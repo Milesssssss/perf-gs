@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "slang-3dgs-trainer"
+version = "0.0.1"
+description = "3D Gaussian Splatting trainer built on SlangPy + slang-rhi"
+requires-python = ">=3.10"
+dependencies = [
+    "slangpy",
+    "numpy",
+    "pillow",
+    "plyfile",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "ruff",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
