@@ -62,6 +62,19 @@ class GaussianBuffers:
     saturation_flag: spy.NDBuffer | None = None  # uint[1]
     training_step: spy.NDBuffer | None = None    # uint[1] (Adam bias correction)
 
+    # --- v2 densification tracking (accumulated over a window) ---
+    grad_mean_2d_mag_accum: spy.NDBuffer | None = None  # int32[max_splats], fixed-point
+    pixel_coverage_accum: spy.NDBuffer | None = None    # uint[max_splats]
+
+    # --- v2 densification scratch + pipeline state ---
+    gaussians_scratch: spy.NDBuffer | None = None   # Gaussian3D[max_splats]
+    adam_state_scratch: spy.NDBuffer | None = None  # AdamState[max_splats]
+    action_buffer: spy.NDBuffer | None = None       # uint[max_splats]
+    valid_mask_buffer: spy.NDBuffer | None = None   # uint[max_splats]
+    scan_buffer: spy.NDBuffer | None = None         # uint[max_splats]
+    scan_block_sums: spy.NDBuffer | None = None     # uint[max_blocks]
+    scan_total: spy.NDBuffer | None = None          # uint[1]
+
     # --- sizes ---
     max_splats: int = 0
     width: int = 0
@@ -135,6 +148,23 @@ def allocate(
     saturation_flag = spy.NDBuffer(device=device, dtype="uint", shape=(1,))
     training_step = spy.NDBuffer(device=device, dtype="uint", shape=(1,))
 
+    grad_mean_2d_mag_accum = spy.NDBuffer(device=device, dtype="int", shape=(max_splats,))
+    pixel_coverage_accum = spy.NDBuffer(device=device, dtype="uint", shape=(max_splats,))
+
+    # v2 densification scratch
+    gaussians_scratch = spy.NDBuffer(device=device, dtype=gaussian_type, shape=(max_splats,))
+    adam_state_scratch = spy.NDBuffer(device=device, dtype=adam_type, shape=(max_splats,))
+    action_buffer = spy.NDBuffer(device=device, dtype="uint", shape=(max_splats,))
+    valid_mask_buffer = spy.NDBuffer(device=device, dtype="uint", shape=(max_splats,))
+    scan_buffer = spy.NDBuffer(device=device, dtype="uint", shape=(max_splats,))
+    # Scan primitive uses 1024 threads/block; number of blocks is ceil(N/1024).
+    # Allocate upper bound = ceil(max_splats / 1024).
+    scan_block_sums = spy.NDBuffer(
+        device=device, dtype="uint",
+        shape=(max(1, (max_splats + 1023) // 1024),),
+    )
+    scan_total = spy.NDBuffer(device=device, dtype="uint", shape=(1,))
+
     num_gaussians_counter.copy_from_numpy(np.zeros(1, dtype=np.uint32))
     saturation_flag.copy_from_numpy(np.zeros(1, dtype=np.uint32))
     training_step.copy_from_numpy(np.zeros(1, dtype=np.uint32))
@@ -154,6 +184,15 @@ def allocate(
         adam_state=adam_state,
         saturation_flag=saturation_flag,
         training_step=training_step,
+        grad_mean_2d_mag_accum=grad_mean_2d_mag_accum,
+        pixel_coverage_accum=pixel_coverage_accum,
+        gaussians_scratch=gaussians_scratch,
+        adam_state_scratch=adam_state_scratch,
+        action_buffer=action_buffer,
+        valid_mask_buffer=valid_mask_buffer,
+        scan_buffer=scan_buffer,
+        scan_block_sums=scan_block_sums,
+        scan_total=scan_total,
         max_splats=max_splats,
         width=width,
         height=height,

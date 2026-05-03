@@ -1,0 +1,44 @@
+# v2 training log — scene=datasets/synthetic/suzanne_blender, backend=vulkan
+# iters=10000, resolution=960x540, n_cams=20
+# densify: every 100 iters in [500, 7000], opacity_reset@[2000, 4000, 6000]
+iter      1  cam 17  loss=0.00336  psnr=24.73 dB  lr_mean=1.60e-04  n_g=  1980    3.5 it/s
+iter    250  cam  5  loss=0.00142  psnr=30.18 dB  lr_mean=1.43e-04  n_g=  1980   13.5 it/s
+iter    500  cam 16  loss=0.00058  psnr=34.28 dB  lr_mean=1.27e-04  n_g=  3603   12.9 it/s
+iter    750  cam 12  loss=0.00049  psnr=33.65 dB  lr_mean=1.13e-04  n_g=  4688   11.9 it/s
+iter   1000  cam 16  loss=0.00025  psnr=36.80 dB  lr_mean=1.01e-04  n_g=  4883   11.5 it/s
+iter   1250  cam 14  loss=0.00019  psnr=40.22 dB  lr_mean=9.00e-05  n_g=  4705   11.3 it/s
+iter   1500  cam  5  loss=0.00012  psnr=40.94 dB  lr_mean=8.02e-05  n_g=  4346   11.3 it/s
+iter   1750  cam 13  loss=0.00010  psnr=40.96 dB  lr_mean=7.15e-05  n_g=  4235   11.2 it/s
+iter   2000  cam  7  loss=0.00008  psnr=39.96 dB  lr_mean=6.37e-05  n_g=  4120   11.2 it/s
+iter   2250  cam 13  loss=0.00007  psnr=42.20 dB  lr_mean=5.68e-05  n_g=  4086   11.0 it/s
+iter   2500  cam  0  loss=0.00006  psnr=41.08 dB  lr_mean=5.06e-05  n_g=  4037   11.0 it/s
+iter   2750  cam  6  loss=0.00006  psnr=40.71 dB  lr_mean=4.51e-05  n_g=  4016   10.9 it/s
+iter   3000  cam  7  loss=0.00006  psnr=41.39 dB  lr_mean=4.02e-05  n_g=  3982   10.9 it/s
+iter   3250  cam 12  loss=0.00005  psnr=43.70 dB  lr_mean=3.58e-05  n_g=  3965   10.8 it/s
+iter   3500  cam 15  loss=0.00005  psnr=43.32 dB  lr_mean=3.19e-05  n_g=  3932   10.8 it/s
+iter   3750  cam 11  loss=0.00005  psnr=42.82 dB  lr_mean=2.85e-05  n_g=  3914   10.7 it/s
+iter   4000  cam  6  loss=0.00005  psnr=42.86 dB  lr_mean=2.54e-05  n_g=  3891   10.6 it/s
+iter   4250  cam  2  loss=0.00005  psnr=43.73 dB  lr_mean=2.26e-05  n_g=  3888   10.5 it/s
+iter   4500  cam 13  loss=0.00005  psnr=43.84 dB  lr_mean=2.02e-05  n_g=  3880   10.5 it/s
+iter   4750  cam  3  loss=0.00004  psnr=45.24 dB  lr_mean=1.80e-05  n_g=  3873   10.4 it/s
+iter   5000  cam  1  loss=0.00004  psnr=44.41 dB  lr_mean=1.60e-05  n_g=  3857   10.4 it/s
+iter   5250  cam 18  loss=0.00004  psnr=43.66 dB  lr_mean=1.43e-05  n_g=  3845   10.3 it/s
+iter   5500  cam 10  loss=0.00004  psnr=44.21 dB  lr_mean=1.27e-05  n_g=  3836   10.3 it/s
+iter   5750  cam  8  loss=0.00004  psnr=42.76 dB  lr_mean=1.13e-05  n_g=  3825   10.2 it/s
+iter   6000  cam  6  loss=0.00004  psnr=43.15 dB  lr_mean=1.01e-05  n_g=  3819   10.2 it/s
+iter   6250  cam 16  loss=0.00004  psnr=44.17 dB  lr_mean=9.00e-06  n_g=  3818   10.2 it/s
+iter   6500  cam 10  loss=0.00004  psnr=43.60 dB  lr_mean=8.02e-06  n_g=  3812   10.1 it/s
+iter   6750  cam 18  loss=0.00004  psnr=44.75 dB  lr_mean=7.15e-06  n_g=  3811   10.1 it/s
+iter   7000  cam  2  loss=0.00004  psnr=43.93 dB  lr_mean=6.37e-06  n_g=  3811   10.1 it/s
+iter   7250  cam 12  loss=0.00004  psnr=43.54 dB  lr_mean=5.68e-06  n_g=  3811   10.0 it/s
+iter   7500  cam 15  loss=0.00004  psnr=44.50 dB  lr_mean=5.06e-06  n_g=  3811   10.0 it/s
+iter   7750  cam  2  loss=0.00003  psnr=44.00 dB  lr_mean=4.51e-06  n_g=  3811    9.9 it/s
+iter   8000  cam  3  loss=0.00003  psnr=45.32 dB  lr_mean=4.02e-06  n_g=  3811    9.9 it/s
+iter   8250  cam 11  loss=0.00003  psnr=44.75 dB  lr_mean=3.58e-06  n_g=  3811    9.9 it/s
+iter   8500  cam  2  loss=0.00003  psnr=44.26 dB  lr_mean=3.19e-06  n_g=  3811    9.9 it/s
+iter   8750  cam 17  loss=0.00003  psnr=46.27 dB  lr_mean=2.85e-06  n_g=  3811    9.8 it/s
+iter   9000  cam 14  loss=0.00003  psnr=45.50 dB  lr_mean=2.54e-06  n_g=  3811    9.8 it/s
+iter   9250  cam 19  loss=0.00003  psnr=45.47 dB  lr_mean=2.26e-06  n_g=  3811    9.8 it/s
+iter   9500  cam  6  loss=0.00003  psnr=43.32 dB  lr_mean=2.02e-06  n_g=  3811    9.8 it/s
+iter   9750  cam 11  loss=0.00004  psnr=44.63 dB  lr_mean=1.80e-06  n_g=  3811    9.7 it/s
+iter  10000  cam 18  loss=0.00003  psnr=45.00 dB  lr_mean=1.60e-06  n_g=  3811    9.7 it/s

@@ -20,6 +20,26 @@ from trainer.dataset import Camera
 from trainer.device import SHADERS_DIR
 
 
+SCAN_BLOCK_SIZE = 1024  # must match shaders/common/scan.slang
+
+
+@dataclass
+class DensifyConfig:
+    """Thresholds for the decide-actions kernel.
+
+    Defaults are taken from Kerbl et al. (3D Gaussian Splatting) and
+    tuned for our unit-scale Suzanne scene. Thresholds are expressed
+    per-iter (i.e. per-window value divided by ``window_iters``).
+    """
+    t_grad: float = 2e-4           # per-iter |grad_mean_2d| magnitude threshold
+    t_split_scale: float = 0.01    # gaussians with max(scale) > this and
+                                   # high grad become SPLIT; else CLONE
+    t_opacity: float = 0.005       # prune if opacity below this
+    t_big_scale: float = 0.5       # prune if any scale component above this
+                                   # (prevents runaway giant gaussians)
+    opacity_reset_value: float = 0.01
+
+
 @dataclass
 class AdamLRs:
     """Adam learning rates. Values taken from the 3DGS paper's defaults;
@@ -76,6 +96,19 @@ class Pipeline:
         self.k_grad_clear = _make_kernel(device, opt / "grad_utils.slang", "clearGradBuffer")
         self.k_saturation_check = _make_kernel(device, opt / "grad_utils.slang", "checkSaturation")
         self.k_saturation_clear = _make_kernel(device, opt / "grad_utils.slang", "clearSaturationFlag")
+
+        densify = SHADERS_DIR / "densify"
+        self.k_clear_tracking = _make_kernel(device, densify / "clear_tracking.slang", "clearTracking")
+        self.k_decide_actions = _make_kernel(device, densify / "decide_actions.slang", "decideActions")
+        self.k_split_and_clone = _make_kernel(device, densify / "split_and_clone.slang", "splitAndClone")
+        self.k_build_prune_mask = _make_kernel(device, densify / "build_prune_mask.slang", "buildPruneMask")
+        self.k_scatter_compact = _make_kernel(device, densify / "scatter_compact.slang", "scatterCompact")
+        self.k_opacity_reset = _make_kernel(device, densify / "opacity_reset.slang", "resetOpacity")
+
+        scan = SHADERS_DIR / "common" / "scan.slang"
+        self.k_scan_block = _make_kernel(device, scan, "scanBlock")
+        self.k_scan_block_sums = _make_kernel(device, scan, "scanBlockSums")
+        self.k_add_block_offsets = _make_kernel(device, scan, "addBlockOffsets")
 
         # --- buffers ---
         self.buffers = buffers.allocate(
@@ -244,7 +277,34 @@ class Pipeline:
             grad_color_r=gb["color_r"].storage,
             grad_color_g=gb["color_g"].storage,
             grad_color_b=gb["color_b"].storage,
+            grad_mean_2d_mag_accum=b.grad_mean_2d_mag_accum.storage,
+            pixel_coverage_accum=b.pixel_coverage_accum.storage,
         )
+
+    def clear_tracking(self) -> None:
+        """Zero the v2 densification tracking accumulators. Called at the
+        start of each densification window (every N iters)."""
+        b = self.buffers
+        self.k_clear_tracking.dispatch(
+            thread_count=[self.max_splats, 1, 1],
+            grad_mean_2d_mag_accum=b.grad_mean_2d_mag_accum.storage,
+            pixel_coverage_accum=b.pixel_coverage_accum.storage,
+            max_splats=self.max_splats,
+        )
+
+    def read_tracking(self) -> dict[str, np.ndarray]:
+        """Read both tracking buffers as float / uint arrays of length
+        ``max_splats``. Used by tests and (temporarily) by Python-side
+        densification prototyping."""
+        b = self.buffers
+        raw_mag = b.grad_mean_2d_mag_accum.to_numpy()
+        raw_cov = b.pixel_coverage_accum.to_numpy()
+        mag_int = np.frombuffer(raw_mag.tobytes(), dtype=np.int32)
+        cov = np.frombuffer(raw_cov.tobytes(), dtype=np.uint32)
+        return {
+            "grad_mean_2d_mag": mag_int.astype(np.float64) / 65536.0,
+            "pixel_coverage": cov.astype(np.int64),
+        }
 
     def _run_saturation_check(self) -> None:
         b = self.buffers
@@ -366,3 +426,170 @@ def _srgb_to_linear_np(c: np.ndarray) -> np.ndarray:
     low = c / 12.92
     high = np.power(np.clip((c + 0.055) / 1.055, 1e-7, None), 2.4)
     return np.where(c <= 0.04045, low, high).astype(np.float32)
+
+
+# -------- densification methods on Pipeline (added via monkey-patch-style
+# direct method definitions; kept here for proximity to the scan + buffer
+# structures they orchestrate) --------
+
+def _scan(self: Pipeline, n: int) -> None:
+    """Run the three-kernel Blelloch scan on ``valid_mask_buffer`` into
+    ``scan_buffer``. ``scan_total[0]`` ends up holding the total sum
+    (i.e. the new live count after compaction)."""
+    b = self.buffers
+    num_blocks = max(1, (n + SCAN_BLOCK_SIZE - 1) // SCAN_BLOCK_SIZE)
+
+    self.k_scan_block.dispatch(
+        thread_count=[num_blocks * SCAN_BLOCK_SIZE, 1, 1],
+        in_buf=b.valid_mask_buffer.storage,
+        out_buf=b.scan_buffer.storage,
+        block_sums=b.scan_block_sums.storage,
+        n=n,
+    )
+    self.k_scan_block_sums.dispatch(
+        thread_count=[SCAN_BLOCK_SIZE, 1, 1],
+        block_sums=b.scan_block_sums.storage,
+        total_out=b.scan_total.storage,
+        num_blocks=num_blocks,
+    )
+    self.k_add_block_offsets.dispatch(
+        thread_count=[num_blocks * SCAN_BLOCK_SIZE, 1, 1],
+        out_buf=b.scan_buffer.storage,
+        block_sums=b.scan_block_sums.storage,
+        n=n,
+    )
+
+
+Pipeline._scan = _scan  # type: ignore[attr-defined]
+
+
+def densify(self: Pipeline, cfg: DensifyConfig, window_iters: int) -> dict:
+    """Run one densification pass.
+
+    Phases:
+      A  decide_actions     - write action[i] per gaussian
+      B  split_and_clone    - append children, overwrite parent slot for splits
+      C  build_prune_mask   - mark valid[i] across post-split range
+      D  scan               - exclusive prefix-sum of valid[]
+      E  scatter_compact    - ping-pong into scratch; Python swaps refs
+
+    Returns a stats dict for logging:
+        {pre_count, post_split_count, final_count, n_split, n_clone, n_prune}
+
+    Does NOT clear tracking buffers — caller decides cadence. Does NOT
+    reset opacity — that's a separate scheduled operation.
+    """
+    b = self.buffers
+
+    # --- Phase A: decide actions ---
+    pre_count = int(b.num_gaussians_counter.to_numpy().view(np.uint32)[0])
+    if pre_count == 0:
+        return {"pre_count": 0, "post_split_count": 0, "final_count": 0,
+                "n_split": 0, "n_clone": 0, "n_prune": 0}
+
+    self.k_decide_actions.dispatch(
+        thread_count=[pre_count, 1, 1],
+        gaussians=b.gaussians.storage,
+        num_gaussians_counter=b.num_gaussians_counter.storage,
+        grad_mean_2d_mag_accum=b.grad_mean_2d_mag_accum.storage,
+        pixel_coverage_accum=b.pixel_coverage_accum.storage,
+        action=b.action_buffer.storage,
+        window_iters=float(window_iters),
+        grad_scale=1.0 / float(max(self.width, self.height)),
+        t_grad=cfg.t_grad,
+        t_split_scale=cfg.t_split_scale,
+        t_opacity=cfg.t_opacity,
+        t_big_scale=cfg.t_big_scale,
+    )
+    self.device.wait_for_idle()
+
+    # --- Phase B: split and clone (may increment counter) ---
+    self.k_split_and_clone.dispatch(
+        thread_count=[pre_count, 1, 1],
+        gaussians=b.gaussians.storage,
+        adam_state=b.adam_state.storage,
+        num_gaussians_counter=b.num_gaussians_counter.storage,
+        action=b.action_buffer.storage,
+        pre_count=pre_count,
+        max_splats=self.max_splats,
+    )
+    self.device.wait_for_idle()
+    post_split_count = int(b.num_gaussians_counter.to_numpy().view(np.uint32)[0])
+    # Clamp: if Phase B was racing against max_splats some children may have
+    # been dropped (atomic counter went past max; the writes past max were
+    # guarded by the shader, but the counter itself still advanced). Clamp
+    # so the mask pass doesn't walk past the real tail.
+    post_split_count = min(post_split_count, self.max_splats)
+
+    # --- Phase C: build prune mask over [0, post_split_count) ---
+    self.k_build_prune_mask.dispatch(
+        thread_count=[post_split_count, 1, 1],
+        action=b.action_buffer.storage,
+        valid_mask=b.valid_mask_buffer.storage,
+        pre_count=pre_count,
+        post_count=post_split_count,
+    )
+    self.device.wait_for_idle()
+
+    # --- Phase D: scan ---
+    self._scan(post_split_count)
+    self.device.wait_for_idle()
+
+    # --- Phase E: scatter compact into scratch buffers ---
+    self.k_scatter_compact.dispatch(
+        thread_count=[post_split_count, 1, 1],
+        gaussians_in=b.gaussians.storage,
+        adam_state_in=b.adam_state.storage,
+        valid_mask=b.valid_mask_buffer.storage,
+        scan=b.scan_buffer.storage,
+        gaussians_out=b.gaussians_scratch.storage,
+        adam_state_out=b.adam_state_scratch.storage,
+        post_count=post_split_count,
+    )
+    self.device.wait_for_idle()
+
+    # --- Swap primary <-> scratch references ---
+    b.gaussians, b.gaussians_scratch = b.gaussians_scratch, b.gaussians
+    b.adam_state, b.adam_state_scratch = b.adam_state_scratch, b.adam_state
+
+    # Update counter to scan_total (= sum of valid_mask = final live count).
+    final_count = int(b.scan_total.to_numpy().view(np.uint32)[0])
+    b.num_gaussians_counter.copy_from_numpy(np.array([final_count], dtype=np.uint32))
+
+    # Stats for logging. Reading action_buffer back is ~pre_count bytes,
+    # cheap on pre_count <= ~100k.
+    actions_raw = b.action_buffer.to_numpy()
+    actions = np.frombuffer(actions_raw.tobytes(), dtype=np.uint32)[:pre_count]
+    n_keep  = int((actions == 0).sum())
+    n_split = int((actions == 1).sum())
+    n_clone = int((actions == 2).sum())
+    n_prune = int((actions == 3).sum())
+
+    return {
+        "pre_count": pre_count,
+        "post_split_count": post_split_count,
+        "final_count": final_count,
+        "n_keep": n_keep,
+        "n_split": n_split,
+        "n_clone": n_clone,
+        "n_prune": n_prune,
+    }
+
+
+Pipeline.densify = densify  # type: ignore[attr-defined]
+
+
+def reset_opacity(self: Pipeline, cfg: DensifyConfig) -> None:
+    """Per-gaussian opacity <- cfg.opacity_reset_value. Standard 3DGS
+    trick: forces optimizer to re-earn opacity on real geometry."""
+    b = self.buffers
+    self.k_opacity_reset.dispatch(
+        thread_count=[self.max_splats, 1, 1],
+        gaussians=b.gaussians.storage,
+        num_gaussians_counter=b.num_gaussians_counter.storage,
+        reset_value=cfg.opacity_reset_value,
+    )
+    self.device.wait_for_idle()
+
+
+Pipeline.reset_opacity = reset_opacity  # type: ignore[attr-defined]

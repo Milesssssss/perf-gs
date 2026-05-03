@@ -268,4 +268,186 @@ scripts/v1_train.py             # training entry
 tests/test_gradients.py         # finite-difference validation
 ```
 
+---
+
+# v2 Plan — Densification + Pruning
+
+Goal: lift the quality ceiling imposed by v1's fixed gaussian count. 3DGS's canonical split / clone / prune heuristic implemented fully on the GPU — no CPU readback inside the densification path. The existing "oversized buffer + GPU counter" design from v0 Q13 is about to start paying off.
+
+## v2.0 — Tracking signals (single milestone, quick)
+
+Densification needs two per-gaussian signals the paper specifies:
+
+- **|grad_mean_2d|** — magnitude of the 2D-mean gradient accumulated across pixels over the densification window. Currently computed inside `backward.slang` as `dp_mean_2d.d` after the eval bwd_diff but discarded after being chained through projection. Add one extra `InterlockedAdd(grad_mean_2d_mag_accum[g_idx], toFixed(length(dp_mean_2d.d)))` per pixel-gaussian.
+- **pixel_coverage** — number of pixels for which this gaussian was actually processed (passed the per-pixel early-break). `InterlockedAdd(pixel_coverage_accum[g_idx], 1)` in the same backward loop body.
+
+### Work
+
+- Add two int32 SoA buffers to `GaussianBuffers`: `grad_mean_2d_mag_accum`, `pixel_coverage_accum`.
+- Extend `shaders/rasterize/tile_binned/backward.slang` with the two atomic adds.
+- Add `shaders/densify/clear_tracking.slang` (zero both buffers).
+- Pipeline clears tracking at the start of each densification window (per-iter cost = one dispatch, negligible).
+- Test: one training step on known scene, readback, assert expected nonzero-per-gaussian pattern.
+
+v2.0 does not modify the gaussian count. It just starts collecting the signals densification will consume in v2.1.
+
+## v2.1 — Densification machinery (GPU-driven, in-place split)
+
+### Five-phase pipeline
+
+**A. Decide actions** — one thread / gaussian, reads tracking buffers + current `log_scale`, `opacity`, writes `action[i] ∈ {KEEP, SPLIT, CLONE, PRUNE}`. Thresholds from a `DensifyConfig`. Paper rules:
+
+- SPLIT: `|grad_mean_2d_mag| > t_grad` AND `max(exp(log_scale)) > t_scale`
+- CLONE: `|grad_mean_2d_mag| > t_grad` AND `max(exp(log_scale)) <= t_scale`
+- PRUNE: `opacity < t_opacity` OR 2D screen radius excessive
+- KEEP: otherwise
+
+**B. Split-and-clone** — one thread / gaussian (over the *pre-densification* range):
+- SPLIT → overwrite slot `i` with child-1 (scale / 1.6, position jittered within parent covariance), zero Adam state at `i`. Atomic-append child-2 (same rule) to tail with zeroed Adam state.
+- CLONE → atomic-append one clone at tail with inherited parent Adam state. Parent slot `i` untouched. (Position jitter along gradient direction is a v2.2 deferred item — see task #54.)
+- KEEP, PRUNE → no-op in this phase.
+- All appends do `InterlockedAdd(num_gaussians_counter[0], 1, tail)` and enforce `tail < max_splats`.
+
+**C. Build prune mask** — one thread / gaussian (over the post-append range, i.e. `0..num_gaussians_counter[0]`): `valid[i] = 0` if `i < original_count` AND `action[i] == PRUNE`, else `valid[i] = 1`. Newly-appended gaussians always start as valid.
+
+**D. Prefix scan** on `valid[]` → each kept gaussian's compacted destination index. Blelloch multi-block, lives in `shaders/common/scan.slang` — a reusable primitive.
+
+**E. Scatter-compact** — ping-pong from `gaussians`/`adam_state` into `gaussians_scratch`/`adam_state_scratch` using `scan[]`. Python swaps primary↔scratch buffer references after the dispatch. Counter updated to total valid count.
+
+### Why in-place split (your design)
+
+- SPLIT children don't need a prune-flag-then-scatter pass to remove the parent — one child directly overwrites the parent slot.
+- Unified with CLONE pattern (both append one child at tail; split also rewrites slot `i`).
+- Fewer bytes moved during compaction.
+
+### Why ping-pong for scatter (not for append)
+
+Scatter writes to slot `scan[i] ≤ i`. Reads and writes to slots `i` and `scan[i]` would race across threads without ordering guarantees. A separate scratch buffer avoids this. Python pointer swap after the dispatch means no physical copy.
+
+### Files
+
+```
+shaders/densify/
+  decide_actions.slang
+  split_and_clone.slang
+  build_prune_mask.slang
+  scatter_compact.slang
+  opacity_reset.slang
+  clear_tracking.slang
+shaders/common/scan.slang     (reusable prefix scan)
+```
+
+### Test
+
+`tests/test_densify.py`: hand-authored 5-gaussian scene, hand-specified action table, run B→C→D→E, assert post-compaction buffer state matches expectation (correct count, correct surviving params per slot, correct children present, Adam state zeroed on split / inherited on clone).
+
+### Sizing
+
+Drop `max_splats` default from 5M to **500k**. Even with Suzanne growing from 1,980 to ~50k peak during training, 500k gives 10× headroom. Ping-pong now costs 500k × ~56 bytes × 2 ≈ 56 MB per buffer (gaussians + adam_state each ping-ponged). Trivial on any modern GPU. 5M was overkill from v0.
+
+## v2.2 — Schedule + re-train
+
+- `train_step(densify_this_step: bool = False, reset_opacity_this_step: bool = False)`.
+- Default schedule for 10k training run on Suzanne:
+  - `densify_this_step = (500 <= iter <= 7000) and (iter % 100 == 0)`
+  - `reset_opacity_this_step = iter in {2000, 4000, 6000}`
+- Re-train Suzanne at 10k. Success metric: **masked-sRGB PSNR** (foreground-only, not full-image which gets dragged up by background matching). Target: visibly improve over v1's ~25 dB masked-sRGB, ideally 30+.
+
+## v2 locked decisions
+
+| Area | Decision |
+|---|---|
+| Driver | GPU-resident densification; no CPU readback in the loop |
+| Split placement | In-place at parent slot (child-1) + atomic-append tail (child-2) |
+| Clone placement | Atomic-append tail; parent slot untouched |
+| Compaction | Ping-pong via scratch buffer + Python pointer swap; scan-based destination indices |
+| Prefix scan | Blelloch multi-block, reusable primitive in `shaders/common/scan.slang` |
+| Adam state on split | Zero (children are at new positions, parent m/v is stale) |
+| Adam state on clone | Inherit parent's state (same position/grad, no reset gain) |
+| Clone position jitter | Deferred to v2.2 (task #54) — v2.1 ships with identical-position clones |
+| Tracking signals | `\|grad_mean_2d\|` + pixel coverage, SoA int32 fixed-point, cleared per densification window |
+| `max_splats` default | 500k (down from 5M); ~56 MB ping-pong cost, ample headroom for Suzanne |
+| SH | Still deferred; v2 ships plain-RGB sigmoid color |
+| Densification flag | Opt-in per `train_step` call; gradient test runs untouched |
+| Order determinism | Post-compaction buffer order is non-deterministic (atomic bumps). Fine — we treat gaussians as an unordered set. |
+
+## v2 non-goals (deferred to v3+)
+
+SH coefficients, held-out view evaluation, perceptual losses (SSIM / LPIPS), full-res (1920×1080) training, checkpointing, interactive viewer, bindless streaming, torch interop, global radix sort (still unused — scan is a different primitive), per-primitive interface abstraction.
+
+---
+
+## v2 shipped
+
+All three milestones done, 57 → 65 tests passing on both Vulkan and D3D12 (new: 4 tracking + 8 densify + 20 scan tests).
+
+### How to use v2
+
+```bash
+# Unit tests
+.venv/Scripts/python.exe -m pytest tests/ -v
+
+# Train Suzanne with densification (default: 10k iters, half-res)
+.venv/Scripts/python.exe scripts/v2_train.py --run-name suzanne_v2
+
+# Same training config lets you tune thresholds:
+.venv/Scripts/python.exe scripts/v2_train.py --t-grad 5e-4 --densify-every 100 \
+    --densify-from 500 --densify-to 7000 \
+    --opacity-reset-iters 2000 4000 6000
+```
+
+### What v2 proves
+
+- GPU-resident densification pipeline with no CPU readback in the hot loop (only stats-logging readback after each densify step, which is optional).
+- Five-phase densify: decide_actions → split_and_clone (in-place child-1 + tail child-2) → build_prune_mask → prefix scan → scatter-compact with pointer-swap ping-pong.
+- Reusable prefix-scan primitive (Blelloch multi-block, up to 1M elements) shipped and unit-tested.
+- Masked-sRGB PSNR on Suzanne: **v1 17.6 dB → v2 27.94 dB (+10.3 dB)**. Fixed point cloud (1,980) → densified + pruned (3,811 final after peak ~5,000).
+- Final render has visible facial features and continuous surfaces vs v1's pinned-vertex dot cloud.
+
+### v2 honest metrics on Suzanne 10k
+
+| metric | value | baseline v1 | delta |
+|---|---|---|---|
+| masked-sRGB PSNR | 27.94 dB | 17.6 dB | **+10.3 dB** |
+| full-image sRGB PSNR | 37.52 dB | 24.74 dB | +12.8 dB |
+| full-image linear PSNR | 44.70 dB | 33.15 dB | +11.5 dB |
+| final gaussian count | 3,811 | 1,980 fixed | ~2× |
+| runtime | 17 min | 14 min | +3 min |
+
+### v2 notable discoveries
+
+- The 3DGS paper's `t_grad ≈ 2e-4` assumes the 2D mean gradient is normalized to image units. Our backward computes `length(dp_mean_2d.d)` in **pixel-space units**, so we divide by `max(W, H)` in the decide-actions kernel. Without this the threshold triggers on ~80% of gaussians at 960×540, not the paper's ~2%.
+- In-place split (child-1 overwrites parent slot, child-2 appended to tail) avoids both a parent-prune flag and a wasted compaction write per split. This was user-suggested and simpler than the ping-pong-both-children variant I originally proposed.
+- Post-compaction buffer order is non-deterministic (atomic-append slot allocation). Fine for correctness since we treat the buffer as an unordered set, but gradient tests have to run with densification disabled for reproducibility.
+- With `max_splats = 500k`, the full Adam + scratch + tracking state fits in ~200 MB VRAM. The 5M default from v0 was overkill.
+
+### v2 files added
+
+```
+shaders/common/scan.slang                   # Blelloch prefix scan primitive
+shaders/densify/
+  clear_tracking.slang
+  decide_actions.slang
+  split_and_clone.slang
+  build_prune_mask.slang
+  scatter_compact.slang
+  opacity_reset.slang
+shaders/rasterize/tile_binned/backward.slang  # + 2 tracking accumulators
+src/trainer/buffers.py                        # + tracking + densify scratch
+src/trainer/pipeline.py                       # + densify(), reset_opacity(),
+                                              #   clear_tracking(), read_tracking(),
+                                              #   DensifyConfig
+scripts/v2_train.py                           # training entry with densification
+tests/test_tracking.py                        # 4 tests
+tests/test_densify.py                         # 8 tests
+tests/test_scan.py                            # 20 tests
+```
+
+### v2 next quality levers (deferred to v3)
+
+- Clone position jitter along gradient direction (task #54; v2 ships identical-position clones).
+- SH view-dependent color (currently plain-RGB sigmoid).
+- Full-res training (1920×1080 is 4× the work of 960×540; would need more perf investment).
+- Perceptual losses (SSIM / LPIPS) instead of pure L2.
+
 

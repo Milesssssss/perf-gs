@@ -59,7 +59,12 @@ void backwardRasterize(
     RWStructuredBuffer<int> grad_opacity,
     RWStructuredBuffer<int> grad_color_r,
     RWStructuredBuffer<int> grad_color_g,
-    RWStructuredBuffer<int> grad_color_b)
+    RWStructuredBuffer<int> grad_color_b,
+    // v2 densification tracking (accumulated over a densification window,
+    // cleared by Python between windows). Fixed-point for the magnitude;
+    // raw uint for the integer coverage count.
+    RWStructuredBuffer<int> grad_mean_2d_mag_accum,
+    RWStructuredBuffer<uint> pixel_coverage_accum)
 {
     uint2 pixel = dtid.xy;
     uint2 frame_dim_px = uint2(camera[0].image_size);
@@ -155,6 +160,15 @@ void backwardRasterize(
         InterlockedAdd(grad_color_r[g_idx], toFixed(dp_color_logit.d.x));
         InterlockedAdd(grad_color_g[g_idx], toFixed(dp_color_logit.d.y));
         InterlockedAdd(grad_color_b[g_idx], toFixed(dp_color_logit.d.z));
+
+        // Densification tracking signals (v2). The paper's split/clone
+        // signal is the magnitude of the 2D-mean gradient accumulated
+        // across all (pixel, gaussian) touches over a window. Coverage
+        // counts how many pixels this gaussian actually touched; used
+        // by pruning heuristics.
+        uint dummy_cov;
+        InterlockedAdd(grad_mean_2d_mag_accum[g_idx], toFixed(length(dp_mean_2d.d)));
+        InterlockedAdd(pixel_coverage_accum[g_idx], 1u, dummy_cov);
 
         // Walk T and C_behind back for the next iteration.
         C_behind += c_i * alpha * T_i;
