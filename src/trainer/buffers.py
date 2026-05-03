@@ -1,22 +1,24 @@
 """GPU buffer/texture allocation for the trainer.
 
-v0 resources: everything the naive forward (M1) *and* the tile-binned
-forward (M3) need. Allocating the tile-binning resources unconditionally
-costs nothing when the naive forward is used; the reverse would force a
-re-allocation step when M3 activates. Easier to over-allocate once.
+v1 resources: everything v0 had (forward) plus the backward/loss/Adam
+pieces. Allocating the v1 resources unconditionally costs a small fixed
+amount of VRAM when only the forward path runs; the reverse would force
+a re-allocation when v1 training activates. Easier to over-allocate once.
 
 Design notes:
 - Gaussian buffer is allocated at ``max_splats`` capacity; the active count
-  lives in a GPU-resident counter buffer. This is the "oversized + counter"
-  pattern from PLAN.md Q13 — costs nothing in v0 but means densification
-  won't force a rewrite in v1.
+  lives in a GPU-resident counter buffer (PLAN.md Q13).
+- Gradients are SoA int32 fixed-point (PLAN.md Q9 + Q10): one buffer per
+  scalar component. ``InterlockedAdd`` on int32 is universally supported
+  cross-IHV; ``VK_EXT_shader_atomic_float`` is not.
+- Adam state is AoS: one :class:`AdamState` per gaussian.
 - Shader struct types are looked up via :mod:`slangpy` reflection from the
   loaded module, so Python never duplicates the memory layout.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 import slangpy as spy
@@ -26,27 +28,46 @@ TILE_SIZE = 16
 MAX_GAUSSIANS_PER_TILE = 1024
 
 
+# Names of the 14 scalar grad buffers (SoA). Order matches how the
+# backward kernel reads/writes them and how Adam consumes them.
+GRAD_SCALAR_COMPONENTS = (
+    "mean_x", "mean_y", "mean_z",
+    "log_scale_x", "log_scale_y", "log_scale_z",
+    "rot_w", "rot_x", "rot_y", "rot_z",
+    "opacity",
+    "color_r", "color_g", "color_b",
+)
+
+
 @dataclass
 class GaussianBuffers:
     # --- always-live gaussian state ---
-    gaussians: spy.NDBuffer            # Gaussian3D[max_splats]
-    num_gaussians_counter: spy.NDBuffer  # uint[1]
+    gaussians: spy.NDBuffer
+    num_gaussians_counter: spy.NDBuffer
 
-    # --- per-frame scratch / output ---
-    projected_2d: spy.NDBuffer         # Projected2DGaussian[max_splats]
-    screen_tiles_count: spy.NDBuffer   # uint[max_tiles]
-    screen_tiles_indices: spy.NDBuffer  # uint[max_tiles * MAX_GAUSSIANS_PER_TILE]
+    # --- per-frame forward scratch / output ---
+    projected_2d: spy.NDBuffer
+    screen_tiles_count: spy.NDBuffer
+    screen_tiles_indices: spy.NDBuffer
 
     output_image: spy.Texture          # rgba32_float, UAV+SRV
-    output_transmittance: spy.Texture  # r32_float, UAV+SRV
-    gaussian_count_per_pixel: spy.Texture  # r32_uint, UAV+SRV
+    output_transmittance: spy.Texture  # r32_float
+    gaussian_count_per_pixel: spy.Texture  # r32_uint
+
+    # --- v1 training resources ---
+    target_image: spy.Texture          # rgba32_float, SRV (read-only in shaders)
+    dL_dC_texture: spy.Texture         # rgba32_float, UAV+SRV
+    grad_buffers: dict[str, spy.NDBuffer] = field(default_factory=dict)  # name -> int32[max_splats]
+    adam_state: spy.NDBuffer | None = None  # AdamState[max_splats]
+    saturation_flag: spy.NDBuffer | None = None  # uint[1]
+    training_step: spy.NDBuffer | None = None    # uint[1] (Adam bias correction)
 
     # --- sizes ---
-    max_splats: int
-    width: int
-    height: int
-    num_tiles_x: int
-    num_tiles_y: int
+    max_splats: int = 0
+    width: int = 0
+    height: int = 0
+    num_tiles_x: int = 0
+    num_tiles_y: int = 0
 
     @property
     def num_tiles(self) -> int:
@@ -60,14 +81,16 @@ def allocate(
     width: int,
     height: int,
 ) -> GaussianBuffers:
-    """Allocate all GPU resources needed by the forward pipeline."""
+    """Allocate all GPU resources needed by forward + backward + Adam."""
     gaussian_type = module.layout.find_type_by_name("Gaussian3D")
     if gaussian_type is None:
         raise RuntimeError("shader module does not expose type 'Gaussian3D'")
-
     projected_type = module.layout.find_type_by_name("Projected2DGaussian")
     if projected_type is None:
         raise RuntimeError("shader module does not expose type 'Projected2DGaussian'")
+    adam_type = module.layout.find_type_by_name("AdamState")
+    if adam_type is None:
+        raise RuntimeError("shader module does not expose type 'AdamState'")
 
     num_tiles_x = (width + TILE_SIZE - 1) // TILE_SIZE
     num_tiles_y = (height + TILE_SIZE - 1) // TILE_SIZE
@@ -82,13 +105,13 @@ def allocate(
         device=device, dtype="uint", shape=(num_tiles * MAX_GAUSSIANS_PER_TILE,),
     )
 
-    def _tex(fmt: spy.Format, label: str) -> spy.Texture:
+    def _tex(fmt: spy.Format, label: str, usage: spy.TextureUsage | None = None) -> spy.Texture:
         return device.create_texture(
             type=spy.TextureType.texture_2d,
             format=fmt,
             width=width,
             height=height,
-            usage=spy.TextureUsage.shader_resource | spy.TextureUsage.unordered_access,
+            usage=usage if usage is not None else (spy.TextureUsage.shader_resource | spy.TextureUsage.unordered_access),
             label=label,
         )
 
@@ -96,7 +119,25 @@ def allocate(
     output_transmittance = _tex(spy.Format.r32_float, "output_transmittance")
     gaussian_count_per_pixel = _tex(spy.Format.r32_uint, "gaussian_count_per_pixel")
 
+    target_image = _tex(
+        spy.Format.rgba32_float, "target_image",
+        usage=spy.TextureUsage.shader_resource | spy.TextureUsage.unordered_access,
+    )
+    dL_dC_texture = _tex(spy.Format.rgba32_float, "dL_dC")
+
+    grad_buffers: dict[str, spy.NDBuffer] = {
+        name: spy.NDBuffer(device=device, dtype="int", shape=(max_splats,))
+        for name in GRAD_SCALAR_COMPONENTS
+    }
+
+    adam_state = spy.NDBuffer(device=device, dtype=adam_type, shape=(max_splats,))
+
+    saturation_flag = spy.NDBuffer(device=device, dtype="uint", shape=(1,))
+    training_step = spy.NDBuffer(device=device, dtype="uint", shape=(1,))
+
     num_gaussians_counter.copy_from_numpy(np.zeros(1, dtype=np.uint32))
+    saturation_flag.copy_from_numpy(np.zeros(1, dtype=np.uint32))
+    training_step.copy_from_numpy(np.zeros(1, dtype=np.uint32))
 
     return GaussianBuffers(
         gaussians=gaussians,
@@ -107,6 +148,12 @@ def allocate(
         output_image=output_image,
         output_transmittance=output_transmittance,
         gaussian_count_per_pixel=gaussian_count_per_pixel,
+        target_image=target_image,
+        dL_dC_texture=dL_dC_texture,
+        grad_buffers=grad_buffers,
+        adam_state=adam_state,
+        saturation_flag=saturation_flag,
+        training_step=training_step,
         max_splats=max_splats,
         width=width,
         height=height,
@@ -130,11 +177,6 @@ def write_gaussians(
     opacities: np.ndarray,
     color_logits: np.ndarray,
 ) -> None:
-    """Populate the gaussian buffer from numpy arrays.
-
-    All arrays must have a leading dimension ``N`` with ``N <= max_splats``.
-    Quaternion convention is ``(w, x, y, z)``.
-    """
     n = means.shape[0]
     assert means.shape == (n, 3), f"means shape {means.shape}"
     assert log_scales.shape == (n, 3), f"log_scales shape {log_scales.shape}"
@@ -153,3 +195,24 @@ def write_gaussians(
     cursor.apply()
 
     set_num_gaussians(buffers, n)
+
+
+def zero_adam_state(buffers: GaussianBuffers) -> None:
+    """Reset all Adam first/second-moment state to zero."""
+    assert buffers.adam_state is not None
+    n = buffers.max_splats
+    cursor = buffers.adam_state.cursor()
+    z3 = spy.float3(0.0, 0.0, 0.0)
+    z4 = spy.float4(0.0, 0.0, 0.0, 0.0)
+    for i in range(n):
+        cursor[i].mean_m = z3
+        cursor[i].mean_v = z3
+        cursor[i].log_scale_m = z3
+        cursor[i].log_scale_v = z3
+        cursor[i].rot_m = z4
+        cursor[i].rot_v = z4
+        cursor[i].opacity_m = 0.0
+        cursor[i].opacity_v = 0.0
+        cursor[i].color_m = z3
+        cursor[i].color_v = z3
+    cursor.apply()

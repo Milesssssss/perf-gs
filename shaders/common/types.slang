@@ -27,4 +27,28 @@ struct CameraData
     float2 image_size;      // width, height in pixels
 };
 
+// Per-gaussian Adam first/second-moment state. AoS matches the read
+// pattern: the Adam kernel loads all m/v for one gaussian, steps it,
+// writes it back. No atomics needed (one thread per gaussian).
+struct AdamState
+{
+    float3 mean_m;
+    float3 mean_v;
+    float3 log_scale_m;
+    float3 log_scale_v;
+    float4 rot_m;
+    float4 rot_v;
+    float  opacity_m;
+    float  opacity_v;
+    float3 color_m;
+    float3 color_v;
+};
+
+// Fixed-point atomic gradient accumulation scale. 2^16 = 65536. PLAN.md Q10.
+static const float FIXED_SCALE = 65536.0;
+static const float FIXED_INV_SCALE = 1.0 / FIXED_SCALE;
+
+int toFixed(float f)   { return int(f * FIXED_SCALE); }
+float fromFixed(int i) { return float(i) * FIXED_INV_SCALE; }
+
 #endif // TRAINER_TYPES_SLANG

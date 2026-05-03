@@ -1,0 +1,13 @@
+# v1.1 training log — scene=datasets/synthetic/suzanne_blender, backend=vulkan
+# iters=10000, resolution=960x540, n_cams=20
+iter      1  cam 17  loss=0.00336  psnr=24.73 dB  lr_mean=1.60e-04    4.4 it/s
+iter    250  cam  5  loss=0.00142  psnr=30.18 dB  lr_mean=1.43e-04   14.4 it/s
+iter    500  cam 16  loss=0.00058  psnr=34.28 dB  lr_mean=1.27e-04   14.3 it/s
+iter    750  cam 12  loss=0.00040  psnr=33.74 dB  lr_mean=1.13e-04   13.6 it/s
+iter   1000  cam 16  loss=0.00031  psnr=34.85 dB  lr_mean=1.01e-04   13.5 it/s
+iter   1250  cam 14  loss=0.00029  psnr=37.58 dB  lr_mean=9.00e-05   13.4 it/s
+iter   1500  cam  5  loss=0.00027  psnr=36.12 dB  lr_mean=8.02e-05   13.3 it/s
+iter   1750  cam 13  loss=0.00025  psnr=35.47 dB  lr_mean=7.15e-05   13.1 it/s
+iter   2000  cam  7  loss=0.00022  psnr=36.85 dB  lr_mean=6.37e-05   13.1 it/s
+iter   2250  cam 13  loss=0.00016  psnr=38.16 dB  lr_mean=5.68e-05   13.1 it/s
+iter   2500  cam  0  loss=0.00014  psnr=38.30 dB  lr_mean=5.06e-05   13.1 it/s
