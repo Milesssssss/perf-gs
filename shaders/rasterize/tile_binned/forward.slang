@@ -15,9 +15,7 @@ static const uint TILE_SIZE = 16;
 static const uint MAX_GAUSSIANS_PER_TILE = 1024;
 
 // Break once transmittance drops below this. Not a magnitude guess — the
-// canonical 3DGS threshold from the reference implementation. At T < 1e-4
-// a gaussian's contribution to the pixel would need alpha near 1 to
-// produce a visible color change.
+// canonical 3DGS threshold from the reference implementation.
 static const float T_EARLY_BREAK = 1e-4;
 
 [shader("compute")]

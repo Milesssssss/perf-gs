@@ -32,6 +32,11 @@
 static const uint TILE_SIZE = 16;
 static const uint MAX_GAUSSIANS_PER_TILE = 1024;
 
+// Must match forward.slang. Gaussians with alpha < ALPHA_MIN don't
+// contribute to the pixel, so they also don't contribute to the pixel's
+// gradient — skip their tile-list slot here the same way forward did.
+static const float ALPHA_MIN = 1.0 / 255.0;
+
 [shader("compute")]
 [numthreads(TILE_SIZE, TILE_SIZE, 1)]
 void backwardRasterize(
@@ -74,8 +79,11 @@ void backwardRasterize(
     uint tile_idx = gid.y * num_tiles.x + gid.x;
     uint base = tile_idx * MAX_GAUSSIANS_PER_TILE;
 
-    uint processed = gaussian_count_per_pixel[pixel];
-    if (processed == 0) return;
+    // ``stop_idx`` is the exclusive tile-list bound forward walked
+    // through. Slots within [0, stop_idx) may have been alpha-culled
+    // by forward; we apply the same check below and skip them.
+    uint stop_idx = gaussian_count_per_pixel[pixel];
+    if (stop_idx == 0) return;
 
     float2 pixel_center = float2(pixel) + 0.5;
     float3 dL_dC = dL_dC_texture[pixel].rgb;
@@ -89,7 +97,7 @@ void backwardRasterize(
     float4x4 view_to_clip  = camera[0].proj_matrix;
     float2 frame_dim = camera[0].image_size;
 
-    for (int i = int(processed) - 1; i >= 0; --i)
+    for (int i = int(stop_idx) - 1; i >= 0; --i)
     {
         uint g_idx = screen_tiles_indices[base + i];
         Gaussian3D g = gaussians[g_idx];

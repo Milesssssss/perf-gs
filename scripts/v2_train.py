@@ -81,6 +81,9 @@ def main() -> None:
     ap.add_argument("--t-opacity", type=float, default=0.005)
     ap.add_argument("--t-big-scale", type=float, default=0.5)
     ap.add_argument("--max-splats", type=int, default=500_000)
+    ap.add_argument("--z-near-cull", type=float, default=0.01,
+                    help="view-space depth floor for bin cull; raise for scenes "
+                         "where points can land near a camera pose (e.g. 0.2)")
     ap.add_argument("--backend", type=str, default="vulkan", choices=["vulkan", "d3d12"])
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--run-name", type=str, default=None)
@@ -118,6 +121,7 @@ def main() -> None:
             "opacity_reset_value": cfg.opacity_reset_value,
         },
         "max_splats": args.max_splats,
+        "z_near_cull": args.z_near_cull,
         "backend": args.backend, "seed": args.seed,
         "run_name": run_name, "n_cams": n_cams, "n_init_points": n_init,
     }, indent=2))
@@ -136,6 +140,7 @@ def main() -> None:
         device=device, width=args.width, height=args.height,
         max_splats=args.max_splats,
     )
+    pipeline.z_near_cull = args.z_near_cull
     pipeline.set_gaussians_from_numpy(**scene.initial_points)
     pipeline.clear_tracking()
 
@@ -167,6 +172,16 @@ def main() -> None:
         pipeline.train_step(entry.camera, lrs=lrs)
 
         rendered = pipeline.read_output_image()[..., :3]
+        # Boundary check: if the forward produced NaN/Inf pixels,
+        # training is already corrupted. Abort loudly rather than
+        # continue accumulating garbage (PLAN.md Q17).
+        if not np.all(np.isfinite(rendered)):
+            n_nan = int(np.sum(~np.isfinite(rendered)))
+            msg = (f"iter {it}: rendered image has {n_nan} non-finite pixels "
+                   f"(out of {rendered.size}). Training aborted.")
+            print(msg)
+            log_txt.write(f"# ABORT: {msg}\n")
+            break
         mse = float(np.mean((rendered - targets_linear[cam_idx]) ** 2))
         rolling_loss = mse if rolling_loss is None else 0.98 * rolling_loss + 0.02 * mse
         psnr = _psnr_linear(rendered, targets_linear[cam_idx])

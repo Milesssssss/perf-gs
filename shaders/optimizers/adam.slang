@@ -124,6 +124,19 @@ void adamStep(
         fromFixed(grad_color_b[idx])
     ) * inv_pixels;
 
+    // Boundary-style defensive check: if any gradient component is
+    // non-finite (NaN or Inf), skip this gaussian's update. Once a
+    // param goes NaN the forward renders NaN, loss is NaN, grad stays
+    // NaN — cascades forever. This guards the Adam step itself against
+    // adversarial numerical inputs. PLAN.md Q17 calls out boundaries
+    // as the one place defensive code earns its keep.
+    bool any_bad = any(isnan(g_mean)) || any(isinf(g_mean))
+                || any(isnan(g_log_scale)) || any(isinf(g_log_scale))
+                || any(isnan(g_rot)) || any(isinf(g_rot))
+                || isnan(g_op) || isinf(g_op)
+                || any(isnan(g_color)) || any(isinf(g_color));
+    if (any_bad) return;
+
     Gaussian3D g = gaussians[idx];
     AdamState s = adam_state[idx];
 

@@ -27,27 +27,34 @@ SCAN_BLOCK_SIZE = 1024  # must match shaders/common/scan.slang
 class DensifyConfig:
     """Thresholds for the decide-actions kernel.
 
-    Defaults are taken from Kerbl et al. (3D Gaussian Splatting) and
-    tuned for our unit-scale Suzanne scene. Thresholds are expressed
-    per-iter (i.e. per-window value divided by ``window_iters``).
+    Defaults match gsplat's ``DefaultStrategyConfig``:
+      grow_grad2d  = 2e-4
+      grow_scale3d = 0.01
+      prune_opa    = 0.005
+      prune_scale3d= 0.1
+    which are in turn drawn from Kerbl et al. (3DGS).
     """
-    t_grad: float = 2e-4           # per-iter |grad_mean_2d| magnitude threshold
-    t_split_scale: float = 0.01    # gaussians with max(scale) > this and
-                                   # high grad become SPLIT; else CLONE
-    t_opacity: float = 0.005       # prune if opacity below this
-    t_big_scale: float = 0.5       # prune if any scale component above this
-                                   # (prevents runaway giant gaussians)
+    t_grad: float = 2e-4           # gsplat grow_grad2d
+    t_split_scale: float = 0.01    # gsplat grow_scale3d (split vs clone threshold)
+    t_opacity: float = 0.005       # gsplat prune_opa
+    t_big_scale: float = 0.1       # gsplat prune_scale3d — world-space scale cap
     opacity_reset_value: float = 0.01
 
 
 @dataclass
 class AdamLRs:
-    """Adam learning rates. Values taken from the 3DGS paper's defaults;
-    ``lr_mean`` is the only one with decay (PLAN.md Q15)."""
+    """Adam learning rates, matching gsplat defaults:
+        means_lr     = 1.6e-4
+        scales_lr    = 5e-3
+        quats_lr     = 1e-3
+        opacities_lr = 2.5e-2
+        sh0_lr       = 2.5e-3
+    Only ``mean`` has LR decay applied (PLAN.md Q15).
+    """
     mean: float = 1.6e-4
     scale: float = 5e-3
     rot: float = 1e-3
-    opacity: float = 5e-2
+    opacity: float = 2.5e-2
     color: float = 2.5e-3
 
 
@@ -123,6 +130,14 @@ class Pipeline:
 
         # Training step counter (Python-side, for Adam bias correction).
         self.iteration = 0
+
+        # Near-plane cull distance used by the bin kernel. Gaussians
+        # closer than this in view space are skipped for the current
+        # frame (they stay in the buffer). Default matches the projection
+        # matrix z_near used by our camera helpers. Callers can adjust
+        # per-scene (larger scenes with points potentially near a camera
+        # pose benefit from raising this, e.g. 0.2).
+        self.z_near_cull = 0.01
 
     # ------------------------------------------------------------------
     # Data loading
@@ -200,6 +215,7 @@ class Pipeline:
             projected_2d=b.projected_2d.storage,
             screen_tiles_count=b.screen_tiles_count.storage,
             screen_tiles_indices=b.screen_tiles_indices.storage,
+            z_near=self.z_near_cull,
         )
         self.k_sort.dispatch(
             thread_count=[num_tiles * 256, 1, 1],

@@ -608,7 +608,7 @@ class GaussianSplattingTrainer:
             camera_index = np.random.randint(0, self.num_cameras)
             
             # Train step
-            rendered = self.train_step(camera_index)
+            self.train_step(camera_index)
             
             # Logging
             if (i + 1) % log_interval == 0:

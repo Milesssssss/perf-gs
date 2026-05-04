@@ -8,6 +8,7 @@
 
 #include "math.slang"
 #include "../primitives/gaussian/eval.slang"
+#include "../primitives/gaussian/snugbox.slang"
 
 float sigmoidScalar(float x)
 {
@@ -32,4 +33,13 @@ float3x3 covFromScaleQuat(float3 scale, float4 quat)
 float evalGaussian2D(float2 pixel, float2 mean_2d, float3 cov2d, float opacity)
 {
     return evalGaussian2DFromCov(pixel, mean_2d, cov2d, opacity);
+}
+
+// Returns (bbox_min.x, bbox_min.y, bbox_max.x, bbox_max.y).
+// For the opacity-too-low case, returns a degenerate box at the mean.
+float4 snugBoxTest(float2 mean_2d, float3 cov2d, float opacity)
+{
+    float2 mn, mx;
+    snugBox(mean_2d, cov2d, opacity, mn, mx);
+    return float4(mn.x, mn.y, mx.x, mx.y);
 }

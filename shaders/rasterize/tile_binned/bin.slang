@@ -10,34 +10,10 @@
 #include "../../common/types.slang"
 #include "../../common/math.slang"
 #include "../../primitives/gaussian/project.slang"
+#include "../../primitives/gaussian/snugbox.slang"
 
 static const uint TILE_SIZE = 16;
 static const uint MAX_GAUSSIANS_PER_TILE = 1024;
-
-void compute2DBoundingBox(float2 mean_2d, float3 cov2d,
-                          out float2 bbox_min, out float2 bbox_max)
-{
-    // Eigenvalues of the 2x2 covariance give the principal-axis radii.
-    float a = cov2d.x;
-    float b = cov2d.y;
-    float c = cov2d.z;
-    float trace = a + c;
-    float det = a * c - b * b;
-    float disc = max(0.0, trace * trace * 0.25 - det);
-    float lambda1 = trace * 0.5 + sqrt(disc);
-    float lambda2 = trace * 0.5 - sqrt(disc);
-
-    // 3-sigma radius, scaled slightly conservative. Matches the canonical
-    // 3DGS binning choice. The 3.1 factor is historical from the paper's
-    // reference implementation; we could tune it later if we see fringe
-    // gaussians clipped against tile edges.
-    float radius_x = 3.1 * sqrt(max(lambda1, 0.0));
-    float radius_y = 3.1 * sqrt(max(lambda2, 0.0));
-    float radius = max(radius_x, radius_y);
-
-    bbox_min = mean_2d - float2(radius, radius);
-    bbox_max = mean_2d + float2(radius, radius);
-}
 
 [shader("compute")]
 [numthreads(256, 1, 1)]
@@ -48,7 +24,8 @@ void binGaussians(
     StructuredBuffer<CameraData> camera,
     RWStructuredBuffer<Projected2DGaussian> projected_2d,
     RWStructuredBuffer<uint> screen_tiles_count,
-    RWStructuredBuffer<uint> screen_tiles_indices)
+    RWStructuredBuffer<uint> screen_tiles_indices,
+    uniform float z_near)
 {
     uint gid = dtid.x;
     if (gid >= num_gaussians_counter[0])
@@ -64,20 +41,31 @@ void binGaussians(
         camera[0].view_matrix, camera[0].proj_matrix, camera[0].image_size,
         mean_2d, cov2d, depth_vs);
 
-    // Record projection result for the forward pass, regardless of cull
-    // so indices line up (forward also checks depth).
+    // Record projection result (regardless of cull). The projection is
+    // numerically meaningless when depth_vs is below z_near — the 1/z
+    // and 1/z^2 terms in the Jacobian make 2D cov entries explode toward
+    // float32 overflow. We still write the struct so backward sees
+    // consistent data; bin cull below prevents these from reaching
+    // forward/backward tile lists this frame.
     Projected2DGaussian proj;
     proj.mean = mean_2d;
     proj.cov2d = cov2d;
     proj.depth_vs = depth_vs;
     projected_2d[gid] = proj;
 
-    if (depth_vs <= 0.0)
+    // Near-plane cull: gaussians closer than z_near do not produce a
+    // well-defined screen footprint. They stay in the buffer (no data
+    // is deleted) and can be binned by a future camera whose frustum
+    // places them at sensible depth.
+    if (depth_vs < z_near)
         return;
 
     float2 frame_dim = camera[0].image_size;
     float2 bbox_min, bbox_max;
-    compute2DBoundingBox(mean_2d, cov2d, bbox_min, bbox_max);
+    // SnugBox: tight opacity-aware bbox. Returns false when opacity
+    // too low for the gaussian to contribute (σ ≤ 1/255) — cull.
+    if (!snugBox(mean_2d, cov2d, g.opacity, bbox_min, bbox_max))
+        return;
 
     bbox_min = max(bbox_min, float2(0.0, 0.0));
     bbox_max = min(bbox_max, frame_dim);
