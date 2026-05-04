@@ -25,7 +25,12 @@ import slangpy as spy
 
 
 TILE_SIZE = 16
-MAX_GAUSSIANS_PER_TILE = 1024
+
+# Default cap on the total number of (tile_id, depth, gaussian_idx) pairs
+# emitted by bin_emit before the global radix sort. A single gaussian
+# covering K tiles contributes K pairs. Sized to handle ~500k gaussians
+# each touching ~8 tiles on average, with headroom for peaks.
+DEFAULT_MAX_SORT_PAIRS = 4_000_000
 
 
 # Names of the 14 scalar grad buffers (SoA). Order matches how the
@@ -47,8 +52,33 @@ class GaussianBuffers:
 
     # --- per-frame forward scratch / output ---
     projected_2d: spy.NDBuffer
-    screen_tiles_count: spy.NDBuffer
-    screen_tiles_indices: spy.NDBuffer
+
+    # v2.x uncapped-binning pipeline (replaces the legacy per-tile array).
+    # See shaders/rasterize/tile_binned/bin_count.slang and bin_emit.slang.
+    tile_count_per_gaussian: spy.NDBuffer   # uint[max_splats]
+    tile_offset_per_gaussian: spy.NDBuffer  # uint[max_splats] — scan output
+    # Ping-pong pair buffers for radix sort.
+    sort_keys_lo_a: spy.NDBuffer            # uint[max_sort_pairs]
+    sort_keys_hi_a: spy.NDBuffer
+    sort_values_a: spy.NDBuffer
+    sort_keys_lo_b: spy.NDBuffer
+    sort_keys_hi_b: spy.NDBuffer
+    sort_values_b: spy.NDBuffer
+    # Block-local radix sort scratch.
+    # block_hist        : uint[num_sort_blocks * 256], per-(block, digit) count
+    # block_start       : uint[num_sort_blocks * 256], digit's exclusive-scan
+    #                     position within its block's sorted LDS layout
+    # block_prefix      : uint[num_sort_blocks * 256], per-(block, digit) global prefix
+    # digit_total       : uint[256], per-digit total count
+    # digit_global_base : uint[256], exclusive scan of digit_total
+    radix_block_hist: spy.NDBuffer
+    radix_block_start: spy.NDBuffer
+    radix_block_prefix: spy.NDBuffer
+    radix_digit_total: spy.NDBuffer
+    radix_digit_global_base: spy.NDBuffer
+    # Per-tile sorted entry ranges.
+    tile_start: spy.NDBuffer                # uint[num_tiles]
+    tile_end: spy.NDBuffer                  # uint[num_tiles]
 
     output_image: spy.Texture          # rgba32_float, UAV+SRV
     output_transmittance: spy.Texture  # r32_float
@@ -63,8 +93,16 @@ class GaussianBuffers:
     training_step: spy.NDBuffer | None = None    # uint[1] (Adam bias correction)
 
     # --- v2 densification tracking (accumulated over a window) ---
+    # grad_mean_2d_mag_accum   : fixed-point sum of per-iter norm-of-sum
+    #                            2D gradients.
+    # visibility_count_accum   : iter count (not pixel count) — matches
+    #                            gsplat's `state["count"]`.
+    # grad_2d_{x,y}_iter       : per-iter vector accumulators; cleared by
+    #                            accumulate_iter at each step end.
     grad_mean_2d_mag_accum: spy.NDBuffer | None = None  # int32[max_splats], fixed-point
-    pixel_coverage_accum: spy.NDBuffer | None = None    # uint[max_splats]
+    visibility_count_accum: spy.NDBuffer | None = None  # uint[max_splats]
+    grad_2d_x_iter: spy.NDBuffer | None = None          # int32[max_splats], fixed-point
+    grad_2d_y_iter: spy.NDBuffer | None = None          # int32[max_splats], fixed-point
 
     # --- v2 densification scratch + pipeline state ---
     gaussians_scratch: spy.NDBuffer | None = None   # Gaussian3D[max_splats]
@@ -77,6 +115,7 @@ class GaussianBuffers:
 
     # --- sizes ---
     max_splats: int = 0
+    max_sort_pairs: int = 0
     width: int = 0
     height: int = 0
     num_tiles_x: int = 0
@@ -93,6 +132,7 @@ def allocate(
     max_splats: int,
     width: int,
     height: int,
+    max_sort_pairs: int = DEFAULT_MAX_SORT_PAIRS,
 ) -> GaussianBuffers:
     """Allocate all GPU resources needed by forward + backward + Adam."""
     gaussian_type = module.layout.find_type_by_name("Gaussian3D")
@@ -113,10 +153,32 @@ def allocate(
     num_gaussians_counter = spy.NDBuffer(device=device, dtype="uint", shape=(1,))
 
     projected_2d = spy.NDBuffer(device=device, dtype=projected_type, shape=(max_splats,))
-    screen_tiles_count = spy.NDBuffer(device=device, dtype="uint", shape=(num_tiles,))
-    screen_tiles_indices = spy.NDBuffer(
-        device=device, dtype="uint", shape=(num_tiles * MAX_GAUSSIANS_PER_TILE,),
+
+    # v2.x uncapped-binning resources.
+    tile_count_per_gaussian = spy.NDBuffer(device=device, dtype="uint", shape=(max_splats,))
+    tile_offset_per_gaussian = spy.NDBuffer(device=device, dtype="uint", shape=(max_splats,))
+    sort_keys_lo_a = spy.NDBuffer(device=device, dtype="uint", shape=(max_sort_pairs,))
+    sort_keys_hi_a = spy.NDBuffer(device=device, dtype="uint", shape=(max_sort_pairs,))
+    sort_values_a = spy.NDBuffer(device=device, dtype="uint", shape=(max_sort_pairs,))
+    sort_keys_lo_b = spy.NDBuffer(device=device, dtype="uint", shape=(max_sort_pairs,))
+    sort_keys_hi_b = spy.NDBuffer(device=device, dtype="uint", shape=(max_sort_pairs,))
+    sort_values_b = spy.NDBuffer(device=device, dtype="uint", shape=(max_sort_pairs,))
+    # Block-local radix sort. SORT_BLOCK_SIZE=256 must match shader.
+    _SORT_BLOCK_SIZE = 256
+    num_sort_blocks = (max_sort_pairs + _SORT_BLOCK_SIZE - 1) // _SORT_BLOCK_SIZE
+    radix_block_hist = spy.NDBuffer(
+        device=device, dtype="uint", shape=(num_sort_blocks * 256,),
     )
+    radix_block_start = spy.NDBuffer(
+        device=device, dtype="uint", shape=(num_sort_blocks * 256,),
+    )
+    radix_block_prefix = spy.NDBuffer(
+        device=device, dtype="uint", shape=(num_sort_blocks * 256,),
+    )
+    radix_digit_total = spy.NDBuffer(device=device, dtype="uint", shape=(256,))
+    radix_digit_global_base = spy.NDBuffer(device=device, dtype="uint", shape=(256,))
+    tile_start = spy.NDBuffer(device=device, dtype="uint", shape=(num_tiles,))
+    tile_end = spy.NDBuffer(device=device, dtype="uint", shape=(num_tiles,))
 
     def _tex(fmt: spy.Format, label: str, usage: spy.TextureUsage | None = None) -> spy.Texture:
         return device.create_texture(
@@ -149,7 +211,9 @@ def allocate(
     training_step = spy.NDBuffer(device=device, dtype="uint", shape=(1,))
 
     grad_mean_2d_mag_accum = spy.NDBuffer(device=device, dtype="int", shape=(max_splats,))
-    pixel_coverage_accum = spy.NDBuffer(device=device, dtype="uint", shape=(max_splats,))
+    visibility_count_accum = spy.NDBuffer(device=device, dtype="uint", shape=(max_splats,))
+    grad_2d_x_iter = spy.NDBuffer(device=device, dtype="int", shape=(max_splats,))
+    grad_2d_y_iter = spy.NDBuffer(device=device, dtype="int", shape=(max_splats,))
 
     # v2 densification scratch
     gaussians_scratch = spy.NDBuffer(device=device, dtype=gaussian_type, shape=(max_splats,))
@@ -173,8 +237,21 @@ def allocate(
         gaussians=gaussians,
         num_gaussians_counter=num_gaussians_counter,
         projected_2d=projected_2d,
-        screen_tiles_count=screen_tiles_count,
-        screen_tiles_indices=screen_tiles_indices,
+        tile_count_per_gaussian=tile_count_per_gaussian,
+        tile_offset_per_gaussian=tile_offset_per_gaussian,
+        sort_keys_lo_a=sort_keys_lo_a,
+        sort_keys_hi_a=sort_keys_hi_a,
+        sort_values_a=sort_values_a,
+        sort_keys_lo_b=sort_keys_lo_b,
+        sort_keys_hi_b=sort_keys_hi_b,
+        sort_values_b=sort_values_b,
+        radix_block_hist=radix_block_hist,
+        radix_block_start=radix_block_start,
+        radix_block_prefix=radix_block_prefix,
+        radix_digit_total=radix_digit_total,
+        radix_digit_global_base=radix_digit_global_base,
+        tile_start=tile_start,
+        tile_end=tile_end,
         output_image=output_image,
         output_transmittance=output_transmittance,
         gaussian_count_per_pixel=gaussian_count_per_pixel,
@@ -185,7 +262,9 @@ def allocate(
         saturation_flag=saturation_flag,
         training_step=training_step,
         grad_mean_2d_mag_accum=grad_mean_2d_mag_accum,
-        pixel_coverage_accum=pixel_coverage_accum,
+        visibility_count_accum=visibility_count_accum,
+        grad_2d_x_iter=grad_2d_x_iter,
+        grad_2d_y_iter=grad_2d_y_iter,
         gaussians_scratch=gaussians_scratch,
         adam_state_scratch=adam_state_scratch,
         action_buffer=action_buffer,
@@ -194,6 +273,7 @@ def allocate(
         scan_block_sums=scan_block_sums,
         scan_total=scan_total,
         max_splats=max_splats,
+        max_sort_pairs=max_sort_pairs,
         width=width,
         height=height,
         num_tiles_x=num_tiles_x,
@@ -216,6 +296,8 @@ def write_gaussians(
     opacities: np.ndarray,
     color_logits: np.ndarray,
 ) -> None:
+    """``opacities`` is a probability in (0, 1); we convert to the
+    pre-sigmoid logit the shader expects."""
     n = means.shape[0]
     assert means.shape == (n, 3), f"means shape {means.shape}"
     assert log_scales.shape == (n, 3), f"log_scales shape {log_scales.shape}"
@@ -224,12 +306,17 @@ def write_gaussians(
     assert color_logits.shape == (n, 3), f"color_logits shape {color_logits.shape}"
     assert n <= buffers.max_splats, f"{n} gaussians exceeds max_splats {buffers.max_splats}"
 
+    # Convert probability → logit once on CPU. 1e-5 floor keeps log finite
+    # when a caller passes exactly 0 or 1.
+    p = np.clip(opacities, 1e-5, 1.0 - 1e-5).astype(np.float32)
+    opacity_logits = np.log(p / (1.0 - p))
+
     cursor = buffers.gaussians.cursor()
     for i in range(n):
         cursor[i].mean = spy.float3(*means[i])
         cursor[i].log_scale = spy.float3(*log_scales[i])
         cursor[i].rot_quat = spy.float4(*rot_quats[i])
-        cursor[i].opacity = float(opacities[i])
+        cursor[i].opacity = float(opacity_logits[i])
         cursor[i].color_logit = spy.float3(*color_logits[i])
     cursor.apply()
 

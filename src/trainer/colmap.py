@@ -228,16 +228,38 @@ def load_colmap(
 
     # Initial-points dict that matches write_gaussians signature.
     n = pts3d.shape[0]
-    rng = np.random.default_rng(0)
+
+    # gsplat-style k-NN scale init: each point's initial scale is the mean
+    # distance to its k nearest neighbours. Lone points in sparse regions
+    # get larger gaussians; points in dense clusters get smaller ones.
+    # This is critical for SfM-initialized scenes where point density
+    # varies dramatically — a uniform init wastes capacity on either
+    # over-covered dense regions or leaves gaps in sparse regions.
+    #
+    # For k=3: query 4 neighbours (the closest is the point itself at
+    # distance 0), average the next 3.
+    from scipy.spatial import cKDTree
+    k = 3
+    if n >= k + 1:
+        tree = cKDTree(pts3d)
+        dists, _ = tree.query(pts3d, k=k + 1)   # (n, k+1), col 0 is self
+        knn_dist = dists[:, 1:k + 1].mean(axis=-1).astype(np.float32)
+        # Floor at a small minimum so coincident points don't produce
+        # zero-scale gaussians.
+        knn_dist = np.clip(knn_dist, 1e-4, None)
+    else:
+        # Fallback for degenerate scenes.
+        knn_dist = np.full(n, 0.01, dtype=np.float32)
+    log_scale_per_point = np.log(knn_dist)
+
     initial_points = {
         "means": pts3d,
-        # Initial scale = 0.01 world units, isotropic. In v0 synthetic
-        # experiments this gave visible but still-trainable sizes.
-        "log_scales": np.full((n, 3), np.log(0.01), dtype=np.float32),
+        # Isotropic, per-point kNN-derived scale.
+        "log_scales": np.repeat(log_scale_per_point[:, None], 3, axis=1).astype(np.float32),
         # Identity quaternion.
         "rot_quats": np.tile(np.array([1, 0, 0, 0], dtype=np.float32), (n, 1)),
-        # Initial opacity 0.1 (pre-sigmoid in training; we store the
-        # activated value since our struct holds opacity in [0, 1]).
+        # Initial opacity 0.1 (probability; converted to logit by
+        # write_gaussians before upload).
         "opacities": np.full(n, 0.1, dtype=np.float32),
         # Mid-gray color (sigmoid(0) = 0.5). The points.txt typically
         # carries real colors but we ignore those in v1 (PLAN.md): the

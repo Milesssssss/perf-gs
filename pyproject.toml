@@ -12,6 +12,7 @@ dependencies = [
     "numpy",
     "pillow",
     "plyfile",
+    "scipy",
 ]
 
 [project.optional-dependencies]

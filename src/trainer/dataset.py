@@ -146,11 +146,11 @@ def load_ply(path: str | Path) -> dict[str, np.ndarray]:
     term is converted to a plain-RGB color_logit so sigmoid(color_logit)
     approximates the same linear RGB as ``0.5 + SH_C0 * f_dc``.
 
-    Opacity in the .ply is pre-sigmoid (i.e. ``sigmoid(opacity)`` gives
-    the real [0,1] opacity). We apply the sigmoid here so the GPU struct
-    holds ready-to-use opacity in [0,1] — matching M1's shader
-    expectation. v1 can revisit this if training wants pre-activation
-    storage for numerical reasons.
+    Opacity in the .ply is pre-sigmoid (i.e. ``sigmoid(opacity)`` is the
+    real [0,1] probability). This loader returns the probability; the
+    Python-side :func:`trainer.buffers.write_gaussians` converts back to
+    logit before writing to the GPU struct (which now stores logits).
+    The round-trip is free modulo a 1e-5 clip at the extremes.
     """
     path = Path(path)
     if not path.exists():

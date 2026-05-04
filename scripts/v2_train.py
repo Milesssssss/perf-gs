@@ -31,7 +31,7 @@ from PIL import Image
 
 from trainer.colmap import load_colmap, load_image
 from trainer.device import create_device
-from trainer.export import render_to_png
+from trainer.export import render_to_png, save_ply
 from trainer.pipeline import AdamLRs, DensifyConfig, Pipeline
 
 
@@ -73,13 +73,13 @@ def main() -> None:
     ap.add_argument("--preview-every", type=int, default=500)
     ap.add_argument("--log-every", type=int, default=250)
     ap.add_argument("--densify-every", type=int, default=100)
-    ap.add_argument("--densify-from", type=int, default=500)
+    ap.add_argument("--densify-from", type=int, default=3000)
     ap.add_argument("--densify-to", type=int, default=7000)
-    ap.add_argument("--opacity-reset-iters", type=int, nargs="*", default=[2000, 4000, 6000])
+    ap.add_argument("--opacity-reset-iters", type=int, nargs="*", default=[4000, 7000])
     ap.add_argument("--t-grad", type=float, default=2e-4)
     ap.add_argument("--t-split-scale", type=float, default=0.01)
     ap.add_argument("--t-opacity", type=float, default=0.005)
-    ap.add_argument("--t-big-scale", type=float, default=0.5)
+    ap.add_argument("--t-big-scale", type=float, default=0.1)
     ap.add_argument("--max-splats", type=int, default=500_000)
     ap.add_argument("--z-near-cull", type=float, default=0.01,
                     help="view-space depth floor for bin cull; raise for scenes "
@@ -144,6 +144,10 @@ def main() -> None:
     pipeline.set_gaussians_from_numpy(**scene.initial_points)
     pipeline.clear_tracking()
 
+    # Pre-upload every target image as its own GPU texture. Per-iter we
+    # just swap the active reference — no CPU→GPU upload in the hot loop.
+    target_textures = [pipeline.create_target_texture(t) for t in targets_srgb]
+
     _render_all_cameras(pipeline, scene, 0, cams_dir)
 
     log_txt = (run_dir / "log.txt").open("w", buffering=1)
@@ -162,34 +166,24 @@ def main() -> None:
 
     t_start = time.time()
     rolling_loss = None
+    # Track the current live gaussian count Python-side to avoid a
+    # per-iter counter readback. Updated from densify() return values.
+    cur_n_gaussians = n_init
 
     for it in range(1, args.iters + 1):
         cam_idx = int(rng.integers(0, n_cams))
         entry = scene.images[cam_idx]
-        pipeline.set_target_image(targets_srgb[cam_idx])
+        pipeline.set_target_texture(target_textures[cam_idx])
 
         lrs = AdamLRs(mean=lr_mean_init * (decay ** (it - 1)))
         pipeline.train_step(entry.camera, lrs=lrs)
 
-        rendered = pipeline.read_output_image()[..., :3]
-        # Boundary check: if the forward produced NaN/Inf pixels,
-        # training is already corrupted. Abort loudly rather than
-        # continue accumulating garbage (PLAN.md Q17).
-        if not np.all(np.isfinite(rendered)):
-            n_nan = int(np.sum(~np.isfinite(rendered)))
-            msg = (f"iter {it}: rendered image has {n_nan} non-finite pixels "
-                   f"(out of {rendered.size}). Training aborted.")
-            print(msg)
-            log_txt.write(f"# ABORT: {msg}\n")
-            break
-        mse = float(np.mean((rendered - targets_linear[cam_idx]) ** 2))
-        rolling_loss = mse if rolling_loss is None else 0.98 * rolling_loss + 0.02 * mse
-        psnr = _psnr_linear(rendered, targets_linear[cam_idx])
-
-        # Densification schedule.
+        # Densification schedule — still in float32 `it`, cheap predicate.
         do_densify = (args.densify_from <= it <= args.densify_to
                       and (it - args.densify_from) % args.densify_every == 0)
         do_opacity_reset = it in args.opacity_reset_iters
+        do_log = (it % args.log_every == 0) or (it == 1) or (it == args.iters)
+        do_preview = (it % args.preview_every == 0) or (it == args.iters)
 
         if do_opacity_reset:
             pipeline.reset_opacity(cfg)
@@ -199,30 +193,49 @@ def main() -> None:
         if do_densify:
             stats = pipeline.densify(cfg, window_iters=args.densify_every)
             pipeline.clear_tracking()
+            cur_n_gaussians = stats["final_count"]
             densify_json.write(json.dumps({"iter": it, "event": "densify", **stats}) + "\n")
             print(f"iter {it}: densify  "
                   f"keep={stats['n_keep']} split={stats['n_split']} "
                   f"clone={stats['n_clone']} prune={stats['n_prune']} "
                   f"| pre={stats['pre_count']} -> post={stats['final_count']}")
 
-        if it % args.log_every == 0 or it == 1:
+        # Loss/PSNR require a GPU→CPU readback of the output image.
+        # Sampling this every step would serialize the training loop and
+        # tank GPU utilization; do it only on log boundaries. Same for
+        # the NaN/Inf safety check (PLAN.md Q17): if the forward has
+        # gone non-finite, it's not going to recover in a few hundred
+        # iters, so checking at log cadence is plenty timely.
+        if do_log or do_preview:
+            pipeline.device.wait_for_idle()
+            rendered = pipeline.read_output_image()[..., :3]
+            if not np.all(np.isfinite(rendered)):
+                n_nan = int(np.sum(~np.isfinite(rendered)))
+                msg = (f"iter {it}: rendered image has {n_nan} non-finite pixels "
+                       f"(out of {rendered.size}). Training aborted.")
+                print(msg)
+                log_txt.write(f"# ABORT: {msg}\n")
+                break
+            mse = float(np.mean((rendered - targets_linear[cam_idx]) ** 2))
+            rolling_loss = mse if rolling_loss is None else 0.98 * rolling_loss + 0.02 * mse
+            psnr = _psnr_linear(rendered, targets_linear[cam_idx])
+
             elapsed = time.time() - t_start
             it_per_s = it / elapsed
-            n_g = int(pipeline.buffers.num_gaussians_counter.to_numpy().view(np.uint32)[0])
             line = (f"iter {it:6d}  cam {cam_idx:2d}  "
                     f"loss={rolling_loss:.5f}  psnr={psnr:5.2f} dB  "
-                    f"lr_mean={lrs.mean:.2e}  n_g={n_g:6d}  {it_per_s:5.1f} it/s")
+                    f"lr_mean={lrs.mean:.2e}  n_g={cur_n_gaussians:6d}  {it_per_s:5.1f} it/s")
             print(line)
             log_txt.write(line + "\n")
             log_json.write(json.dumps({
                 "iter": it, "cam_idx": cam_idx,
                 "loss_rolling": rolling_loss, "loss_instant": mse,
                 "psnr_instant": psnr, "lr_mean": lrs.mean,
-                "n_gaussians": n_g, "it_per_s": it_per_s,
+                "n_gaussians": cur_n_gaussians, "it_per_s": it_per_s,
                 "elapsed_s": elapsed,
             }) + "\n")
 
-        if it % args.preview_every == 0 or it == args.iters:
+        if do_preview:
             _render_all_cameras(pipeline, scene, it, cams_dir)
 
     log_txt.close()
@@ -284,11 +297,15 @@ def main() -> None:
     }
     (run_dir / "final_psnr.json").write_text(json.dumps(summary, indent=2))
 
+    ply_path = run_dir / "output.ply"
+    save_ply(pipeline, ply_path)
+
     print(f"done in {time.time() - t_start:.1f}s")
     print(f"avg PSNR  linear full:   {summary['avg_psnr_linear']:6.2f} dB")
     print(f"avg PSNR  sRGB full:     {summary['avg_psnr_srgb']:6.2f} dB")
     print(f"avg PSNR  sRGB masked:   {summary['avg_psnr_srgb_masked']:6.2f} dB  <- honest silhouette")
     print(f"final gaussian count:    {summary['final_n_gaussians']}")
+    print(f"saved ply:               {ply_path}")
     print(f"run dir: {run_dir}")
 
 

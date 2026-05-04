@@ -4,19 +4,25 @@
 // log_scale/opacity, writes ``action[i] ∈ {KEEP, SPLIT, CLONE, PRUNE}``.
 // Paper heuristic from Kerbl et al. (3D Gaussian Splatting):
 //
-//   mean_2d_grad_norm  =  fixed-to-float(grad_mean_2d_mag_accum[i]) / window_iters
+//   mean_2d_grad_norm  =  window-averaged norm of the per-iter, per-
+//                         gaussian (pixel-summed) 2D gradient
+//                      =  fixed-to-float(grad_mean_2d_mag_accum[i])
+//                         / max(visibility_count_accum[i], 1)
 //   max_scale          =  max(exp(log_scale))
 //
-//   PRUNE  if  opacity < t_opacity  or  max_scale > t_big_scale
+//   PRUNE  if  sigmoid(opacity) < t_opacity  or  max_scale > t_big_scale
 //   SPLIT  if  mean_2d_grad_norm > t_grad  AND  max_scale > t_split_scale
 //   CLONE  if  mean_2d_grad_norm > t_grad  AND  max_scale <= t_split_scale
 //   KEEP   otherwise
 //
-// ``window_iters`` lets the Python side normalize gradients accumulated
-// over N iters into a per-iter-equivalent signal so the same thresholds
-// work regardless of densification cadence.
+// Matches gsplat DefaultStrategy: `grad2d / count.clamp_min(1)` where
+// grad2d is the running sum of per-iter `‖pixel-summed-grad‖` and
+// count is the number of iters the gaussian was visible. Crucially,
+// this is the norm of a sum (not a sum of norms) — tangentially-
+// cancelling pixel gradients correctly report as "settled".
 
 #include "../common/types.slang"
+#include "../common/math.slang"
 
 static const uint ACTION_KEEP  = 0;
 static const uint ACTION_SPLIT = 1;
@@ -30,10 +36,8 @@ void decideActions(
     StructuredBuffer<Gaussian3D> gaussians,
     StructuredBuffer<uint> num_gaussians_counter,
     StructuredBuffer<int> grad_mean_2d_mag_accum,
-    StructuredBuffer<uint> pixel_coverage_accum,
+    StructuredBuffer<uint> visibility_count_accum,
     RWStructuredBuffer<uint> action,
-    uniform float window_iters,
-    uniform float grad_scale,     // 1 / max(frame_dim) to normalize grad to image units
     uniform float t_grad,
     uniform float t_split_scale,
     uniform float t_opacity,
@@ -51,19 +55,27 @@ void decideActions(
     Gaussian3D g = gaussians[i];
     float3 scale = exp(g.log_scale);
     float max_scale = max(scale.x, max(scale.y, scale.z));
+    float opacity = sigmoid(g.opacity);
 
-    if (g.opacity < t_opacity || max_scale > t_big_scale)
+    if (opacity < t_opacity || max_scale > t_big_scale)
     {
         action[i] = ACTION_PRUNE;
         return;
     }
 
-    // Normalize accumulated pixel-space grad mag into per-iter,
-    // image-relative units. ``grad_scale`` is typically 1/max(W,H).
-    float mag_total = fromFixed(grad_mean_2d_mag_accum[i]);
-    float mag_per_iter = (mag_total * grad_scale) / max(window_iters, 1.0);
+    // Gaussians never visible over the window can't be flagged for
+    // growth (no signal to rank them by).
+    uint vis_count = visibility_count_accum[i];
+    if (vis_count == 0u)
+    {
+        action[i] = ACTION_KEEP;
+        return;
+    }
 
-    if (mag_per_iter > t_grad)
+    float mag_total = fromFixed(grad_mean_2d_mag_accum[i]);
+    float mag_avg = mag_total / float(vis_count);
+
+    if (mag_avg > t_grad)
     {
         action[i] = (max_scale > t_split_scale) ? ACTION_SPLIT : ACTION_CLONE;
     }

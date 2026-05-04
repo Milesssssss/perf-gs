@@ -37,9 +37,10 @@ def save_ply(pipeline: Pipeline, path: str | Path) -> None:
     """Export the pipeline's current gaussians as a 3DGS-format .ply.
 
     Inverse of :func:`trainer.dataset.load_ply`:
-    - opacity (in [0,1]) is written pre-sigmoid (logit).
-    - color_logit is converted back to linear RGB via sigmoid, then to
-      SH DC via ``f_dc = (rgb - 0.5) / SH_C0``.
+    - The GPU stores opacity as a pre-sigmoid logit; the .ply format
+      also stores pre-sigmoid opacity, so we write it directly.
+    - ``color_logit`` is converted back to linear RGB via sigmoid, then
+      to SH DC via ``f_dc = (rgb - 0.5) / SH_C0``.
 
     Only the 14 fields M1/M2 produce are written; higher-order SH bands
     land in a later milestone when they matter.
@@ -54,12 +55,8 @@ def save_ply(pipeline: Pipeline, path: str | Path) -> None:
     mean = floats[:, 0:3]
     log_scale = floats[:, 3:6]
     rot_quat = floats[:, 6:10]
-    opacity = floats[:, 10]
+    opacity_logit = floats[:, 10].astype(np.float32)   # stored as logit already
     color_logit = floats[:, 11:14]
-
-    # Inverse activations.
-    safe_opacity = np.clip(opacity, 1e-6, 1.0 - 1e-6)
-    opacity_logit = np.log(safe_opacity / (1.0 - safe_opacity)).astype(np.float32)
 
     linear_rgb = 1.0 / (1.0 + np.exp(-color_logit))
     f_dc = ((linear_rgb - 0.5) / _SH_C0).astype(np.float32)

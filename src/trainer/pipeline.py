@@ -78,12 +78,16 @@ class Pipeline:
         device: spy.Device,
         width: int,
         height: int,
-        max_splats: int = 5_000_000,
+        max_splats: int = 500_000,
+        max_sort_pairs: int | None = None,
     ) -> None:
         self.device = device
         self.width = width
         self.height = height
         self.max_splats = max_splats
+        if max_sort_pairs is None:
+            max_sort_pairs = buffers.DEFAULT_MAX_SORT_PAIRS
+        self.max_sort_pairs = max_sort_pairs
 
         self.module = _module_for_reflection(device)
 
@@ -92,13 +96,20 @@ class Pipeline:
         opt = SHADERS_DIR / "optimizers"
         loss = SHADERS_DIR / "losses"
 
-        self.k_clear_tiles = _make_kernel(device, tb / "clear.slang", "clearTilesCount")
         self.k_clear_textures = _make_kernel(device, tb / "clear.slang", "clearTextures")
-        self.k_bin = _make_kernel(device, tb / "bin.slang", "binGaussians")
-        self.k_sort = _make_kernel(device, tb / "sort.slang", "sortTile")
+        self.k_bin_count = _make_kernel(device, tb / "bin_count.slang", "binCount")
+        self.k_bin_emit = _make_kernel(device, tb / "bin_emit.slang", "binEmit")
+        self.k_clear_tile_ranges = _make_kernel(device, tb / "tile_ranges.slang", "clearTileRanges")
+        self.k_identify_tile_ranges = _make_kernel(device, tb / "tile_ranges.slang", "identifyTileRanges")
         self.k_forward = _make_kernel(device, tb / "forward.slang", "forwardRasterize")
         self.k_loss = _make_kernel(device, loss / "l2_linear.slang", "computeLossGrad")
         self.k_backward = _make_kernel(device, tb / "backward.slang", "backwardRasterize")
+
+        sort = SHADERS_DIR / "sort"
+        self.k_radix_block_sort = _make_kernel(device, sort / "radix_sort.slang", "blockSort")
+        self.k_radix_global_scan = _make_kernel(device, sort / "radix_sort.slang", "globalScan")
+        self.k_radix_scan_digit_totals = _make_kernel(device, sort / "radix_sort.slang", "scanDigitTotals")
+        self.k_radix_scatter_final = _make_kernel(device, sort / "radix_sort.slang", "scatterFinal")
         self.k_adam = _make_kernel(device, opt / "adam.slang", "adamStep")
         self.k_grad_clear = _make_kernel(device, opt / "grad_utils.slang", "clearGradBuffer")
         self.k_saturation_check = _make_kernel(device, opt / "grad_utils.slang", "checkSaturation")
@@ -106,6 +117,7 @@ class Pipeline:
 
         densify = SHADERS_DIR / "densify"
         self.k_clear_tracking = _make_kernel(device, densify / "clear_tracking.slang", "clearTracking")
+        self.k_accumulate_iter = _make_kernel(device, densify / "accumulate_iter.slang", "accumulateIter")
         self.k_decide_actions = _make_kernel(device, densify / "decide_actions.slang", "decideActions")
         self.k_split_and_clone = _make_kernel(device, densify / "split_and_clone.slang", "splitAndClone")
         self.k_build_prune_mask = _make_kernel(device, densify / "build_prune_mask.slang", "buildPruneMask")
@@ -121,6 +133,7 @@ class Pipeline:
         self.buffers = buffers.allocate(
             device=device, module=self.module,
             max_splats=max_splats, width=width, height=height,
+            max_sort_pairs=max_sort_pairs,
         )
 
         camera_type = self.module.layout.find_type_by_name("CameraData")
@@ -160,10 +173,17 @@ class Pipeline:
         self.iteration = 0
 
     def set_target_image(self, rgb: np.ndarray) -> None:
-        """Upload a target image as ``(H, W, 3) float32`` sRGB.
+        """Upload a target image into the pipeline's owned texture. Call
+        this once per iter if you don't want to manage per-camera target
+        textures yourself.
 
         The loss kernel performs ``srgb_to_linear`` on read. We pad the
         image to RGBA because our texture format is rgba32_float.
+
+        For training loops, prefer :meth:`create_target_texture` to
+        pre-upload every target once and pass the texture reference
+        into :meth:`set_target_texture` each iter — avoids an 8 MB
+        upload per step.
         """
         assert rgb.shape == (self.height, self.width, 3), (
             f"target shape {rgb.shape} != ({self.height}, {self.width}, 3)"
@@ -173,6 +193,34 @@ class Pipeline:
             axis=-1,
         )
         self.buffers.target_image.copy_from_numpy(np.ascontiguousarray(rgba))
+        self._active_target = self.buffers.target_image
+
+    def create_target_texture(self, rgb: np.ndarray) -> spy.Texture:
+        """Create a new rgba32_float target texture and upload ``rgb``
+        into it. Caller keeps the returned texture alive and passes it
+        to :meth:`set_target_texture` per iter.
+        """
+        assert rgb.shape == (self.height, self.width, 3), (
+            f"target shape {rgb.shape} != ({self.height}, {self.width}, 3)"
+        )
+        tex = self.device.create_texture(
+            type=spy.TextureType.texture_2d,
+            format=spy.Format.rgba32_float,
+            width=self.width, height=self.height,
+            usage=spy.TextureUsage.shader_resource | spy.TextureUsage.unordered_access,
+            label="target_image_cached",
+        )
+        rgba = np.concatenate(
+            [rgb.astype(np.float32), np.ones((self.height, self.width, 1), np.float32)],
+            axis=-1,
+        )
+        tex.copy_from_numpy(np.ascontiguousarray(rgba))
+        return tex
+
+    def set_target_texture(self, tex: spy.Texture) -> None:
+        """Use a pre-uploaded target texture for subsequent forward+loss
+        calls. Cheap: just a reference swap — no copy, no upload."""
+        self._active_target = tex
 
     # ------------------------------------------------------------------
     # Camera + forward pipeline
@@ -190,16 +238,67 @@ class Pipeline:
         cursor[0].image_size = spy.float2(float(self.width), float(self.height))
         cursor.apply()
 
+    def _radix_sort_pairs(self) -> tuple[spy.NDBuffer, spy.NDBuffer, spy.NDBuffer]:
+        """Block-local 8-pass LSB radix sort. Returns the (keys_lo,
+        keys_hi, values) triplet holding the sorted result.
+
+        Per-pass structure (see shaders/sort/radix_sort.slang):
+          blockSort       — in-place block sort + per-block digit counts
+          globalScan      — per-(block, digit) running prefix + digit totals
+          scanDigitTotals — exclusive scan of the 256 digit totals
+          scatterFinal    — O(1)/thread scatter to the destination buffers
+
+        ``n`` (the actual pair count) lives in ``scan_total[0]`` on the
+        GPU; Python never reads it back in the hot path.
+        """
+        b = self.buffers
+        src_lo, src_hi, src_v = b.sort_keys_lo_a, b.sort_keys_hi_a, b.sort_values_a
+        dst_lo, dst_hi, dst_v = b.sort_keys_lo_b, b.sort_keys_hi_b, b.sort_values_b
+        num_sort_blocks = (self.max_sort_pairs + 255) // 256
+
+        for pass_idx in range(8):
+            self.k_radix_block_sort.dispatch(
+                thread_count=[num_sort_blocks * 256, 1, 1],
+                keys_lo=src_lo.storage, keys_hi=src_hi.storage,
+                values=src_v.storage,
+                block_hist=b.radix_block_hist.storage,
+                block_start=b.radix_block_start.storage,
+                n_buf=b.scan_total.storage,
+                pass_idx=pass_idx,
+            )
+            self.k_radix_global_scan.dispatch(
+                thread_count=[256, 1, 1],
+                block_hist=b.radix_block_hist.storage,
+                block_prefix=b.radix_block_prefix.storage,
+                digit_total=b.radix_digit_total.storage,
+                n_buf=b.scan_total.storage,
+            )
+            self.k_radix_scan_digit_totals.dispatch(
+                thread_count=[256, 1, 1],
+                digit_total=b.radix_digit_total.storage,
+                digit_global_base=b.radix_digit_global_base.storage,
+            )
+            self.k_radix_scatter_final.dispatch(
+                thread_count=[self.max_sort_pairs, 1, 1],
+                keys_lo_in=src_lo.storage, keys_hi_in=src_hi.storage, values_in=src_v.storage,
+                block_start=b.radix_block_start.storage,
+                block_prefix=b.radix_block_prefix.storage,
+                digit_global_base=b.radix_digit_global_base.storage,
+                keys_lo_out=dst_lo.storage, keys_hi_out=dst_hi.storage, values_out=dst_v.storage,
+                n_buf=b.scan_total.storage,
+                pass_idx=pass_idx,
+            )
+            src_lo, dst_lo = dst_lo, src_lo
+            src_hi, dst_hi = dst_hi, src_hi
+            src_v, dst_v = dst_v, src_v
+        return src_lo, src_hi, src_v
+
     def _run_forward(self, camera: Camera) -> None:
         self._upload_camera(camera)
         b = self.buffers
         num_tiles = b.num_tiles
 
-        self.k_clear_tiles.dispatch(
-            thread_count=[num_tiles, 1, 1],
-            screen_tiles_count=b.screen_tiles_count.storage,
-            num_tiles=num_tiles,
-        )
+        # Clear output textures + tile ranges.
         self.k_clear_textures.dispatch(
             thread_count=[self.width, self.height, 1],
             output_image=b.output_image,
@@ -207,28 +306,77 @@ class Pipeline:
             gaussian_count_per_pixel=b.gaussian_count_per_pixel,
             frame_dim=spy.uint2(self.width, self.height),
         )
-        self.k_bin.dispatch(
+        self.k_clear_tile_ranges.dispatch(
+            thread_count=[num_tiles, 1, 1],
+            tile_start=b.tile_start.storage,
+            tile_end=b.tile_end.storage,
+            num_tiles=num_tiles,
+        )
+
+        # Phase 1: per-gaussian tile count.
+        self.k_bin_count.dispatch(
             thread_count=[self.max_splats, 1, 1],
             gaussians=b.gaussians.storage,
             num_gaussians_counter=b.num_gaussians_counter.storage,
             camera=self._camera_buffer.storage,
             projected_2d=b.projected_2d.storage,
-            screen_tiles_count=b.screen_tiles_count.storage,
-            screen_tiles_indices=b.screen_tiles_indices.storage,
+            tile_count_per_gaussian=b.tile_count_per_gaussian.storage,
+            z_near=self.z_near_cull,
+            max_splats=self.max_splats,
+        )
+
+        # Phase 2: exclusive scan → tile_offset_per_gaussian + total count.
+        # scan_total[0] holds the total pair count on the GPU; no readback.
+        self._scan(
+            n=self.max_splats,
+            in_buf=b.tile_count_per_gaussian,
+            out_buf=b.tile_offset_per_gaussian,
+        )
+
+        # Phase 3: emit (tile_id, depth, gaussian_idx) pairs into A buffers.
+        # If the total_pair count is 0, bin_emit does nothing (per-gaussian
+        # tile_count==0 → no writes). The downstream sort + tile_ranges
+        # kernels early-out on i >= scan_total[0], so zero-pair frames are
+        # correct without a CPU branch.
+        self.k_bin_emit.dispatch(
+            thread_count=[self.max_splats, 1, 1],
+            gaussians=b.gaussians.storage,
+            num_gaussians_counter=b.num_gaussians_counter.storage,
+            camera=self._camera_buffer.storage,
+            projected_2d=b.projected_2d.storage,
+            tile_offset_per_gaussian=b.tile_offset_per_gaussian.storage,
+            keys_lo=b.sort_keys_lo_a.storage,
+            keys_hi=b.sort_keys_hi_a.storage,
+            values=b.sort_values_a.storage,
             z_near=self.z_near_cull,
         )
-        self.k_sort.dispatch(
-            thread_count=[num_tiles * 256, 1, 1],
-            projected_2d=b.projected_2d.storage,
-            screen_tiles_count=b.screen_tiles_count.storage,
-            screen_tiles_indices=b.screen_tiles_indices.storage,
+
+        # Phase 4: global radix sort. Reads n from scan_total[0].
+        sorted_lo, sorted_hi, sorted_v = self._radix_sort_pairs()
+
+        # Phase 5: identify per-tile start/end in the sorted array.
+        self.k_identify_tile_ranges.dispatch(
+            thread_count=[self.max_sort_pairs, 1, 1],
+            keys_hi=sorted_hi.storage,
+            tile_start=b.tile_start.storage,
+            tile_end=b.tile_end.storage,
+            n_buf=b.scan_total.storage,
+            num_tiles=num_tiles,
         )
+
+        # Stash the sorted-values buffer for backward/forward to consume.
+        # Which side of the ping-pong won depends on the last pass; we
+        # cached it in self._sorted_values for the backward.
+        self._sorted_values = sorted_v
+
+        # Phase 6: forward rasterize.
         self.k_forward.dispatch(
             thread_count=[b.num_tiles_x * 16, b.num_tiles_y * 16, 1],
             gaussians=b.gaussians.storage,
             projected_2d=b.projected_2d.storage,
-            screen_tiles_count=b.screen_tiles_count.storage,
-            screen_tiles_indices=b.screen_tiles_indices.storage,
+            tile_start=b.tile_start.storage,
+            tile_end=b.tile_end.storage,
+            sorted_gaussian_ids=sorted_v.storage,
             camera=self._camera_buffer.storage,
             output_image=b.output_image,
             output_transmittance=b.output_transmittance,
@@ -257,10 +405,11 @@ class Pipeline:
 
     def _run_loss(self) -> None:
         b = self.buffers
+        target = getattr(self, "_active_target", None) or b.target_image
         self.k_loss.dispatch(
             thread_count=[self.width, self.height, 1],
             output_image=b.output_image,
-            target_image=b.target_image,
+            target_image=target,
             dL_dC=b.dL_dC_texture,
             frame_dim=spy.uint2(self.width, self.height),
         )
@@ -268,12 +417,16 @@ class Pipeline:
     def _run_backward(self) -> None:
         b = self.buffers
         gb = b.grad_buffers
+        # The forward left the sorted gaussian-id buffer on one of the two
+        # ping-pong slots. We cache it during _run_forward.
+        sorted_values = getattr(self, "_sorted_values", b.sort_values_a)
         self.k_backward.dispatch(
             thread_count=[b.num_tiles_x * 16, b.num_tiles_y * 16, 1],
             gaussians=b.gaussians.storage,
             projected_2d=b.projected_2d.storage,
-            screen_tiles_count=b.screen_tiles_count.storage,
-            screen_tiles_indices=b.screen_tiles_indices.storage,
+            tile_start=b.tile_start.storage,
+            tile_end=b.tile_end.storage,
+            sorted_gaussian_ids=sorted_values.storage,
             camera=self._camera_buffer.storage,
             output_image=b.output_image,
             output_transmittance=b.output_transmittance,
@@ -293,8 +446,21 @@ class Pipeline:
             grad_color_r=gb["color_r"].storage,
             grad_color_g=gb["color_g"].storage,
             grad_color_b=gb["color_b"].storage,
+            grad_2d_x_iter=b.grad_2d_x_iter.storage,
+            grad_2d_y_iter=b.grad_2d_y_iter.storage,
+        )
+        # Fold the per-iter 2D grad vector into the window-level
+        # mag + visibility accumulators. Gsplat semantics: the signal
+        # driving densification is the NORM OF THE SUM of per-pixel
+        # gradients per iter, averaged over iters the gaussian was
+        # visible — not the sum of per-pixel norms.
+        self.k_accumulate_iter.dispatch(
+            thread_count=[self.max_splats, 1, 1],
+            grad_2d_x_iter=b.grad_2d_x_iter.storage,
+            grad_2d_y_iter=b.grad_2d_y_iter.storage,
             grad_mean_2d_mag_accum=b.grad_mean_2d_mag_accum.storage,
-            pixel_coverage_accum=b.pixel_coverage_accum.storage,
+            visibility_count_accum=b.visibility_count_accum.storage,
+            max_splats=self.max_splats,
         )
 
     def clear_tracking(self) -> None:
@@ -304,22 +470,23 @@ class Pipeline:
         self.k_clear_tracking.dispatch(
             thread_count=[self.max_splats, 1, 1],
             grad_mean_2d_mag_accum=b.grad_mean_2d_mag_accum.storage,
-            pixel_coverage_accum=b.pixel_coverage_accum.storage,
+            visibility_count_accum=b.visibility_count_accum.storage,
+            grad_2d_x_iter=b.grad_2d_x_iter.storage,
+            grad_2d_y_iter=b.grad_2d_y_iter.storage,
             max_splats=self.max_splats,
         )
 
     def read_tracking(self) -> dict[str, np.ndarray]:
-        """Read both tracking buffers as float / uint arrays of length
-        ``max_splats``. Used by tests and (temporarily) by Python-side
-        densification prototyping."""
+        """Read window-level tracking buffers as float / uint arrays of
+        length ``max_splats``. Used by tests and diagnostics."""
         b = self.buffers
         raw_mag = b.grad_mean_2d_mag_accum.to_numpy()
-        raw_cov = b.pixel_coverage_accum.to_numpy()
+        raw_vis = b.visibility_count_accum.to_numpy()
         mag_int = np.frombuffer(raw_mag.tobytes(), dtype=np.int32)
-        cov = np.frombuffer(raw_cov.tobytes(), dtype=np.uint32)
+        vis = np.frombuffer(raw_vis.tobytes(), dtype=np.uint32)
         return {
             "grad_mean_2d_mag": mag_int.astype(np.float64) / 65536.0,
-            "pixel_coverage": cov.astype(np.int64),
+            "visibility_count": vis.astype(np.int64),
         }
 
     def _run_saturation_check(self) -> None:
@@ -377,18 +544,25 @@ class Pipeline:
 
     def forward_and_loss(self, camera: Camera) -> None:
         """Run forward + loss only. Used by tests that read ``dL_dC``
-        before the backward pass runs."""
+        before the backward pass runs.
+
+        No ``wait_for_idle`` here — callers that read back GPU data
+        should call ``device.wait_for_idle()`` themselves, or use a
+        helper like :meth:`render` / :meth:`read_output_image` which
+        handle the sync. Tests that explicitly sample intermediates
+        insert the wait at their own callsite.
+        """
         self._run_forward(camera)
         self._run_loss()
-        self.device.wait_for_idle()
 
     def backward(self) -> None:
         """Run the backward rasterizer. Assumes forward + loss have run."""
         self._run_backward()
-        self.device.wait_for_idle()
 
     def check_saturation(self) -> bool:
-        """Return True if any int32 gradient buffer saturated."""
+        """Return True if any int32 gradient buffer saturated. The
+        readback forces a GPU flush; callers should only use this
+        diagnostically, not every iter."""
         self._run_saturation_check()
         self.device.wait_for_idle()
         flag = self.buffers.saturation_flag.to_numpy().view(np.uint32)[0]
@@ -399,6 +573,11 @@ class Pipeline:
 
         The target image must have been uploaded via
         :meth:`set_target_image` before calling.
+
+        NO CPU/GPU sync here — training submits kernels and returns
+        immediately. This keeps the GPU saturated; the queue drains
+        when the training loop next reads back data (loss sample,
+        preview render, densify).
         """
         if lrs is None:
             lrs = AdamLRs()
@@ -407,7 +586,320 @@ class Pipeline:
         self._run_loss()
         self._run_backward()
         self._run_adam(lrs)
+
+    def profile_one_step(self, camera: Camera, lrs: AdamLRs | None = None,
+                         warmup_steps: int = 3) -> list[tuple[str, float]]:
+        """Run one full training step with per-phase GPU-timestamp queries
+        and return ``[(label, ms), ...]``.
+
+        A few untimed warmup steps run first so cold JIT / cache effects
+        don't dominate the measurement. Prints the breakdown and returns
+        it for programmatic use. Expects ``set_target_texture`` or
+        ``set_target_image`` to have been called already.
+
+        This method self-records timestamps on every dispatch; uses the
+        per-kernel ``query_pool``/``query_index_before``/``query_index_after``
+        knobs SlangPy exposes. The recorded values are wall times for
+        that single GPU dispatch's execution, in milliseconds.
+        """
+        import time as _time
+
+        if lrs is None:
+            lrs = AdamLRs()
+
+        for _ in range(warmup_steps):
+            self._clear_grads()
+            self._run_forward(camera)
+            self._run_loss()
+            self._run_backward()
+            self._run_adam(lrs)
         self.device.wait_for_idle()
+
+        # Allocate a fresh pool sized to the step's dispatch count.
+        # Upper bound: ~30 for a non-densify step. 128 is plenty.
+        pool = self.device.create_query_pool(spy.QueryType.timestamp, 128)
+        b = self.buffers
+        gb = b.grad_buffers
+        num_tiles = b.num_tiles
+        sorted_lo_after, sorted_hi_after, sorted_v_after = (
+            b.sort_keys_lo_a, b.sort_keys_hi_a, b.sort_values_a,
+        )
+
+        # Each entry: (label, callable). We allocate query indices
+        # incrementally, two per dispatch.
+        events: list[tuple[str, "callable"]] = []
+        idx = [0]
+
+        def _time_kernel(label: str, kernel: spy.ComputeKernel,
+                         thread_count: list[int], **kwargs) -> None:
+            i0 = idx[0]; i1 = i0 + 1; idx[0] += 2
+            kernel.dispatch(thread_count=thread_count,
+                            query_pool=pool,
+                            query_index_before=i0,
+                            query_index_after=i1,
+                            **kwargs)
+            events.append((label, i0))
+
+        # --- Upload camera (CPU side, not timed in GPU queries but
+        # captured by bracket-wall-time for reference). ---
+        t0_wall = _time.perf_counter()
+
+        # Clear grads (14 dispatches; time only the first as
+        # representative — the 14 are identical work so summing would
+        # just be 14× a single dispatch's cost).
+        _time_kernel("clear_grads (1 of 14)", self.k_grad_clear,
+                     [self.max_splats, 1, 1],
+                     grad_buffer=gb[GRAD_SCALAR_COMPONENTS[0]].storage,
+                     max_splats=self.max_splats)
+        for name in GRAD_SCALAR_COMPONENTS[1:]:
+            self.k_grad_clear.dispatch(
+                thread_count=[self.max_splats, 1, 1],
+                grad_buffer=gb[name].storage, max_splats=self.max_splats,
+            )
+
+        # Forward.
+        self._upload_camera(camera)
+        _time_kernel("fwd: clear_textures", self.k_clear_textures,
+                     [self.width, self.height, 1],
+                     output_image=b.output_image,
+                     output_transmittance=b.output_transmittance,
+                     gaussian_count_per_pixel=b.gaussian_count_per_pixel,
+                     frame_dim=spy.uint2(self.width, self.height))
+        _time_kernel("fwd: clear_tile_ranges", self.k_clear_tile_ranges,
+                     [num_tiles, 1, 1],
+                     tile_start=b.tile_start.storage,
+                     tile_end=b.tile_end.storage,
+                     num_tiles=num_tiles)
+        _time_kernel("fwd: bin_count", self.k_bin_count,
+                     [self.max_splats, 1, 1],
+                     gaussians=b.gaussians.storage,
+                     num_gaussians_counter=b.num_gaussians_counter.storage,
+                     camera=self._camera_buffer.storage,
+                     projected_2d=b.projected_2d.storage,
+                     tile_count_per_gaussian=b.tile_count_per_gaussian.storage,
+                     z_near=self.z_near_cull,
+                     max_splats=self.max_splats)
+
+        # Scan is three dispatches; time them individually.
+        in_buf, out_buf = b.tile_count_per_gaussian, b.tile_offset_per_gaussian
+        num_blocks = max(1, (self.max_splats + SCAN_BLOCK_SIZE - 1) // SCAN_BLOCK_SIZE)
+        _time_kernel("fwd: scan_block", self.k_scan_block,
+                     [num_blocks * SCAN_BLOCK_SIZE, 1, 1],
+                     in_buf=in_buf.storage, out_buf=out_buf.storage,
+                     block_sums=b.scan_block_sums.storage, n=self.max_splats)
+        _time_kernel("fwd: scan_block_sums", self.k_scan_block_sums,
+                     [SCAN_BLOCK_SIZE, 1, 1],
+                     block_sums=b.scan_block_sums.storage,
+                     total_out=b.scan_total.storage, num_blocks=num_blocks)
+        _time_kernel("fwd: scan_add_offsets", self.k_add_block_offsets,
+                     [num_blocks * SCAN_BLOCK_SIZE, 1, 1],
+                     out_buf=out_buf.storage,
+                     block_sums=b.scan_block_sums.storage, n=self.max_splats)
+
+        _time_kernel("fwd: bin_emit", self.k_bin_emit,
+                     [self.max_splats, 1, 1],
+                     gaussians=b.gaussians.storage,
+                     num_gaussians_counter=b.num_gaussians_counter.storage,
+                     camera=self._camera_buffer.storage,
+                     projected_2d=b.projected_2d.storage,
+                     tile_offset_per_gaussian=b.tile_offset_per_gaussian.storage,
+                     keys_lo=b.sort_keys_lo_a.storage,
+                     keys_hi=b.sort_keys_hi_a.storage,
+                     values=b.sort_values_a.storage,
+                     z_near=self.z_near_cull)
+
+        # Radix sort: 8 passes × 4 dispatches per pass.
+        src_lo, src_hi, src_v = b.sort_keys_lo_a, b.sort_keys_hi_a, b.sort_values_a
+        dst_lo, dst_hi, dst_v = b.sort_keys_lo_b, b.sort_keys_hi_b, b.sort_values_b
+        num_sort_blocks = (self.max_sort_pairs + 255) // 256
+        radix_events_per_pass: list[tuple[int, int, int, int]] = []
+        for pass_idx in range(8):
+            i_bs  = idx[0]; idx[0] += 2
+            i_gs  = idx[0]; idx[0] += 2
+            i_sdt = idx[0]; idx[0] += 2
+            i_sf  = idx[0]; idx[0] += 2
+            radix_events_per_pass.append((i_bs, i_gs, i_sdt, i_sf))
+            self.k_radix_block_sort.dispatch(
+                thread_count=[num_sort_blocks * 256, 1, 1],
+                keys_lo=src_lo.storage, keys_hi=src_hi.storage,
+                values=src_v.storage,
+                block_hist=b.radix_block_hist.storage,
+                block_start=b.radix_block_start.storage,
+                n_buf=b.scan_total.storage, pass_idx=pass_idx,
+                query_pool=pool, query_index_before=i_bs, query_index_after=i_bs + 1,
+            )
+            self.k_radix_global_scan.dispatch(
+                thread_count=[256, 1, 1],
+                block_hist=b.radix_block_hist.storage,
+                block_prefix=b.radix_block_prefix.storage,
+                digit_total=b.radix_digit_total.storage,
+                n_buf=b.scan_total.storage,
+                query_pool=pool, query_index_before=i_gs, query_index_after=i_gs + 1,
+            )
+            self.k_radix_scan_digit_totals.dispatch(
+                thread_count=[256, 1, 1],
+                digit_total=b.radix_digit_total.storage,
+                digit_global_base=b.radix_digit_global_base.storage,
+                query_pool=pool, query_index_before=i_sdt, query_index_after=i_sdt + 1,
+            )
+            self.k_radix_scatter_final.dispatch(
+                thread_count=[self.max_sort_pairs, 1, 1],
+                keys_lo_in=src_lo.storage, keys_hi_in=src_hi.storage, values_in=src_v.storage,
+                block_start=b.radix_block_start.storage,
+                block_prefix=b.radix_block_prefix.storage,
+                digit_global_base=b.radix_digit_global_base.storage,
+                keys_lo_out=dst_lo.storage, keys_hi_out=dst_hi.storage, values_out=dst_v.storage,
+                n_buf=b.scan_total.storage, pass_idx=pass_idx,
+                query_pool=pool, query_index_before=i_sf, query_index_after=i_sf + 1,
+            )
+            src_lo, dst_lo = dst_lo, src_lo
+            src_hi, dst_hi = dst_hi, src_hi
+            src_v, dst_v = dst_v, src_v
+        sorted_v = src_v
+
+        _time_kernel("fwd: identify_tile_ranges", self.k_identify_tile_ranges,
+                     [self.max_sort_pairs, 1, 1],
+                     keys_hi=src_hi.storage,
+                     tile_start=b.tile_start.storage,
+                     tile_end=b.tile_end.storage,
+                     n_buf=b.scan_total.storage,
+                     num_tiles=num_tiles)
+
+        _time_kernel("fwd: forward_rasterize", self.k_forward,
+                     [b.num_tiles_x * 16, b.num_tiles_y * 16, 1],
+                     gaussians=b.gaussians.storage,
+                     projected_2d=b.projected_2d.storage,
+                     tile_start=b.tile_start.storage,
+                     tile_end=b.tile_end.storage,
+                     sorted_gaussian_ids=sorted_v.storage,
+                     camera=self._camera_buffer.storage,
+                     output_image=b.output_image,
+                     output_transmittance=b.output_transmittance,
+                     gaussian_count_per_pixel=b.gaussian_count_per_pixel)
+
+        # Loss.
+        target = getattr(self, "_active_target", None) or b.target_image
+        _time_kernel("loss", self.k_loss,
+                     [self.width, self.height, 1],
+                     output_image=b.output_image,
+                     target_image=target,
+                     dL_dC=b.dL_dC_texture,
+                     frame_dim=spy.uint2(self.width, self.height))
+
+        # Backward.
+        _time_kernel("bwd: backwardRasterize", self.k_backward,
+                     [b.num_tiles_x * 16, b.num_tiles_y * 16, 1],
+                     gaussians=b.gaussians.storage,
+                     projected_2d=b.projected_2d.storage,
+                     tile_start=b.tile_start.storage,
+                     tile_end=b.tile_end.storage,
+                     sorted_gaussian_ids=sorted_v.storage,
+                     camera=self._camera_buffer.storage,
+                     output_image=b.output_image,
+                     output_transmittance=b.output_transmittance,
+                     gaussian_count_per_pixel=b.gaussian_count_per_pixel,
+                     dL_dC_texture=b.dL_dC_texture,
+                     grad_mean_x=gb["mean_x"].storage,
+                     grad_mean_y=gb["mean_y"].storage,
+                     grad_mean_z=gb["mean_z"].storage,
+                     grad_log_scale_x=gb["log_scale_x"].storage,
+                     grad_log_scale_y=gb["log_scale_y"].storage,
+                     grad_log_scale_z=gb["log_scale_z"].storage,
+                     grad_rot_w=gb["rot_w"].storage,
+                     grad_rot_x=gb["rot_x"].storage,
+                     grad_rot_y=gb["rot_y"].storage,
+                     grad_rot_z=gb["rot_z"].storage,
+                     grad_opacity=gb["opacity"].storage,
+                     grad_color_r=gb["color_r"].storage,
+                     grad_color_g=gb["color_g"].storage,
+                     grad_color_b=gb["color_b"].storage,
+                     grad_2d_x_iter=b.grad_2d_x_iter.storage,
+                     grad_2d_y_iter=b.grad_2d_y_iter.storage)
+
+        _time_kernel("bwd: accumulate_iter", self.k_accumulate_iter,
+                     [self.max_splats, 1, 1],
+                     grad_2d_x_iter=b.grad_2d_x_iter.storage,
+                     grad_2d_y_iter=b.grad_2d_y_iter.storage,
+                     grad_mean_2d_mag_accum=b.grad_mean_2d_mag_accum.storage,
+                     visibility_count_accum=b.visibility_count_accum.storage,
+                     max_splats=self.max_splats)
+
+        # Adam.
+        self.iteration += 1
+        step = float(self.iteration)
+        bc1 = 1.0 - 0.9 ** step
+        bc2 = 1.0 - 0.999 ** step
+        _time_kernel("adam", self.k_adam,
+                     [self.max_splats, 1, 1],
+                     gaussians=b.gaussians.storage,
+                     adam_state=b.adam_state.storage,
+                     num_gaussians_counter=b.num_gaussians_counter.storage,
+                     grad_mean_x=gb["mean_x"].storage,
+                     grad_mean_y=gb["mean_y"].storage,
+                     grad_mean_z=gb["mean_z"].storage,
+                     grad_log_scale_x=gb["log_scale_x"].storage,
+                     grad_log_scale_y=gb["log_scale_y"].storage,
+                     grad_log_scale_z=gb["log_scale_z"].storage,
+                     grad_rot_w=gb["rot_w"].storage,
+                     grad_rot_x=gb["rot_x"].storage,
+                     grad_rot_y=gb["rot_y"].storage,
+                     grad_rot_z=gb["rot_z"].storage,
+                     grad_opacity=gb["opacity"].storage,
+                     grad_color_r=gb["color_r"].storage,
+                     grad_color_g=gb["color_g"].storage,
+                     grad_color_b=gb["color_b"].storage,
+                     cfg={"lr_mean": lrs.mean, "lr_scale": lrs.scale,
+                          "lr_rot": lrs.rot, "lr_opacity": lrs.opacity,
+                          "lr_color": lrs.color,
+                          "bias_correction1": bc1, "bias_correction2": bc2},
+                     pixels_per_step=float(self.width * self.height))
+
+        self.device.wait_for_idle()
+        wall_ms = (_time.perf_counter() - t0_wall) * 1000.0
+
+        ts = pool.get_timestamp_results(0, idx[0])
+        # Results are in seconds per SlangPy docs; convert to ms.
+        results: list[tuple[str, float]] = []
+        for label, i0_q in events:
+            dt_ms = (ts[i0_q + 1] - ts[i0_q]) * 1000.0
+            results.append((label, dt_ms))
+
+        # Radix sort: 4 kernels × 8 passes → 5 summary rows.
+        radix_bs  = sum((ts[p[0] + 1] - ts[p[0]]) * 1000.0 for p in radix_events_per_pass)
+        radix_gs  = sum((ts[p[1] + 1] - ts[p[1]]) * 1000.0 for p in radix_events_per_pass)
+        radix_sdt = sum((ts[p[2] + 1] - ts[p[2]]) * 1000.0 for p in radix_events_per_pass)
+        radix_sf  = sum((ts[p[3] + 1] - ts[p[3]]) * 1000.0 for p in radix_events_per_pass)
+        radix_total = radix_bs + radix_gs + radix_sdt + radix_sf
+        insert_at = next(i for i, (lbl, _) in enumerate(results) if lbl == "fwd: bin_emit") + 1
+        radix_rows = [
+            ("fwd: radix blockSort        (×8)", radix_bs),
+            ("fwd: radix globalScan       (×8)", radix_gs),
+            ("fwd: radix scanDigitTotals  (×8)", radix_sdt),
+            ("fwd: radix scatterFinal     (×8)", radix_sf),
+            ("fwd: radix sort TOTAL       (×8)", radix_total),
+        ]
+        results = results[:insert_at] + radix_rows + results[insert_at:]
+
+        # For the percent calculation we sum everything EXCEPT the
+        # radix TOTAL (that row is derived; counting it double-counts).
+        def _countable(label: str) -> bool:
+            return "radix sort TOTAL" not in label
+        total_gpu = sum(ms for lbl, ms in results if _countable(lbl))
+
+        print(f"\n--- profile_one_step (n_g={int(b.num_gaussians_counter.to_numpy().view(np.uint32)[0])}, "
+              f"max_sort_pairs={self.max_sort_pairs}) ---")
+        print(f"{'phase':<34s}{'ms':>10s}{'% of GPU':>12s}")
+        print("-" * 56)
+        for label, ms in results:
+            if _countable(label):
+                pct = (ms / total_gpu * 100.0) if total_gpu > 0 else 0.0
+                print(f"{label:<34s}{ms:>10.3f}{pct:>11.1f}%")
+            else:
+                print(f"{label:<34s}{ms:>10.3f}{'':>12s}")
+        print("-" * 56)
+        print(f"{'total GPU (sum of phases)':<34s}{total_gpu:>10.3f}")
+        print(f"{'wall-clock (submit + idle)':<34s}{wall_ms:>10.3f}")
+        return results
 
     # ------------------------------------------------------------------
     # Gradient readback (for the finite-difference test)
@@ -448,17 +940,27 @@ def _srgb_to_linear_np(c: np.ndarray) -> np.ndarray:
 # direct method definitions; kept here for proximity to the scan + buffer
 # structures they orchestrate) --------
 
-def _scan(self: Pipeline, n: int) -> None:
-    """Run the three-kernel Blelloch scan on ``valid_mask_buffer`` into
-    ``scan_buffer``. ``scan_total[0]`` ends up holding the total sum
-    (i.e. the new live count after compaction)."""
+def _scan(self: Pipeline, n: int,
+          in_buf: spy.NDBuffer | None = None,
+          out_buf: spy.NDBuffer | None = None) -> None:
+    """Run the three-kernel Blelloch scan on ``in_buf`` into ``out_buf``,
+    writing the total into ``scan_total[0]``.
+
+    Defaults preserve the v2 densification path's behavior (scan the
+    valid-mask buffer into the scan output buffer).
+    """
     b = self.buffers
+    if in_buf is None:
+        in_buf = b.valid_mask_buffer
+    if out_buf is None:
+        out_buf = b.scan_buffer
+
     num_blocks = max(1, (n + SCAN_BLOCK_SIZE - 1) // SCAN_BLOCK_SIZE)
 
     self.k_scan_block.dispatch(
         thread_count=[num_blocks * SCAN_BLOCK_SIZE, 1, 1],
-        in_buf=b.valid_mask_buffer.storage,
-        out_buf=b.scan_buffer.storage,
+        in_buf=in_buf.storage,
+        out_buf=out_buf.storage,
         block_sums=b.scan_block_sums.storage,
         n=n,
     )
@@ -470,7 +972,7 @@ def _scan(self: Pipeline, n: int) -> None:
     )
     self.k_add_block_offsets.dispatch(
         thread_count=[num_blocks * SCAN_BLOCK_SIZE, 1, 1],
-        out_buf=b.scan_buffer.storage,
+        out_buf=out_buf.storage,
         block_sums=b.scan_block_sums.storage,
         n=n,
     )
@@ -479,7 +981,7 @@ def _scan(self: Pipeline, n: int) -> None:
 Pipeline._scan = _scan  # type: ignore[attr-defined]
 
 
-def densify(self: Pipeline, cfg: DensifyConfig, window_iters: int) -> dict:
+def densify(self: Pipeline, cfg: DensifyConfig, window_iters: int = 0) -> dict:
     """Run one densification pass.
 
     Phases:
@@ -497,7 +999,12 @@ def densify(self: Pipeline, cfg: DensifyConfig, window_iters: int) -> dict:
     """
     b = self.buffers
 
-    # --- Phase A: decide actions ---
+    # Densify runs every N (e.g. 100) iters, so CPU readbacks here are
+    # one-off — acceptable. But we only sync where a readback actually
+    # follows, not between each dispatch.
+    #
+    # Phase A: decide actions.
+    self.device.wait_for_idle()
     pre_count = int(b.num_gaussians_counter.to_numpy().view(np.uint32)[0])
     if pre_count == 0:
         return {"pre_count": 0, "post_split_count": 0, "final_count": 0,
@@ -508,18 +1015,15 @@ def densify(self: Pipeline, cfg: DensifyConfig, window_iters: int) -> dict:
         gaussians=b.gaussians.storage,
         num_gaussians_counter=b.num_gaussians_counter.storage,
         grad_mean_2d_mag_accum=b.grad_mean_2d_mag_accum.storage,
-        pixel_coverage_accum=b.pixel_coverage_accum.storage,
+        visibility_count_accum=b.visibility_count_accum.storage,
         action=b.action_buffer.storage,
-        window_iters=float(window_iters),
-        grad_scale=1.0 / float(max(self.width, self.height)),
         t_grad=cfg.t_grad,
         t_split_scale=cfg.t_split_scale,
         t_opacity=cfg.t_opacity,
         t_big_scale=cfg.t_big_scale,
     )
-    self.device.wait_for_idle()
 
-    # --- Phase B: split and clone (may increment counter) ---
+    # Phase B: split and clone (may increment counter).
     self.k_split_and_clone.dispatch(
         thread_count=[pre_count, 1, 1],
         gaussians=b.gaussians.storage,
@@ -529,15 +1033,14 @@ def densify(self: Pipeline, cfg: DensifyConfig, window_iters: int) -> dict:
         pre_count=pre_count,
         max_splats=self.max_splats,
     )
+    # Need post_split_count to drive the next few dispatches' thread_count.
     self.device.wait_for_idle()
     post_split_count = int(b.num_gaussians_counter.to_numpy().view(np.uint32)[0])
-    # Clamp: if Phase B was racing against max_splats some children may have
-    # been dropped (atomic counter went past max; the writes past max were
-    # guarded by the shader, but the counter itself still advanced). Clamp
-    # so the mask pass doesn't walk past the real tail.
+    # Clamp: if Phase B raced against max_splats some children may have
+    # been dropped (writes guarded in shader; counter still advanced).
     post_split_count = min(post_split_count, self.max_splats)
 
-    # --- Phase C: build prune mask over [0, post_split_count) ---
+    # Phases C/D/E submitted back-to-back; readback happens after E.
     self.k_build_prune_mask.dispatch(
         thread_count=[post_split_count, 1, 1],
         action=b.action_buffer.storage,
@@ -545,13 +1048,7 @@ def densify(self: Pipeline, cfg: DensifyConfig, window_iters: int) -> dict:
         pre_count=pre_count,
         post_count=post_split_count,
     )
-    self.device.wait_for_idle()
-
-    # --- Phase D: scan ---
     self._scan(post_split_count)
-    self.device.wait_for_idle()
-
-    # --- Phase E: scatter compact into scratch buffers ---
     self.k_scatter_compact.dispatch(
         thread_count=[post_split_count, 1, 1],
         gaussians_in=b.gaussians.storage,
@@ -562,18 +1059,18 @@ def densify(self: Pipeline, cfg: DensifyConfig, window_iters: int) -> dict:
         adam_state_out=b.adam_state_scratch.storage,
         post_count=post_split_count,
     )
-    self.device.wait_for_idle()
 
-    # --- Swap primary <-> scratch references ---
+    # Swap primary <-> scratch references.
     b.gaussians, b.gaussians_scratch = b.gaussians_scratch, b.gaussians
     b.adam_state, b.adam_state_scratch = b.adam_state_scratch, b.adam_state
 
     # Update counter to scan_total (= sum of valid_mask = final live count).
+    self.device.wait_for_idle()
     final_count = int(b.scan_total.to_numpy().view(np.uint32)[0])
     b.num_gaussians_counter.copy_from_numpy(np.array([final_count], dtype=np.uint32))
 
-    # Stats for logging. Reading action_buffer back is ~pre_count bytes,
-    # cheap on pre_count <= ~100k.
+    # Stats for logging. action_buffer is already stable on GPU; the
+    # wait above covers the readback.
     actions_raw = b.action_buffer.to_numpy()
     actions = np.frombuffer(actions_raw.tobytes(), dtype=np.uint32)[:pre_count]
     n_keep  = int((actions == 0).sum())
@@ -605,7 +1102,6 @@ def reset_opacity(self: Pipeline, cfg: DensifyConfig) -> None:
         num_gaussians_counter=b.num_gaussians_counter.storage,
         reset_value=cfg.opacity_reset_value,
     )
-    self.device.wait_for_idle()
 
 
 Pipeline.reset_opacity = reset_opacity  # type: ignore[attr-defined]

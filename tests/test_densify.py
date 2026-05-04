@@ -69,30 +69,25 @@ def test_densify_action_counts(backend: str) -> None:
     )
 
     # Inject tracking signals directly: high mag for 0 and 1, low for others.
-    # FIXED_SCALE = 65536 — match types.slang.
+    # Normalization: mag_avg = mag_total / visibility_count. Aim for
+    # mag_avg = 10 * t_grad with visibility_count = 50 iters.
     mag = np.zeros(pipeline.max_splats, dtype=np.int32)
-    cov = np.zeros(pipeline.max_splats, dtype=np.uint32)
-    # 10 per-iter threshold units each -> mag_total / window = 10 * t_grad.
+    vis = np.zeros(pipeline.max_splats, dtype=np.uint32)
     cfg = DensifyConfig(
         t_grad=2e-4, t_split_scale=0.01, t_opacity=0.005, t_big_scale=0.5,
     )
-    window = 100
-    # The shader normalizes accumulated mag by (1/max(W,H)) and divides by
-    # window_iters. So to land at 10x t_grad per-iter, we need:
-    #   mag_fixed * FIXED_INV / max(W,H) / window = 10 * t_grad
-    #   mag_fixed = 10 * t_grad * window * max(W,H) * FIXED_SCALE
-    max_dim = max(pipeline.width, pipeline.height)
-    high_mag_fixed = int(cfg.t_grad * 10.0 * window * max_dim * 65536.0)  # = 13107
+    vis_count = 50
+    high_mag_fixed = int(cfg.t_grad * 10.0 * vis_count * 65536.0)
     mag[0] = high_mag_fixed
     mag[1] = high_mag_fixed
-    cov[0] = 50
-    cov[1] = 50
+    vis[0] = vis_count
+    vis[1] = vis_count
     pipeline.buffers.grad_mean_2d_mag_accum.copy_from_numpy(mag)
-    pipeline.buffers.pixel_coverage_accum.copy_from_numpy(cov)
+    pipeline.buffers.visibility_count_accum.copy_from_numpy(vis)
 
     parent_logscale_1 = log_scales[1, 0]  # 0.05
 
-    stats = pipeline.densify(cfg, window_iters=window)
+    stats = pipeline.densify(cfg)
 
     assert stats["n_keep"]  == 1, f"expected 1 KEEP, got {stats}"
     assert stats["n_split"] == 1, f"expected 1 SPLIT, got {stats}"
@@ -135,27 +130,23 @@ def test_densify_clone_preserves_parent(backend: str) -> None:
 
     # Pump high 2d grad to trigger CLONE (small scale → clone, not split).
     cfg = DensifyConfig()
-    window = 100
-    # The shader normalizes accumulated mag by (1/max(W,H)) and divides by
-    # window_iters. So to land at 10x t_grad per-iter, we need:
-    #   mag_fixed * FIXED_INV / max(W,H) / window = 10 * t_grad
-    #   mag_fixed = 10 * t_grad * window * max(W,H) * FIXED_SCALE
-    max_dim = max(pipeline.width, pipeline.height)
-    high_mag_fixed = int(cfg.t_grad * 10.0 * window * max_dim * 65536.0)
+    vis_count = 50
+    high_mag_fixed = int(cfg.t_grad * 10.0 * vis_count * 65536.0)
     mag = np.zeros(pipeline.max_splats, dtype=np.int32)
-    cov = np.zeros(pipeline.max_splats, dtype=np.uint32)
+    vis = np.zeros(pipeline.max_splats, dtype=np.uint32)
     mag[0] = high_mag_fixed
-    cov[0] = 50
+    vis[0] = vis_count
     pipeline.buffers.grad_mean_2d_mag_accum.copy_from_numpy(mag)
-    pipeline.buffers.pixel_coverage_accum.copy_from_numpy(cov)
+    pipeline.buffers.visibility_count_accum.copy_from_numpy(vis)
 
-    stats = pipeline.densify(cfg, window_iters=window)
+    stats = pipeline.densify(cfg)
     assert stats["n_clone"] == 1
     assert stats["final_count"] == 2
 
     post = _read_gaussians(pipeline)
-    # Both survivors should be identical to the parent (clone is verbatim
-    # in v2.1; v2.2 adds gradient-direction jitter).
+    # gsplat-style CLONE: clone is an exact duplicate (no position jitter,
+    # zero Adam). Both surviving gaussians must equal the parent's
+    # pre-densify state, full 14 fields.
     np.testing.assert_allclose(post[0], pre[0], atol=1e-6)
     np.testing.assert_allclose(post[1], pre[0], atol=1e-6)
 
@@ -182,7 +173,7 @@ def test_densify_noop_when_no_signal(backend: str) -> None:
     pipeline.clear_tracking()
 
     cfg = DensifyConfig()
-    stats = pipeline.densify(cfg, window_iters=100)
+    stats = pipeline.densify(cfg)
 
     assert stats["n_keep"] == 3
     assert stats["n_split"] == 0
@@ -197,14 +188,24 @@ def test_densify_noop_when_no_signal(backend: str) -> None:
 @pytest.mark.parametrize("backend", BACKENDS)
 def test_opacity_reset(backend: str) -> None:
     pipeline = _setup(backend)
+    # Mix of opacities: two above reset (0.9, 0.5), one below (0.01).
+    in_probs = np.array([0.9, 0.5, 0.01], dtype=np.float32)
     pipeline.set_gaussians_from_numpy(
         means=np.zeros((3, 3), dtype=np.float32),
         log_scales=np.log(np.full((3, 3), 0.01, dtype=np.float32)),
         rot_quats=np.tile(np.array([1, 0, 0, 0], dtype=np.float32), (3, 1)),
-        opacities=np.array([0.9, 0.5, 0.1], dtype=np.float32),
+        opacities=in_probs,
         color_logits=np.zeros((3, 3), dtype=np.float32),
     )
     cfg = DensifyConfig(opacity_reset_value=0.05)
     pipeline.reset_opacity(cfg)
     post = _read_gaussians(pipeline)
-    np.testing.assert_allclose(post[:, 10], np.full(3, 0.05, dtype=np.float32), atol=1e-6)
+    # gsplat semantics: opacity = min(opacity, logit(0.05)). Gaussians at
+    # 0.9 and 0.5 get clamped DOWN to logit(0.05); the one at 0.01 is
+    # already below the cap and stays at logit(0.01).
+    def logit(p):
+        p_c = np.clip(p, 1e-5, 1.0 - 1e-5)
+        return np.log(p_c / (1.0 - p_c))
+    logit_cap = logit(0.05)
+    expected = np.minimum(logit(in_probs), logit_cap).astype(np.float32)
+    np.testing.assert_allclose(post[:, 10], expected, atol=1e-5)

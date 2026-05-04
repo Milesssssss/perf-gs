@@ -9,7 +9,10 @@ struct Gaussian3D
     float3 mean;            // world-space position
     float3 log_scale;       // exp(log_scale) = per-axis scale of the 3D gaussian
     float4 rot_quat;        // rotation quaternion (w, x, y, z)
-    float opacity;          // [0, 1]
+    float opacity;          // pre-sigmoid opacity logit; sigmoid(opacity) is the
+                            // real probability in [0, 1]. Parameterized as a logit
+                            // so Adam's opacity LR operates on an unbounded scalar
+                            // (matches gsplat; see shaders/primitives/gaussian/eval.slang).
     float3 color_logit;     // sigmoid(color_logit) = linear RGB in [0, 1]
 };
 

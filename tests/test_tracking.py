@@ -1,7 +1,7 @@
 """v2 tracking-accumulator tests.
 
-Verify that the backward pass populates the per-gaussian |grad_mean_2d|
-magnitude and pixel-coverage accumulators in a sensible way:
+Verify that the backward pass + accumulate_iter populate the per-gaussian
+|grad_mean_2d| magnitude and visibility-count accumulators in a sensible way:
 - gaussians that contributed to visible pixels get non-zero tracking
 - gaussians entirely outside the frustum get zero
 - clear_tracking() zeros both buffers
@@ -61,8 +61,13 @@ def test_tracking_populates_and_clears(backend: str) -> None:
         ], dtype=np.float32),
     )
 
-    # A non-trivial target so the loss gradient is non-zero.
-    target = np.ones((H, W, 3), dtype=np.float32) * np.array([0.0, 1.0, 0.0])
+    # Asymmetric target (bright on the right half) so the in-plane
+    # gradient doesn't cancel by symmetry across the gaussian.
+    # Under gsplat-style norm-of-sum tracking, a perfectly symmetric
+    # residual around the gaussian center produces zero 2D grad sum
+    # and therefore zero visibility bump — that's "settled", not a bug.
+    target = np.zeros((H, W, 3), dtype=np.float32)
+    target[:, W // 2 :, 1] = 1.0
     pipeline.set_target_image(target)
 
     camera = simple_camera(
@@ -78,24 +83,24 @@ def test_tracking_populates_and_clears(backend: str) -> None:
     pipeline.backward()
 
     t = pipeline.read_tracking()
-    cov = t["pixel_coverage"]
+    vis = t["visibility_count"]
     mag = t["grad_mean_2d_mag"]
 
-    # The two in-frustum gaussians should have contributed.
-    assert cov[0] > 0, f"expected gaussian 0 to contribute pixels, got cov={cov[0]}"
-    assert cov[1] > 0, f"expected gaussian 1 to contribute pixels, got cov={cov[1]}"
+    # One iter, two in-frustum gaussians — visibility count == 1 each.
+    assert vis[0] == 1, f"expected gaussian 0 visibility_count==1, got {vis[0]}"
+    assert vis[1] == 1, f"expected gaussian 1 visibility_count==1, got {vis[1]}"
     # Their grad_mean_2d magnitudes should be non-zero (we wrote a gradient).
     assert mag[0] > 0.0, f"expected gaussian 0 to have grad_mean_2d_mag > 0, got {mag[0]}"
     assert mag[1] > 0.0, f"expected gaussian 1 to have grad_mean_2d_mag > 0, got {mag[1]}"
 
     # The behind-camera gaussian should have contributed nothing.
-    assert cov[2] == 0, f"expected behind-camera gaussian to have cov=0, got {cov[2]}"
+    assert vis[2] == 0, f"expected behind-camera gaussian to have vis==0, got {vis[2]}"
     assert mag[2] == 0.0, f"expected behind-camera gaussian to have mag=0, got {mag[2]}"
 
     # clear_tracking() should reset everything.
     pipeline.clear_tracking()
     t2 = pipeline.read_tracking()
-    assert np.all(t2["pixel_coverage"] == 0)
+    assert np.all(t2["visibility_count"] == 0)
     assert np.all(t2["grad_mean_2d_mag"] == 0.0)
 
 
@@ -113,7 +118,9 @@ def test_tracking_accumulates_across_iters(backend: str) -> None:
         opacities=np.array([0.8], dtype=np.float32),
         color_logits=np.array([[1.0, -1.0, -1.0]], dtype=np.float32),
     )
-    target = np.ones((H, W, 3), dtype=np.float32) * np.array([0.0, 1.0, 0.0])
+    # Asymmetric target — see rationale in test_tracking_populates_and_clears.
+    target = np.zeros((H, W, 3), dtype=np.float32)
+    target[:, W // 2 :, 1] = 1.0
     pipeline.set_target_image(target)
     camera = simple_camera(
         width=W, height=H,
@@ -126,14 +133,15 @@ def test_tracking_accumulates_across_iters(backend: str) -> None:
     pipeline.forward_and_loss(camera)
     pipeline.backward()
     t1 = pipeline.read_tracking()
-    cov1 = int(t1["pixel_coverage"][0])
+    vis1 = int(t1["visibility_count"][0])
 
     # Second pass WITHOUT clearing tracking.
     pipeline._clear_grads()
     pipeline.forward_and_loss(camera)
     pipeline.backward()
     t2 = pipeline.read_tracking()
-    cov2 = int(t2["pixel_coverage"][0])
+    vis2 = int(t2["visibility_count"][0])
 
-    # Coverage is deterministic (same scene, same camera): exactly 2x.
-    assert cov2 == 2 * cov1, f"expected coverage to double, got {cov1} -> {cov2}"
+    # One visible iter per call: vis1 == 1, vis2 == 2.
+    assert vis1 == 1, f"expected vis1==1, got {vis1}"
+    assert vis2 == 2, f"expected vis2==2 (accumulated), got {vis2}"

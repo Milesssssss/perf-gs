@@ -30,12 +30,22 @@
 #include "../../primitives/gaussian/eval.slang"
 
 static const uint TILE_SIZE = 16;
-static const uint MAX_GAUSSIANS_PER_TILE = 1024;
 
-// Must match forward.slang. Gaussians with alpha < ALPHA_MIN don't
-// contribute to the pixel, so they also don't contribute to the pixel's
-// gradient — skip their tile-list slot here the same way forward did.
-static const float ALPHA_MIN = 1.0 / 255.0;
+// Must match forward.slang. Semantic cap on alpha at 0.99. Gradient
+// does not flow through the saturating branch of min() — we multiply
+// the upstream alpha gradient by 1[alpha_raw <= ALPHA_MAX] before
+// propagating.
+static const float ALPHA_MAX = 0.99;
+
+// Semantic alpha floor: below this a gaussian's contribution to the
+// pixel is sub-8-bit-output, i.e. the pixel is essentially unaffected
+// by this gaussian. We still flow gradients (to keep the FD test happy)
+// but we skip updating the per-iter 2D-grad vector accumulators
+// because those are meant to answer "is this gaussian actively
+// contributing?" — which is not true for sub-display contributions.
+// Without this gate, the signal gets diluted by a bunch of ~zero
+// contributions and the densify threshold becomes too permissive.
+static const float ALPHA_MIN_TRACK = 1.0 / 255.0;
 
 [shader("compute")]
 [numthreads(TILE_SIZE, TILE_SIZE, 1)]
@@ -44,8 +54,9 @@ void backwardRasterize(
     uint3 gid: SV_GroupID,
     StructuredBuffer<Gaussian3D> gaussians,
     StructuredBuffer<Projected2DGaussian> projected_2d,
-    StructuredBuffer<uint> screen_tiles_count,
-    StructuredBuffer<uint> screen_tiles_indices,
+    StructuredBuffer<uint> tile_start,
+    StructuredBuffer<uint> tile_end,
+    StructuredBuffer<uint> sorted_gaussian_ids,
     StructuredBuffer<CameraData> camera,
     RWTexture2D<float4> output_image,
     RWTexture2D<float> output_transmittance,
@@ -65,11 +76,21 @@ void backwardRasterize(
     RWStructuredBuffer<int> grad_color_r,
     RWStructuredBuffer<int> grad_color_g,
     RWStructuredBuffer<int> grad_color_b,
-    // v2 densification tracking (accumulated over a densification window,
-    // cleared by Python between windows). Fixed-point for the magnitude;
-    // raw uint for the integer coverage count.
-    RWStructuredBuffer<int> grad_mean_2d_mag_accum,
-    RWStructuredBuffer<uint> pixel_coverage_accum)
+    // v2 densification tracking — per-iter vector accumulators.
+    // After the backward pass completes, a separate kernel
+    // (accumulate_iter) folds (grad_2d_x_iter[g], grad_2d_y_iter[g]) into
+    // the window-level buffers by taking the norm of the iter-sum and
+    // incrementing visibility count by 1.
+    //
+    // Accumulating the VECTOR (not per-pixel norms) matches gsplat's
+    // DefaultStrategy: `state["grad2d"].index_add_(0, gs_ids,
+    // grads.norm(dim=-1))` where `grads` is already the per-iter, per-
+    // gaussian gradient that autograd has summed over pixels. Summing
+    // norms instead of norm-of-sum would over-report for well-fit
+    // gaussians whose pixel-side gradients cancel tangentially (triangle
+    // inequality), which is exactly the "over-splits" failure mode.
+    RWStructuredBuffer<int> grad_2d_x_iter,
+    RWStructuredBuffer<int> grad_2d_y_iter)
 {
     uint2 pixel = dtid.xy;
     uint2 frame_dim_px = uint2(camera[0].image_size);
@@ -77,13 +98,13 @@ void backwardRasterize(
 
     uint2 num_tiles = (frame_dim_px + TILE_SIZE - 1) / TILE_SIZE;
     uint tile_idx = gid.y * num_tiles.x + gid.x;
-    uint base = tile_idx * MAX_GAUSSIANS_PER_TILE;
+    uint t_start = tile_start[tile_idx];
 
-    // ``stop_idx`` is the exclusive tile-list bound forward walked
-    // through. Slots within [0, stop_idx) may have been alpha-culled
-    // by forward; we apply the same check below and skip them.
-    uint stop_idx = gaussian_count_per_pixel[pixel];
-    if (stop_idx == 0) return;
+    // ``processed`` is the number of gaussians forward walked (after any
+    // early-break). The backward walks them in reverse using the same
+    // t_start offset into the globally-sorted array.
+    uint processed = gaussian_count_per_pixel[pixel];
+    if (processed == 0) return;
 
     float2 pixel_center = float2(pixel) + 0.5;
     float3 dL_dC = dL_dC_texture[pixel].rgb;
@@ -97,20 +118,23 @@ void backwardRasterize(
     float4x4 view_to_clip  = camera[0].proj_matrix;
     float2 frame_dim = camera[0].image_size;
 
-    for (int i = int(stop_idx) - 1; i >= 0; --i)
+    for (int i = int(processed) - 1; i >= 0; --i)
     {
-        uint g_idx = screen_tiles_indices[base + i];
+        uint g_idx = sorted_gaussian_ids[t_start + uint(i)];
         Gaussian3D g = gaussians[g_idx];
         Projected2DGaussian proj = projected_2d[g_idx];
 
-        float alpha = evalGaussian2DFromCov(pixel_center, proj.mean, proj.cov2d, g.opacity);
+        float alpha_raw = evalGaussian2DFromCov(pixel_center, proj.mean, proj.cov2d, g.opacity);
+        // Cap to match forward (semantic probability bound, see forward.slang).
+        float alpha = min(alpha_raw, ALPHA_MAX);
+        // Mask used to zero out the alpha-side gradient when min() saturates
+        // (gradient of min(x, c) w.r.t. x is 1 when x < c, else 0).
+        float alpha_grad_scale = (alpha_raw <= ALPHA_MAX) ? 1.0 : 0.0;
 
-        // Recover T_i from T_{i+1} by undoing the (1 - α_i) factor.
-        // denom is strictly positive given alpha in [0, 1); floor is a
-        // genuine numerical-zero guard (we assume alpha never hits 1
-        // exactly because opacity <= 1 and exp(power) < 1 almost always —
-        // if it does, this pixel wouldn't have contributed anyway).
-        float denom = max(1.0 - alpha, 1e-6);
+        // Recover T_i from T_{i+1} by undoing the (1 - α_i) factor. With
+        // the cap, (1 - alpha) >= 0.01 > 0, so the division is always
+        // well-conditioned.
+        float denom = 1.0 - alpha;
         float T_i = T_post / denom;
 
         var dp_color_logit = diffPair(g.color_logit);
@@ -124,6 +148,8 @@ void backwardRasterize(
         // dC/dα_i = c_i · T_i - C_behind / (1 - α_i)
         float3 dC_dalpha = c_i * T_i - C_behind / denom;
         float dL_dalpha = dot(dL_dC, dC_dalpha);
+        // Zero the gradient when the forward's alpha was clipped.
+        float dL_d_alpha_raw = dL_dalpha * alpha_grad_scale;
 
         // Chain α back through evalGaussian2DFromCov to get grads of
         // mean_2d, cov2d, opacity.
@@ -131,7 +157,7 @@ void backwardRasterize(
         var dp_cov2d   = diffPair(proj.cov2d);
         var dp_opacity = diffPair(g.opacity);
         bwd_diff(evalGaussian2DFromCov)(
-            pixel_center, dp_mean_2d, dp_cov2d, dp_opacity, dL_dalpha);
+            pixel_center, dp_mean_2d, dp_cov2d, dp_opacity, dL_d_alpha_raw);
 
         // Chain mean_2d and cov2d back through projectGaussian3DTo2D to
         // get grads of mean, log_scale, rot_quat. For ``bwd_diff`` of
@@ -169,14 +195,20 @@ void backwardRasterize(
         InterlockedAdd(grad_color_g[g_idx], toFixed(dp_color_logit.d.y));
         InterlockedAdd(grad_color_b[g_idx], toFixed(dp_color_logit.d.z));
 
-        // Densification tracking signals (v2). The paper's split/clone
-        // signal is the magnitude of the 2D-mean gradient accumulated
-        // across all (pixel, gaussian) touches over a window. Coverage
-        // counts how many pixels this gaussian actually touched; used
-        // by pruning heuristics.
-        uint dummy_cov;
-        InterlockedAdd(grad_mean_2d_mag_accum[g_idx], toFixed(length(dp_mean_2d.d)));
-        InterlockedAdd(pixel_coverage_accum[g_idx], 1u, dummy_cov);
+        // Densification tracking signals. Gated on alpha >= ALPHA_MIN_TRACK
+        // so sub-display contributions don't dilute the per-iter sum.
+        // Positive-guard form to avoid D3D12 DXIL codegen issue with
+        // `continue` inside this loop.
+        //
+        // We accumulate the VECTOR dp_mean_2d.d here, not its magnitude.
+        // The post-iter kernel folds these into the window-level
+        // mag_accum + visibility_count (match gsplat semantics — see
+        // the docstring on the RWStructuredBuffer declaration above).
+        if (alpha >= ALPHA_MIN_TRACK)
+        {
+            InterlockedAdd(grad_2d_x_iter[g_idx], toFixed(dp_mean_2d.d.x));
+            InterlockedAdd(grad_2d_y_iter[g_idx], toFixed(dp_mean_2d.d.y));
+        }
 
         // Walk T and C_behind back for the next iteration.
         C_behind += c_i * alpha * T_i;

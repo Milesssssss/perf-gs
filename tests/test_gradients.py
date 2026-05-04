@@ -161,7 +161,18 @@ def test_gradients_finite_difference(backend: str) -> None:
             # Build perturbed scenes.
             scene_plus = {k: v.copy() for k, v in scene.items()}
             scene_minus = {k: v.copy() for k, v in scene.items()}
-            if idx is None:
+
+            if grad_name == "opacity":
+                # The GPU stores a pre-sigmoid logit; ``set_gaussians_from_numpy``
+                # receives a probability and applies logit() internally. To
+                # perturb the logit by ±eps we must convert the probability,
+                # perturb in logit space, then sigmoid back before writing.
+                p = float(scene[field_name][gi])
+                p = min(max(p, 1e-5), 1.0 - 1e-5)
+                base_logit = np.log(p / (1.0 - p))
+                scene_plus[field_name][gi] = 1.0 / (1.0 + np.exp(-(base_logit + eps)))
+                scene_minus[field_name][gi] = 1.0 / (1.0 + np.exp(-(base_logit - eps)))
+            elif idx is None:
                 scene_plus[field_name][gi] += eps
                 scene_minus[field_name][gi] -= eps
             else:

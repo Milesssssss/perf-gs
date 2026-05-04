@@ -4,9 +4,13 @@
 // - SPLIT: overwrite slot i with child-1 (scale / 1.6, jittered position
 //   within parent covariance), zero its Adam state. Atomic-append child-2
 //   (same rule, different jitter) at the tail with zeroed Adam state.
-// - CLONE: atomic-append a clone with inherited parent Adam state;
-//   parent slot i untouched. (Paper-style position jitter along
-//   accumulated gradient direction is a v2.2 deferred item.)
+// - CLONE: atomic-append an EXACT copy of the parent at the tail with
+//   ZEROED Adam state; parent slot i untouched. No position jitter —
+//   matches gsplat's duplicate(): `torch.cat([p, p[sel]])` + fresh
+//   optimizer state. Parent and child diverge via per-iter gradient
+//   noise under a fresh Adam moment buffer. (Inheriting Adam would
+//   make the twins take identical first steps and defeat the
+//   purpose of duplicating.)
 // - KEEP / PRUNE: no-op here. PRUNE is handled by the scatter-compact
 //   pass using the mask from Phase C.
 //
@@ -78,13 +82,6 @@ Gaussian3D _child_for_split(Gaussian3D parent, uint seed)
     return child;
 }
 
-Gaussian3D _child_for_clone(Gaussian3D parent)
-{
-    // v2.1 ships identical-position clone. Gradient-direction nudge
-    // is a v2.2 TODO (task #54).
-    return parent;
-}
-
 AdamState _zero_adam()
 {
     AdamState s;
@@ -141,13 +138,13 @@ void splitAndClone(
     }
     else if (a == ACTION_CLONE)
     {
-        Gaussian3D cl = _child_for_clone(parent);
+        // Exact duplicate of parent with zeroed Adam (gsplat semantics).
         uint tail;
         InterlockedAdd(num_gaussians_counter[0], 1u, tail);
         if (tail < max_splats)
         {
-            gaussians[tail] = cl;
-            adam_state[tail] = parent_adam; // inherit
+            gaussians[tail] = parent;
+            adam_state[tail] = _zero_adam();
         }
     }
 }

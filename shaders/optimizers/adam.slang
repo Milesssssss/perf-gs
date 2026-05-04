@@ -149,10 +149,9 @@ void adamStep(
     g.rot_quat = adam_vec4(g.rot_quat, g_rot, s.rot_m, s.rot_v,
                            cfg.lr_rot, cfg.bias_correction1, cfg.bias_correction2);
 
+    // g.opacity is the pre-sigmoid logit. Unbounded — no clamp.
     g.opacity = adam_scalar(g.opacity, g_op, s.opacity_m, s.opacity_v,
                             cfg.lr_opacity, cfg.bias_correction1, cfg.bias_correction2);
-    // Opacity is a semantic [0, 1] bound (PLAN.md Q17 audit). Keep this.
-    g.opacity = clamp(g.opacity, 0.0, 1.0);
 
     g.color_logit = adam_vec3(g.color_logit, g_color, s.color_m, s.color_v,
                               cfg.lr_color, cfg.bias_correction1, cfg.bias_correction2);

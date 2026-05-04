@@ -1,22 +1,37 @@
 // Tile-binned forward rasterizer.
 //
 // One thread per pixel, one workgroup per tile. Walks the tile's
-// depth-sorted gaussian list front-to-back, accumulating color with
+// depth-sorted gaussian entries front-to-back, accumulating color with
 // front-to-back transmittance. Breaks early when transmittance drops
-// below a small threshold; writes the stop index to
-// gaussian_count_per_pixel so v1's backward pass can iterate exactly the
-// gaussians that contributed to this pixel (PLAN.md Q11).
+// below a small threshold; writes the stop index (relative to the tile's
+// local entry range) to gaussian_count_per_pixel so the backward can
+// iterate the same entries in reverse.
+//
+// Entries come from the globally-sorted (key, value) array produced by
+// the radix sort. tile_start[t] / tile_end[t] define [first, last)
+// indices of tile t's entries within sorted_gaussian_ids[]. No per-tile
+// cap — capacity is bounded only by the sorted-pair buffer allocation.
 
 #include "../../common/types.slang"
 #include "../../common/math.slang"
 #include "../../primitives/gaussian/eval.slang"
 
 static const uint TILE_SIZE = 16;
-static const uint MAX_GAUSSIANS_PER_TILE = 1024;
 
 // Break once transmittance drops below this. Not a magnitude guess — the
 // canonical 3DGS threshold from the reference implementation.
 static const float T_EARLY_BREAK = 1e-4;
+
+// Semantic cap on the per-gaussian alpha. Alpha represents the fraction
+// of light absorbed by a gaussian at a pixel; it is a probability in
+// [0, 1]. Our analytical alpha = opacity * exp(power) can exceed 1 when
+// the projected 2D covariance becomes numerically degenerate (negative
+// determinant after projection + low-pass filter), causing runaway
+// pixel saturation. Capping at 0.99 matches the reference 3DGS
+// implementation and keeps the backward's T_i recovery well-conditioned
+// (1 - 0.99 = 0.01 is a safe divisor). This is a semantic bound
+// (probability ≤ 1), not a magnitude guess.
+static const float ALPHA_MAX = 0.99;
 
 [shader("compute")]
 [numthreads(TILE_SIZE, TILE_SIZE, 1)]
@@ -25,8 +40,9 @@ void forwardRasterize(
     uint3 gid: SV_GroupID,
     StructuredBuffer<Gaussian3D> gaussians,
     StructuredBuffer<Projected2DGaussian> projected_2d,
-    StructuredBuffer<uint> screen_tiles_count,
-    StructuredBuffer<uint> screen_tiles_indices,
+    StructuredBuffer<uint> tile_start,
+    StructuredBuffer<uint> tile_end,
+    StructuredBuffer<uint> sorted_gaussian_ids,   // the value array after sort
     StructuredBuffer<CameraData> camera,
     RWTexture2D<float4> output_image,
     RWTexture2D<float> output_transmittance,
@@ -39,8 +55,9 @@ void forwardRasterize(
 
     uint2 num_tiles = (frame_dim_px + TILE_SIZE - 1) / TILE_SIZE;
     uint tile_idx = gid.y * num_tiles.x + gid.x;
-    uint base = tile_idx * MAX_GAUSSIANS_PER_TILE;
-    uint tile_count = min(screen_tiles_count[tile_idx], MAX_GAUSSIANS_PER_TILE);
+    uint t_start = tile_start[tile_idx];
+    uint t_end   = tile_end[tile_idx];
+    uint tile_count = (t_end > t_start) ? (t_end - t_start) : 0;
 
     float2 pixel_center = float2(pixel) + 0.5;
     float3 C = float3(0.0, 0.0, 0.0);
@@ -49,12 +66,13 @@ void forwardRasterize(
 
     for (uint i = 0; i < tile_count; ++i)
     {
-        uint gaussian_idx = screen_tiles_indices[base + i];
+        uint gaussian_idx = sorted_gaussian_ids[t_start + i];
 
         Projected2DGaussian proj = projected_2d[gaussian_idx];
         Gaussian3D g = gaussians[gaussian_idx];
 
-        float alpha = evalGaussian2DFromCov(pixel_center, proj.mean, proj.cov2d, g.opacity);
+        float alpha_raw = evalGaussian2DFromCov(pixel_center, proj.mean, proj.cov2d, g.opacity);
+        float alpha = min(alpha_raw, ALPHA_MAX);
         float3 color_rgb = sigmoid3(g.color_logit);
 
         C += color_rgb * alpha * T;
