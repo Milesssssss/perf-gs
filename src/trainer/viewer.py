@@ -92,9 +92,9 @@ class FlyCamera:
         if "d" in keys:
             self.eye += self.right * vel
         if "q" in keys:
-            self.eye[1] -= vel
-        if "e" in keys:
             self.eye[1] += vel
+        if "e" in keys:
+            self.eye[1] -= vel
 
     def rotate(self, dx: float, dy: float):
         self.yaw += -dx * self.sensitivity
@@ -113,7 +113,7 @@ class FlyCamera:
 
 class Viewer:
     def __init__(self, device: spy.Device, width: int = 960, height: int = 540,
-                 max_splats: int = 500_000, fovy: float = 60.0):
+                 max_splats: int = 500_000, fovy: float = 90.0):
         self.device = device
         self.width = width
         self.height = height

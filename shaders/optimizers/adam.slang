@@ -61,21 +61,21 @@ void adamStep(
     RWStructuredBuffer<Gaussian3D> gaussians,
     RWStructuredBuffer<AdamState> adam_state,
     StructuredBuffer<uint> num_gaussians_counter,
-    // Float gradient accumulators (accumulated via float atomics in backward).
-    RWStructuredBuffer<float> grad_mean_x,
-    RWStructuredBuffer<float> grad_mean_y,
-    RWStructuredBuffer<float> grad_mean_z,
-    RWStructuredBuffer<float> grad_log_scale_x,
-    RWStructuredBuffer<float> grad_log_scale_y,
-    RWStructuredBuffer<float> grad_log_scale_z,
-    RWStructuredBuffer<float> grad_rot_w,
-    RWStructuredBuffer<float> grad_rot_x,
-    RWStructuredBuffer<float> grad_rot_y,
-    RWStructuredBuffer<float> grad_rot_z,
-    RWStructuredBuffer<float> grad_opacity,
-    RWStructuredBuffer<float> grad_color_r,
-    RWStructuredBuffer<float> grad_color_g,
-    RWStructuredBuffer<float> grad_color_b,
+    // Gradient accumulators (int32 fixed-point).
+    RWStructuredBuffer<int> grad_mean_x,
+    RWStructuredBuffer<int> grad_mean_y,
+    RWStructuredBuffer<int> grad_mean_z,
+    RWStructuredBuffer<int> grad_log_scale_x,
+    RWStructuredBuffer<int> grad_log_scale_y,
+    RWStructuredBuffer<int> grad_log_scale_z,
+    RWStructuredBuffer<int> grad_rot_w,
+    RWStructuredBuffer<int> grad_rot_x,
+    RWStructuredBuffer<int> grad_rot_y,
+    RWStructuredBuffer<int> grad_rot_z,
+    RWStructuredBuffer<int> grad_opacity,
+    RWStructuredBuffer<int> grad_color_r,
+    RWStructuredBuffer<int> grad_color_g,
+    RWStructuredBuffer<int> grad_color_b,
     // Uniforms
     uniform AdamConfig cfg,
     uniform float pixels_per_step)
@@ -85,23 +85,24 @@ void adamStep(
 
     float inv_pixels = 1.0 / max(pixels_per_step, 1.0);
 
-    // Read float gradients and normalize by pixel count.
+    // Read fixed-point gradients and normalize by pixel count.
     float3 g_mean = float3(
-        grad_mean_x[idx], grad_mean_y[idx], grad_mean_z[idx]
+        fromFixed(grad_mean_x[idx]), fromFixed(grad_mean_y[idx]), fromFixed(grad_mean_z[idx])
     ) * inv_pixels;
 
     float3 g_log_scale = float3(
-        grad_log_scale_x[idx], grad_log_scale_y[idx], grad_log_scale_z[idx]
+        fromFixed(grad_log_scale_x[idx]), fromFixed(grad_log_scale_y[idx]), fromFixed(grad_log_scale_z[idx])
     ) * inv_pixels;
 
     float4 g_rot = float4(
-        grad_rot_w[idx], grad_rot_x[idx], grad_rot_y[idx], grad_rot_z[idx]
+        fromFixed(grad_rot_w[idx]), fromFixed(grad_rot_x[idx]),
+        fromFixed(grad_rot_y[idx]), fromFixed(grad_rot_z[idx])
     ) * inv_pixels;
 
-    float g_op = grad_opacity[idx] * inv_pixels;
+    float g_op = fromFixed(grad_opacity[idx]) * inv_pixels;
 
     float3 g_color = float3(
-        grad_color_r[idx], grad_color_g[idx], grad_color_b[idx]
+        fromFixed(grad_color_r[idx]), fromFixed(grad_color_g[idx]), fromFixed(grad_color_b[idx])
     ) * inv_pixels;
 
     // NaN/Inf guard.
@@ -134,9 +135,9 @@ void adamStep(
     adam_state[idx] = s;
 
     // Zero the gradient accumulators for the next iteration.
-    grad_mean_x[idx] = 0.0; grad_mean_y[idx] = 0.0; grad_mean_z[idx] = 0.0;
-    grad_log_scale_x[idx] = 0.0; grad_log_scale_y[idx] = 0.0; grad_log_scale_z[idx] = 0.0;
-    grad_rot_w[idx] = 0.0; grad_rot_x[idx] = 0.0; grad_rot_y[idx] = 0.0; grad_rot_z[idx] = 0.0;
-    grad_opacity[idx] = 0.0;
-    grad_color_r[idx] = 0.0; grad_color_g[idx] = 0.0; grad_color_b[idx] = 0.0;
+    grad_mean_x[idx] = 0; grad_mean_y[idx] = 0; grad_mean_z[idx] = 0;
+    grad_log_scale_x[idx] = 0; grad_log_scale_y[idx] = 0; grad_log_scale_z[idx] = 0;
+    grad_rot_w[idx] = 0; grad_rot_x[idx] = 0; grad_rot_y[idx] = 0; grad_rot_z[idx] = 0;
+    grad_opacity[idx] = 0;
+    grad_color_r[idx] = 0; grad_color_g[idx] = 0; grad_color_b[idx] = 0;
 }

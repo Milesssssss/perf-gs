@@ -207,7 +207,7 @@ def allocate(
     dL_dC_texture = _tex(spy.Format.rgba32_float, "dL_dC")
 
     grad_buffers: dict[str, spy.NDBuffer] = {
-        name: spy.NDBuffer(device=device, dtype="float", shape=(max_splats,))
+        name: spy.NDBuffer(device=device, dtype="int", shape=(max_splats,))
         for name in GRAD_SCALAR_COMPONENTS
     }
 
@@ -216,10 +216,10 @@ def allocate(
     saturation_flag = spy.NDBuffer(device=device, dtype="uint", shape=(1,))
     training_step = spy.NDBuffer(device=device, dtype="uint", shape=(1,))
 
-    grad_mean_2d_mag_accum = spy.NDBuffer(device=device, dtype="float", shape=(max_splats,))
+    grad_mean_2d_mag_accum = spy.NDBuffer(device=device, dtype="int", shape=(max_splats,))
     visibility_count_accum = spy.NDBuffer(device=device, dtype="uint", shape=(max_splats,))
-    grad_2d_x_iter = spy.NDBuffer(device=device, dtype="float", shape=(max_splats,))
-    grad_2d_y_iter = spy.NDBuffer(device=device, dtype="float", shape=(max_splats,))
+    grad_2d_x_iter = spy.NDBuffer(device=device, dtype="int", shape=(max_splats,))
+    grad_2d_y_iter = spy.NDBuffer(device=device, dtype="int", shape=(max_splats,))
 
     # FastGS importance scoring
     importance_score_accum = spy.NDBuffer(device=device, dtype="uint", shape=(max_splats,))

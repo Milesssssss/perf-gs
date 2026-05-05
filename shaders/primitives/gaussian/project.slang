@@ -51,16 +51,17 @@ void projectGaussian3DTo2D(
     float3x3 Sigma_view = mul(mul(W, Sigma3D), transpose(W));
 
     // --- Jacobian of perspective divide to screen pixels ---
-    // For a pinhole with clip-space matrix entries P[0][0]=fx_ndc and
-    // P[1][1]=fy_ndc (both typically positive, y possibly flipped), the
-    // pixel-space focal lengths are:
     float focal_x = view_to_clip[0][0] * frame_dim.x * 0.5;
     float focal_y = view_to_clip[1][1] * frame_dim.y * 0.5;
 
-    float x = mean_vs.x;
-    float y = mean_vs.y;
     float z = mean_vs.z;
     float z2 = z * z;
+    // Clamp x/z and y/z to prevent Jacobian degeneracy at screen edges.
+    // This is the standard 3DGS fix (lim = tan(FOV/2) * 1.3).
+    float lim_x = 1.3 * z / (view_to_clip[0][0]);
+    float lim_y = 1.3 * z / (view_to_clip[1][1]);
+    float x = clamp(mean_vs.x, -lim_x, lim_x);
+    float y = clamp(mean_vs.y, -lim_y, lim_y);
 
     // J rows = d(screen_xy) / d(view_xyz) evaluated at the mean.
     float2 J0 = float2(-focal_x / z, 0.0);             // d/dX

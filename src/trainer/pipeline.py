@@ -64,6 +64,15 @@ def _make_kernel(device: spy.Device, path: Path, entry: str) -> spy.ComputeKerne
     return device.create_compute_kernel(program)
 
 
+# Maps kernel id -> name for debug markers.
+_kernel_labels: dict[int, str] = {}
+
+
+def _label_kernel(kernel: spy.ComputeKernel, name: str) -> spy.ComputeKernel:
+    _kernel_labels[id(kernel)] = name
+    return kernel
+
+
 def _module_for_reflection(device: spy.Device) -> spy.Module:
     """Load a shader file that includes all the shared struct types so
     buffers.py can reflect ``Gaussian3D`` / ``Projected2DGaussian`` /
@@ -97,43 +106,48 @@ class Pipeline:
         opt = SHADERS_DIR / "optimizers"
         loss = SHADERS_DIR / "losses"
 
-        self.k_clear_textures = _make_kernel(device, tb / "clear.slang", "clearTextures")
-        self.k_bin_count = _make_kernel(device, tb / "bin_count.slang", "binCount")
-        self.k_bin_emit = _make_kernel(device, tb / "bin_emit.slang", "binEmit")
-        self.k_clear_tile_ranges = _make_kernel(device, tb / "tile_ranges.slang", "clearTileRanges")
-        self.k_identify_tile_ranges = _make_kernel(device, tb / "tile_ranges.slang", "identifyTileRanges")
-        self.k_forward = _make_kernel(device, tb / "forward.slang", "forwardRasterize")
-        self.k_loss = _make_kernel(device, loss / "l2_linear.slang", "computeLossGrad")
-        self.k_loss_ssim = _make_kernel(device, loss / "ssim_loss.slang", "computeSSIMLossGrad")
-        self.k_regularization = _make_kernel(device, loss / "regularization.slang", "addRegularization")
-        self.k_backward = _make_kernel(device, tb / "backward.slang", "backwardRasterize")
+        def mk(path, entry):
+            k = _make_kernel(device, path, entry)
+            _kernel_labels[id(k)] = entry
+            return k
+
+        self.k_clear_textures = mk(tb / "clear.slang", "clearTextures")
+        self.k_bin_count = mk(tb / "bin_count.slang", "binCount")
+        self.k_bin_emit = mk(tb / "bin_emit.slang", "binEmit")
+        self.k_clear_tile_ranges = mk(tb / "tile_ranges.slang", "clearTileRanges")
+        self.k_identify_tile_ranges = mk(tb / "tile_ranges.slang", "identifyTileRanges")
+        self.k_forward = mk(tb / "forward.slang", "forwardRasterize")
+        self.k_loss = mk(loss / "l2_linear.slang", "computeLossGrad")
+        self.k_loss_ssim = mk(loss / "ssim_loss.slang", "computeSSIMLossGrad")
+        self.k_regularization = mk(loss / "regularization.slang", "addRegularization")
+        self.k_backward = mk(tb / "backward.slang", "backwardRasterize")
 
         sort = SHADERS_DIR / "sort"
-        self.k_radix_block_sort = _make_kernel(device, sort / "radix_sort.slang", "blockSort")
-        self.k_radix_global_scan = _make_kernel(device, sort / "radix_sort.slang", "globalScan")
-        self.k_radix_scan_digit_totals = _make_kernel(device, sort / "radix_sort.slang", "scanDigitTotals")
-        self.k_radix_scatter_final = _make_kernel(device, sort / "radix_sort.slang", "scatterFinal")
-        self.k_adam = _make_kernel(device, opt / "adam.slang", "adamStep")
-        self.k_grad_clear = _make_kernel(device, opt / "grad_utils.slang", "clearGradBuffer")
-        self.k_saturation_check = _make_kernel(device, opt / "grad_utils.slang", "checkSaturation")
-        self.k_saturation_clear = _make_kernel(device, opt / "grad_utils.slang", "clearSaturationFlag")
+        self.k_radix_block_sort = mk(sort / "radix_sort.slang", "blockSort")
+        self.k_radix_global_scan = mk(sort / "radix_sort.slang", "globalScan")
+        self.k_radix_scan_digit_totals = mk(sort / "radix_sort.slang", "scanDigitTotals")
+        self.k_radix_scatter_final = mk(sort / "radix_sort.slang", "scatterFinal")
+        self.k_adam = mk(opt / "adam.slang", "adamStep")
+        self.k_grad_clear = mk(opt / "grad_utils.slang", "clearGradBuffer")
+        self.k_saturation_check = mk(opt / "grad_utils.slang", "checkSaturation")
+        self.k_saturation_clear = mk(opt / "grad_utils.slang", "clearSaturationFlag")
 
         densify = SHADERS_DIR / "densify"
-        self.k_clear_tracking = _make_kernel(device, densify / "clear_tracking.slang", "clearTracking")
-        self.k_accumulate_iter = _make_kernel(device, densify / "accumulate_iter.slang", "accumulateIter")
-        self.k_decide_actions = _make_kernel(device, densify / "decide_actions.slang", "decideActions")
-        self.k_split_and_clone = _make_kernel(device, densify / "split_and_clone.slang", "splitAndClone")
-        self.k_build_prune_mask = _make_kernel(device, densify / "build_prune_mask.slang", "buildPruneMask")
-        self.k_scatter_compact = _make_kernel(device, densify / "scatter_compact.slang", "scatterCompact")
-        self.k_opacity_reset = _make_kernel(device, densify / "opacity_reset.slang", "resetOpacity")
-        self.k_clear_importance = _make_kernel(device, densify / "clear_importance.slang", "clearImportance")
-        self.k_compute_error_mask = _make_kernel(device, densify / "compute_error_mask.slang", "computeErrorMask")
-        self.k_score_forward = _make_kernel(device, densify / "score_forward.slang", "scoreForward")
+        self.k_clear_tracking = mk(densify / "clear_tracking.slang", "clearTracking")
+        self.k_accumulate_iter = mk(densify / "accumulate_iter.slang", "accumulateIter")
+        self.k_decide_actions = mk(densify / "decide_actions.slang", "decideActions")
+        self.k_split_and_clone = mk(densify / "split_and_clone.slang", "splitAndClone")
+        self.k_build_prune_mask = mk(densify / "build_prune_mask.slang", "buildPruneMask")
+        self.k_scatter_compact = mk(densify / "scatter_compact.slang", "scatterCompact")
+        self.k_opacity_reset = mk(densify / "opacity_reset.slang", "resetOpacity")
+        self.k_clear_importance = mk(densify / "clear_importance.slang", "clearImportance")
+        self.k_compute_error_mask = mk(densify / "compute_error_mask.slang", "computeErrorMask")
+        self.k_score_forward = mk(densify / "score_forward.slang", "scoreForward")
 
         scan = SHADERS_DIR / "common" / "scan.slang"
-        self.k_scan_block = _make_kernel(device, scan, "scanBlock")
-        self.k_scan_block_sums = _make_kernel(device, scan, "scanBlockSums")
-        self.k_add_block_offsets = _make_kernel(device, scan, "addBlockOffsets")
+        self.k_scan_block = mk(scan, "scanBlock")
+        self.k_scan_block_sums = mk(scan, "scanBlockSums")
+        self.k_add_block_offsets = mk(scan, "addBlockOffsets")
 
         # --- buffers ---
         self.buffers = buffers.allocate(
@@ -150,6 +164,9 @@ class Pipeline:
         # Training step counter (Python-side, for Adam bias correction).
         self.iteration = 0
 
+        # When set, all dispatches route through this encoder (for debug markers).
+        self._encoder: spy.CommandEncoder | None = None
+
         # Near-plane cull distance used by the bin kernel.
         self.z_near_cull = 0.01
 
@@ -162,6 +179,13 @@ class Pipeline:
 
         # SSIM loss mixing. 0 = pure L2, >0 = L1+SSIM blend (3DGS default 0.2).
         self.lambda_ssim = 0.2
+
+    def _dispatch(self, kernel, **kwargs):
+        """Dispatch a kernel, inserting a debug marker if encoder is active."""
+        if self._encoder:
+            label = _kernel_labels.get(id(kernel), "unknown")
+            self._encoder.insert_debug_marker(label, spy.math.float3(0.6, 0.8, 1.0))
+        kernel.dispatch(command_encoder=self._encoder, **kwargs)
 
     # ------------------------------------------------------------------
     # Data loading
@@ -276,7 +300,7 @@ class Pipeline:
         num_sort_blocks = (self.max_sort_pairs + 255) // 256
 
         for pass_idx in range(8):
-            self.k_radix_block_sort.dispatch(
+            self._dispatch(self.k_radix_block_sort,
                 thread_count=[num_sort_blocks * 256, 1, 1],
                 keys_lo=src_lo.storage, keys_hi=src_hi.storage,
                 values=src_v.storage,
@@ -285,19 +309,19 @@ class Pipeline:
                 n_buf=b.scan_total.storage,
                 pass_idx=pass_idx,
             )
-            self.k_radix_global_scan.dispatch(
+            self._dispatch(self.k_radix_global_scan,
                 thread_count=[256, 1, 1],
                 block_hist=b.radix_block_hist.storage,
                 block_prefix=b.radix_block_prefix.storage,
                 digit_total=b.radix_digit_total.storage,
                 n_buf=b.scan_total.storage,
             )
-            self.k_radix_scan_digit_totals.dispatch(
+            self._dispatch(self.k_radix_scan_digit_totals,
                 thread_count=[256, 1, 1],
                 digit_total=b.radix_digit_total.storage,
                 digit_global_base=b.radix_digit_global_base.storage,
             )
-            self.k_radix_scatter_final.dispatch(
+            self._dispatch(self.k_radix_scatter_final,
                 thread_count=[self.max_sort_pairs, 1, 1],
                 keys_lo_in=src_lo.storage, keys_hi_in=src_hi.storage, values_in=src_v.storage,
                 block_start=b.radix_block_start.storage,
@@ -318,14 +342,14 @@ class Pipeline:
         num_tiles = b.num_tiles
 
         # Clear output textures + tile ranges.
-        self.k_clear_textures.dispatch(
+        self._dispatch(self.k_clear_textures,
             thread_count=[self.width, self.height, 1],
             output_image=b.output_image,
             output_transmittance=b.output_transmittance,
             gaussian_count_per_pixel=b.gaussian_count_per_pixel,
             frame_dim=spy.uint2(self.width, self.height),
         )
-        self.k_clear_tile_ranges.dispatch(
+        self._dispatch(self.k_clear_tile_ranges,
             thread_count=[num_tiles, 1, 1],
             tile_start=b.tile_start.storage,
             tile_end=b.tile_end.storage,
@@ -333,7 +357,7 @@ class Pipeline:
         )
 
         # Phase 1: per-gaussian tile count.
-        self.k_bin_count.dispatch(
+        self._dispatch(self.k_bin_count,
             thread_count=[self.max_splats, 1, 1],
             gaussians=b.gaussians.storage,
             num_gaussians_counter=b.num_gaussians_counter.storage,
@@ -357,7 +381,7 @@ class Pipeline:
         # tile_count==0 → no writes). The downstream sort + tile_ranges
         # kernels early-out on i >= scan_total[0], so zero-pair frames are
         # correct without a CPU branch.
-        self.k_bin_emit.dispatch(
+        self._dispatch(self.k_bin_emit,
             thread_count=[self.max_splats, 1, 1],
             gaussians=b.gaussians.storage,
             num_gaussians_counter=b.num_gaussians_counter.storage,
@@ -374,7 +398,7 @@ class Pipeline:
         sorted_lo, sorted_hi, sorted_v = self._radix_sort_pairs()
 
         # Phase 5: identify per-tile start/end in the sorted array.
-        self.k_identify_tile_ranges.dispatch(
+        self._dispatch(self.k_identify_tile_ranges,
             thread_count=[self.max_sort_pairs, 1, 1],
             keys_hi=sorted_hi.storage,
             tile_start=b.tile_start.storage,
@@ -389,7 +413,7 @@ class Pipeline:
         self._sorted_values = sorted_v
 
         # Phase 6: forward rasterize.
-        self.k_forward.dispatch(
+        self._dispatch(self.k_forward,
             thread_count=[b.num_tiles_x * 16, b.num_tiles_y * 16, 1],
             gaussians=b.gaussians.storage,
             projected_2d=b.projected_2d.storage,
@@ -416,7 +440,7 @@ class Pipeline:
     def _clear_grads(self) -> None:
         b = self.buffers
         for name in GRAD_SCALAR_COMPONENTS:
-            self.k_grad_clear.dispatch(
+            self._dispatch(self.k_grad_clear,
                 thread_count=[self.max_splats, 1, 1],
                 grad_buffer=b.grad_buffers[name].storage,
                 max_splats=self.max_splats,
@@ -426,7 +450,7 @@ class Pipeline:
         b = self.buffers
         target = getattr(self, "_active_target", None) or b.target_image
         if self.lambda_ssim > 0:
-            self.k_loss_ssim.dispatch(
+            self._dispatch(self.k_loss_ssim,
                 thread_count=[self.width, self.height, 1],
                 output_image=b.output_image,
                 target_image=target,
@@ -436,7 +460,7 @@ class Pipeline:
                 w_alpha=self.w_alpha,
             )
         else:
-            self.k_loss.dispatch(
+            self._dispatch(self.k_loss,
                 thread_count=[self.width, self.height, 1],
                 output_image=b.output_image,
                 target_image=target,
@@ -451,7 +475,7 @@ class Pipeline:
         # The forward left the sorted gaussian-id buffer on one of the two
         # ping-pong slots. We cache it during _run_forward.
         sorted_values = getattr(self, "_sorted_values", b.sort_values_a)
-        self.k_backward.dispatch(
+        self._dispatch(self.k_backward,
             thread_count=[b.num_tiles_x * 16, b.num_tiles_y * 16, 1],
             gaussians=b.gaussians.storage,
             projected_2d=b.projected_2d.storage,
@@ -485,7 +509,7 @@ class Pipeline:
         # driving densification is the NORM OF THE SUM of per-pixel
         # gradients per iter, averaged over iters the gaussian was
         # visible — not the sum of per-pixel norms.
-        self.k_accumulate_iter.dispatch(
+        self._dispatch(self.k_accumulate_iter,
             thread_count=[self.max_splats, 1, 1],
             grad_2d_x_iter=b.grad_2d_x_iter.storage,
             grad_2d_y_iter=b.grad_2d_y_iter.storage,
@@ -500,7 +524,7 @@ class Pipeline:
         b = self.buffers
         gb = b.grad_buffers
         n = int(b.num_gaussians_counter.to_numpy().view(np.uint32)[0]) if False else self.max_splats
-        self.k_regularization.dispatch(
+        self._dispatch(self.k_regularization,
             thread_count=[self.max_splats, 1, 1],
             gaussians=b.gaussians.storage,
             num_gaussians_counter=b.num_gaussians_counter.storage,
@@ -517,7 +541,7 @@ class Pipeline:
         """Zero the v2 densification tracking accumulators. Called at the
         start of each densification window (every N iters)."""
         b = self.buffers
-        self.k_clear_tracking.dispatch(
+        self._dispatch(self.k_clear_tracking,
             thread_count=[self.max_splats, 1, 1],
             grad_mean_2d_mag_accum=b.grad_mean_2d_mag_accum.storage,
             visibility_count_accum=b.visibility_count_accum.storage,
@@ -527,25 +551,25 @@ class Pipeline:
         )
 
     def read_tracking(self) -> dict[str, np.ndarray]:
-        """Read window-level tracking buffers."""
+        """Read window-level tracking buffers (int32 fixed-point)."""
         b = self.buffers
         raw_mag = b.grad_mean_2d_mag_accum.to_numpy()
         raw_vis = b.visibility_count_accum.to_numpy()
-        mag = np.frombuffer(raw_mag.tobytes(), dtype=np.float32)
+        mag_int = np.frombuffer(raw_mag.tobytes(), dtype=np.int32)
         vis = np.frombuffer(raw_vis.tobytes(), dtype=np.uint32)
         return {
-            "grad_mean_2d_mag": mag.astype(np.float64),
+            "grad_mean_2d_mag": mag_int.astype(np.float64) / 4096.0,
             "visibility_count": vis.astype(np.int64),
         }
 
     def _run_saturation_check(self) -> None:
         b = self.buffers
-        self.k_saturation_clear.dispatch(
+        self._dispatch(self.k_saturation_clear,
             thread_count=[1, 1, 1],
             saturation_flag=b.saturation_flag.storage,
         )
         for name in GRAD_SCALAR_COMPONENTS:
-            self.k_saturation_check.dispatch(
+            self._dispatch(self.k_saturation_check,
                 thread_count=[self.max_splats, 1, 1],
                 grad_buffer=b.grad_buffers[name].storage,
                 saturation_flag=b.saturation_flag.storage,
@@ -560,7 +584,7 @@ class Pipeline:
 
         b = self.buffers
         gb = b.grad_buffers
-        self.k_adam.dispatch(
+        self._dispatch(self.k_adam,
             thread_count=[self.max_splats, 1, 1],
             gaussians=b.gaussians.storage,
             adam_state=b.adam_state.storage,
@@ -630,12 +654,28 @@ class Pipeline:
         """
         if lrs is None:
             lrs = AdamLRs()
+        enc = self.device.create_command_encoder()
+        self._encoder = enc
+        enc.push_debug_group("clear_grads", spy.math.float3(0.3, 0.3, 0.3))
         self._clear_grads()
+        enc.pop_debug_group()
+        enc.push_debug_group("forward", spy.math.float3(0.2, 0.8, 0.3))
         self._run_forward(camera)
+        enc.pop_debug_group()
+        enc.push_debug_group("loss", spy.math.float3(1.0, 0.8, 0.0))
         self._run_loss()
+        enc.pop_debug_group()
+        enc.push_debug_group("backward", spy.math.float3(0.9, 0.2, 0.2))
         self._run_backward()
+        enc.pop_debug_group()
+        enc.push_debug_group("regularization", spy.math.float3(0.6, 0.4, 0.9))
         self._run_regularization()
+        enc.pop_debug_group()
+        enc.push_debug_group("adam", spy.math.float3(0.2, 0.6, 1.0))
         self._run_adam(lrs)
+        enc.pop_debug_group()
+        self.device.submit_command_buffer(enc.finish())
+        self._encoder = None
 
     def profile_one_step(self, camera: Camera, lrs: AdamLRs | None = None,
                          warmup_steps: int = 3) -> list[tuple[str, float]]:
@@ -683,7 +723,7 @@ class Pipeline:
         def _time_kernel(label: str, kernel: spy.ComputeKernel,
                          thread_count: list[int], **kwargs) -> None:
             i0 = idx[0]; i1 = i0 + 1; idx[0] += 2
-            kernel.dispatch(thread_count=thread_count,
+            kernel.dispatch(command_encoder=self._encoder, thread_count=thread_count,
                             query_pool=pool,
                             query_index_before=i0,
                             query_index_after=i1,
@@ -702,7 +742,7 @@ class Pipeline:
                      grad_buffer=gb[GRAD_SCALAR_COMPONENTS[0]].storage,
                      max_splats=self.max_splats)
         for name in GRAD_SCALAR_COMPONENTS[1:]:
-            self.k_grad_clear.dispatch(
+            self._dispatch(self.k_grad_clear,
                 thread_count=[self.max_splats, 1, 1],
                 grad_buffer=gb[name].storage, max_splats=self.max_splats,
             )
@@ -769,7 +809,7 @@ class Pipeline:
             i_sdt = idx[0]; idx[0] += 2
             i_sf  = idx[0]; idx[0] += 2
             radix_events_per_pass.append((i_bs, i_gs, i_sdt, i_sf))
-            self.k_radix_block_sort.dispatch(
+            self._dispatch(self.k_radix_block_sort,
                 thread_count=[num_sort_blocks * 256, 1, 1],
                 keys_lo=src_lo.storage, keys_hi=src_hi.storage,
                 values=src_v.storage,
@@ -778,7 +818,7 @@ class Pipeline:
                 n_buf=b.scan_total.storage, pass_idx=pass_idx,
                 query_pool=pool, query_index_before=i_bs, query_index_after=i_bs + 1,
             )
-            self.k_radix_global_scan.dispatch(
+            self._dispatch(self.k_radix_global_scan,
                 thread_count=[256, 1, 1],
                 block_hist=b.radix_block_hist.storage,
                 block_prefix=b.radix_block_prefix.storage,
@@ -786,13 +826,13 @@ class Pipeline:
                 n_buf=b.scan_total.storage,
                 query_pool=pool, query_index_before=i_gs, query_index_after=i_gs + 1,
             )
-            self.k_radix_scan_digit_totals.dispatch(
+            self._dispatch(self.k_radix_scan_digit_totals,
                 thread_count=[256, 1, 1],
                 digit_total=b.radix_digit_total.storage,
                 digit_global_base=b.radix_digit_global_base.storage,
                 query_pool=pool, query_index_before=i_sdt, query_index_after=i_sdt + 1,
             )
-            self.k_radix_scatter_final.dispatch(
+            self._dispatch(self.k_radix_scatter_final,
                 thread_count=[self.max_sort_pairs, 1, 1],
                 keys_lo_in=src_lo.storage, keys_hi_in=src_hi.storage, values_in=src_v.storage,
                 block_start=b.radix_block_start.storage,
@@ -956,14 +996,16 @@ class Pipeline:
     # ------------------------------------------------------------------
 
     def read_gradients(self) -> dict[str, np.ndarray]:
-        """Read back the 14 SoA float grad buffers."""
+        """Read back the 14 SoA int32 fixed-point grad buffers."""
         from trainer.buffers import GRAD_SCALAR_COMPONENTS as NAMES
 
         n = int(self.buffers.num_gaussians_counter.to_numpy().view(np.uint32)[0])
+        inv = 1.0 / 4096.0
         out: dict[str, np.ndarray] = {}
         for name in NAMES:
             raw = self.buffers.grad_buffers[name].to_numpy()
-            out[name] = np.frombuffer(raw.tobytes(), dtype=np.float32)[:n].astype(np.float64)
+            ints = np.frombuffer(raw.tobytes(), dtype=np.int32)[:n]
+            out[name] = ints.astype(np.float64) * inv
         return out
 
     def read_loss(self) -> float:
@@ -1004,20 +1046,20 @@ def _scan(self: Pipeline, n: int,
 
     num_blocks = max(1, (n + SCAN_BLOCK_SIZE - 1) // SCAN_BLOCK_SIZE)
 
-    self.k_scan_block.dispatch(
+    self._dispatch(self.k_scan_block,
         thread_count=[num_blocks * SCAN_BLOCK_SIZE, 1, 1],
         in_buf=in_buf.storage,
         out_buf=out_buf.storage,
         block_sums=b.scan_block_sums.storage,
         n=n,
     )
-    self.k_scan_block_sums.dispatch(
+    self._dispatch(self.k_scan_block_sums,
         thread_count=[SCAN_BLOCK_SIZE, 1, 1],
         block_sums=b.scan_block_sums.storage,
         total_out=b.scan_total.storage,
         num_blocks=num_blocks,
     )
-    self.k_add_block_offsets.dispatch(
+    self._dispatch(self.k_add_block_offsets,
         thread_count=[num_blocks * SCAN_BLOCK_SIZE, 1, 1],
         out_buf=out_buf.storage,
         block_sums=b.scan_block_sums.storage,
@@ -1042,7 +1084,7 @@ def compute_importance_scores(
     """
     b = self.buffers
 
-    self.k_clear_importance.dispatch(
+    self._dispatch(self.k_clear_importance,
         thread_count=[self.max_splats, 1, 1],
         importance_score_accum=b.importance_score_accum.storage,
         max_splats=self.max_splats,
@@ -1051,7 +1093,7 @@ def compute_importance_scores(
     for cam, target_tex in zip(cameras, target_textures):
         self._run_forward(cam)
 
-        self.k_compute_error_mask.dispatch(
+        self._dispatch(self.k_compute_error_mask,
             thread_count=[self.width, self.height, 1],
             output_image=b.output_image,
             target_image=target_tex,
@@ -1061,7 +1103,7 @@ def compute_importance_scores(
         )
 
         sorted_values = getattr(self, "_sorted_values", b.sort_values_a)
-        self.k_score_forward.dispatch(
+        self._dispatch(self.k_score_forward,
             thread_count=[b.num_tiles_x * 16, b.num_tiles_y * 16, 1],
             gaussians=b.gaussians.storage,
             projected_2d=b.projected_2d.storage,
@@ -1109,7 +1151,7 @@ def densify(self: Pipeline, cfg: DensifyConfig) -> dict:
     prune = max(1, pre_count // 2)
     b.prune_budget.copy_from_numpy(np.array([prune], dtype=np.int32))
 
-    self.k_decide_actions.dispatch(
+    self._dispatch(self.k_decide_actions,
         thread_count=[pre_count, 1, 1],
         gaussians=b.gaussians.storage,
         num_gaussians_counter=b.num_gaussians_counter.storage,
@@ -1125,7 +1167,7 @@ def densify(self: Pipeline, cfg: DensifyConfig) -> dict:
     )
 
     # Phase B: split and clone (may increment counter).
-    self.k_split_and_clone.dispatch(
+    self._dispatch(self.k_split_and_clone,
         thread_count=[pre_count, 1, 1],
         gaussians=b.gaussians.storage,
         adam_state=b.adam_state.storage,
@@ -1139,7 +1181,7 @@ def densify(self: Pipeline, cfg: DensifyConfig) -> dict:
     post_split_count = min(post_split_count, self.max_splats)
 
     # Phases C/D/E: compact.
-    self.k_build_prune_mask.dispatch(
+    self._dispatch(self.k_build_prune_mask,
         thread_count=[post_split_count, 1, 1],
         action=b.action_buffer.storage,
         valid_mask=b.valid_mask_buffer.storage,
@@ -1147,7 +1189,7 @@ def densify(self: Pipeline, cfg: DensifyConfig) -> dict:
         post_count=post_split_count,
     )
     self._scan(post_split_count)
-    self.k_scatter_compact.dispatch(
+    self._dispatch(self.k_scatter_compact,
         thread_count=[post_split_count, 1, 1],
         gaussians_in=b.gaussians.storage,
         adam_state_in=b.adam_state.storage,
@@ -1192,7 +1234,7 @@ def cap_opacity(self: Pipeline, cap_value: float = 0.8) -> None:
     b = self.buffers
     import math
     cap_logit = math.log(cap_value / (1.0 - cap_value))
-    self.k_opacity_reset.dispatch(
+    self._dispatch(self.k_opacity_reset,
         thread_count=[self.max_splats, 1, 1],
         gaussians=b.gaussians.storage,
         num_gaussians_counter=b.num_gaussians_counter.storage,
@@ -1207,7 +1249,7 @@ def reset_opacity(self: Pipeline, cfg: DensifyConfig) -> None:
     """Per-gaussian opacity <- low value. Forces optimizer to re-earn
     opacity on real geometry."""
     b = self.buffers
-    self.k_opacity_reset.dispatch(
+    self._dispatch(self.k_opacity_reset,
         thread_count=[self.max_splats, 1, 1],
         gaussians=b.gaussians.storage,
         num_gaussians_counter=b.num_gaussians_counter.storage,

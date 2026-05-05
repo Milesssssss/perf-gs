@@ -1,8 +1,4 @@
-// Opacity + scale regularization gradients (float atomic version).
-//
-// Adds L1 regularization penalties directly to the float gradient buffers:
-//   opacity_reg:  d/d(opacity_logit) of  w_opa * mean(sigmoid(opacity_logit))
-//   scale_reg:    d/d(log_scale)     of  w_scale * mean(exp(log_scale))
+// Opacity + scale regularization gradients (int32 fixed-point).
 
 #include "../common/types.slang"
 #include "../common/math.slang"
@@ -13,10 +9,10 @@ void addRegularization(
     uint3 dtid: SV_DispatchThreadID,
     StructuredBuffer<Gaussian3D> gaussians,
     StructuredBuffer<uint> num_gaussians_counter,
-    RWStructuredBuffer<float> grad_opacity,
-    RWStructuredBuffer<float> grad_log_scale_x,
-    RWStructuredBuffer<float> grad_log_scale_y,
-    RWStructuredBuffer<float> grad_log_scale_z,
+    RWStructuredBuffer<int> grad_opacity,
+    RWStructuredBuffer<int> grad_log_scale_x,
+    RWStructuredBuffer<int> grad_log_scale_y,
+    RWStructuredBuffer<int> grad_log_scale_z,
     uniform float w_opacity,
     uniform float w_scale,
     uniform float inv_n)
@@ -30,15 +26,15 @@ void addRegularization(
     {
         float sig = sigmoid(g.opacity);
         float d_opa = w_opacity * sig * (1.0 - sig) * inv_n;
-        InterlockedAdd(grad_opacity[i], d_opa);
+        InterlockedAdd(grad_opacity[i], toFixed(d_opa));
     }
 
     if (w_scale > 0.0)
     {
         float3 scale = exp(g.log_scale);
         float3 d_scale = w_scale * scale * inv_n;
-        InterlockedAdd(grad_log_scale_x[i], d_scale.x);
-        InterlockedAdd(grad_log_scale_y[i], d_scale.y);
-        InterlockedAdd(grad_log_scale_z[i], d_scale.z);
+        InterlockedAdd(grad_log_scale_x[i], toFixed(d_scale.x));
+        InterlockedAdd(grad_log_scale_y[i], toFixed(d_scale.y));
+        InterlockedAdd(grad_log_scale_z[i], toFixed(d_scale.z));
     }
 }

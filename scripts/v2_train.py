@@ -71,8 +71,8 @@ def main() -> None:
     ap.add_argument("--iters", type=int, default=10000)
     ap.add_argument("--width", type=int, default=960)
     ap.add_argument("--height", type=int, default=540)
-    ap.add_argument("--preview-every", type=int, default=500)
-    ap.add_argument("--log-every", type=int, default=250)
+    ap.add_argument("--preview-every", type=int, default=0)
+    ap.add_argument("--log-every", type=int, default=0)
     ap.add_argument("--densify-every", type=int, default=500)
     ap.add_argument("--densify-from", type=int, default=500)
     ap.add_argument("--densify-to", type=int, default=15000)
@@ -88,7 +88,7 @@ def main() -> None:
     ap.add_argument("--opacity-cap", type=float, default=0.8)
     ap.add_argument("--opacity-reg", type=float, default=0.01)
     ap.add_argument("--scale-reg", type=float, default=0.01)
-    ap.add_argument("--w-alpha", type=float, default=0.5,
+    ap.add_argument("--w-alpha", type=float, default=0.2,
                     help="alpha loss weight; set > 0 for RGBA targets (e.g. 1.0)")
     ap.add_argument("--lambda-ssim", type=float, default=0.2,
                     help="SSIM loss weight (3DGS default 0.2); 0 = pure L2")
@@ -96,7 +96,7 @@ def main() -> None:
     ap.add_argument("--z-near-cull", type=float, default=0.01,
                     help="view-space depth floor for bin cull; raise for scenes "
                          "where points can land near a camera pose (e.g. 0.2)")
-    ap.add_argument("--profile-every", type=int, default=500,
+    ap.add_argument("--profile-every", type=int, default=0,
                     help="profile one full step every N iters (0 to disable)")
     ap.add_argument("--no-viewer", action="store_true", help="disable live viewer")
     ap.add_argument("--backend", type=str, default="vulkan", choices=["vulkan", "d3d12"])
@@ -235,8 +235,8 @@ def main() -> None:
         do_densify = (args.densify_from <= it <= args.densify_to
                       and (it - args.densify_from) % args.densify_every == 0)
         do_opacity_reset = (it % 3000 == 0 and it >= args.densify_from and it < args.iters)
-        do_log = (it % args.log_every == 0) or (it == 1) or (it == args.iters)
-        do_preview = (it % args.preview_every == 0) or (it == args.iters)
+        do_log = args.log_every > 0 and ((it % args.log_every == 0) or (it == 1) or (it == args.iters))
+        do_preview = args.preview_every > 0 and ((it % args.preview_every == 0) or (it == args.iters))
 
         if do_opacity_reset:
             pipeline.reset_opacity(cfg)
@@ -267,6 +267,9 @@ def main() -> None:
         # the NaN/Inf safety check (PLAN.md Q17): if the forward has
         # gone non-finite, it's not going to recover in a few hundred
         # iters, so checking at log cadence is plenty timely.
+        if it % 10 == 0:
+            print(f"iter {it}: train step done.")
+
         if do_log or do_preview:
             pipeline.device.wait_for_idle()
             rendered = pipeline.read_output_image()[..., :3]
