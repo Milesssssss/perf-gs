@@ -74,7 +74,10 @@ def _setup_pipeline(backend: str, w: int, h: int) -> Pipeline:
         device = create_device(backend=backend)
     except Exception as exc:
         pytest.skip(f"backend {backend!r} unavailable: {exc}")
-    return Pipeline(device=device, width=w, height=h, max_splats=16)
+    p = Pipeline(device=device, width=w, height=h, max_splats=16)
+    p.lambda_ssim = 0.0
+    p.w_alpha = 0.0
+    return p
 
 
 # The parameter table. (component_name_in_grad_buffer, field, index_in_field)

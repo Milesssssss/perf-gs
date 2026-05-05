@@ -30,7 +30,7 @@ TILE_SIZE = 16
 # emitted by bin_emit before the global radix sort. A single gaussian
 # covering K tiles contributes K pairs. Sized to handle ~500k gaussians
 # each touching ~8 tiles on average, with headroom for peaks.
-DEFAULT_MAX_SORT_PAIRS = 4_000_000
+DEFAULT_MAX_SORT_PAIRS = 2_000_000
 
 
 # Names of the 14 scalar grad buffers (SoA). Order matches how the
@@ -251,6 +251,7 @@ def allocate(
     saturation_flag.copy_from_numpy(np.zeros(1, dtype=np.uint32))
     training_step.copy_from_numpy(np.zeros(1, dtype=np.uint32))
 
+    # this is nuts
     return GaussianBuffers(
         gaussians=gaussians,
         num_gaussians_counter=num_gaussians_counter,

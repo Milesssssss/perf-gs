@@ -94,6 +94,8 @@ def main() -> None:
     ap.add_argument("--z-near-cull", type=float, default=0.01,
                     help="view-space depth floor for bin cull; raise for scenes "
                          "where points can land near a camera pose (e.g. 0.2)")
+    ap.add_argument("--profile-every", type=int, default=500,
+                    help="profile one full step every N iters (0 to disable)")
     ap.add_argument("--backend", type=str, default="vulkan", choices=["vulkan", "d3d12"])
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--run-name", type=str, default=None)
@@ -185,6 +187,7 @@ def main() -> None:
 
     _render_all_cameras(pipeline, scene, 0, cams_dir)
 
+    profile_json = (run_dir / "profile_log.jsonl").open("w", buffering=1) if args.profile_every > 0 else None
     log_txt = (run_dir / "log.txt").open("w", buffering=1)
     log_json = (run_dir / "log.jsonl").open("w", buffering=1)
     densify_json = (run_dir / "densify_log.jsonl").open("w", buffering=1)
@@ -286,6 +289,70 @@ def main() -> None:
         if do_preview:
             _render_all_cameras(pipeline, scene, it, cams_dir)
 
+        # Per-phase profiling: time each phase of a full training step.
+        if profile_json and args.profile_every > 0 and it % args.profile_every == 0:
+            import time as _time
+            pipeline.device.wait_for_idle()
+
+            prof_cam_idx = int(rng.integers(0, n_cams))
+            prof_entry = scene.images[prof_cam_idx]
+            pipeline.set_target_texture(target_textures[prof_cam_idx])
+            prof_lrs = AdamLRs(mean=lr_mean_init * (decay ** (it - 1)))
+
+            # Warm up (avoid cold-cache effects).
+            pipeline._clear_grads()
+            pipeline._run_forward(prof_entry.camera)
+            pipeline._run_loss()
+            pipeline._run_backward()
+            pipeline._run_regularization()
+            pipeline._run_adam(prof_lrs)
+            pipeline.device.wait_for_idle()
+
+            timings = {}
+
+            t0 = _time.perf_counter()
+            pipeline._clear_grads()
+            pipeline.device.wait_for_idle()
+            timings["clear_grads_ms"] = (_time.perf_counter() - t0) * 1000
+
+            t0 = _time.perf_counter()
+            pipeline._run_forward(prof_entry.camera)
+            pipeline.device.wait_for_idle()
+            timings["forward_ms"] = (_time.perf_counter() - t0) * 1000
+
+            t0 = _time.perf_counter()
+            pipeline._run_loss()
+            pipeline.device.wait_for_idle()
+            timings["loss_ms"] = (_time.perf_counter() - t0) * 1000
+
+            t0 = _time.perf_counter()
+            pipeline._run_backward()
+            pipeline.device.wait_for_idle()
+            timings["backward_ms"] = (_time.perf_counter() - t0) * 1000
+
+            t0 = _time.perf_counter()
+            pipeline._run_regularization()
+            pipeline.device.wait_for_idle()
+            timings["regularization_ms"] = (_time.perf_counter() - t0) * 1000
+
+            t0 = _time.perf_counter()
+            pipeline._run_adam(prof_lrs)
+            pipeline.device.wait_for_idle()
+            timings["adam_ms"] = (_time.perf_counter() - t0) * 1000
+
+            timings["total_ms"] = sum(timings.values())
+            timings["iter"] = it
+            timings["n_gaussians"] = cur_n_gaussians
+
+            profile_json.write(json.dumps(timings) + "\n")
+            print(f"iter {it}: PROFILE  "
+                  f"fwd={timings['forward_ms']:.1f}  loss={timings['loss_ms']:.1f}  "
+                  f"bwd={timings['backward_ms']:.1f}  reg={timings['regularization_ms']:.1f}  "
+                  f"adam={timings['adam_ms']:.1f}  total={timings['total_ms']:.1f} ms  "
+                  f"n_g={cur_n_gaussians}")
+
+    if profile_json:
+        profile_json.close()
     log_txt.close()
     log_json.close()
     densify_json.close()
