@@ -67,10 +67,15 @@ def _render_all_cameras(pipeline: Pipeline, scene, iter_idx: int, cams_dir: Path
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--scene", type=str, default="datasets/synthetic/suzanne_blender")
-    ap.add_argument("--iters", type=int, default=10000)
-    ap.add_argument("--width", type=int, default=960)
-    ap.add_argument("--height", type=int, default=540)
+    ap.add_argument("--scene", type=str, default="datasets/360_v2/bicycle")
+    ap.add_argument("--iters", type=int, default=30000)
+    ap.add_argument("--downsample", type=int, default=1,
+                    help="downsample factor (1=full res, 2=half, 4=quarter). "
+                         "Uses images_N dir if it exists, otherwise resizes on load.")
+    ap.add_argument("--width", type=int, default=None,
+                    help="force render width (overrides --downsample)")
+    ap.add_argument("--height", type=int, default=None,
+                    help="force render height (overrides --downsample)")
     ap.add_argument("--preview-every", type=int, default=0)
     ap.add_argument("--log-every", type=int, default=0)
     ap.add_argument("--densify-every", type=int, default=500)
@@ -92,7 +97,7 @@ def main() -> None:
                     help="alpha loss weight; set > 0 for RGBA targets (e.g. 1.0)")
     ap.add_argument("--lambda-ssim", type=float, default=0.2,
                     help="SSIM loss weight (3DGS default 0.2); 0 = pure L2")
-    ap.add_argument("--max-splats", type=int, default=800_000)
+    ap.add_argument("--max-splats", type=int, default=1_000_000)
     ap.add_argument("--z-near-cull", type=float, default=0.01,
                     help="view-space depth floor for bin cull; raise for scenes "
                          "where points can land near a camera pose (e.g. 0.2)")
@@ -110,10 +115,13 @@ def main() -> None:
     run_dir.mkdir(parents=True, exist_ok=True)
     cams_dir.mkdir(parents=True, exist_ok=True)
 
-    scene = load_colmap(args.scene, width=args.width, height=args.height)
+    scene = load_colmap(args.scene, width=args.width, height=args.height,
+                        downsample=args.downsample)
     n_cams = len(scene.images)
     n_init = scene.initial_points["means"].shape[0]
     extent = scene.scene_extent
+    # Resolved width/height from the scene (may differ from args if args were None).
+    W, H = scene.images[0].camera.image_size
     print(f"loaded {n_cams} cameras, {n_init} init points, scene_extent={extent:.3f}")
     #print(f"schedule: densify [{args.densify_from}, {args.densify_to}] every {args.densify_every}, "
     #      f"opacity_reset@{args.opacity_reset_iters or 'none'}")
@@ -135,7 +143,7 @@ def main() -> None:
     (run_dir / "config.json").write_text(json.dumps({
         "scene": args.scene,
         "iters": args.iters,
-        "width": args.width, "height": args.height,
+        "width": W, "height": H,
         "preview_every": args.preview_every, "log_every": args.log_every,
         "densify_every": args.densify_every,
         "densify_from": args.densify_from, "densify_to": args.densify_to,
@@ -157,7 +165,7 @@ def main() -> None:
     }, indent=2))
 
     use_alpha = args.w_alpha > 0
-    targets_srgb = [load_image(e, scene.image_dir, args.width, args.height,
+    targets_srgb = [load_image(e, scene.image_dir, W, H,
                                load_alpha=use_alpha)
                     for e in scene.images]
     targets_linear = [_srgb_to_linear(t[..., :3]) for t in targets_srgb]
@@ -174,7 +182,7 @@ def main() -> None:
 
     device = create_device(backend=args.backend)
     pipeline = Pipeline(
-        device=device, width=args.width, height=args.height,
+        device=device, width=W, height=H,
         max_splats=args.max_splats,
     )
     pipeline.z_near_cull = args.z_near_cull
@@ -188,7 +196,7 @@ def main() -> None:
     # Launch live viewer.
     viewer = None
     if not args.no_viewer:
-        viewer = Viewer(device, width=args.width, height=args.height,
+        viewer = Viewer(device, width=W, height=H,
                         max_splats=args.max_splats)
         viewer.start()
 
@@ -203,7 +211,7 @@ def main() -> None:
     log_json = (run_dir / "log.jsonl").open("w", buffering=1)
     densify_json = (run_dir / "densify_log.jsonl").open("w", buffering=1)
     log_txt.write(f"# v2 training log — scene={args.scene}, backend={args.backend}\n")
-    log_txt.write(f"# iters={args.iters}, resolution={args.width}x{args.height}, n_cams={n_cams}\n")
+    log_txt.write(f"# iters={args.iters}, resolution={W}x{H}, n_cams={n_cams}\n")
     log_txt.write(f"# densify: every {args.densify_every} iters in "
                   f"[{args.densify_from}, {args.densify_to}]\n")
 

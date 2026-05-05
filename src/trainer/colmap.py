@@ -297,20 +297,24 @@ def load_colmap(
     scene_dir: Path | str,
     width: int | None = None,
     height: int | None = None,
+    downsample: int = 1,
 ) -> ColmapDataset:
     """Load a COLMAP scene, auto-detecting text vs binary format.
 
-    Tries these paths in order:
-      <scene_dir>/sparse/0/text/cameras.txt  (text)
-      <scene_dir>/sparse/0/cameras.txt       (text)
-      <scene_dir>/sparse/0/cameras.bin       (binary)
-
-    ``width`` / ``height`` are the *target render resolution* — if they
-    differ from the COLMAP camera's native width/height, the principal
-    point and focal length scale linearly.
+    Resolution is determined by (in priority order):
+      1. Explicit ``width``/``height`` if provided.
+      2. ``downsample`` factor applied to native resolution.
+         If ``images_N`` directory exists, images are loaded from there
+         (already downsampled); otherwise full-res images are resized on load.
+      3. Native resolution (downsample=1, no width/height).
     """
     scene_dir = Path(scene_dir)
-    img_dir = scene_dir / "images"
+
+    # Choose image directory: images_N if it exists, else images.
+    if downsample > 1 and (scene_dir / f"images_{downsample}").exists():
+        img_dir = scene_dir / f"images_{downsample}"
+    else:
+        img_dir = scene_dir / "images"
 
     sparse_dir, fmt = _find_sparse_dir(scene_dir)
     if sparse_dir is None:
@@ -334,9 +338,9 @@ def load_colmap(
     native_w, native_h = next(iter(native_sizes))
 
     if width is None:
-        width = native_w
+        width = native_w // downsample
     if height is None:
-        height = native_h
+        height = native_h // downsample
 
     sx = width / native_w
     sy = height / native_h
