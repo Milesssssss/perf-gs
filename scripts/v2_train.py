@@ -88,6 +88,8 @@ def main() -> None:
     ap.add_argument("--scale-reg", type=float, default=0.01)
     ap.add_argument("--w-alpha", type=float, default=0.5,
                     help="alpha loss weight; set > 0 for RGBA targets (e.g. 1.0)")
+    ap.add_argument("--lambda-ssim", type=float, default=0.2,
+                    help="SSIM loss weight (3DGS default 0.2); 0 = pure L2")
     ap.add_argument("--max-splats", type=int, default=800_000)
     ap.add_argument("--z-near-cull", type=float, default=0.01,
                     help="view-space depth floor for bin cull; raise for scenes "
@@ -173,6 +175,7 @@ def main() -> None:
     pipeline.opacity_reg = args.opacity_reg
     pipeline.scale_reg = args.scale_reg
     pipeline.w_alpha = args.w_alpha
+    pipeline.lambda_ssim = args.lambda_ssim
     pipeline.set_gaussians_from_numpy(**scene.initial_points)
     pipeline.clear_tracking()
 

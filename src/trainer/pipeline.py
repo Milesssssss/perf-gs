@@ -103,6 +103,7 @@ class Pipeline:
         self.k_identify_tile_ranges = _make_kernel(device, tb / "tile_ranges.slang", "identifyTileRanges")
         self.k_forward = _make_kernel(device, tb / "forward.slang", "forwardRasterize")
         self.k_loss = _make_kernel(device, loss / "l2_linear.slang", "computeLossGrad")
+        self.k_loss_ssim = _make_kernel(device, loss / "ssim_loss.slang", "computeSSIMLossGrad")
         self.k_regularization = _make_kernel(device, loss / "regularization.slang", "addRegularization")
         self.k_backward = _make_kernel(device, tb / "backward.slang", "backwardRasterize")
 
@@ -157,6 +158,9 @@ class Pipeline:
 
         # Alpha loss weight. Set > 0 when target images have meaningful alpha.
         self.w_alpha = 0.0
+
+        # SSIM loss mixing. 0 = pure L2, >0 = L1+SSIM blend (3DGS default 0.2).
+        self.lambda_ssim = 0.2
 
     # ------------------------------------------------------------------
     # Data loading
@@ -420,14 +424,25 @@ class Pipeline:
     def _run_loss(self) -> None:
         b = self.buffers
         target = getattr(self, "_active_target", None) or b.target_image
-        self.k_loss.dispatch(
-            thread_count=[self.width, self.height, 1],
-            output_image=b.output_image,
-            target_image=target,
-            dL_dC=b.dL_dC_texture,
-            frame_dim=spy.uint2(self.width, self.height),
-            w_alpha=self.w_alpha,
-        )
+        if self.lambda_ssim > 0:
+            self.k_loss_ssim.dispatch(
+                thread_count=[self.width, self.height, 1],
+                output_image=b.output_image,
+                target_image=target,
+                dL_dC=b.dL_dC_texture,
+                frame_dim=spy.uint2(self.width, self.height),
+                lambda_ssim=self.lambda_ssim,
+                w_alpha=self.w_alpha,
+            )
+        else:
+            self.k_loss.dispatch(
+                thread_count=[self.width, self.height, 1],
+                output_image=b.output_image,
+                target_image=target,
+                dL_dC=b.dL_dC_texture,
+                frame_dim=spy.uint2(self.width, self.height),
+                w_alpha=self.w_alpha,
+            )
 
     def _run_backward(self) -> None:
         b = self.buffers
