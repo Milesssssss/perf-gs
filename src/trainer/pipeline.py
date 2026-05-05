@@ -25,20 +25,20 @@ SCAN_BLOCK_SIZE = 1024  # must match shaders/common/scan.slang
 
 @dataclass
 class DensifyConfig:
-    """Thresholds for the decide-actions kernel.
+    """FastGS-style multi-view importance score densification.
 
-    Defaults match gsplat's ``DefaultStrategyConfig``:
-      grow_grad2d  = 2e-4
-      grow_scale3d = 0.01
-      prune_opa    = 0.005
-      prune_scale3d= 0.1
-    which are in turn drawn from Kerbl et al. (3DGS).
+    Replaces gradient-threshold heuristics with a principled per-gaussian
+    importance score: count of high-error pixels touched across N views.
+    See arxiv 2511.04283 (FastGS).
     """
-    t_grad: float = 2e-4           # gsplat grow_grad2d
-    t_split_scale: float = 0.01    # gsplat grow_scale3d (split vs clone threshold)
-    t_opacity: float = 0.005       # gsplat prune_opa
-    t_big_scale: float = 0.1       # gsplat prune_scale3d — world-space scale cap
-    opacity_reset_value: float = 0.01
+    n_scoring_views: int = 10       # cameras sampled for importance scoring
+    loss_thresh: float = 0.1        # L1 threshold for binary error mask
+    importance_thresh: float = 5.0  # min importance to allow split/clone
+    t_split_scale: float = 0.01     # max_scale > this => split (else clone)
+    t_opacity: float = 0.005        # prune if sigmoid(opacity) < this
+    t_big_scale: float = 0.1        # prune if max_scale > this (world-space floater removal)
+    growth_rate: float = 0.05       # max growth per densify step (fraction of current count)
+    opacity_cap: float = 0.8        # post-densify opacity cap (softer than reset)
 
 
 @dataclass
@@ -123,6 +123,9 @@ class Pipeline:
         self.k_build_prune_mask = _make_kernel(device, densify / "build_prune_mask.slang", "buildPruneMask")
         self.k_scatter_compact = _make_kernel(device, densify / "scatter_compact.slang", "scatterCompact")
         self.k_opacity_reset = _make_kernel(device, densify / "opacity_reset.slang", "resetOpacity")
+        self.k_clear_importance = _make_kernel(device, densify / "clear_importance.slang", "clearImportance")
+        self.k_compute_error_mask = _make_kernel(device, densify / "compute_error_mask.slang", "computeErrorMask")
+        self.k_score_forward = _make_kernel(device, densify / "score_forward.slang", "scoreForward")
 
         scan = SHADERS_DIR / "common" / "scan.slang"
         self.k_scan_block = _make_kernel(device, scan, "scanBlock")
@@ -981,46 +984,94 @@ def _scan(self: Pipeline, n: int,
 Pipeline._scan = _scan  # type: ignore[attr-defined]
 
 
-def densify(self: Pipeline, cfg: DensifyConfig, window_iters: int = 0) -> dict:
-    """Run one densification pass.
+def compute_importance_scores(
+    self: Pipeline,
+    cameras: list,
+    target_textures: list,
+    cfg: DensifyConfig,
+) -> None:
+    """Run N scoring views to accumulate per-gaussian importance scores.
+
+    For each view: render → compute binary error mask → walk tiles and
+    count how many high-error pixels each gaussian touches. Results
+    accumulate into buffers.importance_score_accum (uint per gaussian).
+    """
+    b = self.buffers
+
+    self.k_clear_importance.dispatch(
+        thread_count=[self.max_splats, 1, 1],
+        importance_score_accum=b.importance_score_accum.storage,
+        max_splats=self.max_splats,
+    )
+
+    for cam, target_tex in zip(cameras, target_textures):
+        self._run_forward(cam)
+
+        self.k_compute_error_mask.dispatch(
+            thread_count=[self.width, self.height, 1],
+            output_image=b.output_image,
+            target_image=target_tex,
+            error_mask=b.error_mask,
+            frame_dim=spy.uint2(self.width, self.height),
+            loss_thresh=cfg.loss_thresh,
+        )
+
+        sorted_values = getattr(self, "_sorted_values", b.sort_values_a)
+        self.k_score_forward.dispatch(
+            thread_count=[b.num_tiles_x * 16, b.num_tiles_y * 16, 1],
+            gaussians=b.gaussians.storage,
+            projected_2d=b.projected_2d.storage,
+            tile_start=b.tile_start.storage,
+            tile_end=b.tile_end.storage,
+            sorted_gaussian_ids=sorted_values.storage,
+            camera=self._camera_buffer.storage,
+            error_mask=b.error_mask,
+            importance_score_accum=b.importance_score_accum.storage,
+        )
+
+
+Pipeline.compute_importance_scores = compute_importance_scores  # type: ignore[attr-defined]
+
+
+def densify(self: Pipeline, cfg: DensifyConfig) -> dict:
+    """Run one densification pass using FastGS importance scores.
+
+    Assumes compute_importance_scores() has been called beforehand to
+    populate the importance_score_accum buffer.
 
     Phases:
-      A  decide_actions     - write action[i] per gaussian
+      A  decide_actions     - write action[i] per gaussian (importance-based)
       B  split_and_clone    - append children, overwrite parent slot for splits
       C  build_prune_mask   - mark valid[i] across post-split range
       D  scan               - exclusive prefix-sum of valid[]
       E  scatter_compact    - ping-pong into scratch; Python swaps refs
 
-    Returns a stats dict for logging:
-        {pre_count, post_split_count, final_count, n_split, n_clone, n_prune}
-
-    Does NOT clear tracking buffers — caller decides cadence. Does NOT
-    reset opacity — that's a separate scheduled operation.
+    Returns a stats dict for logging.
     """
     b = self.buffers
 
-    # Densify runs every N (e.g. 100) iters, so CPU readbacks here are
-    # one-off — acceptable. But we only sync where a readback actually
-    # follows, not between each dispatch.
-    #
-    # Phase A: decide actions.
     self.device.wait_for_idle()
     pre_count = int(b.num_gaussians_counter.to_numpy().view(np.uint32)[0])
     if pre_count == 0:
         return {"pre_count": 0, "post_split_count": 0, "final_count": 0,
-                "n_split": 0, "n_clone": 0, "n_prune": 0}
+                "n_split": 0, "n_clone": 0, "n_prune": 0, "n_keep": 0}
+
+    # Set growth budget: max new gaussians this step = growth_rate * current.
+    budget = max(1, int(cfg.growth_rate * pre_count))
+    b.growth_budget.copy_from_numpy(np.array([budget], dtype=np.int32))
 
     self.k_decide_actions.dispatch(
         thread_count=[pre_count, 1, 1],
         gaussians=b.gaussians.storage,
         num_gaussians_counter=b.num_gaussians_counter.storage,
-        grad_mean_2d_mag_accum=b.grad_mean_2d_mag_accum.storage,
-        visibility_count_accum=b.visibility_count_accum.storage,
+        importance_score_accum=b.importance_score_accum.storage,
         action=b.action_buffer.storage,
-        t_grad=cfg.t_grad,
+        growth_budget=b.growth_budget.storage,
+        importance_thresh=cfg.importance_thresh,
         t_split_scale=cfg.t_split_scale,
         t_opacity=cfg.t_opacity,
         t_big_scale=cfg.t_big_scale,
+        n_scoring_views=cfg.n_scoring_views,
     )
 
     # Phase B: split and clone (may increment counter).
@@ -1033,14 +1084,11 @@ def densify(self: Pipeline, cfg: DensifyConfig, window_iters: int = 0) -> dict:
         pre_count=pre_count,
         max_splats=self.max_splats,
     )
-    # Need post_split_count to drive the next few dispatches' thread_count.
     self.device.wait_for_idle()
     post_split_count = int(b.num_gaussians_counter.to_numpy().view(np.uint32)[0])
-    # Clamp: if Phase B raced against max_splats some children may have
-    # been dropped (writes guarded in shader; counter still advanced).
     post_split_count = min(post_split_count, self.max_splats)
 
-    # Phases C/D/E submitted back-to-back; readback happens after E.
+    # Phases C/D/E: compact.
     self.k_build_prune_mask.dispatch(
         thread_count=[post_split_count, 1, 1],
         action=b.action_buffer.storage,
@@ -1060,17 +1108,13 @@ def densify(self: Pipeline, cfg: DensifyConfig, window_iters: int = 0) -> dict:
         post_count=post_split_count,
     )
 
-    # Swap primary <-> scratch references.
     b.gaussians, b.gaussians_scratch = b.gaussians_scratch, b.gaussians
     b.adam_state, b.adam_state_scratch = b.adam_state_scratch, b.adam_state
 
-    # Update counter to scan_total (= sum of valid_mask = final live count).
     self.device.wait_for_idle()
     final_count = int(b.scan_total.to_numpy().view(np.uint32)[0])
     b.num_gaussians_counter.copy_from_numpy(np.array([final_count], dtype=np.uint32))
 
-    # Stats for logging. action_buffer is already stable on GPU; the
-    # wait above covers the readback.
     actions_raw = b.action_buffer.to_numpy()
     actions = np.frombuffer(actions_raw.tobytes(), dtype=np.uint32)[:pre_count]
     n_keep  = int((actions == 0).sum())
@@ -1092,15 +1136,32 @@ def densify(self: Pipeline, cfg: DensifyConfig, window_iters: int = 0) -> dict:
 Pipeline.densify = densify  # type: ignore[attr-defined]
 
 
+def cap_opacity(self: Pipeline, cap_value: float = 0.8) -> None:
+    """Cap per-gaussian opacity at cap_value. Softer alternative to full
+    opacity reset — lets gaussians keep earned opacity up to the cap."""
+    b = self.buffers
+    import math
+    cap_logit = math.log(cap_value / (1.0 - cap_value))
+    self.k_opacity_reset.dispatch(
+        thread_count=[self.max_splats, 1, 1],
+        gaussians=b.gaussians.storage,
+        num_gaussians_counter=b.num_gaussians_counter.storage,
+        reset_value=cap_value,
+    )
+
+
+Pipeline.cap_opacity = cap_opacity  # type: ignore[attr-defined]
+
+
 def reset_opacity(self: Pipeline, cfg: DensifyConfig) -> None:
-    """Per-gaussian opacity <- cfg.opacity_reset_value. Standard 3DGS
-    trick: forces optimizer to re-earn opacity on real geometry."""
+    """Per-gaussian opacity <- low value. Forces optimizer to re-earn
+    opacity on real geometry."""
     b = self.buffers
     self.k_opacity_reset.dispatch(
         thread_count=[self.max_splats, 1, 1],
         gaussians=b.gaussians.storage,
         num_gaussians_counter=b.num_gaussians_counter.storage,
-        reset_value=cfg.opacity_reset_value,
+        reset_value=0.01,
     )
 
 

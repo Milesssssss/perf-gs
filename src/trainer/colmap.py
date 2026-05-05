@@ -42,6 +42,7 @@ class ColmapDataset:
     images: list[ColmapImageEntry]
     image_dir: Path
     initial_points: dict[str, np.ndarray]  # matches write_gaussians signature
+    scene_extent: float = 1.0              # bounding sphere radius
 
 
 def _quat_wxyz_to_rotmat(q: np.ndarray) -> np.ndarray:
@@ -268,10 +269,16 @@ def load_colmap(
         "color_logits": np.zeros((n, 3), dtype=np.float32),
     }
 
+    # Scene extent: radius of the bounding sphere centered at the centroid.
+    # Used by densification to set scale thresholds relative to the scene.
+    centroid = pts3d.mean(axis=0)
+    scene_extent = float(np.linalg.norm(pts3d - centroid, axis=1).max())
+
     return ColmapDataset(
         images=image_entries,
         image_dir=img_dir,
         initial_points=initial_points,
+        scene_extent=scene_extent,
     )
 
 

@@ -74,12 +74,16 @@ def main() -> None:
     ap.add_argument("--log-every", type=int, default=250)
     ap.add_argument("--densify-every", type=int, default=100)
     ap.add_argument("--densify-from", type=int, default=3000)
-    ap.add_argument("--densify-to", type=int, default=7000)
-    ap.add_argument("--opacity-reset-iters", type=int, nargs="*", default=[4000, 7000])
-    ap.add_argument("--t-grad", type=float, default=2e-4)
+    ap.add_argument("--densify-to", type=int, default=10000)
+    ap.add_argument("--opacity-reset-iters", type=int, nargs="*", default=[3500, 7000])
+    ap.add_argument("--n-scoring-views", type=int, default=10)
+    ap.add_argument("--loss-thresh", type=float, default=0.1)
+    ap.add_argument("--importance-thresh", type=float, default=5.0)
     ap.add_argument("--t-split-scale", type=float, default=0.01)
     ap.add_argument("--t-opacity", type=float, default=0.005)
     ap.add_argument("--t-big-scale", type=float, default=0.1)
+    ap.add_argument("--growth-rate", type=float, default=0.3)
+    ap.add_argument("--opacity-cap", type=float, default=0.8)
     ap.add_argument("--max-splats", type=int, default=500_000)
     ap.add_argument("--z-near-cull", type=float, default=0.01,
                     help="view-space depth floor for bin cull; raise for scenes "
@@ -98,13 +102,18 @@ def main() -> None:
     scene = load_colmap(args.scene, width=args.width, height=args.height)
     n_cams = len(scene.images)
     n_init = scene.initial_points["means"].shape[0]
-    print(f"loaded {n_cams} cameras, {n_init} init points")
+    extent = scene.scene_extent
+    print(f"loaded {n_cams} cameras, {n_init} init points, scene_extent={extent:.3f}")
 
     cfg = DensifyConfig(
-        t_grad=args.t_grad,
+        n_scoring_views=args.n_scoring_views,
+        loss_thresh=args.loss_thresh,
+        importance_thresh=args.importance_thresh,
         t_split_scale=args.t_split_scale,
         t_opacity=args.t_opacity,
-        t_big_scale=args.t_big_scale,
+        t_big_scale=args.t_big_scale * extent,
+        growth_rate=args.growth_rate,
+        opacity_cap=args.opacity_cap,
     )
 
     (run_dir / "config.json").write_text(json.dumps({
@@ -116,9 +125,14 @@ def main() -> None:
         "densify_from": args.densify_from, "densify_to": args.densify_to,
         "opacity_reset_iters": args.opacity_reset_iters,
         "densify_config": {
-            "t_grad": cfg.t_grad, "t_split_scale": cfg.t_split_scale,
-            "t_opacity": cfg.t_opacity, "t_big_scale": cfg.t_big_scale,
-            "opacity_reset_value": cfg.opacity_reset_value,
+            "n_scoring_views": cfg.n_scoring_views,
+            "loss_thresh": cfg.loss_thresh,
+            "importance_thresh": cfg.importance_thresh,
+            "t_split_scale": cfg.t_split_scale,
+            "t_opacity": cfg.t_opacity,
+            "t_big_scale": cfg.t_big_scale,
+            "growth_rate": cfg.growth_rate,
+            "opacity_cap": cfg.opacity_cap,
         },
         "max_splats": args.max_splats,
         "z_near_cull": args.z_near_cull,
@@ -188,11 +202,23 @@ def main() -> None:
         if do_opacity_reset:
             pipeline.reset_opacity(cfg)
             densify_json.write(json.dumps({"iter": it, "event": "opacity_reset"}) + "\n")
-            print(f"iter {it}: opacity reset to {cfg.opacity_reset_value}")
+            print(f"iter {it}: opacity reset")
 
         if do_densify:
-            stats = pipeline.densify(cfg, window_iters=args.densify_every)
-            pipeline.clear_tracking()
+            # Suppress opacity pruning before the first opacity reset.
+            densify_cfg = cfg
+            if args.opacity_reset_iters and it < args.opacity_reset_iters[0]:
+                from dataclasses import replace
+                densify_cfg = replace(cfg, t_opacity=0.0)
+
+            # Sample N cameras for importance scoring.
+            n_score = min(densify_cfg.n_scoring_views, n_cams)
+            score_indices = rng.choice(n_cams, size=n_score, replace=False)
+            score_cameras = [scene.images[i].camera for i in score_indices]
+            score_targets = [target_textures[i] for i in score_indices]
+
+            pipeline.compute_importance_scores(score_cameras, score_targets, densify_cfg)
+            stats = pipeline.densify(densify_cfg)
             cur_n_gaussians = stats["final_count"]
             densify_json.write(json.dumps({"iter": it, "event": "densify", **stats}) + "\n")
             print(f"iter {it}: densify  "

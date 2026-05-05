@@ -18,7 +18,10 @@
       "Edit",
       "Write",
       "Glob",
-      "Grep"
+      "Grep",
+      "WebFetch(domain:arxiv.org)",
+      "Bash(gh api *)",
+      "WebFetch(domain:raw.githubusercontent.com)"
     ],
     "deny": [
       "Bash(rm *)",

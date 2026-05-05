@@ -1,25 +1,25 @@
-// Phase A of densification: decide per-gaussian action.
+// Phase A of densification: decide per-gaussian action using FastGS
+// multi-view importance score with growth budget.
 //
-// One thread per gaussian. Reads tracking accumulators + current
-// log_scale/opacity, writes ``action[i] ∈ {KEEP, SPLIT, CLONE, PRUNE}``.
-// Paper heuristic from Kerbl et al. (3D Gaussian Splatting):
+// One thread per gaussian. Reads the importance score accumulated over
+// N scoring views + current log_scale/opacity, writes
+// ``action[i] in {KEEP, SPLIT, CLONE, PRUNE}``.
 //
-//   mean_2d_grad_norm  =  window-averaged norm of the per-iter, per-
-//                         gaussian (pixel-summed) 2D gradient
-//                      =  fixed-to-float(grad_mean_2d_mag_accum[i])
-//                         / max(visibility_count_accum[i], 1)
-//   max_scale          =  max(exp(log_scale))
+// Decision rules:
+//   importance = importance_score_accum[i] / n_scoring_views
+//   max_scale  = max(exp(log_scale))
 //
-//   PRUNE  if  sigmoid(opacity) < t_opacity  or  max_scale > t_big_scale
-//   SPLIT  if  mean_2d_grad_norm > t_grad  AND  max_scale > t_split_scale
-//   CLONE  if  mean_2d_grad_norm > t_grad  AND  max_scale <= t_split_scale
+//   PRUNE  if  sigmoid(opacity) < t_opacity  OR  max_scale > t_big_scale
+//   SPLIT  if  importance > importance_thresh  AND  max_scale > t_split_scale
+//   CLONE  if  importance > importance_thresh  AND  max_scale <= t_split_scale
 //   KEEP   otherwise
 //
-// Matches gsplat DefaultStrategy: `grad2d / count.clamp_min(1)` where
-// grad2d is the running sum of per-iter `‖pixel-summed-grad‖` and
-// count is the number of iters the gaussian was visible. Crucially,
-// this is the norm of a sum (not a sum of norms) — tangentially-
-// cancelling pixel gradients correctly report as "settled".
+// Growth is budget-limited: a shared atomic counter (growth_budget) is
+// decremented by each thread that wants to split/clone. Once the budget
+// hits zero, remaining candidates are demoted to KEEP. This gives
+// approximate top-N selection (threads with higher importance that race
+// first get the budget — not perfectly ranked but good enough for
+// stochastic training).
 
 #include "../common/types.slang"
 #include "../common/math.slang"
@@ -35,13 +35,14 @@ void decideActions(
     uint3 dtid: SV_DispatchThreadID,
     StructuredBuffer<Gaussian3D> gaussians,
     StructuredBuffer<uint> num_gaussians_counter,
-    StructuredBuffer<int> grad_mean_2d_mag_accum,
-    StructuredBuffer<uint> visibility_count_accum,
+    StructuredBuffer<uint> importance_score_accum,
     RWStructuredBuffer<uint> action,
-    uniform float t_grad,
+    RWStructuredBuffer<int> growth_budget,
+    uniform float importance_thresh,
     uniform float t_split_scale,
     uniform float t_opacity,
-    uniform float t_big_scale)
+    uniform float t_big_scale,
+    uniform uint n_scoring_views)
 {
     uint i = dtid.x;
     uint n = num_gaussians_counter[0];
@@ -57,26 +58,26 @@ void decideActions(
     float max_scale = max(scale.x, max(scale.y, scale.z));
     float opacity = sigmoid(g.opacity);
 
+    // Prune: low opacity or oversized world-space scale.
     if (opacity < t_opacity || max_scale > t_big_scale)
     {
         action[i] = ACTION_PRUNE;
         return;
     }
 
-    // Gaussians never visible over the window can't be flagged for
-    // growth (no signal to rank them by).
-    uint vis_count = visibility_count_accum[i];
-    if (vis_count == 0u)
-    {
-        action[i] = ACTION_KEEP;
-        return;
-    }
+    float importance = float(importance_score_accum[i]) / float(max(n_scoring_views, 1u));
 
-    float mag_total = fromFixed(grad_mean_2d_mag_accum[i]);
-    float mag_avg = mag_total / float(vis_count);
-
-    if (mag_avg > t_grad)
+    if (importance > importance_thresh)
     {
+        // Consume one unit of growth budget via atomic decrement.
+        // If budget is already <= 0, demote to KEEP.
+        int remaining;
+        InterlockedAdd(growth_budget[0], -1, remaining);
+        if (remaining <= 0)
+        {
+            action[i] = ACTION_KEEP;
+            return;
+        }
         action[i] = (max_scale > t_split_scale) ? ACTION_SPLIT : ACTION_CLONE;
     }
     else

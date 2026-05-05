@@ -76,19 +76,15 @@ void backwardRasterize(
     RWStructuredBuffer<int> grad_color_r,
     RWStructuredBuffer<int> grad_color_g,
     RWStructuredBuffer<int> grad_color_b,
-    // v2 densification tracking — per-iter vector accumulators.
+    // v2 densification tracking — per-iter absgrad accumulators.
     // After the backward pass completes, a separate kernel
     // (accumulate_iter) folds (grad_2d_x_iter[g], grad_2d_y_iter[g]) into
     // the window-level buffers by taking the norm of the iter-sum and
     // incrementing visibility count by 1.
     //
-    // Accumulating the VECTOR (not per-pixel norms) matches gsplat's
-    // DefaultStrategy: `state["grad2d"].index_add_(0, gs_ids,
-    // grads.norm(dim=-1))` where `grads` is already the per-iter, per-
-    // gaussian gradient that autograd has summed over pixels. Summing
-    // norms instead of norm-of-sum would over-report for well-fit
-    // gaussians whose pixel-side gradients cancel tangentially (triangle
-    // inequality), which is exactly the "over-splits" failure mode.
+    // We accumulate |grad| per pixel (absgrad semantics, gsplat default).
+    // This prevents cancellation for gaussians straddling edges — those
+    // are exactly the ones that need splitting.
     RWStructuredBuffer<int> grad_2d_x_iter,
     RWStructuredBuffer<int> grad_2d_y_iter)
 {
@@ -195,19 +191,19 @@ void backwardRasterize(
         InterlockedAdd(grad_color_g[g_idx], toFixed(dp_color_logit.d.y));
         InterlockedAdd(grad_color_b[g_idx], toFixed(dp_color_logit.d.z));
 
-        // Densification tracking signals. Gated on alpha >= ALPHA_MIN_TRACK
-        // so sub-display contributions don't dilute the per-iter sum.
-        // Positive-guard form to avoid D3D12 DXIL codegen issue with
-        // `continue` inside this loop.
+        // Densification tracking signals (absgrad semantics). Gated on
+        // alpha >= ALPHA_MIN_TRACK so sub-display contributions don't
+        // dilute the per-iter sum.
         //
-        // We accumulate the VECTOR dp_mean_2d.d here, not its magnitude.
-        // The post-iter kernel folds these into the window-level
-        // mag_accum + visibility_count (match gsplat semantics — see
-        // the docstring on the RWStructuredBuffer declaration above).
+        // We accumulate |dp_mean_2d.d| per pixel (gsplat absgrad=True
+        // default). accumulate_iter then computes
+        // norm(sum_abs_x, sum_abs_y) per iter. Absgrad prevents
+        // cancellation for gaussians straddling edges — exactly those
+        // that need splitting.
         if (alpha >= ALPHA_MIN_TRACK)
         {
-            InterlockedAdd(grad_2d_x_iter[g_idx], toFixed(dp_mean_2d.d.x));
-            InterlockedAdd(grad_2d_y_iter[g_idx], toFixed(dp_mean_2d.d.y));
+            InterlockedAdd(grad_2d_x_iter[g_idx], toFixed(abs(dp_mean_2d.d.x)));
+            InterlockedAdd(grad_2d_y_iter[g_idx], toFixed(abs(dp_mean_2d.d.y)));
         }
 
         // Walk T and C_behind back for the next iteration.

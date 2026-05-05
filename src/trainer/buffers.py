@@ -104,6 +104,11 @@ class GaussianBuffers:
     grad_2d_x_iter: spy.NDBuffer | None = None          # int32[max_splats], fixed-point
     grad_2d_y_iter: spy.NDBuffer | None = None          # int32[max_splats], fixed-point
 
+    # --- FastGS importance scoring ---
+    importance_score_accum: spy.NDBuffer | None = None  # uint[max_splats]
+    growth_budget: spy.NDBuffer | None = None           # int[1]
+    error_mask: spy.Texture | None = None               # r32_uint, WxH
+
     # --- v2 densification scratch + pipeline state ---
     gaussians_scratch: spy.NDBuffer | None = None   # Gaussian3D[max_splats]
     adam_state_scratch: spy.NDBuffer | None = None  # AdamState[max_splats]
@@ -215,6 +220,17 @@ def allocate(
     grad_2d_x_iter = spy.NDBuffer(device=device, dtype="int", shape=(max_splats,))
     grad_2d_y_iter = spy.NDBuffer(device=device, dtype="int", shape=(max_splats,))
 
+    # FastGS importance scoring
+    importance_score_accum = spy.NDBuffer(device=device, dtype="uint", shape=(max_splats,))
+    growth_budget = spy.NDBuffer(device=device, dtype="int", shape=(1,))
+    error_mask = device.create_texture(
+        type=spy.TextureType.texture_2d,
+        format=spy.Format.r32_uint,
+        width=width, height=height,
+        usage=spy.TextureUsage.shader_resource | spy.TextureUsage.unordered_access,
+        label="error_mask",
+    )
+
     # v2 densification scratch
     gaussians_scratch = spy.NDBuffer(device=device, dtype=gaussian_type, shape=(max_splats,))
     adam_state_scratch = spy.NDBuffer(device=device, dtype=adam_type, shape=(max_splats,))
@@ -265,6 +281,9 @@ def allocate(
         visibility_count_accum=visibility_count_accum,
         grad_2d_x_iter=grad_2d_x_iter,
         grad_2d_y_iter=grad_2d_y_iter,
+        importance_score_accum=importance_score_accum,
+        growth_budget=growth_budget,
+        error_mask=error_mask,
         gaussians_scratch=gaussians_scratch,
         adam_state_scratch=adam_state_scratch,
         action_buffer=action_buffer,
