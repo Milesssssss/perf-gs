@@ -269,10 +269,18 @@ def load_colmap(
         "color_logits": np.zeros((n, 3), dtype=np.float32),
     }
 
-    # Scene extent: radius of the bounding sphere centered at the centroid.
-    # Used by densification to set scale thresholds relative to the scene.
-    centroid = pts3d.mean(axis=0)
-    scene_extent = float(np.linalg.norm(pts3d - centroid, axis=1).max())
+    # Scene extent: radius of the camera bounding sphere * 1.1 (gsplat/3DGS
+    # convention — getNerfppNorm). Used by densification scale thresholds:
+    #   split/clone boundary = 0.01 * scene_extent
+    #   big-scale prune      = 0.1  * scene_extent
+    cam_positions = []
+    for rec in imgs:
+        R = _quat_wxyz_to_rotmat(np.array([rec["qw"], rec["qx"], rec["qy"], rec["qz"]]))
+        t = np.array([rec["tx"], rec["ty"], rec["tz"]])
+        cam_positions.append(-R.T @ t)
+    cam_positions = np.array(cam_positions, dtype=np.float64)
+    cam_centroid = cam_positions.mean(axis=0)
+    scene_extent = float(np.linalg.norm(cam_positions - cam_centroid, axis=1).max()) * 1.1
 
     return ColmapDataset(
         images=image_entries,
@@ -282,14 +290,20 @@ def load_colmap(
     )
 
 
-def load_image(entry: ColmapImageEntry, image_dir: Path, width: int, height: int) -> np.ndarray:
-    """Read a PNG/JPG from disk and downsample to (height, width, 3) float32.
+def load_image(entry: ColmapImageEntry, image_dir: Path, width: int, height: int,
+               load_alpha: bool = False) -> np.ndarray:
+    """Read a PNG/JPG from disk and downsample to float32.
 
-    Returns sRGB values in [0, 1]. Alpha is dropped (PLAN.md v1 D table).
+    Returns sRGB values in [0, 1]. If ``load_alpha`` is True and the image
+    has an alpha channel, returns (H, W, 4); otherwise (H, W, 3).
     """
     from PIL import Image
     path = image_dir / entry.image_name
-    img = Image.open(path).convert("RGB")
+    img = Image.open(path)
+    if load_alpha and img.mode == "RGBA":
+        img = img.convert("RGBA")
+    else:
+        img = img.convert("RGB")
     if img.size != (width, height):
         img = img.resize((width, height), Image.LANCZOS)
     arr = np.asarray(img, dtype=np.float32) / 255.0

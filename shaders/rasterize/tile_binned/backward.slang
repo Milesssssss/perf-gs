@@ -103,7 +103,9 @@ void backwardRasterize(
     if (processed == 0) return;
 
     float2 pixel_center = float2(pixel) + 0.5;
-    float3 dL_dC = dL_dC_texture[pixel].rgb;
+    float4 dL_dC_full = dL_dC_texture[pixel];
+    float3 dL_dC = dL_dC_full.rgb;
+    float dL_dA = dL_dC_full.a;
 
     // T_post holds T_{i+1}: the transmittance *after* processing gaussian i.
     // For the last gaussian processed, that's output_transmittance[pixel].
@@ -140,10 +142,11 @@ void backwardRasterize(
         float3 dL_dc_i = dL_dC * (alpha * T_i);
         bwd_diff(sigmoid3)(dp_color_logit, dL_dc_i);
 
-        // --- alpha gradient: dL/dα_i = dL/dC · dC/dα_i ---
+        // --- alpha gradient: dL/dα_i = dL/dC · dC/dα_i + dL/dA · dA/dα_i ---
         // dC/dα_i = c_i · T_i - C_behind / (1 - α_i)
+        // dA/dα_i = T_i  (rendered alpha = 1 - T_final, chain rule through transmittance)
         float3 dC_dalpha = c_i * T_i - C_behind / denom;
-        float dL_dalpha = dot(dL_dC, dC_dalpha);
+        float dL_dalpha = dot(dL_dC, dC_dalpha) + dL_dA * T_i;
         // Zero the gradient when the forward's alpha was clipped.
         float dL_d_alpha_raw = dL_dalpha * alpha_grad_scale;
 

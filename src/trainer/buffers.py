@@ -107,6 +107,7 @@ class GaussianBuffers:
     # --- FastGS importance scoring ---
     importance_score_accum: spy.NDBuffer | None = None  # uint[max_splats]
     growth_budget: spy.NDBuffer | None = None           # int[1]
+    prune_budget: spy.NDBuffer | None = None            # int[1]
     error_mask: spy.Texture | None = None               # r32_uint, WxH
 
     # --- v2 densification scratch + pipeline state ---
@@ -223,6 +224,7 @@ def allocate(
     # FastGS importance scoring
     importance_score_accum = spy.NDBuffer(device=device, dtype="uint", shape=(max_splats,))
     growth_budget = spy.NDBuffer(device=device, dtype="int", shape=(1,))
+    prune_budget = spy.NDBuffer(device=device, dtype="int", shape=(1,))
     error_mask = device.create_texture(
         type=spy.TextureType.texture_2d,
         format=spy.Format.r32_uint,
@@ -283,6 +285,7 @@ def allocate(
         grad_2d_y_iter=grad_2d_y_iter,
         importance_score_accum=importance_score_accum,
         growth_budget=growth_budget,
+        prune_budget=prune_budget,
         error_mask=error_mask,
         gaussians_scratch=gaussians_scratch,
         adam_state_scratch=adam_state_scratch,

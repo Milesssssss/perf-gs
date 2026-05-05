@@ -103,6 +103,7 @@ class Pipeline:
         self.k_identify_tile_ranges = _make_kernel(device, tb / "tile_ranges.slang", "identifyTileRanges")
         self.k_forward = _make_kernel(device, tb / "forward.slang", "forwardRasterize")
         self.k_loss = _make_kernel(device, loss / "l2_linear.slang", "computeLossGrad")
+        self.k_regularization = _make_kernel(device, loss / "regularization.slang", "addRegularization")
         self.k_backward = _make_kernel(device, tb / "backward.slang", "backwardRasterize")
 
         sort = SHADERS_DIR / "sort"
@@ -147,13 +148,15 @@ class Pipeline:
         # Training step counter (Python-side, for Adam bias correction).
         self.iteration = 0
 
-        # Near-plane cull distance used by the bin kernel. Gaussians
-        # closer than this in view space are skipped for the current
-        # frame (they stay in the buffer). Default matches the projection
-        # matrix z_near used by our camera helpers. Callers can adjust
-        # per-scene (larger scenes with points potentially near a camera
-        # pose benefit from raising this, e.g. 0.2).
+        # Near-plane cull distance used by the bin kernel.
         self.z_near_cull = 0.01
+
+        # Regularization weights (gsplat defaults: both 0; MCMC uses 0.001).
+        self.opacity_reg = 0.01
+        self.scale_reg = 0.01
+
+        # Alpha loss weight. Set > 0 when target images have meaningful alpha.
+        self.w_alpha = 0.0
 
     # ------------------------------------------------------------------
     # Data loading
@@ -198,24 +201,32 @@ class Pipeline:
         self.buffers.target_image.copy_from_numpy(np.ascontiguousarray(rgba))
         self._active_target = self.buffers.target_image
 
-    def create_target_texture(self, rgb: np.ndarray) -> spy.Texture:
-        """Create a new rgba32_float target texture and upload ``rgb``
-        into it. Caller keeps the returned texture alive and passes it
-        to :meth:`set_target_texture` per iter.
+    def create_target_texture(self, img: np.ndarray) -> spy.Texture:
+        """Create a new rgba32_float target texture and upload into it.
+
+        Accepts (H, W, 3) RGB or (H, W, 4) RGBA. RGB is padded with
+        alpha=1. For RGBA inputs, RGB is premultiplied by alpha so that
+        transparent regions have RGB=0 (matching our renderer's black
+        background where nothing is rendered).
         """
-        assert rgb.shape == (self.height, self.width, 3), (
-            f"target shape {rgb.shape} != ({self.height}, {self.width}, 3)"
-        )
+        if img.ndim == 3 and img.shape[2] == 4:
+            assert img.shape[:2] == (self.height, self.width)
+            rgba = img.astype(np.float32).copy()
+            rgba[..., :3] *= rgba[..., 3:4]
+        else:
+            assert img.shape == (self.height, self.width, 3), (
+                f"target shape {img.shape} != ({self.height}, {self.width}, 3)"
+            )
+            rgba = np.concatenate(
+                [img.astype(np.float32), np.ones((self.height, self.width, 1), np.float32)],
+                axis=-1,
+            )
         tex = self.device.create_texture(
             type=spy.TextureType.texture_2d,
             format=spy.Format.rgba32_float,
             width=self.width, height=self.height,
             usage=spy.TextureUsage.shader_resource | spy.TextureUsage.unordered_access,
             label="target_image_cached",
-        )
-        rgba = np.concatenate(
-            [rgb.astype(np.float32), np.ones((self.height, self.width, 1), np.float32)],
-            axis=-1,
         )
         tex.copy_from_numpy(np.ascontiguousarray(rgba))
         return tex
@@ -415,6 +426,7 @@ class Pipeline:
             target_image=target,
             dL_dC=b.dL_dC_texture,
             frame_dim=spy.uint2(self.width, self.height),
+            w_alpha=self.w_alpha,
         )
 
     def _run_backward(self) -> None:
@@ -464,6 +476,25 @@ class Pipeline:
             grad_mean_2d_mag_accum=b.grad_mean_2d_mag_accum.storage,
             visibility_count_accum=b.visibility_count_accum.storage,
             max_splats=self.max_splats,
+        )
+
+    def _run_regularization(self) -> None:
+        if self.opacity_reg <= 0 and self.scale_reg <= 0:
+            return
+        b = self.buffers
+        gb = b.grad_buffers
+        n = int(b.num_gaussians_counter.to_numpy().view(np.uint32)[0]) if False else self.max_splats
+        self.k_regularization.dispatch(
+            thread_count=[self.max_splats, 1, 1],
+            gaussians=b.gaussians.storage,
+            num_gaussians_counter=b.num_gaussians_counter.storage,
+            grad_opacity=gb["opacity"].storage,
+            grad_log_scale_x=gb["log_scale_x"].storage,
+            grad_log_scale_y=gb["log_scale_y"].storage,
+            grad_log_scale_z=gb["log_scale_z"].storage,
+            w_opacity=self.opacity_reg,
+            w_scale=self.scale_reg,
+            inv_n=1.0 / float(self.max_splats),
         )
 
     def clear_tracking(self) -> None:
@@ -572,7 +603,7 @@ class Pipeline:
         return flag != 0
 
     def train_step(self, camera: Camera, lrs: AdamLRs | None = None) -> None:
-        """Run one training step: forward → loss → backward → adam.
+        """Run one training step: forward → loss → backward → regularization → adam.
 
         The target image must have been uploaded via
         :meth:`set_target_image` before calling.
@@ -588,6 +619,7 @@ class Pipeline:
         self._run_forward(camera)
         self._run_loss()
         self._run_backward()
+        self._run_regularization()
         self._run_adam(lrs)
 
     def profile_one_step(self, camera: Camera, lrs: AdamLRs | None = None,
@@ -1056,9 +1088,14 @@ def densify(self: Pipeline, cfg: DensifyConfig) -> dict:
         return {"pre_count": 0, "post_split_count": 0, "final_count": 0,
                 "n_split": 0, "n_clone": 0, "n_prune": 0, "n_keep": 0}
 
-    # Set growth budget: max new gaussians this step = growth_rate * current.
-    budget = max(1, int(cfg.growth_rate * pre_count))
-    b.growth_budget.copy_from_numpy(np.array([budget], dtype=np.int32))
+    # Growth budget: max new gaussians this step.
+    growth = max(1, int(cfg.growth_rate * pre_count))
+    b.growth_budget.copy_from_numpy(np.array([growth], dtype=np.int32))
+    # Prune budget: at most 50% of candidates actually pruned (FastGS).
+    # We don't know the candidate count ahead of time, so set budget to
+    # 50% of current count — an upper bound on candidates.
+    prune = max(1, pre_count // 2)
+    b.prune_budget.copy_from_numpy(np.array([prune], dtype=np.int32))
 
     self.k_decide_actions.dispatch(
         thread_count=[pre_count, 1, 1],
@@ -1067,6 +1104,7 @@ def densify(self: Pipeline, cfg: DensifyConfig) -> dict:
         importance_score_accum=b.importance_score_accum.storage,
         action=b.action_buffer.storage,
         growth_budget=b.growth_budget.storage,
+        prune_budget=b.prune_budget.storage,
         importance_thresh=cfg.importance_thresh,
         t_split_scale=cfg.t_split_scale,
         t_opacity=cfg.t_opacity,

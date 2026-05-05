@@ -72,19 +72,23 @@ def main() -> None:
     ap.add_argument("--height", type=int, default=540)
     ap.add_argument("--preview-every", type=int, default=500)
     ap.add_argument("--log-every", type=int, default=250)
-    ap.add_argument("--densify-every", type=int, default=100)
-    ap.add_argument("--densify-from", type=int, default=3000)
-    ap.add_argument("--densify-to", type=int, default=10000)
-    ap.add_argument("--opacity-reset-iters", type=int, nargs="*", default=[3500, 7000])
+    ap.add_argument("--densify-every", type=int, default=500)
+    ap.add_argument("--densify-from", type=int, default=500)
+    ap.add_argument("--densify-to", type=int, default=15000)
+    #ap.add_argument("--opacity-reset-iters", type=int, nargs="*", default=[3000])
     ap.add_argument("--n-scoring-views", type=int, default=10)
     ap.add_argument("--loss-thresh", type=float, default=0.1)
     ap.add_argument("--importance-thresh", type=float, default=5.0)
     ap.add_argument("--t-split-scale", type=float, default=0.01)
     ap.add_argument("--t-opacity", type=float, default=0.005)
     ap.add_argument("--t-big-scale", type=float, default=0.1)
-    ap.add_argument("--growth-rate", type=float, default=0.3)
+    ap.add_argument("--growth-rate", type=float, default=1.0)
     ap.add_argument("--opacity-cap", type=float, default=0.8)
-    ap.add_argument("--max-splats", type=int, default=500_000)
+    ap.add_argument("--opacity-reg", type=float, default=0.01)
+    ap.add_argument("--scale-reg", type=float, default=0.01)
+    ap.add_argument("--w-alpha", type=float, default=0.5,
+                    help="alpha loss weight; set > 0 for RGBA targets (e.g. 1.0)")
+    ap.add_argument("--max-splats", type=int, default=800_000)
     ap.add_argument("--z-near-cull", type=float, default=0.01,
                     help="view-space depth floor for bin cull; raise for scenes "
                          "where points can land near a camera pose (e.g. 0.2)")
@@ -104,12 +108,16 @@ def main() -> None:
     n_init = scene.initial_points["means"].shape[0]
     extent = scene.scene_extent
     print(f"loaded {n_cams} cameras, {n_init} init points, scene_extent={extent:.3f}")
+    #print(f"schedule: densify [{args.densify_from}, {args.densify_to}] every {args.densify_every}, "
+    #      f"opacity_reset@{args.opacity_reset_iters or 'none'}")
+
+    print(f"schedule: densify [{args.densify_from}, {args.densify_to}] every {args.densify_every}")
 
     cfg = DensifyConfig(
         n_scoring_views=args.n_scoring_views,
         loss_thresh=args.loss_thresh,
         importance_thresh=args.importance_thresh,
-        t_split_scale=args.t_split_scale,
+        t_split_scale=args.t_split_scale * extent,
         t_opacity=args.t_opacity,
         t_big_scale=args.t_big_scale * extent,
         growth_rate=args.growth_rate,
@@ -123,7 +131,7 @@ def main() -> None:
         "preview_every": args.preview_every, "log_every": args.log_every,
         "densify_every": args.densify_every,
         "densify_from": args.densify_from, "densify_to": args.densify_to,
-        "opacity_reset_iters": args.opacity_reset_iters,
+        #"opacity_reset_iters": args.opacity_reset_iters,
         "densify_config": {
             "n_scoring_views": cfg.n_scoring_views,
             "loss_thresh": cfg.loss_thresh,
@@ -140,14 +148,21 @@ def main() -> None:
         "run_name": run_name, "n_cams": n_cams, "n_init_points": n_init,
     }, indent=2))
 
-    targets_srgb = [load_image(e, scene.image_dir, args.width, args.height)
+    use_alpha = args.w_alpha > 0
+    targets_srgb = [load_image(e, scene.image_dir, args.width, args.height,
+                               load_alpha=use_alpha)
                     for e in scene.images]
-    targets_linear = [_srgb_to_linear(t) for t in targets_srgb]
+    targets_linear = [_srgb_to_linear(t[..., :3]) for t in targets_srgb]
     for cam_i, (entry, tgt) in enumerate(zip(scene.images, targets_srgb)):
         cam_dir = cams_dir / f"cam_{cam_i:02d}"
         cam_dir.mkdir(parents=True, exist_ok=True)
-        Image.fromarray((tgt * 255 + 0.5).clip(0, 255).astype(np.uint8),
-                        mode="RGB").save(cam_dir / "gt.png")
+        if use_alpha and tgt.shape[-1] == 4:
+            # Save RGBA so transparent background is visible in the GT.
+            gt_rgba = (tgt * 255 + 0.5).clip(0, 255).astype(np.uint8)
+            Image.fromarray(gt_rgba, mode="RGBA").save(cam_dir / "gt.png")
+        else:
+            gt_rgb = (tgt[..., :3] * 255 + 0.5).clip(0, 255).astype(np.uint8)
+            Image.fromarray(gt_rgb, mode="RGB").save(cam_dir / "gt.png")
 
     device = create_device(backend=args.backend)
     pipeline = Pipeline(
@@ -155,6 +170,9 @@ def main() -> None:
         max_splats=args.max_splats,
     )
     pipeline.z_near_cull = args.z_near_cull
+    pipeline.opacity_reg = args.opacity_reg
+    pipeline.scale_reg = args.scale_reg
+    pipeline.w_alpha = args.w_alpha
     pipeline.set_gaussians_from_numpy(**scene.initial_points)
     pipeline.clear_tracking()
 
@@ -170,7 +188,7 @@ def main() -> None:
     log_txt.write(f"# v2 training log — scene={args.scene}, backend={args.backend}\n")
     log_txt.write(f"# iters={args.iters}, resolution={args.width}x{args.height}, n_cams={n_cams}\n")
     log_txt.write(f"# densify: every {args.densify_every} iters in "
-                  f"[{args.densify_from}, {args.densify_to}], opacity_reset@{args.opacity_reset_iters}\n")
+                  f"[{args.densify_from}, {args.densify_to}]\n")
 
     rng = np.random.default_rng(args.seed)
 
@@ -192,10 +210,10 @@ def main() -> None:
         lrs = AdamLRs(mean=lr_mean_init * (decay ** (it - 1)))
         pipeline.train_step(entry.camera, lrs=lrs)
 
-        # Densification schedule — still in float32 `it`, cheap predicate.
+        # Densification schedule.
         do_densify = (args.densify_from <= it <= args.densify_to
                       and (it - args.densify_from) % args.densify_every == 0)
-        do_opacity_reset = it in args.opacity_reset_iters
+        do_opacity_reset = (it % 3000 == 0 and it >= args.densify_from and it < args.iters)
         do_log = (it % args.log_every == 0) or (it == 1) or (it == args.iters)
         do_preview = (it % args.preview_every == 0) or (it == args.iters)
 
@@ -205,11 +223,12 @@ def main() -> None:
             print(f"iter {it}: opacity reset")
 
         if do_densify:
-            # Suppress opacity pruning before the first opacity reset.
-            densify_cfg = cfg
-            if args.opacity_reset_iters and it < args.opacity_reset_iters[0]:
-                from dataclasses import replace
-                densify_cfg = replace(cfg, t_opacity=0.0)
+            # Before iter 3000: no big-scale pruning (FastGS behavior).
+            from dataclasses import replace
+            if it <= 3000:
+                densify_cfg = replace(cfg, t_big_scale=float('inf'))
+            else:
+                densify_cfg = cfg
 
             # Sample N cameras for importance scoring.
             n_score = min(densify_cfg.n_scoring_views, n_cams)

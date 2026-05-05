@@ -83,7 +83,7 @@ void forwardRasterize(
             break;
     }
 
-    output_image[pixel] = float4(C, 1.0);
+    output_image[pixel] = float4(C, 1.0 - T);
     output_transmittance[pixel] = T;
     gaussian_count_per_pixel[pixel] = processed;
 }

@@ -1,25 +1,17 @@
 // Phase A of densification: decide per-gaussian action using FastGS
-// multi-view importance score with growth budget.
-//
-// One thread per gaussian. Reads the importance score accumulated over
-// N scoring views + current log_scale/opacity, writes
-// ``action[i] in {KEEP, SPLIT, CLONE, PRUNE}``.
+// multi-view importance score with budget-limited growth AND pruning.
 //
 // Decision rules:
 //   importance = importance_score_accum[i] / n_scoring_views
 //   max_scale  = max(exp(log_scale))
 //
-//   PRUNE  if  sigmoid(opacity) < t_opacity  OR  max_scale > t_big_scale
+//   PRUNE candidates:
+//     sigmoid(opacity) < t_opacity  OR  max_scale > t_big_scale
+//     Budget-limited: only 50% of candidates are actually pruned (atomic).
 //   SPLIT  if  importance > importance_thresh  AND  max_scale > t_split_scale
 //   CLONE  if  importance > importance_thresh  AND  max_scale <= t_split_scale
+//     Budget-limited by growth_budget.
 //   KEEP   otherwise
-//
-// Growth is budget-limited: a shared atomic counter (growth_budget) is
-// decremented by each thread that wants to split/clone. Once the budget
-// hits zero, remaining candidates are demoted to KEEP. This gives
-// approximate top-N selection (threads with higher importance that race
-// first get the budget — not perfectly ranked but good enough for
-// stochastic training).
 
 #include "../common/types.slang"
 #include "../common/math.slang"
@@ -38,6 +30,7 @@ void decideActions(
     StructuredBuffer<uint> importance_score_accum,
     RWStructuredBuffer<uint> action,
     RWStructuredBuffer<int> growth_budget,
+    RWStructuredBuffer<int> prune_budget,
     uniform float importance_thresh,
     uniform float t_split_scale,
     uniform float t_opacity,
@@ -58,10 +51,21 @@ void decideActions(
     float max_scale = max(scale.x, max(scale.y, scale.z));
     float opacity = sigmoid(g.opacity);
 
-    // Prune: low opacity or oversized world-space scale.
-    if (opacity < t_opacity || max_scale > t_big_scale)
+    // Prune candidates: low opacity or oversized.
+    bool is_prune_candidate = (opacity < t_opacity) || (max_scale > t_big_scale);
+    if (is_prune_candidate)
     {
-        action[i] = ACTION_PRUNE;
+        // Budget-limited: only 50% of candidates actually get pruned.
+        int remaining;
+        InterlockedAdd(prune_budget[0], -1, remaining);
+        if (remaining > 0)
+        {
+            action[i] = ACTION_PRUNE;
+        }
+        else
+        {
+            action[i] = ACTION_KEEP;
+        }
         return;
     }
 
@@ -69,8 +73,6 @@ void decideActions(
 
     if (importance > importance_thresh)
     {
-        // Consume one unit of growth budget via atomic decrement.
-        // If budget is already <= 0, demote to KEEP.
         int remaining;
         InterlockedAdd(growth_budget[0], -1, remaining);
         if (remaining <= 0)

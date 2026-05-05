@@ -1,19 +1,16 @@
-// L2 loss in linear color space.
+// L2 loss in linear color space with optional alpha supervision.
 //
-// Reads the rendered output (linear RGB) and the ground-truth target
-// (sRGB-encoded PNG values), converts target to linear, writes the
-// per-pixel gradient ``dL/dC`` to a UAV texture that the backward
-// rasterizer reads. No gamma in the backward path (PLAN.md Q12).
+// Reads the rendered output (linear RGB + alpha in .a) and the ground-truth
+// target (sRGB-encoded RGB + alpha in .a), converts target RGB to linear,
+// writes the per-pixel gradient ``dL/dC`` to a UAV texture that the backward
+// rasterizer reads.
 //
-// L2 loss per pixel: L_pixel = sum_c (C_c - T_c)^2
+// L2 loss per pixel: L_pixel = sum_c (C_c - T_c)^2 + w_alpha * (A_r - A_t)^2
 // dL/dC_c = 2 * (C_c - T_c)
-// Loss is averaged over pixels in Python by dividing the accumulated
-// parameter gradients by pixel count — the shader itself does not
-// normalize so the per-pixel gradient is just the raw 2*(C - T).
+// dL/dA   = 2 * w_alpha * (A_r - A_t)  (stored in dL_dC.a)
 
 static float srgb_to_linear_scalar(float c)
 {
-    // IEC 61966-2-1 sRGB -> linear.
     return c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4);
 }
 
@@ -33,15 +30,28 @@ void computeLossGrad(
     RWTexture2D<float4> output_image,
     RWTexture2D<float4> target_image,
     RWTexture2D<float4> dL_dC,
-    uniform uint2 frame_dim)
+    uniform uint2 frame_dim,
+    uniform float w_alpha)
 {
     uint2 p = dtid.xy;
     if (p.x >= frame_dim.x || p.y >= frame_dim.y) return;
 
-    float3 C = output_image[p].rgb;
-    float3 T_srgb = target_image[p].rgb;
+    float4 rendered = output_image[p];
+    float4 target = target_image[p];
+
+    float3 C = rendered.rgb;
+    float3 T_srgb = target.rgb;
     float3 T_linear = srgb_to_linear(T_srgb);
 
-    float3 grad = 2.0 * (C - T_linear);
-    dL_dC[p] = float4(grad, 0.0);
+    float3 grad_rgb = 2.0 * (C - T_linear);
+
+    float grad_alpha = 0.0;
+    if (w_alpha > 0.0)
+    {
+        float A_rendered = rendered.a;
+        float A_target = target.a;
+        grad_alpha = 2.0 * w_alpha * (A_rendered - A_target);
+    }
+
+    dL_dC[p] = float4(grad_rgb, grad_alpha);
 }
