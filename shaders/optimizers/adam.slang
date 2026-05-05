@@ -1,16 +1,8 @@
 // Adam optimizer step.
 //
-// One thread per gaussian. Reads SoA int32 fixed-point gradients,
-// converts to float, runs Adam, writes updated params and m/v state.
-// No atomics needed — each thread owns its gaussian's slot across all
-// 14 grad buffers and one AdamState record.
-//
-// The training_step counter is incremented by Python (one write per step)
-// *before* this kernel runs; we read it as a uniform.
-//
-// LR decay: positional lr decays exponentially over a fixed schedule
-// (PLAN.md Q15, restricted to lr_mean). Python passes the already-decayed
-// value.
+// One thread per gaussian. Reads float gradient accumulators (summed by
+// the backward pass via float atomics), normalizes by pixel count, runs
+// Adam, writes updated params and m/v state.
 
 #include "../common/types.slang"
 
@@ -29,8 +21,6 @@ struct AdamConfig
     float bias_correction2;
 };
 
-// Scalar Adam step. Not a template — Slang generics get clunky for float3
-// element-wise ops, and inlining this by hand keeps the kernel readable.
 float adam_scalar(
     float param, float grad,
     inout float m, inout float v,
@@ -71,21 +61,21 @@ void adamStep(
     RWStructuredBuffer<Gaussian3D> gaussians,
     RWStructuredBuffer<AdamState> adam_state,
     StructuredBuffer<uint> num_gaussians_counter,
-    // Gradient buffers (SoA, fixed-point int32)
-    StructuredBuffer<int> grad_mean_x,
-    StructuredBuffer<int> grad_mean_y,
-    StructuredBuffer<int> grad_mean_z,
-    StructuredBuffer<int> grad_log_scale_x,
-    StructuredBuffer<int> grad_log_scale_y,
-    StructuredBuffer<int> grad_log_scale_z,
-    StructuredBuffer<int> grad_rot_w,
-    StructuredBuffer<int> grad_rot_x,
-    StructuredBuffer<int> grad_rot_y,
-    StructuredBuffer<int> grad_rot_z,
-    StructuredBuffer<int> grad_opacity,
-    StructuredBuffer<int> grad_color_r,
-    StructuredBuffer<int> grad_color_g,
-    StructuredBuffer<int> grad_color_b,
+    // Float gradient accumulators (accumulated via float atomics in backward).
+    RWStructuredBuffer<float> grad_mean_x,
+    RWStructuredBuffer<float> grad_mean_y,
+    RWStructuredBuffer<float> grad_mean_z,
+    RWStructuredBuffer<float> grad_log_scale_x,
+    RWStructuredBuffer<float> grad_log_scale_y,
+    RWStructuredBuffer<float> grad_log_scale_z,
+    RWStructuredBuffer<float> grad_rot_w,
+    RWStructuredBuffer<float> grad_rot_x,
+    RWStructuredBuffer<float> grad_rot_y,
+    RWStructuredBuffer<float> grad_rot_z,
+    RWStructuredBuffer<float> grad_opacity,
+    RWStructuredBuffer<float> grad_color_r,
+    RWStructuredBuffer<float> grad_color_g,
+    RWStructuredBuffer<float> grad_color_b,
     // Uniforms
     uniform AdamConfig cfg,
     uniform float pixels_per_step)
@@ -93,43 +83,28 @@ void adamStep(
     uint idx = dtid.x;
     if (idx >= num_gaussians_counter[0]) return;
 
-    // Load fixed-point grads; normalize by pixel count so the effective
-    // per-step gradient is an average over contributing pixels (matches
-    // what the loss normalization implies).
     float inv_pixels = 1.0 / max(pixels_per_step, 1.0);
+
+    // Read float gradients and normalize by pixel count.
     float3 g_mean = float3(
-        fromFixed(grad_mean_x[idx]),
-        fromFixed(grad_mean_y[idx]),
-        fromFixed(grad_mean_z[idx])
+        grad_mean_x[idx], grad_mean_y[idx], grad_mean_z[idx]
     ) * inv_pixels;
 
     float3 g_log_scale = float3(
-        fromFixed(grad_log_scale_x[idx]),
-        fromFixed(grad_log_scale_y[idx]),
-        fromFixed(grad_log_scale_z[idx])
+        grad_log_scale_x[idx], grad_log_scale_y[idx], grad_log_scale_z[idx]
     ) * inv_pixels;
 
     float4 g_rot = float4(
-        fromFixed(grad_rot_w[idx]),
-        fromFixed(grad_rot_x[idx]),
-        fromFixed(grad_rot_y[idx]),
-        fromFixed(grad_rot_z[idx])
+        grad_rot_w[idx], grad_rot_x[idx], grad_rot_y[idx], grad_rot_z[idx]
     ) * inv_pixels;
 
-    float g_op = fromFixed(grad_opacity[idx]) * inv_pixels;
+    float g_op = grad_opacity[idx] * inv_pixels;
 
     float3 g_color = float3(
-        fromFixed(grad_color_r[idx]),
-        fromFixed(grad_color_g[idx]),
-        fromFixed(grad_color_b[idx])
+        grad_color_r[idx], grad_color_g[idx], grad_color_b[idx]
     ) * inv_pixels;
 
-    // Boundary-style defensive check: if any gradient component is
-    // non-finite (NaN or Inf), skip this gaussian's update. Once a
-    // param goes NaN the forward renders NaN, loss is NaN, grad stays
-    // NaN — cascades forever. This guards the Adam step itself against
-    // adversarial numerical inputs. PLAN.md Q17 calls out boundaries
-    // as the one place defensive code earns its keep.
+    // NaN/Inf guard.
     bool any_bad = any(isnan(g_mean)) || any(isinf(g_mean))
                 || any(isnan(g_log_scale)) || any(isinf(g_log_scale))
                 || any(isnan(g_rot)) || any(isinf(g_rot))
@@ -149,7 +124,6 @@ void adamStep(
     g.rot_quat = adam_vec4(g.rot_quat, g_rot, s.rot_m, s.rot_v,
                            cfg.lr_rot, cfg.bias_correction1, cfg.bias_correction2);
 
-    // g.opacity is the pre-sigmoid logit. Unbounded — no clamp.
     g.opacity = adam_scalar(g.opacity, g_op, s.opacity_m, s.opacity_v,
                             cfg.lr_opacity, cfg.bias_correction1, cfg.bias_correction2);
 
@@ -158,4 +132,11 @@ void adamStep(
 
     gaussians[idx] = g;
     adam_state[idx] = s;
+
+    // Zero the gradient accumulators for the next iteration.
+    grad_mean_x[idx] = 0.0; grad_mean_y[idx] = 0.0; grad_mean_z[idx] = 0.0;
+    grad_log_scale_x[idx] = 0.0; grad_log_scale_y[idx] = 0.0; grad_log_scale_z[idx] = 0.0;
+    grad_rot_w[idx] = 0.0; grad_rot_x[idx] = 0.0; grad_rot_y[idx] = 0.0; grad_rot_z[idx] = 0.0;
+    grad_opacity[idx] = 0.0;
+    grad_color_r[idx] = 0.0; grad_color_g[idx] = 0.0; grad_color_b[idx] = 0.0;
 }

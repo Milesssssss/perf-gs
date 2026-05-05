@@ -138,12 +138,23 @@ void splitAndClone(
     }
     else if (a == ACTION_CLONE)
     {
-        // Exact duplicate of parent with zeroed Adam (gsplat semantics).
+        // Duplicate parent but halve opacity on both so the combined
+        // alpha contribution is unchanged: sigmoid(new_logit) = sigmoid(old_logit) / 2.
+        // new_logit = log(p/2 / (1 - p/2)) where p = sigmoid(old_logit).
+        float p = 1.0 / (1.0 + exp(-parent.opacity));
+        float half_p = p * 0.5;
+        float new_logit = log(half_p / (1.0 - half_p));
+
+        Gaussian3D clone = parent;
+        clone.opacity = new_logit;
+        gaussians[i].opacity = new_logit;
+        adam_state[i] = _zero_adam();
+
         uint tail;
         InterlockedAdd(num_gaussians_counter[0], 1u, tail);
         if (tail < max_splats)
         {
-            gaussians[tail] = parent;
+            gaussians[tail] = clone;
             adam_state[tail] = _zero_adam();
         }
     }

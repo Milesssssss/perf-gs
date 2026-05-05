@@ -34,6 +34,7 @@ class DensifyConfig:
     n_scoring_views: int = 10       # cameras sampled for importance scoring
     loss_thresh: float = 0.1        # L1 threshold for binary error mask
     importance_thresh: float = 5.0  # min importance to allow split/clone
+    prune_thresh: float = 50.0      # VCP: prune if importance > this (degrading quality)
     t_split_scale: float = 0.01     # max_scale > this => split (else clone)
     t_opacity: float = 0.005        # prune if sigmoid(opacity) < this
     t_big_scale: float = 0.1        # prune if max_scale > this (world-space floater removal)
@@ -52,7 +53,7 @@ class AdamLRs:
     Only ``mean`` has LR decay applied (PLAN.md Q15).
     """
     mean: float = 1.6e-4
-    scale: float = 5e-3
+    scale: float = 1e-3
     rot: float = 1e-3
     opacity: float = 2.5e-2
     color: float = 2.5e-3
@@ -509,7 +510,7 @@ class Pipeline:
             grad_log_scale_z=gb["log_scale_z"].storage,
             w_opacity=self.opacity_reg,
             w_scale=self.scale_reg,
-            inv_n=1.0 / float(self.max_splats),
+            inv_n=1.0,
         )
 
     def clear_tracking(self) -> None:
@@ -526,15 +527,14 @@ class Pipeline:
         )
 
     def read_tracking(self) -> dict[str, np.ndarray]:
-        """Read window-level tracking buffers as float / uint arrays of
-        length ``max_splats``. Used by tests and diagnostics."""
+        """Read window-level tracking buffers."""
         b = self.buffers
         raw_mag = b.grad_mean_2d_mag_accum.to_numpy()
         raw_vis = b.visibility_count_accum.to_numpy()
-        mag_int = np.frombuffer(raw_mag.tobytes(), dtype=np.int32)
+        mag = np.frombuffer(raw_mag.tobytes(), dtype=np.float32)
         vis = np.frombuffer(raw_vis.tobytes(), dtype=np.uint32)
         return {
-            "grad_mean_2d_mag": mag_int.astype(np.float64) / 65536.0,
+            "grad_mean_2d_mag": mag.astype(np.float64),
             "visibility_count": vis.astype(np.int64),
         }
 
@@ -956,17 +956,14 @@ class Pipeline:
     # ------------------------------------------------------------------
 
     def read_gradients(self) -> dict[str, np.ndarray]:
-        """Read back the 14 SoA grad buffers as float arrays of length
-        ``num_gaussians``. Fixed-point division happens on CPU."""
+        """Read back the 14 SoA float grad buffers."""
         from trainer.buffers import GRAD_SCALAR_COMPONENTS as NAMES
 
         n = int(self.buffers.num_gaussians_counter.to_numpy().view(np.uint32)[0])
-        inv = 1.0 / 65536.0
         out: dict[str, np.ndarray] = {}
         for name in NAMES:
             raw = self.buffers.grad_buffers[name].to_numpy()
-            ints = np.frombuffer(raw.tobytes(), dtype=np.int32)[:n]
-            out[name] = ints.astype(np.float64) * inv
+            out[name] = np.frombuffer(raw.tobytes(), dtype=np.float32)[:n].astype(np.float64)
         return out
 
     def read_loss(self) -> float:

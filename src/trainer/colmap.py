@@ -110,9 +110,10 @@ def _parse_images(path: Path) -> list[dict]:
     return entries
 
 
-def _parse_points3d(path: Path) -> np.ndarray:
-    """Return (N, 3) float32 array of world-space point positions."""
+def _parse_points3d(path: Path) -> tuple[np.ndarray, np.ndarray]:
+    """Return (positions (N,3) float32, colors (N,3) float32 in [0,1])."""
     pts: list[list[float]] = []
+    colors: list[list[float]] = []
     with path.open("r") as f:
         for line in f:
             line = line.strip()
@@ -120,7 +121,10 @@ def _parse_points3d(path: Path) -> np.ndarray:
                 continue
             parts = line.split()
             pts.append([float(parts[1]), float(parts[2]), float(parts[3])])
-    return np.array(pts, dtype=np.float32)
+            colors.append([int(parts[4]) / 255.0, int(parts[5]) / 255.0, int(parts[6]) / 255.0])
+    positions = np.array(pts, dtype=np.float32) if pts else np.zeros((0, 3), dtype=np.float32)
+    rgb = np.array(colors, dtype=np.float32) if colors else np.zeros((0, 3), dtype=np.float32)
+    return positions, rgb
 
 
 def _view_matrix(qw: float, qx: float, qy: float, qz: float,
@@ -172,25 +176,156 @@ def _projection_matrix(fx: float, fy: float, cx: float, cy: float,
     return M
 
 
+def _srgb_colors_to_logits(srgb: np.ndarray) -> np.ndarray:
+    """Convert sRGB [0,1] colors to sigmoid-logit space for color_logit param."""
+    # sRGB -> linear
+    linear = np.where(srgb <= 0.04045, srgb / 12.92,
+                      ((srgb + 0.055) / 1.055) ** 2.4).astype(np.float32)
+    # Clamp to avoid log(0) or log(inf)
+    linear = np.clip(linear, 1e-5, 1.0 - 1e-5)
+    # linear -> logit: sigmoid^-1(x) = log(x / (1-x))
+    return np.log(linear / (1.0 - linear)).astype(np.float32)
+
+
+def _find_sparse_dir(scene_dir: Path) -> tuple[Path | None, str]:
+    """Find the COLMAP sparse reconstruction, trying common layouts.
+
+    Returns (directory, format) where format is 'text' or 'bin'.
+    Tries in order:
+      sparse/0/text/cameras.txt
+      sparse/0/cameras.txt
+      sparse/0/cameras.bin
+    """
+    # sparse/0/text/*.txt
+    d = scene_dir / "sparse" / "0" / "text"
+    if (d / "cameras.txt").exists():
+        return d, "text"
+    # sparse/0/*.txt
+    d = scene_dir / "sparse" / "0"
+    if (d / "cameras.txt").exists():
+        return d, "text"
+    # sparse/0/*.bin
+    if (d / "cameras.bin").exists():
+        return d, "bin"
+    return None, ""
+
+
+def _parse_cameras_bin(path: Path) -> dict[int, dict]:
+    """Parse COLMAP binary cameras.bin."""
+    import struct
+    cameras: dict[int, dict] = {}
+    with path.open("rb") as f:
+        num_cameras = struct.unpack("<Q", f.read(8))[0]
+        for _ in range(num_cameras):
+            cam_id, model_id, w, h = struct.unpack("<iIQQ", f.read(24))
+            # Model IDs: 0=SIMPLE_PINHOLE(3), 1=PINHOLE(4), ...
+            if model_id == 0:  # SIMPLE_PINHOLE
+                params = struct.unpack("<3d", f.read(24))
+                fx = fy = params[0]
+                cx, cy = params[1], params[2]
+                model = "SIMPLE_PINHOLE"
+            elif model_id == 1:  # PINHOLE
+                params = struct.unpack("<4d", f.read(32))
+                fx, fy, cx, cy = params
+                model = "PINHOLE"
+            else:
+                # Skip unknown models — read param count from model table
+                num_params = {2: 4, 3: 5, 4: 5, 5: 12}.get(model_id, 4)
+                f.read(num_params * 8)
+                continue
+            cameras[cam_id] = {
+                "model": model, "width": int(w), "height": int(h),
+                "fx": fx, "fy": fy, "cx": cx, "cy": cy,
+            }
+    return cameras
+
+
+def _parse_images_bin(path: Path) -> list[dict]:
+    """Parse COLMAP binary images.bin."""
+    import struct
+    entries: list[dict] = []
+    with path.open("rb") as f:
+        num_images = struct.unpack("<Q", f.read(8))[0]
+        for _ in range(num_images):
+            image_id = struct.unpack("<i", f.read(4))[0]
+            qw, qx, qy, qz = struct.unpack("<4d", f.read(32))
+            tx, ty, tz = struct.unpack("<3d", f.read(24))
+            camera_id = struct.unpack("<i", f.read(4))[0]
+            # Image name: null-terminated string.
+            name_bytes = b""
+            while True:
+                c = f.read(1)
+                if c == b"\x00":
+                    break
+                name_bytes += c
+            name = name_bytes.decode("utf-8")
+            # Skip 2D points (num_points2D * (x, y, point3D_id)).
+            num_points2d = struct.unpack("<Q", f.read(8))[0]
+            f.read(num_points2d * 24)  # 2 doubles + 1 int64
+            entries.append({
+                "image_id": image_id,
+                "qw": qw, "qx": qx, "qy": qy, "qz": qz,
+                "tx": tx, "ty": ty, "tz": tz,
+                "camera_id": camera_id,
+                "name": name,
+            })
+    return entries
+
+
+def _parse_points3d_bin(path: Path) -> tuple[np.ndarray, np.ndarray]:
+    """Parse COLMAP binary points3D.bin. Returns (positions, colors)."""
+    import struct
+    pts: list[list[float]] = []
+    colors: list[list[float]] = []
+    with path.open("rb") as f:
+        num_points = struct.unpack("<Q", f.read(8))[0]
+        for _ in range(num_points):
+            point3d_id = struct.unpack("<Q", f.read(8))[0]
+            x, y, z = struct.unpack("<3d", f.read(24))
+            r, g, b = struct.unpack("<3B", f.read(3))
+            error = struct.unpack("<d", f.read(8))[0]
+            track_length = struct.unpack("<Q", f.read(8))[0]
+            f.read(track_length * 8)
+            pts.append([x, y, z])
+            colors.append([r / 255.0, g / 255.0, b / 255.0])
+    positions = np.array(pts, dtype=np.float32) if pts else np.zeros((0, 3), dtype=np.float32)
+    rgb = np.array(colors, dtype=np.float32) if colors else np.zeros((0, 3), dtype=np.float32)
+    return positions, rgb
+
+
 def load_colmap(
     scene_dir: Path | str,
     width: int | None = None,
     height: int | None = None,
 ) -> ColmapDataset:
-    """Load a COLMAP scene from ``<scene_dir>/sparse/0/text/``.
+    """Load a COLMAP scene, auto-detecting text vs binary format.
+
+    Tries these paths in order:
+      <scene_dir>/sparse/0/text/cameras.txt  (text)
+      <scene_dir>/sparse/0/cameras.txt       (text)
+      <scene_dir>/sparse/0/cameras.bin       (binary)
 
     ``width`` / ``height`` are the *target render resolution* — if they
     differ from the COLMAP camera's native width/height, the principal
-    point and focal length scale linearly. All cameras in the scene are
-    assumed to share the same native resolution (we assert this).
+    point and focal length scale linearly.
     """
     scene_dir = Path(scene_dir)
-    text_dir = scene_dir / "sparse" / "0" / "text"
     img_dir = scene_dir / "images"
 
-    cams = _parse_cameras(text_dir / "cameras.txt")
-    imgs = _parse_images(text_dir / "images.txt")
-    pts3d = _parse_points3d(text_dir / "points3D.txt")
+    sparse_dir, fmt = _find_sparse_dir(scene_dir)
+    if sparse_dir is None:
+        raise FileNotFoundError(
+            f"No COLMAP sparse reconstruction found in {scene_dir}/sparse/0/ "
+            f"(tried text/*.txt, *.txt, *.bin)")
+
+    if fmt == "text":
+        cams = _parse_cameras(sparse_dir / "cameras.txt")
+        imgs = _parse_images(sparse_dir / "images.txt")
+        pts3d, pts_colors = _parse_points3d(sparse_dir / "points3D.txt")
+    else:
+        cams = _parse_cameras_bin(sparse_dir / "cameras.bin")
+        imgs = _parse_images_bin(sparse_dir / "images.bin")
+        pts3d, pts_colors = _parse_points3d_bin(sparse_dir / "points3D.bin")
 
     # Sanity: all cameras same native resolution.
     native_sizes = {(c["width"], c["height"]) for c in cams.values()}
@@ -241,17 +376,16 @@ def load_colmap(
     # distance 0), average the next 3.
     from scipy.spatial import cKDTree
     k = 3
+    init_scale = 1.0
     if n >= k + 1:
         tree = cKDTree(pts3d)
         dists, _ = tree.query(pts3d, k=k + 1)   # (n, k+1), col 0 is self
-        knn_dist = dists[:, 1:k + 1].mean(axis=-1).astype(np.float32)
-        # Floor at a small minimum so coincident points don't produce
-        # zero-scale gaussians.
-        knn_dist = np.clip(knn_dist, 1e-4, None)
+        dist_sq = (dists[:, 1:k + 1] ** 2).mean(axis=-1).astype(np.float32)
+        dist_sq = np.clip(dist_sq, 1e-7, None)
+        knn_dist = np.sqrt(dist_sq)
     else:
-        # Fallback for degenerate scenes.
         knn_dist = np.full(n, 0.01, dtype=np.float32)
-    log_scale_per_point = np.log(knn_dist)
+    log_scale_per_point = np.log(knn_dist * init_scale)
 
     initial_points = {
         "means": pts3d,
@@ -261,12 +395,9 @@ def load_colmap(
         "rot_quats": np.tile(np.array([1, 0, 0, 0], dtype=np.float32), (n, 1)),
         # Initial opacity 0.1 (probability; converted to logit by
         # write_gaussians before upload).
-        "opacities": np.full(n, 0.1, dtype=np.float32),
-        # Mid-gray color (sigmoid(0) = 0.5). The points.txt typically
-        # carries real colors but we ignore those in v1 (PLAN.md): the
-        # scene doesn't benefit materially and it's one fewer thing to
-        # plumb through the loader.
-        "color_logits": np.zeros((n, 3), dtype=np.float32),
+        "opacities": np.full(n, 0.01, dtype=np.float32),
+        # Color logits from SfM point colors. Convert sRGB -> linear -> logit.
+        "color_logits": _srgb_colors_to_logits(pts_colors),
     }
 
     # Scene extent: radius of the camera bounding sphere * 1.1 (gsplat/3DGS

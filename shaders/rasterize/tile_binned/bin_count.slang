@@ -72,48 +72,6 @@ void binCount(
     uint2 tile_max = uint2(bbox_max) / TILE_SIZE;
     tile_max = min(tile_max, num_tiles - 1);
 
-    EllipseParams e;
-    if (!computeEllipseParams(cov2d, g.opacity, e)) return;
-    float x_d_args, y_d_args;
-    computeExtremumOffsets(e, x_d_args, y_d_args);
-
-    uint tiles_y_span = tile_max.y - tile_min.y + 1;
-    uint tiles_x_span = tile_max.x - tile_min.x + 1;
-
-    uint count = 0;
-    if (tiles_y_span <= tiles_x_span)
-    {
-        for (uint ty = tile_min.y; ty <= tile_max.y; ++ty)
-        {
-            float row_y_bot = float(ty * TILE_SIZE);
-            float row_y_top = float((ty + 1) * TILE_SIZE);
-            float2 xr = accuTileRowXRange(
-                e, mean_2d.y, bbox_min.x, bbox_max.x,
-                y_d_args, mean_2d, row_y_bot, row_y_top);
-            if (xr.y < xr.x) continue;
-            uint tx_min = uint(max(xr.x, 0.0)) / TILE_SIZE;
-            uint tx_max = uint(max(xr.y, 0.0)) / TILE_SIZE;
-            tx_min = max(tx_min, tile_min.x);
-            tx_max = min(tx_max, tile_max.x);
-            count += (tx_max - tx_min + 1);
-        }
-    }
-    else
-    {
-        for (uint tx = tile_min.x; tx <= tile_max.x; ++tx)
-        {
-            float col_x_left  = float(tx * TILE_SIZE);
-            float col_x_right = float((tx + 1) * TILE_SIZE);
-            float2 yr = accuTileColYRange(
-                e, mean_2d.x, bbox_min.y, bbox_max.y,
-                x_d_args, mean_2d, col_x_left, col_x_right);
-            if (yr.y < yr.x) continue;
-            uint ty_min = uint(max(yr.x, 0.0)) / TILE_SIZE;
-            uint ty_max = uint(max(yr.y, 0.0)) / TILE_SIZE;
-            ty_min = max(ty_min, tile_min.y);
-            ty_max = min(ty_max, tile_max.y);
-            count += (ty_max - ty_min + 1);
-        }
-    }
+    uint count = (tile_max.x - tile_min.x + 1) * (tile_max.y - tile_min.y + 1);
     tile_count_per_gaussian[gid] = count;
 }

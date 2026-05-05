@@ -32,6 +32,7 @@ from PIL import Image
 from trainer.colmap import load_colmap, load_image
 from trainer.device import create_device
 from trainer.export import render_to_png, save_ply
+from trainer.viewer import Viewer
 from trainer.pipeline import AdamLRs, DensifyConfig, Pipeline
 
 
@@ -79,6 +80,7 @@ def main() -> None:
     ap.add_argument("--n-scoring-views", type=int, default=10)
     ap.add_argument("--loss-thresh", type=float, default=0.1)
     ap.add_argument("--importance-thresh", type=float, default=5.0)
+    ap.add_argument("--prune-thresh", type=float, default=50.0)
     ap.add_argument("--t-split-scale", type=float, default=0.01)
     ap.add_argument("--t-opacity", type=float, default=0.005)
     ap.add_argument("--t-big-scale", type=float, default=0.1)
@@ -96,6 +98,7 @@ def main() -> None:
                          "where points can land near a camera pose (e.g. 0.2)")
     ap.add_argument("--profile-every", type=int, default=500,
                     help="profile one full step every N iters (0 to disable)")
+    ap.add_argument("--no-viewer", action="store_true", help="disable live viewer")
     ap.add_argument("--backend", type=str, default="vulkan", choices=["vulkan", "d3d12"])
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--run-name", type=str, default=None)
@@ -121,6 +124,7 @@ def main() -> None:
         n_scoring_views=args.n_scoring_views,
         loss_thresh=args.loss_thresh,
         importance_thresh=args.importance_thresh,
+        prune_thresh=args.prune_thresh,
         t_split_scale=args.t_split_scale * extent,
         t_opacity=args.t_opacity,
         t_big_scale=args.t_big_scale * extent,
@@ -181,6 +185,13 @@ def main() -> None:
     pipeline.set_gaussians_from_numpy(**scene.initial_points)
     pipeline.clear_tracking()
 
+    # Launch live viewer.
+    viewer = None
+    if not args.no_viewer:
+        viewer = Viewer(device, width=args.width, height=args.height,
+                        max_splats=args.max_splats)
+        viewer.start()
+
     # Pre-upload every target image as its own GPU texture. Per-iter we
     # just swap the active reference — no CPU→GPU upload in the hot loop.
     target_textures = [pipeline.create_target_texture(t) for t in targets_srgb]
@@ -216,6 +227,10 @@ def main() -> None:
         lrs = AdamLRs(mean=lr_mean_init * (decay ** (it - 1)))
         pipeline.train_step(entry.camera, lrs=lrs)
 
+        # Update viewer every 100 iters.
+        if viewer and it % 100 == 0:
+            viewer.update_gaussians(pipeline)
+
         # Densification schedule.
         do_densify = (args.densify_from <= it <= args.densify_to
                       and (it - args.densify_from) % args.densify_every == 0)
@@ -229,12 +244,7 @@ def main() -> None:
             print(f"iter {it}: opacity reset")
 
         if do_densify:
-            # Before iter 3000: no big-scale pruning (FastGS behavior).
-            from dataclasses import replace
-            if it <= 3000:
-                densify_cfg = replace(cfg, t_big_scale=float('inf'))
-            else:
-                densify_cfg = cfg
+            densify_cfg = cfg
 
             # Sample N cameras for importance scoring.
             n_score = min(densify_cfg.n_scoring_views, n_cams)
@@ -351,6 +361,8 @@ def main() -> None:
                   f"adam={timings['adam_ms']:.1f}  total={timings['total_ms']:.1f} ms  "
                   f"n_g={cur_n_gaussians}")
 
+    if viewer:
+        viewer.stop()
     if profile_json:
         profile_json.close()
     log_txt.close()
@@ -374,7 +386,7 @@ def main() -> None:
         mse_lin = float(np.mean((r_lin - t_lin) ** 2))
 
         r_srgb = np.clip(r_lin, 0.0, 1.0) ** (1.0 / 2.2)
-        t_srgb = targets_srgb[cam_i]
+        t_srgb = targets_srgb[cam_i][..., :3]
         mse_srgb = float(np.mean((r_srgb - t_srgb) ** 2))
 
         mask = (t_srgb.sum(-1) > 0.05) | (r_srgb.sum(-1) > 0.05)

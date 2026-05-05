@@ -107,9 +107,9 @@ def test_densify_action_counts(backend: str) -> None:
 
 
 @pytest.mark.parametrize("backend", BACKENDS)
-def test_densify_clone_preserves_parent(backend: str) -> None:
-    """A small gaussian with high importance should be CLONED. Both the
-    parent and clone should have identical params."""
+def test_densify_clone_halves_opacity(backend: str) -> None:
+    """A small gaussian with high importance should be CLONED with halved
+    opacity on both parent and clone."""
     pipeline = _setup(backend)
 
     pipeline.set_gaussians_from_numpy(
@@ -119,7 +119,6 @@ def test_densify_clone_preserves_parent(backend: str) -> None:
         opacities=np.array([0.7], dtype=np.float32),
         color_logits=np.array([[0.3, -0.5, 0.8]], dtype=np.float32),
     )
-    pre = _read_gaussians(pipeline)
 
     cfg = DensifyConfig(
         n_scoring_views=10, importance_thresh=5.0,
@@ -135,8 +134,10 @@ def test_densify_clone_preserves_parent(backend: str) -> None:
     assert stats["final_count"] == 2
 
     post = _read_gaussians(pipeline)
-    np.testing.assert_allclose(post[0], pre[0], atol=1e-6)
-    np.testing.assert_allclose(post[1], pre[0], atol=1e-6)
+    # Both should have opacity logit corresponding to 0.7/2 = 0.35
+    expected_logit = float(np.log(0.35 / (1.0 - 0.35)))
+    np.testing.assert_allclose(post[0, 10], expected_logit, atol=1e-4)
+    np.testing.assert_allclose(post[1, 10], expected_logit, atol=1e-4)
 
 
 @pytest.mark.parametrize("backend", BACKENDS)
