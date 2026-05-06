@@ -78,7 +78,7 @@ def main() -> None:
                     help="force render height (overrides --downsample)")
     ap.add_argument("--preview-every", type=int, default=1000)
     ap.add_argument("--log-every", type=int, default=500)
-    ap.add_argument("--densify-every", type=int, default=500)
+    ap.add_argument("--densify-every", type=int, default=100)
     ap.add_argument("--densify-from", type=int, default=500)
     ap.add_argument("--densify-to", type=int, default=15000)
     #ap.add_argument("--opacity-reset-iters", type=int, nargs="*", default=[3000])
@@ -86,7 +86,7 @@ def main() -> None:
     ap.add_argument("--loss-thresh", type=float, default=0.1)
     ap.add_argument("--importance-thresh", type=float, default=5.0)
     ap.add_argument("--prune-thresh", type=float, default=50.0)
-    ap.add_argument("--t-split-scale", type=float, default=0.01)
+    ap.add_argument("--t-split-scale", type=float, default=0.001)
     ap.add_argument("--t-opacity", type=float, default=0.005)
     ap.add_argument("--t-big-scale", type=float, default=0.1)
     ap.add_argument("--growth-rate", type=float, default=1.0)
@@ -262,6 +262,7 @@ def main() -> None:
 
             pipeline.compute_importance_scores(score_cameras, score_targets, densify_cfg)
             stats = pipeline.densify(densify_cfg)
+            pipeline.clear_tracking()
             cur_n_gaussians = stats["final_count"]
             densify_json.write(json.dumps({"iter": it, "event": "densify", **stats}) + "\n")
             print(f"iter {it}: densify  "

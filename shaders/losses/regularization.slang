@@ -1,4 +1,4 @@
-// Opacity + scale regularization gradients (int32 fixed-point).
+// Opacity + scale regularization gradients (int64 fixed-point).
 
 #include "../common/types.slang"
 #include "../common/math.slang"
@@ -9,10 +9,10 @@ void addRegularization(
     uint3 dtid: SV_DispatchThreadID,
     StructuredBuffer<Gaussian3D> gaussians,
     StructuredBuffer<uint> num_gaussians_counter,
-    RWStructuredBuffer<int> grad_opacity,
-    RWStructuredBuffer<int> grad_log_scale_x,
-    RWStructuredBuffer<int> grad_log_scale_y,
-    RWStructuredBuffer<int> grad_log_scale_z,
+    RWStructuredBuffer<int64_t> grad_opacity,
+    RWStructuredBuffer<int64_t> grad_log_scale_x,
+    RWStructuredBuffer<int64_t> grad_log_scale_y,
+    RWStructuredBuffer<int64_t> grad_log_scale_z,
     uniform float w_opacity,
     uniform float w_scale,
     uniform float inv_n)

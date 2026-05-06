@@ -47,13 +47,11 @@ struct AdamState
     float3 color_v;
 };
 
-// Fixed-point atomic gradient accumulation.
-// Scale=4096 balances precision vs overflow headroom:
-// Max per-pixel contribution ~0.1 → 410 fixed. 500k pixels → 205M < 2.1B (int32 max).
-static const float FIXED_SCALE = 4096.0;
+// Fixed-point atomic gradient accumulation (int64, no overflow).
+static const float FIXED_SCALE = 65536.0;
 static const float FIXED_INV_SCALE = 1.0 / FIXED_SCALE;
 
-int toFixed(float f)   { return int(f * FIXED_SCALE); }
-float fromFixed(int i) { return float(i) * FIXED_INV_SCALE; }
+int64_t toFixed(float f)   { return int64_t(f * FIXED_SCALE); }
+float fromFixed(int64_t i) { return float(i) * FIXED_INV_SCALE; }
 
 #endif // TRAINER_TYPES_SLANG

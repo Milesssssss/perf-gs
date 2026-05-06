@@ -21,7 +21,8 @@
       "Grep",
       "WebFetch(domain:arxiv.org)",
       "Bash(gh api *)",
-      "WebFetch(domain:raw.githubusercontent.com)"
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "WebFetch(domain:github.com)"
     ],
     "deny": [
       "Bash(rm *)",

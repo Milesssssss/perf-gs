@@ -34,8 +34,10 @@ class DensifyConfig:
     n_scoring_views: int = 10       # cameras sampled for importance scoring
     loss_thresh: float = 0.1        # L1 threshold for binary error mask
     importance_thresh: float = 5.0  # min importance to allow split/clone
+    t_grad_clone: float = 0.000004   # clone threshold (~p99 of signal with L2 loss)
+    t_grad_split: float = 0.00002   # split threshold (~top 0.1% with L2 loss)
     prune_thresh: float = 50.0      # VCP: prune if importance > this (degrading quality)
-    t_split_scale: float = 0.01     # max_scale > this => split (else clone)
+    t_split_scale: float = 0.001    # max_scale > this => split (else clone)
     t_opacity: float = 0.005        # prune if sigmoid(opacity) < this
     t_big_scale: float = 0.1        # prune if max_scale > this (world-space floater removal)
     growth_rate: float = 0.05       # max growth per densify step (fraction of current count)
@@ -53,7 +55,7 @@ class AdamLRs:
     Only ``mean`` has LR decay applied (PLAN.md Q15).
     """
     mean: float = 1.6e-4
-    scale: float = 1e-3
+    scale: float = 5e-3
     rot: float = 1e-3
     opacity: float = 2.5e-2
     color: float = 2.5e-3
@@ -141,6 +143,7 @@ class Pipeline:
         self.k_scatter_compact = mk(densify / "scatter_compact.slang", "scatterCompact")
         self.k_opacity_reset = mk(densify / "opacity_reset.slang", "resetOpacity")
         self.k_clear_importance = mk(densify / "clear_importance.slang", "clearImportance")
+        self.k_compute_l1_minmax = mk(densify / "compute_error_mask.slang", "computeL1MinMax")
         self.k_compute_error_mask = mk(densify / "compute_error_mask.slang", "computeErrorMask")
         self.k_score_forward = mk(densify / "score_forward.slang", "scoreForward")
 
@@ -551,14 +554,14 @@ class Pipeline:
         )
 
     def read_tracking(self) -> dict[str, np.ndarray]:
-        """Read window-level tracking buffers (int32 fixed-point)."""
+        """Read window-level tracking buffers (int64 fixed-point)."""
         b = self.buffers
         raw_mag = b.grad_mean_2d_mag_accum.to_numpy()
         raw_vis = b.visibility_count_accum.to_numpy()
-        mag_int = np.frombuffer(raw_mag.tobytes(), dtype=np.int32)
+        mag_int = np.frombuffer(raw_mag.tobytes(), dtype=np.int64)
         vis = np.frombuffer(raw_vis.tobytes(), dtype=np.uint32)
         return {
-            "grad_mean_2d_mag": mag_int.astype(np.float64) / 4096.0,
+            "grad_mean_2d_mag": mag_int.astype(np.float64) / 65536.0,
             "visibility_count": vis.astype(np.int64),
         }
 
@@ -996,15 +999,15 @@ class Pipeline:
     # ------------------------------------------------------------------
 
     def read_gradients(self) -> dict[str, np.ndarray]:
-        """Read back the 14 SoA int32 fixed-point grad buffers."""
+        """Read back the 14 SoA int64 fixed-point grad buffers."""
         from trainer.buffers import GRAD_SCALAR_COMPONENTS as NAMES
 
         n = int(self.buffers.num_gaussians_counter.to_numpy().view(np.uint32)[0])
-        inv = 1.0 / 4096.0
+        inv = 1.0 / 65536.0
         out: dict[str, np.ndarray] = {}
         for name in NAMES:
             raw = self.buffers.grad_buffers[name].to_numpy()
-            ints = np.frombuffer(raw.tobytes(), dtype=np.int32)[:n]
+            ints = np.frombuffer(raw.tobytes(), dtype=np.int64)[:n]
             out[name] = ints.astype(np.float64) * inv
         return out
 
@@ -1093,10 +1096,24 @@ def compute_importance_scores(
     for cam, target_tex in zip(cameras, target_textures):
         self._run_forward(cam)
 
-        self._dispatch(self.k_compute_error_mask,
+        # Initialize minmax: min=+inf (0x7f7fffff), max=0 (0x00000000).
+        b.l1_minmax.copy_from_numpy(np.array([0x7f7fffff, 0x00000000], dtype=np.uint32))
+
+        # Pass 1: compute L1 per pixel, find min/max.
+        self._dispatch(self.k_compute_l1_minmax,
             thread_count=[self.width, self.height, 1],
             output_image=b.output_image,
             target_image=target_tex,
+            l1_map=b.l1_map,
+            minmax_buf=b.l1_minmax.storage,
+            frame_dim=spy.uint2(self.width, self.height),
+        )
+
+        # Pass 2: normalize and threshold.
+        self._dispatch(self.k_compute_error_mask,
+            thread_count=[self.width, self.height, 1],
+            l1_map=b.l1_map,
+            minmax_buf=b.l1_minmax.storage,
             error_mask=b.error_mask,
             frame_dim=spy.uint2(self.width, self.height),
             loss_thresh=cfg.loss_thresh,

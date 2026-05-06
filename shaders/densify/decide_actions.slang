@@ -72,7 +72,9 @@ void decideActions(
         return;
     }
 
-    // Growth: split large gaussians, clone small ones.
+    bool is_large = max_scale > t_split_scale;
+
+    // Growth: importance score is the primary signal (FastGS VCD).
     if (importance > importance_thresh)
     {
         int remaining;
@@ -82,7 +84,7 @@ void decideActions(
             action[i] = ACTION_KEEP;
             return;
         }
-        action[i] = (max_scale > t_split_scale) ? ACTION_SPLIT : ACTION_CLONE;
+        action[i] = is_large ? ACTION_SPLIT : ACTION_CLONE;
     }
     else
     {

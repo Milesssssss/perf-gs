@@ -109,6 +109,8 @@ class GaussianBuffers:
     growth_budget: spy.NDBuffer | None = None           # int[1]
     prune_budget: spy.NDBuffer | None = None            # int[1]
     error_mask: spy.Texture | None = None               # r32_uint, WxH
+    l1_map: spy.Texture | None = None                   # r32_float, WxH
+    l1_minmax: spy.NDBuffer | None = None               # uint[2]
 
     # --- v2 densification scratch + pipeline state ---
     gaussians_scratch: spy.NDBuffer | None = None   # Gaussian3D[max_splats]
@@ -207,7 +209,7 @@ def allocate(
     dL_dC_texture = _tex(spy.Format.rgba32_float, "dL_dC")
 
     grad_buffers: dict[str, spy.NDBuffer] = {
-        name: spy.NDBuffer(device=device, dtype="int", shape=(max_splats,))
+        name: spy.NDBuffer(device=device, dtype="int64_t", shape=(max_splats,))
         for name in GRAD_SCALAR_COMPONENTS
     }
 
@@ -216,10 +218,10 @@ def allocate(
     saturation_flag = spy.NDBuffer(device=device, dtype="uint", shape=(1,))
     training_step = spy.NDBuffer(device=device, dtype="uint", shape=(1,))
 
-    grad_mean_2d_mag_accum = spy.NDBuffer(device=device, dtype="int", shape=(max_splats,))
+    grad_mean_2d_mag_accum = spy.NDBuffer(device=device, dtype="int64_t", shape=(max_splats,))
     visibility_count_accum = spy.NDBuffer(device=device, dtype="uint", shape=(max_splats,))
-    grad_2d_x_iter = spy.NDBuffer(device=device, dtype="int", shape=(max_splats,))
-    grad_2d_y_iter = spy.NDBuffer(device=device, dtype="int", shape=(max_splats,))
+    grad_2d_x_iter = spy.NDBuffer(device=device, dtype="int64_t", shape=(max_splats,))
+    grad_2d_y_iter = spy.NDBuffer(device=device, dtype="int64_t", shape=(max_splats,))
 
     # FastGS importance scoring
     importance_score_accum = spy.NDBuffer(device=device, dtype="uint", shape=(max_splats,))
@@ -232,6 +234,14 @@ def allocate(
         usage=spy.TextureUsage.shader_resource | spy.TextureUsage.unordered_access,
         label="error_mask",
     )
+    l1_map = device.create_texture(
+        type=spy.TextureType.texture_2d,
+        format=spy.Format.r32_float,
+        width=width, height=height,
+        usage=spy.TextureUsage.shader_resource | spy.TextureUsage.unordered_access,
+        label="l1_map",
+    )
+    l1_minmax = spy.NDBuffer(device=device, dtype="uint", shape=(2,))
 
     # v2 densification scratch
     gaussians_scratch = spy.NDBuffer(device=device, dtype=gaussian_type, shape=(max_splats,))
@@ -288,6 +298,8 @@ def allocate(
         growth_budget=growth_budget,
         prune_budget=prune_budget,
         error_mask=error_mask,
+        l1_map=l1_map,
+        l1_minmax=l1_minmax,
         gaussians_scratch=gaussians_scratch,
         adam_state_scratch=adam_state_scratch,
         action_buffer=action_buffer,
