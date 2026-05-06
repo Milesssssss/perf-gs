@@ -76,8 +76,8 @@ def main() -> None:
                     help="force render width (overrides --downsample)")
     ap.add_argument("--height", type=int, default=None,
                     help="force render height (overrides --downsample)")
-    ap.add_argument("--preview-every", type=int, default=0)
-    ap.add_argument("--log-every", type=int, default=0)
+    ap.add_argument("--preview-every", type=int, default=1000)
+    ap.add_argument("--log-every", type=int, default=500)
     ap.add_argument("--densify-every", type=int, default=500)
     ap.add_argument("--densify-from", type=int, default=500)
     ap.add_argument("--densify-to", type=int, default=15000)
@@ -242,7 +242,7 @@ def main() -> None:
         # Densification schedule.
         do_densify = (args.densify_from <= it <= args.densify_to
                       and (it - args.densify_from) % args.densify_every == 0)
-        do_opacity_reset = (it % 3000 == 0 and it >= args.densify_from and it < args.iters)
+        do_opacity_reset = (it % 3000 == 0 and it >= args.densify_from and it <= args.densify_to)
         do_log = args.log_every > 0 and ((it % args.log_every == 0) or (it == 1) or (it == args.iters))
         do_preview = args.preview_every > 0 and ((it % args.preview_every == 0) or (it == args.iters))
 

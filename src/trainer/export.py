@@ -58,8 +58,14 @@ def save_ply(pipeline: Pipeline, path: str | Path) -> None:
     opacity_logit = floats[:, 10].astype(np.float32)   # stored as logit already
     color_logit = floats[:, 11:14]
 
+    # Our renderer: color = sigmoid(color_logit) in LINEAR space.
+    # 3DGS PLY convention: rendered_color = SH_C0 * f_dc + 0.5
+    # Viewers expect this to produce sRGB values, so we convert linear→sRGB first.
     linear_rgb = 1.0 / (1.0 + np.exp(-color_logit))
-    f_dc = ((linear_rgb - 0.5) / _SH_C0).astype(np.float32)
+    srgb_rgb = np.where(linear_rgb <= 0.0031308,
+                        linear_rgb * 12.92,
+                        1.055 * np.power(np.clip(linear_rgb, 0.0031308, None), 1.0/2.4) - 0.055)
+    f_dc = ((srgb_rgb - 0.5) / _SH_C0).astype(np.float32)
 
     dtype = [
         ("x", "f4"), ("y", "f4"), ("z", "f4"),

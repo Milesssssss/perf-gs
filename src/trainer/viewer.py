@@ -210,19 +210,28 @@ class Viewer:
         window.on_mouse_event = on_mouse
         window.on_resize = on_resize
 
+        configured = True
+
         while not window.should_close() and not self._stop_event.is_set():
             window.process_events()
 
             if needs_reconfigure:
                 needs_reconfigure = False
+                configured = False
                 new_w, new_h = window.width, window.height
                 if new_w > 0 and new_h > 0:
                     try:
                         self.device.wait_for_idle()
                         surface.unconfigure()
+                        self.device.wait_for_idle()
                         surface.configure(width=new_w, height=new_h)
-                    except Exception:
-                        pass
+                        configured = True
+                    except Exception as e:
+                        print(f"[Viewer] reconfigure failed: {e}")
+                continue
+
+            if not configured:
+                time.sleep(0.016)
                 continue
 
             now = time.perf_counter()
