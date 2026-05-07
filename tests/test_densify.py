@@ -69,11 +69,9 @@ def test_densify_action_counts(backend: str) -> None:
 
     # Inject importance scores and gradient signals.
     cfg = DensifyConfig(
-        n_scoring_views=10, importance_thresh=5.0,
-        t_grad_clone=0.0002, t_grad_split=0.0012,
-        t_split_scale=0.01, t_opacity=0.005,
+        n_scoring_views=10,
+        t_opacity=0.005,
         t_big_scale=10.0,   # disable big-scale prune for this test
-        growth_rate=1.0,     # no budget limit for this test
     )
     importance = np.zeros(pipeline.max_splats, dtype=np.uint32)
     importance[0] = 100  # high importance + small   -> CLONE
@@ -97,7 +95,7 @@ def test_densify_action_counts(backend: str) -> None:
     pipeline.buffers.grad_mean_2d_mag_accum.copy_from_numpy(mag)
     pipeline.buffers.visibility_count_accum.copy_from_numpy(vis)
 
-    stats = pipeline.densify(cfg)
+    stats = pipeline.densify(cfg, densify_step=1, n_densify_steps=1, init_count=0)
 
     # With gradient gate, only gaussians passing both importance AND grad threshold
     # are densified. Verify at least some growth happens.
@@ -122,10 +120,9 @@ def test_densify_clone_halves_opacity(backend: str) -> None:
     )
 
     cfg = DensifyConfig(
-        n_scoring_views=10, importance_thresh=5.0,
-        t_grad_clone=0.0002, t_grad_split=0.0012,
-        t_split_scale=0.01, t_opacity=0.005,
-        t_big_scale=10.0, growth_rate=1.0,
+        n_scoring_views=10,
+        t_opacity=0.005,
+        t_big_scale=10.0,
     )
     importance = np.zeros(pipeline.max_splats, dtype=np.uint32)
     importance[0] = 100
@@ -140,7 +137,7 @@ def test_densify_clone_halves_opacity(backend: str) -> None:
     pipeline.buffers.grad_mean_2d_mag_accum.copy_from_numpy(mag)
     pipeline.buffers.visibility_count_accum.copy_from_numpy(vis)
 
-    stats = pipeline.densify(cfg)
+    stats = pipeline.densify(cfg, densify_step=1, n_densify_steps=1, init_count=0)
     assert stats["n_clone"] == 1
     assert stats["final_count"] == 2
 
@@ -174,7 +171,7 @@ def test_densify_noop_when_no_signal(backend: str) -> None:
     pipeline.buffers.importance_score_accum.copy_from_numpy(importance)
 
     cfg = DensifyConfig()
-    stats = pipeline.densify(cfg)
+    stats = pipeline.densify(cfg, densify_step=1, n_densify_steps=1, init_count=0)
 
     assert stats["n_keep"] == 3
     assert stats["n_split"] == 0
@@ -215,7 +212,7 @@ def test_opacity_reset(backend: str) -> None:
 
 @pytest.mark.parametrize("backend", BACKENDS)
 def test_growth_budget_limits_splits(backend: str) -> None:
-    """With growth_rate=0.2 and 5 gaussians, budget=1. Only 1 of the 3
+    """With a small parabolic budget, only 1 of the 3
     high-importance large gaussians should get promoted."""
     pipeline = _setup(backend)
 
@@ -235,11 +232,9 @@ def test_growth_budget_limits_splits(backend: str) -> None:
     )
 
     cfg = DensifyConfig(
-        n_scoring_views=10, importance_thresh=5.0,
-        t_grad_clone=0.0002, t_grad_split=0.0012,
-        t_split_scale=0.01, t_opacity=0.005,
+        n_scoring_views=10,
+        t_opacity=0.005,
         t_big_scale=10.0,
-        growth_rate=0.2,  # budget = max(1, int(0.2*5)) = 1
     )
     importance = np.zeros(pipeline.max_splats, dtype=np.uint32)
     importance[0] = 100
@@ -261,9 +256,10 @@ def test_growth_budget_limits_splits(backend: str) -> None:
     pipeline.buffers.grad_mean_2d_mag_accum.copy_from_numpy(mag)
     pipeline.buffers.visibility_count_accum.copy_from_numpy(vis)
 
-    stats = pipeline.densify(cfg)
+    # Sqrt schedule: target = 5 + (32-5)*(1/730)^0.5 ≈ 6.0, growth = 1.
+    stats = pipeline.densify(cfg, densify_step=1, n_densify_steps=730, init_count=5)
 
-    # 3 candidates compete for budget=1. Only 1 wins.
+    # 3 candidates compete for a small budget. Only 1 wins.
     assert stats["n_split"] + stats["n_clone"] == 1, (
         f"expected 1 growth action, got split={stats['n_split']} clone={stats['n_clone']}"
     )

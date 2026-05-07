@@ -1,20 +1,18 @@
-// Phase A of densification: decide per-gaussian action using FastGS
-// multi-view importance score with budget-limited growth AND VCP pruning.
+// Phase A of densification: compute per-gaussian densification scores
+// and apply unconditional pruning rules.
 //
-// Decision rules:
-//   importance = importance_score_accum[i] / n_scoring_views
-//   max_scale  = max(exp(log_scale))
+// Threshold-free growth selection: instead of hard thresholds on gradient
+// magnitude or importance, this kernel computes a continuous score per
+// gaussian. The Python host reads scores back, ranks them, and selects
+// the top-B for split/clone based on the growth budget.
 //
-//   PRUNE if:
-//     - max_scale > t_big_scale (oversized, unconditional)
-//     - sigmoid(opacity) < t_opacity (budget-limited)
-//     - importance > prune_thresh (VCP: multi-view consistent pruning,
-//       gaussian is associated with high error across views, budget-limited)
-//   SPLIT if:
-//     - importance > importance_thresh AND max_scale > t_split_scale
-//   CLONE if:
-//     - importance > importance_thresh AND max_scale <= t_split_scale
-//   KEEP otherwise
+// Pruning decisions (oversized, low-opacity) are still applied here
+// since they're structural invariants, not signal-quality judgments.
+//
+// Output:
+//   action[i] = ACTION_PRUNE for pruned gaussians
+//   action[i] = ACTION_KEEP  for all others (may be overwritten by host)
+//   score[i]  = densification priority (0 for pruned/inactive)
 
 #include "../common/types.slang"
 #include "../common/math.slang"
@@ -31,11 +29,11 @@ void decideActions(
     StructuredBuffer<Gaussian3D> gaussians,
     StructuredBuffer<uint> num_gaussians_counter,
     StructuredBuffer<uint> importance_score_accum,
+    StructuredBuffer<int64_t> grad_mean_2d_mag_accum,
+    StructuredBuffer<uint> visibility_count_accum,
     RWStructuredBuffer<uint> action,
-    RWStructuredBuffer<int> growth_budget,
+    RWStructuredBuffer<float> densify_score,
     RWStructuredBuffer<int> prune_budget,
-    uniform float importance_thresh,
-    uniform float t_split_scale,
     uniform float t_opacity,
     uniform float t_big_scale,
     uniform uint n_scoring_views)
@@ -46,6 +44,7 @@ void decideActions(
     if (i >= n)
     {
         action[i] = ACTION_KEEP;
+        densify_score[i] = 0.0;
         return;
     }
 
@@ -58,36 +57,44 @@ void decideActions(
     if (max_scale > t_big_scale)
     {
         action[i] = ACTION_PRUNE;
+        densify_score[i] = 0.0;
         return;
     }
-
-    float importance = float(importance_score_accum[i]) / float(max(n_scoring_views, 1u));
 
     // Low-opacity pruning (budget-limited).
     if (opacity < t_opacity)
     {
         int remaining;
         InterlockedAdd(prune_budget[0], -1, remaining);
-        action[i] = (remaining > 0) ? ACTION_PRUNE : ACTION_KEEP;
-        return;
-    }
-
-    bool is_large = max_scale > t_split_scale;
-
-    // Growth: importance score is the primary signal (FastGS VCD).
-    if (importance > importance_thresh)
-    {
-        int remaining;
-        InterlockedAdd(growth_budget[0], -1, remaining);
-        if (remaining <= 0)
+        if (remaining > 0)
         {
-            action[i] = ACTION_KEEP;
+            action[i] = ACTION_PRUNE;
+            densify_score[i] = 0.0;
             return;
         }
-        action[i] = is_large ? ACTION_SPLIT : ACTION_CLONE;
     }
-    else
-    {
-        action[i] = ACTION_KEEP;
-    }
+
+    // Densification score: combines multiple signals (inspired by Taming 3DGS §3.3).
+    //
+    //   importance : multi-view error attribution (how many error pixels touch this gaussian)
+    //   avg_grad   : under-reconstruction signal (2D position gradient magnitude)
+    //   opacity    : high opacity = real geometry worth densifying, low = floater/ghost
+    //   scale_prod : surface area proxy — larger gaussians benefit more from subdivision
+    //
+    // All signals are multiplied together. Opacity acts as a gate (near-zero kills
+    // the score), scale_prod biases toward gaussians that cover more area.
+
+    float importance = float(importance_score_accum[i]) / float(max(n_scoring_views, 1u));
+
+    uint vis = visibility_count_accum[i];
+    float avg_grad = (vis > 0)
+        ? fromFixed(grad_mean_2d_mag_accum[i]) / float(vis)
+        : 0.0;
+
+    float scale_prod = scale.x * scale.y + scale.x * scale.z + scale.y * scale.z;
+
+    float score = importance * avg_grad * opacity * scale_prod;
+
+    action[i] = ACTION_KEEP;
+    densify_score[i] = score;
 }

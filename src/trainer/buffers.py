@@ -113,6 +113,7 @@ class GaussianBuffers:
     l1_minmax: spy.NDBuffer | None = None               # uint[2]
 
     # --- v2 densification scratch + pipeline state ---
+    densify_score: spy.NDBuffer | None = None       # float[max_splats]
     gaussians_scratch: spy.NDBuffer | None = None   # Gaussian3D[max_splats]
     adam_state_scratch: spy.NDBuffer | None = None  # AdamState[max_splats]
     action_buffer: spy.NDBuffer | None = None       # uint[max_splats]
@@ -244,6 +245,7 @@ def allocate(
     l1_minmax = spy.NDBuffer(device=device, dtype="uint", shape=(2,))
 
     # v2 densification scratch
+    densify_score = spy.NDBuffer(device=device, dtype="float", shape=(max_splats,))
     gaussians_scratch = spy.NDBuffer(device=device, dtype=gaussian_type, shape=(max_splats,))
     adam_state_scratch = spy.NDBuffer(device=device, dtype=adam_type, shape=(max_splats,))
     action_buffer = spy.NDBuffer(device=device, dtype="uint", shape=(max_splats,))
@@ -300,6 +302,7 @@ def allocate(
         error_mask=error_mask,
         l1_map=l1_map,
         l1_minmax=l1_minmax,
+        densify_score=densify_score,
         gaussians_scratch=gaussians_scratch,
         adam_state_scratch=adam_state_scratch,
         action_buffer=action_buffer,

@@ -25,22 +25,22 @@ SCAN_BLOCK_SIZE = 1024  # must match shaders/common/scan.slang
 
 @dataclass
 class DensifyConfig:
-    """FastGS-style multi-view importance score densification.
+    """Threshold-free score-ranked densification with budget-scheduled growth.
 
-    Replaces gradient-threshold heuristics with a principled per-gaussian
-    importance score: count of high-error pixels touched across N views.
-    See arxiv 2511.04283 (FastGS).
+    Growth follows a sqrt schedule from initial count to max_splats over
+    the densification window. The budget at each step is deterministic.
+
+    Growth selection is purely rank-based: the top-B gaussians by
+    composite score get densified each step. No signal thresholds — the
+    schedule determines how many, the ranking determines which ones.
+
+    Score = importance * avg_grad * opacity * surface_area_proxy.
+    Split/clone classification: median surface area within the selected set.
     """
     n_scoring_views: int = 10       # cameras sampled for importance scoring
     loss_thresh: float = 0.1        # L1 threshold for binary error mask
-    importance_thresh: float = 5.0  # min importance to allow split/clone
-    t_grad_clone: float = 0.000004   # clone threshold (~p99 of signal with L2 loss)
-    t_grad_split: float = 0.00002   # split threshold (~top 0.1% with L2 loss)
-    prune_thresh: float = 50.0      # VCP: prune if importance > this (degrading quality)
-    t_split_scale: float = 0.001    # max_scale > this => split (else clone)
     t_opacity: float = 0.005        # prune if sigmoid(opacity) < this
     t_big_scale: float = 0.1        # prune if max_scale > this (world-space floater removal)
-    growth_rate: float = 0.05       # max growth per densify step (fraction of current count)
     opacity_cap: float = 0.8        # post-densify opacity cap (softer than reset)
 
 
@@ -680,320 +680,6 @@ class Pipeline:
         self.device.submit_command_buffer(enc.finish())
         self._encoder = None
 
-    def profile_one_step(self, camera: Camera, lrs: AdamLRs | None = None,
-                         warmup_steps: int = 3) -> list[tuple[str, float]]:
-        """Run one full training step with per-phase GPU-timestamp queries
-        and return ``[(label, ms), ...]``.
-
-        A few untimed warmup steps run first so cold JIT / cache effects
-        don't dominate the measurement. Prints the breakdown and returns
-        it for programmatic use. Expects ``set_target_texture`` or
-        ``set_target_image`` to have been called already.
-
-        This method self-records timestamps on every dispatch; uses the
-        per-kernel ``query_pool``/``query_index_before``/``query_index_after``
-        knobs SlangPy exposes. The recorded values are wall times for
-        that single GPU dispatch's execution, in milliseconds.
-        """
-        import time as _time
-
-        if lrs is None:
-            lrs = AdamLRs()
-
-        for _ in range(warmup_steps):
-            self._clear_grads()
-            self._run_forward(camera)
-            self._run_loss()
-            self._run_backward()
-            self._run_adam(lrs)
-        self.device.wait_for_idle()
-
-        # Allocate a fresh pool sized to the step's dispatch count.
-        # Upper bound: ~30 for a non-densify step. 128 is plenty.
-        pool = self.device.create_query_pool(spy.QueryType.timestamp, 128)
-        b = self.buffers
-        gb = b.grad_buffers
-        num_tiles = b.num_tiles
-        sorted_lo_after, sorted_hi_after, sorted_v_after = (
-            b.sort_keys_lo_a, b.sort_keys_hi_a, b.sort_values_a,
-        )
-
-        # Each entry: (label, callable). We allocate query indices
-        # incrementally, two per dispatch.
-        events: list[tuple[str, "callable"]] = []
-        idx = [0]
-
-        def _time_kernel(label: str, kernel: spy.ComputeKernel,
-                         thread_count: list[int], **kwargs) -> None:
-            i0 = idx[0]; i1 = i0 + 1; idx[0] += 2
-            kernel.dispatch(command_encoder=self._encoder, thread_count=thread_count,
-                            query_pool=pool,
-                            query_index_before=i0,
-                            query_index_after=i1,
-                            **kwargs)
-            events.append((label, i0))
-
-        # --- Upload camera (CPU side, not timed in GPU queries but
-        # captured by bracket-wall-time for reference). ---
-        t0_wall = _time.perf_counter()
-
-        # Clear grads (14 dispatches; time only the first as
-        # representative — the 14 are identical work so summing would
-        # just be 14× a single dispatch's cost).
-        _time_kernel("clear_grads (1 of 14)", self.k_grad_clear,
-                     [self.max_splats, 1, 1],
-                     grad_buffer=gb[GRAD_SCALAR_COMPONENTS[0]].storage,
-                     max_splats=self.max_splats)
-        for name in GRAD_SCALAR_COMPONENTS[1:]:
-            self._dispatch(self.k_grad_clear,
-                thread_count=[self.max_splats, 1, 1],
-                grad_buffer=gb[name].storage, max_splats=self.max_splats,
-            )
-
-        # Forward.
-        self._upload_camera(camera)
-        _time_kernel("fwd: clear_textures", self.k_clear_textures,
-                     [self.width, self.height, 1],
-                     output_image=b.output_image,
-                     output_transmittance=b.output_transmittance,
-                     gaussian_count_per_pixel=b.gaussian_count_per_pixel,
-                     frame_dim=spy.uint2(self.width, self.height))
-        _time_kernel("fwd: clear_tile_ranges", self.k_clear_tile_ranges,
-                     [num_tiles, 1, 1],
-                     tile_start=b.tile_start.storage,
-                     tile_end=b.tile_end.storage,
-                     num_tiles=num_tiles)
-        _time_kernel("fwd: bin_count", self.k_bin_count,
-                     [self.max_splats, 1, 1],
-                     gaussians=b.gaussians.storage,
-                     num_gaussians_counter=b.num_gaussians_counter.storage,
-                     camera=self._camera_buffer.storage,
-                     projected_2d=b.projected_2d.storage,
-                     tile_count_per_gaussian=b.tile_count_per_gaussian.storage,
-                     z_near=self.z_near_cull,
-                     max_splats=self.max_splats)
-
-        # Scan is three dispatches; time them individually.
-        in_buf, out_buf = b.tile_count_per_gaussian, b.tile_offset_per_gaussian
-        num_blocks = max(1, (self.max_splats + SCAN_BLOCK_SIZE - 1) // SCAN_BLOCK_SIZE)
-        _time_kernel("fwd: scan_block", self.k_scan_block,
-                     [num_blocks * SCAN_BLOCK_SIZE, 1, 1],
-                     in_buf=in_buf.storage, out_buf=out_buf.storage,
-                     block_sums=b.scan_block_sums.storage, n=self.max_splats)
-        _time_kernel("fwd: scan_block_sums", self.k_scan_block_sums,
-                     [SCAN_BLOCK_SIZE, 1, 1],
-                     block_sums=b.scan_block_sums.storage,
-                     total_out=b.scan_total.storage, num_blocks=num_blocks)
-        _time_kernel("fwd: scan_add_offsets", self.k_add_block_offsets,
-                     [num_blocks * SCAN_BLOCK_SIZE, 1, 1],
-                     out_buf=out_buf.storage,
-                     block_sums=b.scan_block_sums.storage, n=self.max_splats)
-
-        _time_kernel("fwd: bin_emit", self.k_bin_emit,
-                     [self.max_splats, 1, 1],
-                     gaussians=b.gaussians.storage,
-                     num_gaussians_counter=b.num_gaussians_counter.storage,
-                     camera=self._camera_buffer.storage,
-                     projected_2d=b.projected_2d.storage,
-                     tile_offset_per_gaussian=b.tile_offset_per_gaussian.storage,
-                     keys_lo=b.sort_keys_lo_a.storage,
-                     keys_hi=b.sort_keys_hi_a.storage,
-                     values=b.sort_values_a.storage,
-                     z_near=self.z_near_cull)
-
-        # Radix sort: 8 passes × 4 dispatches per pass.
-        src_lo, src_hi, src_v = b.sort_keys_lo_a, b.sort_keys_hi_a, b.sort_values_a
-        dst_lo, dst_hi, dst_v = b.sort_keys_lo_b, b.sort_keys_hi_b, b.sort_values_b
-        num_sort_blocks = (self.max_sort_pairs + 255) // 256
-        radix_events_per_pass: list[tuple[int, int, int, int]] = []
-        for pass_idx in range(8):
-            i_bs  = idx[0]; idx[0] += 2
-            i_gs  = idx[0]; idx[0] += 2
-            i_sdt = idx[0]; idx[0] += 2
-            i_sf  = idx[0]; idx[0] += 2
-            radix_events_per_pass.append((i_bs, i_gs, i_sdt, i_sf))
-            self._dispatch(self.k_radix_block_sort,
-                thread_count=[num_sort_blocks * 256, 1, 1],
-                keys_lo=src_lo.storage, keys_hi=src_hi.storage,
-                values=src_v.storage,
-                block_hist=b.radix_block_hist.storage,
-                block_start=b.radix_block_start.storage,
-                n_buf=b.scan_total.storage, pass_idx=pass_idx,
-                query_pool=pool, query_index_before=i_bs, query_index_after=i_bs + 1,
-            )
-            self._dispatch(self.k_radix_global_scan,
-                thread_count=[256, 1, 1],
-                block_hist=b.radix_block_hist.storage,
-                block_prefix=b.radix_block_prefix.storage,
-                digit_total=b.radix_digit_total.storage,
-                n_buf=b.scan_total.storage,
-                query_pool=pool, query_index_before=i_gs, query_index_after=i_gs + 1,
-            )
-            self._dispatch(self.k_radix_scan_digit_totals,
-                thread_count=[256, 1, 1],
-                digit_total=b.radix_digit_total.storage,
-                digit_global_base=b.radix_digit_global_base.storage,
-                query_pool=pool, query_index_before=i_sdt, query_index_after=i_sdt + 1,
-            )
-            self._dispatch(self.k_radix_scatter_final,
-                thread_count=[self.max_sort_pairs, 1, 1],
-                keys_lo_in=src_lo.storage, keys_hi_in=src_hi.storage, values_in=src_v.storage,
-                block_start=b.radix_block_start.storage,
-                block_prefix=b.radix_block_prefix.storage,
-                digit_global_base=b.radix_digit_global_base.storage,
-                keys_lo_out=dst_lo.storage, keys_hi_out=dst_hi.storage, values_out=dst_v.storage,
-                n_buf=b.scan_total.storage, pass_idx=pass_idx,
-                query_pool=pool, query_index_before=i_sf, query_index_after=i_sf + 1,
-            )
-            src_lo, dst_lo = dst_lo, src_lo
-            src_hi, dst_hi = dst_hi, src_hi
-            src_v, dst_v = dst_v, src_v
-        sorted_v = src_v
-
-        _time_kernel("fwd: identify_tile_ranges", self.k_identify_tile_ranges,
-                     [self.max_sort_pairs, 1, 1],
-                     keys_hi=src_hi.storage,
-                     tile_start=b.tile_start.storage,
-                     tile_end=b.tile_end.storage,
-                     n_buf=b.scan_total.storage,
-                     num_tiles=num_tiles)
-
-        _time_kernel("fwd: forward_rasterize", self.k_forward,
-                     [b.num_tiles_x * 16, b.num_tiles_y * 16, 1],
-                     gaussians=b.gaussians.storage,
-                     projected_2d=b.projected_2d.storage,
-                     tile_start=b.tile_start.storage,
-                     tile_end=b.tile_end.storage,
-                     sorted_gaussian_ids=sorted_v.storage,
-                     camera=self._camera_buffer.storage,
-                     output_image=b.output_image,
-                     output_transmittance=b.output_transmittance,
-                     gaussian_count_per_pixel=b.gaussian_count_per_pixel)
-
-        # Loss.
-        target = getattr(self, "_active_target", None) or b.target_image
-        _time_kernel("loss", self.k_loss,
-                     [self.width, self.height, 1],
-                     output_image=b.output_image,
-                     target_image=target,
-                     dL_dC=b.dL_dC_texture,
-                     frame_dim=spy.uint2(self.width, self.height))
-
-        # Backward.
-        _time_kernel("bwd: backwardRasterize", self.k_backward,
-                     [b.num_tiles_x * 16, b.num_tiles_y * 16, 1],
-                     gaussians=b.gaussians.storage,
-                     projected_2d=b.projected_2d.storage,
-                     tile_start=b.tile_start.storage,
-                     tile_end=b.tile_end.storage,
-                     sorted_gaussian_ids=sorted_v.storage,
-                     camera=self._camera_buffer.storage,
-                     output_image=b.output_image,
-                     output_transmittance=b.output_transmittance,
-                     gaussian_count_per_pixel=b.gaussian_count_per_pixel,
-                     dL_dC_texture=b.dL_dC_texture,
-                     grad_mean_x=gb["mean_x"].storage,
-                     grad_mean_y=gb["mean_y"].storage,
-                     grad_mean_z=gb["mean_z"].storage,
-                     grad_log_scale_x=gb["log_scale_x"].storage,
-                     grad_log_scale_y=gb["log_scale_y"].storage,
-                     grad_log_scale_z=gb["log_scale_z"].storage,
-                     grad_rot_w=gb["rot_w"].storage,
-                     grad_rot_x=gb["rot_x"].storage,
-                     grad_rot_y=gb["rot_y"].storage,
-                     grad_rot_z=gb["rot_z"].storage,
-                     grad_opacity=gb["opacity"].storage,
-                     grad_color_r=gb["color_r"].storage,
-                     grad_color_g=gb["color_g"].storage,
-                     grad_color_b=gb["color_b"].storage,
-                     grad_2d_x_iter=b.grad_2d_x_iter.storage,
-                     grad_2d_y_iter=b.grad_2d_y_iter.storage)
-
-        _time_kernel("bwd: accumulate_iter", self.k_accumulate_iter,
-                     [self.max_splats, 1, 1],
-                     grad_2d_x_iter=b.grad_2d_x_iter.storage,
-                     grad_2d_y_iter=b.grad_2d_y_iter.storage,
-                     grad_mean_2d_mag_accum=b.grad_mean_2d_mag_accum.storage,
-                     visibility_count_accum=b.visibility_count_accum.storage,
-                     max_splats=self.max_splats)
-
-        # Adam.
-        self.iteration += 1
-        step = float(self.iteration)
-        bc1 = 1.0 - 0.9 ** step
-        bc2 = 1.0 - 0.999 ** step
-        _time_kernel("adam", self.k_adam,
-                     [self.max_splats, 1, 1],
-                     gaussians=b.gaussians.storage,
-                     adam_state=b.adam_state.storage,
-                     num_gaussians_counter=b.num_gaussians_counter.storage,
-                     grad_mean_x=gb["mean_x"].storage,
-                     grad_mean_y=gb["mean_y"].storage,
-                     grad_mean_z=gb["mean_z"].storage,
-                     grad_log_scale_x=gb["log_scale_x"].storage,
-                     grad_log_scale_y=gb["log_scale_y"].storage,
-                     grad_log_scale_z=gb["log_scale_z"].storage,
-                     grad_rot_w=gb["rot_w"].storage,
-                     grad_rot_x=gb["rot_x"].storage,
-                     grad_rot_y=gb["rot_y"].storage,
-                     grad_rot_z=gb["rot_z"].storage,
-                     grad_opacity=gb["opacity"].storage,
-                     grad_color_r=gb["color_r"].storage,
-                     grad_color_g=gb["color_g"].storage,
-                     grad_color_b=gb["color_b"].storage,
-                     cfg={"lr_mean": lrs.mean, "lr_scale": lrs.scale,
-                          "lr_rot": lrs.rot, "lr_opacity": lrs.opacity,
-                          "lr_color": lrs.color,
-                          "bias_correction1": bc1, "bias_correction2": bc2},
-                     pixels_per_step=float(self.width * self.height))
-
-        self.device.wait_for_idle()
-        wall_ms = (_time.perf_counter() - t0_wall) * 1000.0
-
-        ts = pool.get_timestamp_results(0, idx[0])
-        # Results are in seconds per SlangPy docs; convert to ms.
-        results: list[tuple[str, float]] = []
-        for label, i0_q in events:
-            dt_ms = (ts[i0_q + 1] - ts[i0_q]) * 1000.0
-            results.append((label, dt_ms))
-
-        # Radix sort: 4 kernels × 8 passes → 5 summary rows.
-        radix_bs  = sum((ts[p[0] + 1] - ts[p[0]]) * 1000.0 for p in radix_events_per_pass)
-        radix_gs  = sum((ts[p[1] + 1] - ts[p[1]]) * 1000.0 for p in radix_events_per_pass)
-        radix_sdt = sum((ts[p[2] + 1] - ts[p[2]]) * 1000.0 for p in radix_events_per_pass)
-        radix_sf  = sum((ts[p[3] + 1] - ts[p[3]]) * 1000.0 for p in radix_events_per_pass)
-        radix_total = radix_bs + radix_gs + radix_sdt + radix_sf
-        insert_at = next(i for i, (lbl, _) in enumerate(results) if lbl == "fwd: bin_emit") + 1
-        radix_rows = [
-            ("fwd: radix blockSort        (×8)", radix_bs),
-            ("fwd: radix globalScan       (×8)", radix_gs),
-            ("fwd: radix scanDigitTotals  (×8)", radix_sdt),
-            ("fwd: radix scatterFinal     (×8)", radix_sf),
-            ("fwd: radix sort TOTAL       (×8)", radix_total),
-        ]
-        results = results[:insert_at] + radix_rows + results[insert_at:]
-
-        # For the percent calculation we sum everything EXCEPT the
-        # radix TOTAL (that row is derived; counting it double-counts).
-        def _countable(label: str) -> bool:
-            return "radix sort TOTAL" not in label
-        total_gpu = sum(ms for lbl, ms in results if _countable(lbl))
-
-        print(f"\n--- profile_one_step (n_g={int(b.num_gaussians_counter.to_numpy().view(np.uint32)[0])}, "
-              f"max_sort_pairs={self.max_sort_pairs}) ---")
-        print(f"{'phase':<34s}{'ms':>10s}{'% of GPU':>12s}")
-        print("-" * 56)
-        for label, ms in results:
-            if _countable(label):
-                pct = (ms / total_gpu * 100.0) if total_gpu > 0 else 0.0
-                print(f"{label:<34s}{ms:>10.3f}{pct:>11.1f}%")
-            else:
-                print(f"{label:<34s}{ms:>10.3f}{'':>12s}")
-        print("-" * 56)
-        print(f"{'total GPU (sum of phases)':<34s}{total_gpu:>10.3f}")
-        print(f"{'wall-clock (submit + idle)':<34s}{wall_ms:>10.3f}")
-        return results
-
     # ------------------------------------------------------------------
     # Gradient readback (for the finite-difference test)
     # ------------------------------------------------------------------
@@ -1136,21 +822,30 @@ def compute_importance_scores(
 Pipeline.compute_importance_scores = compute_importance_scores  # type: ignore[attr-defined]
 
 
-def densify(self: Pipeline, cfg: DensifyConfig) -> dict:
-    """Run one densification pass using FastGS importance scores.
+def densify(self: Pipeline, cfg: DensifyConfig,
+            densify_step: int, n_densify_steps: int,
+            init_count: int) -> dict:
+    """Run one densification pass: score → rank → select top-B → split/clone.
 
-    Assumes compute_importance_scores() has been called beforehand to
-    populate the importance_score_accum buffer.
+    Growth follows a sqrt schedule: target(x) = S + (B - S) * sqrt(x/N).
+    Front-loads growth (large steps early when sparse, tapering toward
+    the target). The per-step budget is max(0, target - current_count),
+    catching up if pruning dropped the count below the curve.
 
     Phases:
-      A  decide_actions     - write action[i] per gaussian (importance-based)
-      B  split_and_clone    - append children, overwrite parent slot for splits
-      C  build_prune_mask   - mark valid[i] across post-split range
-      D  scan               - exclusive prefix-sum of valid[]
-      E  scatter_compact    - ping-pong into scratch; Python swaps refs
+      A  decide_actions     - compute scores, apply pruning rules
+      B  (CPU) rank+select  - top-B by score, classify split/clone by scale
+      C  split_and_clone    - append children, overwrite parent slot for splits
+      D  build_prune_mask   - mark valid[i] across post-split range
+      E  scan + compact     - prefix-sum + scatter
 
     Returns a stats dict for logging.
     """
+    ACTION_KEEP = 0
+    ACTION_SPLIT = 1
+    ACTION_CLONE = 2
+    ACTION_PRUNE = 3
+
     b = self.buffers
 
     self.device.wait_for_idle()
@@ -1159,31 +854,82 @@ def densify(self: Pipeline, cfg: DensifyConfig) -> dict:
         return {"pre_count": 0, "post_split_count": 0, "final_count": 0,
                 "n_split": 0, "n_clone": 0, "n_prune": 0, "n_keep": 0}
 
-    # Growth budget: max new gaussians this step.
-    growth = max(1, int(cfg.growth_rate * pre_count))
-    b.growth_budget.copy_from_numpy(np.array([growth], dtype=np.int32))
-    # Prune budget: at most 50% of candidates actually pruned (FastGS).
-    # We don't know the candidate count ahead of time, so set budget to
-    # 50% of current count — an upper bound on candidates.
+    # Growth schedule: sqrt curve front-loads growth (big steps early when
+    # sparse, tapering as we approach target). Catch-up: if pruning dropped
+    # count below the curve, we grow more this step.
+    B = self.max_splats
+    S = init_count
+    N = max(n_densify_steps, 1)
+    x = min(densify_step, N)
+    target_at_x = S + (B - S) * (x / N) ** 0.5
+    growth = max(0, int(target_at_x) - pre_count)
+
+    # Prune budget: at most 50% of current count.
     prune = max(1, pre_count // 2)
     b.prune_budget.copy_from_numpy(np.array([prune], dtype=np.int32))
 
+    # Phase A: GPU computes scores and applies pruning.
     self._dispatch(self.k_decide_actions,
         thread_count=[pre_count, 1, 1],
         gaussians=b.gaussians.storage,
         num_gaussians_counter=b.num_gaussians_counter.storage,
         importance_score_accum=b.importance_score_accum.storage,
+        grad_mean_2d_mag_accum=b.grad_mean_2d_mag_accum.storage,
+        visibility_count_accum=b.visibility_count_accum.storage,
         action=b.action_buffer.storage,
-        growth_budget=b.growth_budget.storage,
+        densify_score=b.densify_score.storage,
         prune_budget=b.prune_budget.storage,
-        importance_thresh=cfg.importance_thresh,
-        t_split_scale=cfg.t_split_scale,
         t_opacity=cfg.t_opacity,
         t_big_scale=cfg.t_big_scale,
         n_scoring_views=cfg.n_scoring_views,
     )
+    self.device.wait_for_idle()
 
-    # Phase B: split and clone (may increment counter).
+    # Phase B (CPU): read scores + actions, rank, select top-B.
+    actions_raw = b.action_buffer.to_numpy()
+    actions = np.frombuffer(actions_raw.tobytes(), dtype=np.uint32)[:pre_count].copy()
+
+    scores_raw = b.densify_score.to_numpy()
+    scores = np.frombuffer(scores_raw.tobytes(), dtype=np.float32)[:pre_count]
+
+    if growth > 0:
+        # Read gaussian scales for split/clone classification.
+        gauss_raw = b.gaussians.to_numpy()
+        gauss_floats = np.frombuffer(gauss_raw.tobytes(), dtype=np.float32).reshape(-1, 14)
+        scales = np.exp(gauss_floats[:pre_count, 3:6])
+        # Surface area proxy: sum of pairwise axis products (∝ ellipsoid SA).
+        sa = (scales[:, 0] * scales[:, 1]
+            + scales[:, 0] * scales[:, 2]
+            + scales[:, 1] * scales[:, 2])
+
+        # Only consider non-pruned gaussians with positive score.
+        candidates = (actions == ACTION_KEEP) & (scores > 0)
+        candidate_indices = np.where(candidates)[0]
+
+        if len(candidate_indices) > 0:
+            candidate_scores = scores[candidate_indices]
+            # Select top-B by score (no threshold).
+            n_select = min(growth, len(candidate_indices))
+            top_local = np.argpartition(candidate_scores, -n_select)[-n_select:]
+            top_indices = candidate_indices[top_local]
+
+            # Classify by surface area: above-median → split (too big,
+            # needs subdivision), at/below → clone (right size, region
+            # needs more coverage). Relative to the selected set.
+            selected_sa = sa[top_indices]
+            sa_median = float(np.median(selected_sa))
+            for idx in top_indices:
+                if sa[idx] > sa_median:
+                    actions[idx] = ACTION_SPLIT
+                else:
+                    actions[idx] = ACTION_CLONE
+
+    # Write the final action buffer back to GPU.
+    action_upload = np.zeros(self.max_splats, dtype=np.uint32)
+    action_upload[:pre_count] = actions
+    b.action_buffer.copy_from_numpy(action_upload)
+
+    # Phase C: split and clone (may increment counter).
     self._dispatch(self.k_split_and_clone,
         thread_count=[pre_count, 1, 1],
         gaussians=b.gaussians.storage,
@@ -1197,7 +943,7 @@ def densify(self: Pipeline, cfg: DensifyConfig) -> dict:
     post_split_count = int(b.num_gaussians_counter.to_numpy().view(np.uint32)[0])
     post_split_count = min(post_split_count, self.max_splats)
 
-    # Phases C/D/E: compact.
+    # Phases D/E: compact.
     self._dispatch(self.k_build_prune_mask,
         thread_count=[post_split_count, 1, 1],
         action=b.action_buffer.storage,
@@ -1224,12 +970,10 @@ def densify(self: Pipeline, cfg: DensifyConfig) -> dict:
     final_count = int(b.scan_total.to_numpy().view(np.uint32)[0])
     b.num_gaussians_counter.copy_from_numpy(np.array([final_count], dtype=np.uint32))
 
-    actions_raw = b.action_buffer.to_numpy()
-    actions = np.frombuffer(actions_raw.tobytes(), dtype=np.uint32)[:pre_count]
-    n_keep  = int((actions == 0).sum())
-    n_split = int((actions == 1).sum())
-    n_clone = int((actions == 2).sum())
-    n_prune = int((actions == 3).sum())
+    n_keep  = int((actions == ACTION_KEEP).sum())
+    n_split = int((actions == ACTION_SPLIT).sum())
+    n_clone = int((actions == ACTION_CLONE).sum())
+    n_prune = int((actions == ACTION_PRUNE).sum())
 
     return {
         "pre_count": pre_count,

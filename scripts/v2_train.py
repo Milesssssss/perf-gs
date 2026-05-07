@@ -78,18 +78,14 @@ def main() -> None:
                     help="force render height (overrides --downsample)")
     ap.add_argument("--preview-every", type=int, default=1000)
     ap.add_argument("--log-every", type=int, default=500)
-    ap.add_argument("--densify-every", type=int, default=100)
+    ap.add_argument("--densify-every", type=int, default=500)
     ap.add_argument("--densify-from", type=int, default=500)
     ap.add_argument("--densify-to", type=int, default=15000)
     #ap.add_argument("--opacity-reset-iters", type=int, nargs="*", default=[3000])
     ap.add_argument("--n-scoring-views", type=int, default=10)
     ap.add_argument("--loss-thresh", type=float, default=0.1)
-    ap.add_argument("--importance-thresh", type=float, default=5.0)
-    ap.add_argument("--prune-thresh", type=float, default=50.0)
-    ap.add_argument("--t-split-scale", type=float, default=0.001)
     ap.add_argument("--t-opacity", type=float, default=0.005)
     ap.add_argument("--t-big-scale", type=float, default=0.1)
-    ap.add_argument("--growth-rate", type=float, default=1.0)
     ap.add_argument("--opacity-cap", type=float, default=0.8)
     ap.add_argument("--opacity-reg", type=float, default=0.01)
     ap.add_argument("--scale-reg", type=float, default=0.01)
@@ -131,12 +127,8 @@ def main() -> None:
     cfg = DensifyConfig(
         n_scoring_views=args.n_scoring_views,
         loss_thresh=args.loss_thresh,
-        importance_thresh=args.importance_thresh,
-        prune_thresh=args.prune_thresh,
-        t_split_scale=args.t_split_scale * extent,
         t_opacity=args.t_opacity,
         t_big_scale=args.t_big_scale * extent,
-        growth_rate=args.growth_rate,
         opacity_cap=args.opacity_cap,
     )
 
@@ -151,11 +143,8 @@ def main() -> None:
         "densify_config": {
             "n_scoring_views": cfg.n_scoring_views,
             "loss_thresh": cfg.loss_thresh,
-            "importance_thresh": cfg.importance_thresh,
-            "t_split_scale": cfg.t_split_scale,
             "t_opacity": cfg.t_opacity,
             "t_big_scale": cfg.t_big_scale,
-            "growth_rate": cfg.growth_rate,
             "opacity_cap": cfg.opacity_cap,
         },
         "max_splats": args.max_splats,
@@ -242,14 +231,15 @@ def main() -> None:
         # Densification schedule.
         do_densify = (args.densify_from <= it <= args.densify_to
                       and (it - args.densify_from) % args.densify_every == 0)
-        do_opacity_reset = (it % 3000 == 0 and it >= args.densify_from and it <= args.densify_to)
+        #do_opacity_reset = (it % 3000 == 0 and it >= args.densify_from and it <= args.densify_to)
         do_log = args.log_every > 0 and ((it % args.log_every == 0) or (it == 1) or (it == args.iters))
         do_preview = args.preview_every > 0 and ((it % args.preview_every == 0) or (it == args.iters))
 
-        if do_opacity_reset:
-            pipeline.reset_opacity(cfg)
-            densify_json.write(json.dumps({"iter": it, "event": "opacity_reset"}) + "\n")
-            print(f"iter {it}: opacity reset")
+        # for now no opacity reset, i do not like it.
+        #if do_opacity_reset:
+        #    pipeline.reset_opacity(cfg)
+        #    densify_json.write(json.dumps({"iter": it, "event": "opacity_reset"}) + "\n")
+        #    print(f"iter {it}: opacity reset")
 
         if do_densify:
             densify_cfg = cfg
@@ -260,8 +250,14 @@ def main() -> None:
             score_cameras = [scene.images[i].camera for i in score_indices]
             score_targets = [target_textures[i] for i in score_indices]
 
+            n_densify_steps = (args.densify_to - args.densify_from) // args.densify_every + 1
+            densify_step = (it - args.densify_from) // args.densify_every + 1
+
             pipeline.compute_importance_scores(score_cameras, score_targets, densify_cfg)
-            stats = pipeline.densify(densify_cfg)
+            stats = pipeline.densify(densify_cfg,
+                                     densify_step=densify_step,
+                                     n_densify_steps=n_densify_steps,
+                                     init_count=n_init)
             pipeline.clear_tracking()
             cur_n_gaussians = stats["final_count"]
             densify_json.write(json.dumps({"iter": it, "event": "densify", **stats}) + "\n")
@@ -280,6 +276,8 @@ def main() -> None:
             print(f"iter {it}: train step done.")
 
         if do_log or do_preview:
+            if do_densify:
+                pipeline.render(entry.camera)
             pipeline.device.wait_for_idle()
             rendered = pipeline.read_output_image()[..., :3]
             if not np.all(np.isfinite(rendered)):
