@@ -60,9 +60,8 @@ void binCount(
     if (depth_vs < z_near) return;
     if (cov2d_det <= 0.0) return;
 
-    if (depth_vs < z_near) return;
-
     float2 frame_dim = camera[0].image_size;
+
     float2 bbox_min, bbox_max;
     if (!snugBox(mean_2d, cov2d, g.opacity, bbox_min, bbox_max))
         return;

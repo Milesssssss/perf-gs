@@ -57,7 +57,7 @@ void projectGaussian3DTo2D(
 
     float z = mean_vs.z;
     float z2 = z * z;
-    // Clamp x/z and y/z to prevent Jacobian degeneracy at screen edges.
+    // Clamp x/z and y/z to prevent Jacobian degeneracy at screen edges
     // This is the standard 3DGS fix (lim = tan(FOV/2) * 1.3).
     float lim_x = 1.3 * z / (view_to_clip[0][0]);
     float lim_y = 1.3 * z / (view_to_clip[1][1]);
