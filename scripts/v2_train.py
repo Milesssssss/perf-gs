@@ -69,14 +69,14 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--scene", type=str, default="datasets/360_v2/bicycle")
     ap.add_argument("--iters", type=int, default=30000)
-    ap.add_argument("--downsample", type=int, default=1,
+    ap.add_argument("--downsample", type=int, default=4,
                     help="downsample factor (1=full res, 2=half, 4=quarter). "
                          "Uses images_N dir if it exists, otherwise resizes on load.")
     ap.add_argument("--width", type=int, default=None,
                     help="force render width (overrides --downsample)")
     ap.add_argument("--height", type=int, default=None,
                     help="force render height (overrides --downsample)")
-    ap.add_argument("--preview-every", type=int, default=1000)
+    ap.add_argument("--preview-every", type=int, default=0)
     ap.add_argument("--log-every", type=int, default=500)
     ap.add_argument("--densify-every", type=int, default=500)
     ap.add_argument("--densify-from", type=int, default=500)
@@ -193,7 +193,9 @@ def main() -> None:
     # just swap the active reference — no CPU→GPU upload in the hot loop.
     target_textures = [pipeline.create_target_texture(t) for t in targets_srgb]
 
-    _render_all_cameras(pipeline, scene, 0, cams_dir)
+    print("A")
+    #_render_all_cameras(pipeline, scene, 0, cams_dir)
+    print("B")
 
     profile_json = (run_dir / "profile_log.jsonl").open("w", buffering=1) if args.profile_every > 0 else None
     log_txt = (run_dir / "log.txt").open("w", buffering=1)

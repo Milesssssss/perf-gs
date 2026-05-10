@@ -60,11 +60,9 @@ class AdamLRs:
     opacity: float = 2.5e-2
     color: float = 2.5e-3
 
-
 def _make_kernel(device: spy.Device, path: Path, entry: str) -> spy.ComputeKernel:
     program = device.load_program(str(path), [entry])
     return device.create_compute_kernel(program)
-
 
 # Maps kernel id -> name for debug markers.
 _kernel_labels: dict[int, str] = {}
@@ -159,10 +157,13 @@ class Pipeline:
             max_sort_pairs=max_sort_pairs,
         )
 
-        camera_type = self.module.layout.find_type_by_name("CameraData")
-        if camera_type is None:
-            raise RuntimeError("shader module does not expose type 'CameraData'")
-        self._camera_buffer = spy.NDBuffer(device=device, dtype=camera_type, shape=(1,))
+        # Camera buffer: raw 144-byte buffer (136 data + 8 padding to 16-byte align).
+        # Using a raw Buffer avoids reflection dependency (survives hot-reload).
+        self._camera_buffer = device.create_buffer(
+            size=144,
+            usage=spy.BufferUsage.shader_resource | spy.BufferUsage.unordered_access,
+            label="camera_data",
+        )
 
         # Training step counter (Python-side, for Adam bias correction).
         self.iteration = 0
@@ -182,6 +183,12 @@ class Pipeline:
 
         # SSIM loss mixing. 0 = pure L2, >0 = L1+SSIM blend (3DGS default 0.2).
         self.lambda_ssim = 0.2
+
+    def on_hot_reload(self) -> None:
+        """Refresh reflection-dependent objects after device.reload_all_programs().
+        Camera buffer is raw bytes so it survives reload. Only the module
+        reference needs refreshing (for any code that uses reflected types)."""
+        self.module = _module_for_reflection(self.device)
 
     def _dispatch(self, kernel, **kwargs):
         """Dispatch a kernel, inserting a debug marker if encoder is active."""
@@ -278,11 +285,12 @@ class Pipeline:
                 f"camera resolution {camera.image_size} does not match pipeline "
                 f"resolution {(self.width, self.height)}"
             )
-        cursor = self._camera_buffer.cursor()
-        cursor[0].view_matrix = spy.float4x4(camera.view_matrix)
-        cursor[0].proj_matrix = spy.float4x4(camera.proj_matrix)
-        cursor[0].image_size = spy.float2(float(self.width), float(self.height))
-        cursor.apply()
+        data = np.empty(36, dtype=np.float32)
+        data[0:16] = camera.view_matrix.flatten()
+        data[16:32] = camera.proj_matrix.flatten()
+        data[32:34] = np.array([self.width, self.height], dtype=np.float32)
+        data[34:36] = 0.0  # padding
+        self._camera_buffer.copy_from_numpy(np.ascontiguousarray(data.view(np.uint8)))
 
     def _radix_sort_pairs(self) -> tuple[spy.NDBuffer, spy.NDBuffer, spy.NDBuffer]:
         """Block-local 8-pass LSB radix sort. Returns the (keys_lo,
@@ -364,7 +372,7 @@ class Pipeline:
             thread_count=[self.max_splats, 1, 1],
             gaussians=b.gaussians.storage,
             num_gaussians_counter=b.num_gaussians_counter.storage,
-            camera=self._camera_buffer.storage,
+            camera=self._camera_buffer,
             projected_2d=b.projected_2d.storage,
             tile_count_per_gaussian=b.tile_count_per_gaussian.storage,
             z_near=self.z_near_cull,
@@ -388,7 +396,7 @@ class Pipeline:
             thread_count=[self.max_splats, 1, 1],
             gaussians=b.gaussians.storage,
             num_gaussians_counter=b.num_gaussians_counter.storage,
-            camera=self._camera_buffer.storage,
+            camera=self._camera_buffer,
             projected_2d=b.projected_2d.storage,
             tile_offset_per_gaussian=b.tile_offset_per_gaussian.storage,
             keys_lo=b.sort_keys_lo_a.storage,
@@ -423,7 +431,7 @@ class Pipeline:
             tile_start=b.tile_start.storage,
             tile_end=b.tile_end.storage,
             sorted_gaussian_ids=sorted_v.storage,
-            camera=self._camera_buffer.storage,
+            camera=self._camera_buffer,
             output_image=b.output_image,
             output_transmittance=b.output_transmittance,
             gaussian_count_per_pixel=b.gaussian_count_per_pixel,
@@ -485,7 +493,7 @@ class Pipeline:
             tile_start=b.tile_start.storage,
             tile_end=b.tile_end.storage,
             sorted_gaussian_ids=sorted_values.storage,
-            camera=self._camera_buffer.storage,
+            camera=self._camera_buffer,
             output_image=b.output_image,
             output_transmittance=b.output_transmittance,
             gaussian_count_per_pixel=b.gaussian_count_per_pixel,
@@ -813,7 +821,7 @@ def compute_importance_scores(
             tile_start=b.tile_start.storage,
             tile_end=b.tile_end.storage,
             sorted_gaussian_ids=sorted_values.storage,
-            camera=self._camera_buffer.storage,
+            camera=self._camera_buffer,
             error_mask=b.error_mask,
             importance_score_accum=b.importance_score_accum.storage,
         )

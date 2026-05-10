@@ -4,6 +4,9 @@ Has its own Pipeline (separate buffers/scratch) and copies the gaussian
 buffer + count from the training pipeline every N iterations. Completely
 decoupled — no shared mutable state, no locks needed.
 
+Shader hot-reload: file changes are polled and device.reload_all_programs()
+is called to update kernels in-place.
+
 Usage:
     from trainer.viewer import Viewer
     viewer = Viewer(device, width, height, max_splats)
@@ -16,6 +19,7 @@ Usage:
 from __future__ import annotations
 
 import math
+import os
 import threading
 import time
 
@@ -23,6 +27,7 @@ import numpy as np
 import slangpy as spy
 
 from trainer.dataset import Camera
+from trainer.device import SHADERS_DIR
 from trainer.pipeline import Pipeline
 
 
@@ -111,6 +116,56 @@ class FlyCamera:
         return Camera(view_matrix=view, proj_matrix=proj, image_size=(width, height))
 
 
+class _ShaderWatcher:
+    """Polls .slang files for mtime changes. Calls device.reload_all_programs()
+    when a change is detected (after a debounce period)."""
+
+    DEBOUNCE_S = 0.4
+    POLL_INTERVAL = 0.5
+
+    def __init__(self, device: spy.Device, pipeline: Pipeline):
+        self._device = device
+        self._pipeline = pipeline
+        self._mtimes: dict[str, float] = {}
+        self._last_poll = 0.0
+        self._change_at: float | None = None
+        self._scan(initial=True)
+
+    def _scan(self, initial: bool = False) -> bool:
+        changed = False
+        for root, _, files in os.walk(SHADERS_DIR):
+            for f in files:
+                if not f.endswith(".slang"):
+                    continue
+                path = os.path.join(root, f)
+                try:
+                    mt = os.path.getmtime(path)
+                except OSError:
+                    continue
+                if not initial and self._mtimes.get(path) != mt:
+                    changed = True
+                self._mtimes[path] = mt
+        return changed
+
+    def poll(self):
+        """Call each frame. Triggers reload_all_programs after debounce."""
+        now = time.monotonic()
+        if now - self._last_poll >= self.POLL_INTERVAL:
+            self._last_poll = now
+            if self._scan():
+                self._change_at = now
+
+        if self._change_at is not None and now - self._change_at >= self.DEBOUNCE_S:
+            self._change_at = None
+            self._device.wait_for_idle()
+            self._device.reload_all_programs()
+            try:
+                self._pipeline.on_hot_reload()
+                print("[Viewer] shaders reloaded")
+            except Exception as e:
+                print(f"[Viewer] on_hot_reload failed: {e}")
+
+
 class Viewer:
     def __init__(self, device: spy.Device, width: int = 960, height: int = 540,
                  max_splats: int = 500_000, fovy: float = 90.0):
@@ -121,7 +176,6 @@ class Viewer:
         self.fovy = fovy
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
-        # Viewer has its own pipeline for rendering (separate buffers).
         self._pipeline = Pipeline(
             device=device, width=width, height=height, max_splats=max_splats,
         )
@@ -211,9 +265,11 @@ class Viewer:
         window.on_resize = on_resize
 
         configured = True
+        watcher = _ShaderWatcher(self.device, self._pipeline)
 
         while not window.should_close() and not self._stop_event.is_set():
             window.process_events()
+            watcher.poll()
 
             if needs_reconfigure:
                 needs_reconfigure = False
@@ -252,7 +308,10 @@ class Viewer:
                 cmd = encoder.finish()
                 self.device.submit_command_buffer(cmd)
                 surface.present()
-            except Exception:
+            except Exception as e:
+                if not getattr(self, '_err_printed', False):
+                    print(f"[Viewer] frame error: {e}")
+                    self._err_printed = True
                 time.sleep(0.016)
 
         try:

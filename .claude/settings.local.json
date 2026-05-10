@@ -22,7 +22,11 @@
       "WebFetch(domain:arxiv.org)",
       "Bash(gh api *)",
       "WebFetch(domain:raw.githubusercontent.com)",
-      "WebFetch(domain:github.com)"
+      "WebFetch(domain:github.com)",
+      "Bash(sed -i 's/float4\\(1.0, 0.0, 0.0, 1.0\\)/float4\\(0.0, 1.0, 0.0, 1.0\\)/' shaders/test_hotreload.slang)",
+      "Bash(jobs -l)",
+      "Bash(kill %1)",
+      "Bash(wait)"
     ],
     "deny": [
       "Bash(rm *)",

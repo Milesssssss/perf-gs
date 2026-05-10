@@ -38,6 +38,14 @@ float evalGaussian2DFromCov(
                         + 2.0 * d.x * d.y * cov_inv_01
                         + d.y * d.y * cov_inv_11);
 
+    // Mahalanobis distance is non-negative by construction, so power
+    // must be <= 0. Positive values arise from float32 cancellation in
+    // J*Σ*Jᵀ when the camera is close and the gaussian is at screen
+    // edges (large Jacobian entries). Reference 3DGS skips these; we
+    // return 0 to keep the function branchless and differentiable.
+    if (power > 0.0)
+        return 0.0;
+
     return sigmoid(opacity_logit) * exp(power);
 }
 

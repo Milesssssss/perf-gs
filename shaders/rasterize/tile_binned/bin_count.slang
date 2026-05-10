@@ -44,16 +44,21 @@ void binCount(
     float2 mean_2d;
     float3 cov2d;
     float depth_vs;
+    float cov2d_det;
+
     projectGaussian3DTo2D(
         g.mean, g.log_scale, g.rot_quat,
         camera[0].view_matrix, camera[0].proj_matrix, camera[0].image_size,
-        mean_2d, cov2d, depth_vs);
+        mean_2d, cov2d, depth_vs, cov2d_det);
 
     Projected2DGaussian proj;
     proj.mean = mean_2d;
     proj.cov2d = cov2d;
     proj.depth_vs = depth_vs;
     projected_2d[gid] = proj;
+
+    if (depth_vs < z_near) return;
+    if (cov2d_det <= 0.0) return;
 
     if (depth_vs < z_near) return;
 

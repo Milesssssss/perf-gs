@@ -210,7 +210,7 @@ void backwardRasterize(
             bwd_diff(projectGaussian3DTo2D)(
                 dp_mean, dp_log_scale, dp_rot_quat,
                 world_to_view, view_to_clip, frame_dim,
-                sum_dp_mean_2d, sum_dp_cov2d, 0.0);
+                sum_dp_mean_2d, sum_dp_cov2d, 0.0, 0.0);
 
             InterlockedAdd(grad_mean_x[g_idx], toFixed(dp_mean.d.x));
             InterlockedAdd(grad_mean_y[g_idx], toFixed(dp_mean.d.y));

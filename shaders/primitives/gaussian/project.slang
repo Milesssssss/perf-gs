@@ -27,7 +27,8 @@ void projectGaussian3DTo2D(
     no_diff float2 frame_dim,
     out float2 mean_2d,
     out float3 cov2d,
-    out float depth_vs)
+    out float depth_vs,
+    out float cov2d_det)
 {
     // --- mean: world -> view -> clip -> NDC -> pixel ---
     float3 mean_vs = mul(world_to_view, float4(mean, 1.0)).xyz;
@@ -63,28 +64,17 @@ void projectGaussian3DTo2D(
     float x = clamp(mean_vs.x, -lim_x, lim_x);
     float y = clamp(mean_vs.y, -lim_y, lim_y);
 
-    // J rows = d(screen_xy) / d(view_xyz) evaluated at the mean.
-    float2 J0 = float2(-focal_x / z, 0.0);             // d/dX
-    float2 J1 = float2(0.0, -focal_y / z);             // d/dY
-    float2 J2 = float2(focal_x * x / z2, focal_y * y / z2); // d/dZ
+    // J = d(screen_xy) / d(view_xyz), as a 2×3 matrix (2 rows, 3 cols).
+    float2x3 J = float2x3(
+        float3(focal_x / z, 0.0, -focal_x * x / z2), // d(sx)/d(vx,vy,vz)
+        float3(0.0, focal_y / z, -focal_y * y / z2)  // d(sy)/d(vx,vy,vz)
+    );
 
-    // Σ_2d = J Σ_view Jᵀ  (inlined 2x2 symmetric result)
-    float cov_00 = J0.x * (Sigma_view[0][0] * J0.x + Sigma_view[0][1] * J1.x + Sigma_view[0][2] * J2.x)
-                 + J1.x * (Sigma_view[1][0] * J0.x + Sigma_view[1][1] * J1.x + Sigma_view[1][2] * J2.x)
-                 + J2.x * (Sigma_view[2][0] * J0.x + Sigma_view[2][1] * J1.x + Sigma_view[2][2] * J2.x);
+    float2x2 cov2d_full = mul(J, mul(Sigma_view, transpose(J)));
 
-    float cov_01 = J0.x * (Sigma_view[0][0] * J0.y + Sigma_view[0][1] * J1.y + Sigma_view[0][2] * J2.y)
-                 + J1.x * (Sigma_view[1][0] * J0.y + Sigma_view[1][1] * J1.y + Sigma_view[1][2] * J2.y)
-                 + J2.x * (Sigma_view[2][0] * J0.y + Sigma_view[2][1] * J1.y + Sigma_view[2][2] * J2.y);
-
-    float cov_11 = J0.y * (Sigma_view[0][0] * J0.y + Sigma_view[0][1] * J1.y + Sigma_view[0][2] * J2.y)
-                 + J1.y * (Sigma_view[1][0] * J0.y + Sigma_view[1][1] * J1.y + Sigma_view[1][2] * J2.y)
-                 + J2.y * (Sigma_view[2][0] * J0.y + Sigma_view[2][1] * J1.y + Sigma_view[2][2] * J2.y);
-
-    // Low-pass filter: adds half a pixel^2 of variance on each axis so
-    // sub-pixel gaussians still rasterize as at least one pixel.
-    // Not defensive — derived in the 3DGS paper (see header comment).
-    cov2d = float3(cov_00 + 0.3, cov_01, cov_11 + 0.3);
+    // Pack upper triangle into float3 (xx, xy, yy).
+    cov2d = float3(cov2d_full[0][0] + 0.3, cov2d_full[0][1], cov2d_full[1][1] + 0.3);
+    cov2d_det = cov2d.x * cov2d.z - cov2d.y * cov2d.y;
 }
 
 #endif // TRAINER_GAUSSIAN_PROJECT_SLANG
