@@ -16,10 +16,9 @@ from trainer.device import create_device
 from trainer.pipeline import Pipeline
 from trainer.viewer import Viewer
 
-
 def main() -> None:
     ap = argparse.ArgumentParser(description="View a .ply gaussian splat file")
-    ap.add_argument("ply", type=str, help="path to the .ply file to view")
+    ap.add_argument("ply", type=str, help="path to the .ply file to view", default=r"C:\Users\sscolari\Desktop\slang_3dgs_trainer\datasets\ply_files\debug\Debug.ply")
     ap.add_argument("--width", type=int, default=960)
     ap.add_argument("--height", type=int, default=540)
     ap.add_argument("--max-splats", type=int, default=1_000_000)
@@ -36,7 +35,7 @@ def main() -> None:
     pipeline.set_gaussians_from_numpy(**data)
 
     viewer = Viewer(device, width=args.width, height=args.height,
-                    max_splats=max(args.max_splats, n))
+                    max_splats=max(args.max_splats, n), hot_reload=True)
     viewer.update_gaussians(pipeline)
     viewer.start()
 

@@ -76,7 +76,7 @@ def main() -> None:
                     help="force render width (overrides --downsample)")
     ap.add_argument("--height", type=int, default=None,
                     help="force render height (overrides --downsample)")
-    ap.add_argument("--preview-every", type=int, default=0)
+    ap.add_argument("--preview-every", type=int, default=2000)
     ap.add_argument("--log-every", type=int, default=500)
     ap.add_argument("--densify-every", type=int, default=500)
     ap.add_argument("--densify-from", type=int, default=500)
@@ -91,14 +91,18 @@ def main() -> None:
     ap.add_argument("--scale-reg", type=float, default=0.01)
     ap.add_argument("--w-alpha", type=float, default=0.2,
                     help="alpha loss weight; set > 0 for RGBA targets (e.g. 1.0)")
-    ap.add_argument("--lambda-ssim", type=float, default=0.2,
+    ap.add_argument("--lambda-ssim", type=float, default=0,
                     help="SSIM loss weight (3DGS default 0.2); 0 = pure L2")
-    ap.add_argument("--max-splats", type=int, default=1_000_000)
+    ap.add_argument("--max-splats", type=int, default=4_000_000)
     ap.add_argument("--z-near-cull", type=float, default=0.01,
                     help="view-space depth floor for bin cull; raise for scenes "
                          "where points can land near a camera pose (e.g. 0.2)")
     ap.add_argument("--profile-every", type=int, default=0,
                     help="profile one full step every N iters (0 to disable)")
+    ap.add_argument("--simple-densify", action="store_true",
+                    help="use reference 3DGS threshold-based densification instead of score-ranked")
+    ap.add_argument("--grad-thresh", type=float, default=0.0002,
+                    help="gradient threshold for simple densification (reference 3DGS default)")
     ap.add_argument("--no-viewer", action="store_true", help="disable live viewer")
     ap.add_argument("--backend", type=str, default="vulkan", choices=["vulkan", "d3d12"])
     ap.add_argument("--seed", type=int, default=0)
@@ -246,20 +250,27 @@ def main() -> None:
         if do_densify:
             densify_cfg = cfg
 
-            # Sample N cameras for importance scoring.
-            n_score = min(densify_cfg.n_scoring_views, n_cams)
-            score_indices = rng.choice(n_cams, size=n_score, replace=False)
-            score_cameras = [scene.images[i].camera for i in score_indices]
-            score_targets = [target_textures[i] for i in score_indices]
+            if args.simple_densify:
+                stats = pipeline.densify_simple(
+                    densify_cfg,
+                    grad_thresh=args.grad_thresh,
+                    scale_thresh=extent * 0.01,
+                )
+            else:
+                # Score-ranked densification with importance scoring.
+                n_score = min(densify_cfg.n_scoring_views, n_cams)
+                score_indices = rng.choice(n_cams, size=n_score, replace=False)
+                score_cameras = [scene.images[i].camera for i in score_indices]
+                score_targets = [target_textures[i] for i in score_indices]
 
-            n_densify_steps = (args.densify_to - args.densify_from) // args.densify_every + 1
-            densify_step = (it - args.densify_from) // args.densify_every + 1
+                n_densify_steps = (args.densify_to - args.densify_from) // args.densify_every + 1
+                densify_step = (it - args.densify_from) // args.densify_every + 1
 
-            pipeline.compute_importance_scores(score_cameras, score_targets, densify_cfg)
-            stats = pipeline.densify(densify_cfg,
-                                     densify_step=densify_step,
-                                     n_densify_steps=n_densify_steps,
-                                     init_count=n_init)
+                pipeline.compute_importance_scores(score_cameras, score_targets, densify_cfg)
+                stats = pipeline.densify(densify_cfg,
+                                         densify_step=densify_step,
+                                         n_densify_steps=n_densify_steps,
+                                         init_count=n_init)
             pipeline.clear_tracking()
             cur_n_gaussians = stats["final_count"]
             densify_json.write(json.dumps({"iter": it, "event": "densify", **stats}) + "\n")

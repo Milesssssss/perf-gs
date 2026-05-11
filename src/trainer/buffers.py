@@ -28,8 +28,9 @@ TILE_SIZE = 16
 
 # Default cap on the total number of (tile_id, depth, gaussian_idx) pairs
 # emitted by bin_emit before the global radix sort. A single gaussian
-# covering K tiles contributes K pairs. Sized to handle ~500k gaussians
-# each touching ~8 tiles on average, with headroom for peaks.
+# covering K tiles contributes K pairs. Computed as max_splats * 16
+# (average tile coverage with headroom) in allocate(); this constant
+# is only used when no explicit value is provided.
 DEFAULT_MAX_SORT_PAIRS = 8_000_000
 
 
@@ -120,6 +121,7 @@ class GaussianBuffers:
     valid_mask_buffer: spy.NDBuffer | None = None   # uint[max_splats]
     scan_buffer: spy.NDBuffer | None = None         # uint[max_splats]
     scan_block_sums: spy.NDBuffer | None = None     # uint[max_blocks]
+    scan_block_sums_l2: spy.NDBuffer | None = None  # uint[max_l2_blocks]
     scan_total: spy.NDBuffer | None = None          # uint[1]
 
     # --- sizes ---
@@ -253,9 +255,16 @@ def allocate(
     scan_buffer = spy.NDBuffer(device=device, dtype="uint", shape=(max_splats,))
     # Scan primitive uses 1024 threads/block; number of blocks is ceil(N/1024).
     # Allocate upper bound = ceil(max_splats / 1024).
+    num_l1_blocks = max(1, (max_splats + 1023) // 1024)
     scan_block_sums = spy.NDBuffer(
         device=device, dtype="uint",
-        shape=(max(1, (max_splats + 1023) // 1024),),
+        shape=(num_l1_blocks,),
+    )
+    # Level-2 block sums for 3-level scan (needed when max_splats > 1M).
+    num_l2_blocks = max(1, (num_l1_blocks + 1023) // 1024)
+    scan_block_sums_l2 = spy.NDBuffer(
+        device=device, dtype="uint",
+        shape=(num_l2_blocks,),
     )
     scan_total = spy.NDBuffer(device=device, dtype="uint", shape=(1,))
 
@@ -309,6 +318,7 @@ def allocate(
         valid_mask_buffer=valid_mask_buffer,
         scan_buffer=scan_buffer,
         scan_block_sums=scan_block_sums,
+        scan_block_sums_l2=scan_block_sums_l2,
         scan_total=scan_total,
         max_splats=max_splats,
         max_sort_pairs=max_sort_pairs,

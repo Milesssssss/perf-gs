@@ -96,7 +96,7 @@ class Pipeline:
         self.height = height
         self.max_splats = max_splats
         if max_sort_pairs is None:
-            max_sort_pairs = buffers.DEFAULT_MAX_SORT_PAIRS
+            max_sort_pairs = max(buffers.DEFAULT_MAX_SORT_PAIRS, max_splats * 16)
         self.max_sort_pairs = max_sort_pairs
 
         self.module = _module_for_reflection(device)
@@ -136,6 +136,7 @@ class Pipeline:
         self.k_clear_tracking = mk(densify / "clear_tracking.slang", "clearTracking")
         self.k_accumulate_iter = mk(densify / "accumulate_iter.slang", "accumulateIter")
         self.k_decide_actions = mk(densify / "decide_actions.slang", "decideActions")
+        self.k_decide_actions_simple = mk(densify / "decide_actions_simple.slang", "decideActionsSimple")
         self.k_split_and_clone = mk(densify / "split_and_clone.slang", "splitAndClone")
         self.k_build_prune_mask = mk(densify / "build_prune_mask.slang", "buildPruneMask")
         self.k_scatter_compact = mk(densify / "scatter_compact.slang", "scatterCompact")
@@ -729,11 +730,10 @@ def _srgb_to_linear_np(c: np.ndarray) -> np.ndarray:
 def _scan(self: Pipeline, n: int,
           in_buf: spy.NDBuffer | None = None,
           out_buf: spy.NDBuffer | None = None) -> None:
-    """Run the three-kernel Blelloch scan on ``in_buf`` into ``out_buf``,
+    """Run a multi-level Blelloch scan on ``in_buf`` into ``out_buf``,
     writing the total into ``scan_total[0]``.
 
-    Defaults preserve the v2 densification path's behavior (scan the
-    valid-mask buffer into the scan output buffer).
+    Supports up to SCAN_BLOCK_SIZE^3 (~1 billion) elements via 3 levels.
     """
     b = self.buffers
     if in_buf is None:
@@ -743,6 +743,7 @@ def _scan(self: Pipeline, n: int,
 
     num_blocks = max(1, (n + SCAN_BLOCK_SIZE - 1) // SCAN_BLOCK_SIZE)
 
+    # Level 1: per-block scan, producing block_sums[num_blocks].
     self._dispatch(self.k_scan_block,
         thread_count=[num_blocks * SCAN_BLOCK_SIZE, 1, 1],
         in_buf=in_buf.storage,
@@ -750,12 +751,40 @@ def _scan(self: Pipeline, n: int,
         block_sums=b.scan_block_sums.storage,
         n=n,
     )
-    self._dispatch(self.k_scan_block_sums,
-        thread_count=[SCAN_BLOCK_SIZE, 1, 1],
-        block_sums=b.scan_block_sums.storage,
-        total_out=b.scan_total.storage,
-        num_blocks=num_blocks,
-    )
+
+    if num_blocks <= SCAN_BLOCK_SIZE:
+        # 2-level: single-workgroup scan of block sums.
+        self._dispatch(self.k_scan_block_sums,
+            thread_count=[SCAN_BLOCK_SIZE, 1, 1],
+            block_sums=b.scan_block_sums.storage,
+            total_out=b.scan_total.storage,
+            num_blocks=num_blocks,
+        )
+    else:
+        # 3-level: scan block_sums using the same 2-level pattern.
+        num_l2_blocks = max(1, (num_blocks + SCAN_BLOCK_SIZE - 1) // SCAN_BLOCK_SIZE)
+        # Scan block_sums → block_sums (in-place prefix), with l2 block sums.
+        self._dispatch(self.k_scan_block,
+            thread_count=[num_l2_blocks * SCAN_BLOCK_SIZE, 1, 1],
+            in_buf=b.scan_block_sums.storage,
+            out_buf=b.scan_block_sums.storage,
+            block_sums=b.scan_block_sums_l2.storage,
+            n=num_blocks,
+        )
+        self._dispatch(self.k_scan_block_sums,
+            thread_count=[SCAN_BLOCK_SIZE, 1, 1],
+            block_sums=b.scan_block_sums_l2.storage,
+            total_out=b.scan_total.storage,
+            num_blocks=num_l2_blocks,
+        )
+        self._dispatch(self.k_add_block_offsets,
+            thread_count=[num_l2_blocks * SCAN_BLOCK_SIZE, 1, 1],
+            out_buf=b.scan_block_sums.storage,
+            block_sums=b.scan_block_sums_l2.storage,
+            n=num_blocks,
+        )
+
+    # Final: add block offsets to per-element results.
     self._dispatch(self.k_add_block_offsets,
         thread_count=[num_blocks * SCAN_BLOCK_SIZE, 1, 1],
         out_buf=out_buf.storage,
@@ -995,6 +1024,125 @@ def densify(self: Pipeline, cfg: DensifyConfig,
 
 
 Pipeline.densify = densify  # type: ignore[attr-defined]
+
+
+def densify_simple(self: Pipeline, cfg: DensifyConfig,
+                   grad_thresh: float = 0.0002,
+                   scale_thresh: float | None = None) -> dict:
+    """Reference 3DGS densification: threshold on avg_grad, split/clone by scale.
+
+    No rank-selection, no importance scoring, no growth budget. Every gaussian
+    that exceeds grad_thresh gets densified. Simple and proven.
+    """
+    ACTION_KEEP = 0
+    ACTION_SPLIT = 1
+    ACTION_CLONE = 2
+    ACTION_PRUNE = 3
+
+    b = self.buffers
+
+    if scale_thresh is None:
+        scale_thresh = cfg.t_big_scale * 0.1
+
+    self.device.wait_for_idle()
+    pre_count = int(b.num_gaussians_counter.to_numpy().view(np.uint32)[0])
+    if pre_count == 0:
+        return {"pre_count": 0, "post_split_count": 0, "final_count": 0,
+                "n_split": 0, "n_clone": 0, "n_prune": 0, "n_keep": 0}
+
+    self._dispatch(self.k_decide_actions_simple,
+        thread_count=[self.max_splats, 1, 1],
+        gaussians=b.gaussians.storage,
+        num_gaussians_counter=b.num_gaussians_counter.storage,
+        grad_mean_2d_mag_accum=b.grad_mean_2d_mag_accum.storage,
+        visibility_count_accum=b.visibility_count_accum.storage,
+        action=b.action_buffer.storage,
+        grad_thresh=grad_thresh,
+        scale_thresh=scale_thresh,
+        t_opacity=cfg.t_opacity,
+        t_big_scale=cfg.t_big_scale,
+        max_splats=self.max_splats,
+    )
+    self.device.wait_for_idle()
+
+    actions_raw = b.action_buffer.to_numpy()
+    actions = np.frombuffer(actions_raw.tobytes(), dtype=np.uint32)[:pre_count].copy()
+
+    # Cap growth to avoid blowing past max_splats.
+    n_grow = int((actions == ACTION_SPLIT).sum()) * 2 + int((actions == ACTION_CLONE).sum())
+    n_prune_count = int((actions == ACTION_PRUNE).sum())
+    projected = pre_count + n_grow - n_prune_count
+    if projected > self.max_splats:
+        # Too many — disable cloning/splitting for gaussians until budget fits.
+        grow_indices = np.where((actions == ACTION_SPLIT) | (actions == ACTION_CLONE))[0]
+        excess = projected - self.max_splats
+        # Remove excess from end of grow list.
+        if excess > 0 and len(grow_indices) > 0:
+            remove = grow_indices[-min(excess, len(grow_indices)):]
+            actions[remove] = ACTION_KEEP
+
+        action_upload = np.zeros(self.max_splats, dtype=np.uint32)
+        action_upload[:pre_count] = actions
+        b.action_buffer.copy_from_numpy(action_upload)
+
+    # Phase C: split and clone.
+    self._dispatch(self.k_split_and_clone,
+        thread_count=[pre_count, 1, 1],
+        gaussians=b.gaussians.storage,
+        adam_state=b.adam_state.storage,
+        num_gaussians_counter=b.num_gaussians_counter.storage,
+        action=b.action_buffer.storage,
+        pre_count=pre_count,
+        max_splats=self.max_splats,
+    )
+    self.device.wait_for_idle()
+    post_split_count = int(b.num_gaussians_counter.to_numpy().view(np.uint32)[0])
+    post_split_count = min(post_split_count, self.max_splats)
+
+    # Phases D/E: compact (remove pruned).
+    self._dispatch(self.k_build_prune_mask,
+        thread_count=[post_split_count, 1, 1],
+        action=b.action_buffer.storage,
+        valid_mask=b.valid_mask_buffer.storage,
+        pre_count=pre_count,
+        post_count=post_split_count,
+    )
+    self._scan(post_split_count)
+    self._dispatch(self.k_scatter_compact,
+        thread_count=[post_split_count, 1, 1],
+        gaussians_in=b.gaussians.storage,
+        adam_state_in=b.adam_state.storage,
+        valid_mask=b.valid_mask_buffer.storage,
+        scan=b.scan_buffer.storage,
+        gaussians_out=b.gaussians_scratch.storage,
+        adam_state_out=b.adam_state_scratch.storage,
+        post_count=post_split_count,
+    )
+
+    b.gaussians, b.gaussians_scratch = b.gaussians_scratch, b.gaussians
+    b.adam_state, b.adam_state_scratch = b.adam_state_scratch, b.adam_state
+
+    self.device.wait_for_idle()
+    final_count = int(b.scan_total.to_numpy().view(np.uint32)[0])
+    b.num_gaussians_counter.copy_from_numpy(np.array([final_count], dtype=np.uint32))
+
+    n_keep  = int((actions == ACTION_KEEP).sum())
+    n_split = int((actions == ACTION_SPLIT).sum())
+    n_clone = int((actions == ACTION_CLONE).sum())
+    n_prune = int((actions == ACTION_PRUNE).sum())
+
+    return {
+        "pre_count": pre_count,
+        "post_split_count": post_split_count,
+        "final_count": final_count,
+        "n_keep": n_keep,
+        "n_split": n_split,
+        "n_clone": n_clone,
+        "n_prune": n_prune,
+    }
+
+
+Pipeline.densify_simple = densify_simple  # type: ignore[attr-defined]
 
 
 def cap_opacity(self: Pipeline, cap_value: float = 0.8) -> None:

@@ -27,7 +27,8 @@ float evalGaussian2DFromCov(
     float2 d = pixel - mean_2d;
 
     float det = cov2d.x * cov2d.z - cov2d.y * cov2d.y;
-    det = max(det, 1e-20);
+    if (det <= 0.0)
+        return 0.0;
 
     float inv_det = 1.0 / det;
     float cov_inv_00 =  cov2d.z * inv_det;
@@ -38,11 +39,6 @@ float evalGaussian2DFromCov(
                         + 2.0 * d.x * d.y * cov_inv_01
                         + d.y * d.y * cov_inv_11);
 
-    // Mahalanobis distance is non-negative by construction, so power
-    // must be <= 0. Positive values arise from float32 cancellation in
-    // J*Σ*Jᵀ when the camera is close and the gaussian is at screen
-    // edges (large Jacobian entries). Reference 3DGS skips these; we
-    // return 0 to keep the function branchless and differentiable.
     if (power > 0.0)
         return 0.0;
 

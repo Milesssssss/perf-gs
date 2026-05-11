@@ -58,7 +58,6 @@ void binCount(
     projected_2d[gid] = proj;
 
     if (depth_vs < z_near) return;
-    if (cov2d_det <= 0.0) return;
 
     float2 frame_dim = camera[0].image_size;
 

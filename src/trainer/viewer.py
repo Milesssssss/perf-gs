@@ -106,7 +106,7 @@ class FlyCamera:
         self.pitch += -dy * self.sensitivity
         self.pitch = max(-89.0, min(89.0, self.pitch))
 
-    def get_camera(self, width: int, height: int, fovy: float = 60.0) -> Camera:
+    def get_camera(self, width: int, height: int, fovy: float = 45.0) -> Camera:
         view = _build_view_matrix(
             self.eye.astype(np.float32),
             self.forward.astype(np.float32),
@@ -168,12 +168,14 @@ class _ShaderWatcher:
 
 class Viewer:
     def __init__(self, device: spy.Device, width: int = 960, height: int = 540,
-                 max_splats: int = 500_000, fovy: float = 90.0):
+                 max_splats: int = 500_000, fovy: float = 45.0,
+                 hot_reload: bool = False):
         self.device = device
         self.width = width
         self.height = height
         self.max_splats = max_splats
         self.fovy = fovy
+        self.hot_reload = hot_reload
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
         self._pipeline = Pipeline(
@@ -182,16 +184,22 @@ class Viewer:
         self._pipeline.lambda_ssim = 0.0
         self._pipeline.w_alpha = 0.0
         self._has_data = False
+        self._update_pending = False
 
     def update_gaussians(self, train_pipeline: Pipeline):
-        """Copy gaussian buffer + count from trainer. Call from training thread."""
-        train_pipeline.device.wait_for_idle()
-        n_raw = train_pipeline.buffers.num_gaussians_counter.to_numpy()
-        n = int(np.frombuffer(n_raw.tobytes(), dtype=np.uint32)[0])
-        g_raw = train_pipeline.buffers.gaussians.to_numpy()
-        self._pipeline.buffers.num_gaussians_counter.copy_from_numpy(
-            np.array([n], dtype=np.uint32))
-        self._pipeline.buffers.gaussians.copy_from_numpy(g_raw)
+        """GPU blit gaussian data from training pipeline to viewer pipeline.
+
+        Both pipelines share the same device, so this is a fast GPU→GPU
+        copy with no CPU round-trip. Called from training thread.
+        """
+        src_g = train_pipeline.buffers.gaussians.storage
+        dst_g = self._pipeline.buffers.gaussians.storage
+        src_n = train_pipeline.buffers.num_gaussians_counter.storage
+        dst_n = self._pipeline.buffers.num_gaussians_counter.storage
+        encoder = self.device.create_command_encoder()
+        encoder.copy_buffer(dst_g, 0, src_g, 0, src_g.size)
+        encoder.copy_buffer(dst_n, 0, src_n, 0, src_n.size)
+        self.device.submit_command_buffer(encoder.finish())
         self._has_data = True
 
     def start(self):
@@ -265,11 +273,12 @@ class Viewer:
         window.on_resize = on_resize
 
         configured = True
-        watcher = _ShaderWatcher(self.device, self._pipeline)
+        watcher = _ShaderWatcher(self.device, self._pipeline) if self.hot_reload else None
 
         while not window.should_close() and not self._stop_event.is_set():
             window.process_events()
-            watcher.poll()
+            if watcher:
+                watcher.poll()
 
             if needs_reconfigure:
                 needs_reconfigure = False
@@ -301,7 +310,7 @@ class Viewer:
 
             camera = cam.get_camera(self.width, self.height, self.fovy)
             try:
-                self._pipeline.render(camera)
+                self._pipeline._run_forward(camera)
                 surface_tex = surface.acquire_next_image()
                 encoder = self.device.create_command_encoder()
                 encoder.blit(surface_tex, self._pipeline.buffers.output_image)
