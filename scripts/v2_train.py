@@ -67,7 +67,9 @@ def _render_all_cameras(pipeline: Pipeline, scene, iter_idx: int, cams_dir: Path
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--scene", type=str, default="datasets/360_v2/bicycle")
+    #ap.add_argument("--scene", type=str, default="datasets/360_v2/bicycle")
+    ap.add_argument("--scene", type=str, default="datasets/synthetic/suzanne_blender")
+
     ap.add_argument("--iters", type=int, default=30000)
     ap.add_argument("--downsample", type=int, default=4,
                     help="downsample factor (1=full res, 2=half, 4=quarter). "
@@ -247,7 +249,7 @@ def main() -> None:
         #    densify_json.write(json.dumps({"iter": it, "event": "opacity_reset"}) + "\n")
         #    print(f"iter {it}: opacity reset")
 
-        if do_densify:
+        if False:
             densify_cfg = cfg
 
             if args.simple_densify:

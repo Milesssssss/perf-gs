@@ -95,6 +95,7 @@ void backwardRasterize(
     float dL_dA = dL_dC_full.a;
 
     float T_post = valid_pixel ? output_transmittance[pixel] : 1.0;
+    float T_final = T_post;
     float3 C_behind = float3(0.0, 0.0, 0.0);
 
     float4x4 world_to_view = camera[0].view_matrix;
@@ -103,7 +104,7 @@ void backwardRasterize(
 
     for (int i = int(max_processed) - 1; i >= 0; --i)
     {
-        // --- Phase 1: Cooperative load ---
+        // --- Phase 1: Cooperative load ---, we could try moving from 16x16 tiles with all in GS mem to 32x8 with 8 in GS mem and 8 in registers via wave-intr
         if (tid == 0)
         {
             uint idx = sorted_gaussian_ids[t_start + uint(i)];
@@ -143,7 +144,9 @@ void backwardRasterize(
             bwd_diff(sigmoid3)(dp_color_logit, dL_dc_i);
 
             float3 dC_dalpha = c_i * T_i - C_behind / denom;
-            float dL_dalpha = dot(dL_dC, dC_dalpha) + dL_dA * T_i;
+
+            float dL_dalpha = dot(dL_dC, dC_dalpha) + dL_dA * (T_final / denom);
+            
             float dL_d_alpha_raw = dL_dalpha * alpha_grad_scale;
 
             var dp_mean_2d = diffPair(proj.mean);
@@ -181,6 +184,12 @@ void backwardRasterize(
         gs_reduce[CH_ITER_Y   * TILE_AREA + tid] = local_abs_mean2d_y;
         GroupMemoryBarrierWithGroupSync();
 
+        //These two next phases are probably causing quite a bit of divergence, but
+        //it may still be a win overall compared to doing the projection backward in every thread
+        //Ideally while some threads are doing the reduction and the first one the proj backward
+        // could we have one of the threads that finishes the reduction early be the one issuing
+        // the mem read to load the gaussian in the GS mem? Rn thread 0 has to do the single proj + atomics and issue the mem read for next splat.
+        
         [ForceUnroll]
         for (uint stride = TILE_AREA >> 1; stride > 0; stride >>= 1)
         {
