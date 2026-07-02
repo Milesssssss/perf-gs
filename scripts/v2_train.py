@@ -214,7 +214,11 @@ def main() -> None:
 
     rng = np.random.default_rng(args.seed)
 
-    lr_mean_init = 1.6e-4
+    # gsplat/3DGS scale the means LR by scene extent (getNerfppNorm radius):
+    # means are the only world-unit parameter, so their LR must track scene
+    # scale. Without this, centers move ~scene_extent times too slowly and
+    # cannot migrate to the surface, leaving elongated/stuck splats.
+    lr_mean_init = 1.6e-4 * extent
     lr_mean_final = lr_mean_init * 1e-2
     decay = (lr_mean_final / lr_mean_init) ** (1.0 / max(args.iters, 1))
 

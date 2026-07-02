@@ -176,8 +176,8 @@ class Pipeline:
         self.z_near_cull = 0.01
 
         # Regularization weights (gsplat defaults: both 0; MCMC uses 0.001).
-        self.opacity_reg = 0.01
-        self.scale_reg = 0.01
+        self.opacity_reg = 0.0
+        self.scale_reg = 0.0
 
         # Alpha loss weight. Set > 0 when target images have meaningful alpha.
         self.w_alpha = 0.0
@@ -707,14 +707,17 @@ class Pipeline:
         return out
 
     def read_loss(self) -> float:
-        """Read the L2 loss as a scalar. Computed on CPU from the
+        """Read the L1 loss as a scalar. Computed on CPU from the
         output_image and target_image — the shader doesn't accumulate
-        the scalar itself (we only needed dL/dC for the backward)."""
+        the scalar itself (we only needed dL/dC for the backward).
+
+        Matches the L1 photometric objective in l2_linear.slang so the
+        finite-difference gradient tests stay consistent with the shader."""
         C = self.buffers.output_image.to_numpy()[..., :3]
         T_rgba = self.buffers.target_image.to_numpy()[..., :3]
         T_linear = _srgb_to_linear_np(T_rgba)
         diff = C - T_linear
-        return float(np.sum(diff * diff))
+        return float(np.sum(np.abs(diff)))
 
 
 def _srgb_to_linear_np(c: np.ndarray) -> np.ndarray:
