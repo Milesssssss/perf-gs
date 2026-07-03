@@ -123,6 +123,7 @@ def main() -> None:
     ap.add_argument("--init-opacity", type=float, default=0.1, help="initial opacity for all splats")
     ap.add_argument("--grow-scale3d", type=float, default=0.01, help="GSs with 3d scale (normalized by scene_scale below this "
                     "value will be duplicated. Above will be split. Default is 0.01")
+    ap.add_argument("--opacity-reset-value", type=float, default=0.01, help="value to reset opacity to when doing opacity reset")
     args = ap.parse_args()
 
     run_name = args.run_name or datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -150,6 +151,7 @@ def main() -> None:
         t_opacity=args.t_opacity,
         t_big_scale=args.t_big_scale * extent,
         opacity_cap=args.opacity_cap,
+        t_opacity_reset_value=args.opacity_reset_value
     )
 
     (run_dir / "config.json").write_text(json.dumps({
@@ -275,15 +277,15 @@ def main() -> None:
         # Densification schedule.
         do_densify = (args.densify_from <= it <= args.densify_to
                       and (it - args.densify_from) % args.densify_every == 0)
-        #do_opacity_reset = (it % 3000 == 0 and it >= args.densify_from and it <= args.densify_to)
+        do_opacity_reset = (it % 3000 == 0 and it >= args.densify_from and it <= args.densify_to)
         do_log = args.log_every > 0 and ((it % args.log_every == 0) or (it == 1) or (it == args.iters))
         do_preview = args.preview_every > 0 and ((it % args.preview_every == 0) or (it == args.iters))
 
         # for now no opacity reset, i do not like it.
-        #if do_opacity_reset:
-        #    pipeline.reset_opacity(cfg)
-        #    densify_json.write(json.dumps({"iter": it, "event": "opacity_reset"}) + "\n")
-        #    print(f"iter {it}: opacity reset")
+        if do_opacity_reset:
+           pipeline.reset_opacity(cfg)
+           densify_json.write(json.dumps({"iter": it, "event": "opacity_reset"}) + "\n")
+           print(f"iter {it}: opacity reset")
 
         densify_cfg = cfg
         if do_densify:

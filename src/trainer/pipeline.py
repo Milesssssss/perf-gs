@@ -42,6 +42,7 @@ class DensifyConfig:
     t_opacity: float = 0.005        # prune if sigmoid(opacity) < this
     t_big_scale: float = 0.1        # prune if max_scale > this (world-space floater removal)
     opacity_cap: float = 0.8        # post-densify opacity cap (softer than reset)
+    t_opacity_reset_value: float = 0.01  # reset opacity to this value
 
 
 @dataclass
@@ -1245,7 +1246,7 @@ def reset_opacity(self: Pipeline, cfg: DensifyConfig) -> None:
         thread_count=[self.max_splats, 1, 1],
         gaussians=b.gaussians.storage,
         num_gaussians_counter=b.num_gaussians_counter.storage,
-        reset_value=0.01,
+        reset_value=cfg.t_opacity_reset_value,
     )
 
 
