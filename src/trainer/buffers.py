@@ -359,34 +359,31 @@ def write_gaussians(
     p = np.clip(opacities, 1e-5, 1.0 - 1e-5).astype(np.float32)
     opacity_logits = np.log(p / (1.0 - p))
 
-    cursor = buffers.gaussians.cursor()
-    for i in range(n):
-        cursor[i].mean = spy.float3(*means[i])
-        cursor[i].log_scale = spy.float3(*log_scales[i])
-        cursor[i].rot_quat = spy.float4(*rot_quats[i])
-        cursor[i].opacity = float(opacity_logits[i])
-        cursor[i].color_logit = spy.float3(*color_logits[i])
-    cursor.apply()
+    # Gaussian3D is 14 contiguous float32s with no padding:
+    #   mean(3), log_scale(3), rot_quat(4), opacity(1), color_logit(3).
+    # Build the whole block with vectorized numpy and upload in one
+    # copy_from_numpy — the per-element cursor loop below built ~5*n
+    # temporary spy.float3/float4 objects (≈90ms per 5k gaussians, seconds
+    # after densification grows the count into the hundreds of thousands).
+    block = np.empty((n, 14), dtype=np.float32)
+    block[:, 0:3] = means
+    block[:, 3:6] = log_scales
+    block[:, 6:10] = rot_quats
+    block[:, 10] = opacity_logits
+    block[:, 11:14] = color_logits
+    buffers.gaussians.copy_from_numpy(np.ascontiguousarray(block.reshape(-1)))
 
     set_num_gaussians(buffers, n)
 
 
 def zero_adam_state(buffers: GaussianBuffers) -> None:
-    """Reset all Adam first/second-moment state to zero."""
+    """Reset all Adam first/second-moment state to zero.
+
+    The whole AdamState buffer is contiguous POD, so a single zero-filled
+    copy_from_numpy clears it regardless of the internal field layout. The
+    old per-element cursor loop ran over all max_splats (~820ms per 50k,
+    i.e. ~80s at a 5M cap) on every set_gaussians_from_numpy call.
+    """
     assert buffers.adam_state is not None
-    n = buffers.max_splats
-    cursor = buffers.adam_state.cursor()
-    z3 = spy.float3(0.0, 0.0, 0.0)
-    z4 = spy.float4(0.0, 0.0, 0.0, 0.0)
-    for i in range(n):
-        cursor[i].mean_m = z3
-        cursor[i].mean_v = z3
-        cursor[i].log_scale_m = z3
-        cursor[i].log_scale_v = z3
-        cursor[i].rot_m = z4
-        cursor[i].rot_v = z4
-        cursor[i].opacity_m = 0.0
-        cursor[i].opacity_v = 0.0
-        cursor[i].color_m = z3
-        cursor[i].color_v = z3
-    cursor.apply()
+    n_floats = buffers.adam_state.to_numpy().view(np.float32).size
+    buffers.adam_state.copy_from_numpy(np.zeros(n_floats, dtype=np.float32))

@@ -1,0 +1,7 @@
+- TODOs:
+	- Finish verifying that gsplat with L1, no densification is at least similar to gsplat, we are pretty close imho
+	- Implement SSIM shader and fix loss function
+	- Make sure we match gsplat, initially visually, then with PSRN scoring.
+	- Include or port a production grade radix sort.
+	- Test SGD by selecting a random pixel pattern in patches and accumulate gradient only from a subset of pixels to improve perf.
+	- Understand if a render-graph system is needed or if slangpy already handles all of that

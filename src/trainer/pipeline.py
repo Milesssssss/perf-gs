@@ -536,6 +536,7 @@ class Pipeline:
             grad_2d_y_iter=b.grad_2d_y_iter.storage,
             grad_mean_2d_mag_accum=b.grad_mean_2d_mag_accum.storage,
             visibility_count_accum=b.visibility_count_accum.storage,
+            frame_dim=spy.float2(self.width, self.height),
             max_splats=self.max_splats,
         )
 
@@ -1049,8 +1050,7 @@ Pipeline.densify = densify  # type: ignore[attr-defined]
 
 def densify_simple(self: Pipeline, cfg: DensifyConfig,
                    grad_thresh: float = 0.0002,
-                   scale_thresh: float | None = None,
-                   prune_max_scale: float | None = None) -> dict:
+                   scale_thresh: float | None = None) -> dict:
     """Reference 3DGS densification: threshold on avg_grad, split/clone by scale.
 
     No rank-selection, no importance scoring, no growth budget. Every gaussian
@@ -1063,15 +1063,48 @@ def densify_simple(self: Pipeline, cfg: DensifyConfig,
 
     b = self.buffers
 
+    # Per-phase timing. Enable with TRAINER_DENSIFY_TIMING=1. Each mark
+    # syncs the GPU so the elapsed time is attributed to the phase that
+    # produced the work, not to a later sync that happens to drain it.
+    import os, time as _time
+    _timing = os.environ.get("TRAINER_DENSIFY_TIMING") == "1"
+    _t_prev = [None]
+    def _mark(label: str) -> None:
+        if not _timing:
+            return
+        self.device.wait_for_idle()
+        now = _time.perf_counter()
+        if _t_prev[0] is not None:
+            print(f"    [densify] {label:22s} {(now - _t_prev[0]) * 1000:9.1f} ms")
+        _t_prev[0] = now
+
     if scale_thresh is None:
         scale_thresh = cfg.t_big_scale * 0.1
 
+    _mark("start")
     self.device.wait_for_idle()
     pre_count = int(b.num_gaussians_counter.to_numpy().view(np.uint32)[0])
+    _mark("initial sync+count")
     if pre_count == 0:
         return {"pre_count": 0, "post_split_count": 0, "final_count": 0,
                 "n_split": 0, "n_clone": 0, "n_prune": 0, "n_keep": 0}
 
+    # ``grad_thresh`` is expressed in gsplat's convention: the NDC-space
+    # densification gradient of the MEAN L1 loss (F.l1_loss averages over
+    # H*W*channels). Our accumulator already carries the NDC conversion
+    # (accumulate_iter multiplies by frame_dim/2) but NOT the loss-mean
+    # factor — the loss shader emits the raw per-pixel gradient sum, and
+    # the 1/(H*W*3) factor is too small to survive the 2^16 fixed-point
+    # accumulator. So we scale the threshold UP by H*W*channels here to
+    # compare against our sum-convention signal. With this, grad_thresh
+    # stays resolution- and convention-compatible with gsplat's 0.0002.
+
+    #gsplat: loss = F.l1_loss(...) = mean over all pixels and channels = sum / (H·W·3). ours: the loss shader emits raw sign(C−T) per pixel/channel, a sum, no division.
+    # gsplat_signal > 0.0002
+    #  our_signal / (H*W*3) > 0.0002        (scale the signal down)
+    #  our_signal > 0.0002 * (H*W*3)        (scale the threshold up) <- what we did
+    channels = 3.0
+    grad_thresh_internal = grad_thresh * (self.width * self.height * channels)
     self._dispatch(self.k_decide_actions_simple,
         thread_count=[self.max_splats, 1, 1],
         gaussians=b.gaussians.storage,
@@ -1079,34 +1112,36 @@ def densify_simple(self: Pipeline, cfg: DensifyConfig,
         grad_mean_2d_mag_accum=b.grad_mean_2d_mag_accum.storage,
         visibility_count_accum=b.visibility_count_accum.storage,
         action=b.action_buffer.storage,
-        grad_thresh=grad_thresh,
+        grad_thresh=grad_thresh_internal,
         scale_thresh=scale_thresh,
-        max_scale=prune_max_scale,
         t_opacity=cfg.t_opacity,
         t_big_scale=cfg.t_big_scale,
         max_splats=self.max_splats,
     )
     self.device.wait_for_idle()
+    _mark("decide_actions")
 
-    actions_raw = b.action_buffer.to_numpy()
-    actions = np.frombuffer(actions_raw.tobytes(), dtype=np.uint32)[:pre_count].copy()
+    # TODO: this readback is slowing down the densification step a lot. Like some seconds.
 
-    # Cap growth to avoid blowing past max_splats.
-    n_grow = int((actions == ACTION_SPLIT).sum()) * 2 + int((actions == ACTION_CLONE).sum())
-    n_prune_count = int((actions == ACTION_PRUNE).sum())
-    projected = pre_count + n_grow - n_prune_count
-    if projected > self.max_splats:
-        # Too many — disable cloning/splitting for gaussians until budget fits.
-        grow_indices = np.where((actions == ACTION_SPLIT) | (actions == ACTION_CLONE))[0]
-        excess = projected - self.max_splats
-        # Remove excess from end of grow list.
-        if excess > 0 and len(grow_indices) > 0:
-            remove = grow_indices[-min(excess, len(grow_indices)):]
-            actions[remove] = ACTION_KEEP
-
-        action_upload = np.zeros(self.max_splats, dtype=np.uint32)
-        action_upload[:pre_count] = actions
-        b.action_buffer.copy_from_numpy(action_upload)
+    # actions_raw = b.action_buffer.to_numpy()
+    # actions = np.frombuffer(actions_raw.tobytes(), dtype=np.uint32)[:pre_count].copy()
+# 
+    # # Cap growth to avoid blowing past max_splats.
+    # n_grow = int((actions == ACTION_SPLIT).sum()) * 2 + int((actions == ACTION_CLONE).sum())
+    # n_prune_count = int((actions == ACTION_PRUNE).sum())
+    # projected = pre_count + n_grow - n_prune_count
+    # if projected > self.max_splats:
+    #     # Too many — disable cloning/splitting for gaussians until budget fits.
+    #     grow_indices = np.where((actions == ACTION_SPLIT) | (actions == ACTION_CLONE))[0]
+    #     excess = projected - self.max_splats
+    #     # Remove excess from end of grow list.
+    #     if excess > 0 and len(grow_indices) > 0:
+    #         remove = grow_indices[-min(excess, len(grow_indices)):]
+    #         actions[remove] = ACTION_KEEP
+# 
+    #     action_upload = np.zeros(self.max_splats, dtype=np.uint32)
+    #     action_upload[:pre_count] = actions
+    #     b.action_buffer.copy_from_numpy(action_upload)
 
     # Phase C: split and clone.
     self._dispatch(self.k_split_and_clone,
@@ -1121,6 +1156,7 @@ def densify_simple(self: Pipeline, cfg: DensifyConfig,
     self.device.wait_for_idle()
     post_split_count = int(b.num_gaussians_counter.to_numpy().view(np.uint32)[0])
     post_split_count = min(post_split_count, self.max_splats)
+    _mark("split_and_clone")
 
     # Phases D/E: compact (remove pruned).
     self._dispatch(self.k_build_prune_mask,
@@ -1148,20 +1184,21 @@ def densify_simple(self: Pipeline, cfg: DensifyConfig,
     self.device.wait_for_idle()
     final_count = int(b.scan_total.to_numpy().view(np.uint32)[0])
     b.num_gaussians_counter.copy_from_numpy(np.array([final_count], dtype=np.uint32))
+    _mark("prune_mask+scan+compact")
 
-    n_keep  = int((actions == ACTION_KEEP).sum())
-    n_split = int((actions == ACTION_SPLIT).sum())
-    n_clone = int((actions == ACTION_CLONE).sum())
-    n_prune = int((actions == ACTION_PRUNE).sum())
+    # n_keep  = int((actions == ACTION_KEEP).sum())
+    # n_split = int((actions == ACTION_SPLIT).sum())
+    # n_clone = int((actions == ACTION_CLONE).sum())
+    # n_prune = int((actions == ACTION_PRUNE).sum())
 
     return {
         "pre_count": pre_count,
         "post_split_count": post_split_count,
         "final_count": final_count,
-        "n_keep": n_keep,
-        "n_split": n_split,
-        "n_clone": n_clone,
-        "n_prune": n_prune,
+        "n_keep": -1,
+        "n_split": -1,
+        "n_clone": -1,
+        "n_prune": -1,
     }
 
 

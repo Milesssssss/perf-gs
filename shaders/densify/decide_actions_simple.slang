@@ -62,6 +62,7 @@ void decideActionsSimple(
 
     // Densification signal: average 2D gradient magnitude.
     uint vis = visibility_count_accum[i];
+    
     float avg_grad = 0.0;
     if (vis > 0)
         avg_grad = fromFixed(grad_mean_2d_mag_accum[i]) / float(vis);

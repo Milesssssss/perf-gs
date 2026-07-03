@@ -338,10 +338,27 @@ def load_colmap(
         raise ValueError(f"scene has mixed native camera sizes: {native_sizes}")
     native_w, native_h = next(iter(native_sizes))
 
-    if width is None:
-        width = native_w // downsample
-    if height is None:
-        height = native_h // downsample
+    if width is None or height is None:
+        # When a pre-downsampled images_N directory is used, adopt its ACTUAL
+        # on-disk pixel size as the render target. The COLMAP downsampler
+        # rounds (e.g. 4946//4 = 1236 but the tool wrote 1237), so computing
+        # native // downsample here disagrees with the files by ~1px, which
+        # made load_image LANCZOS-resize every image on load (~110ms each,
+        # ~21s over 194 cams) for nothing. Reading the real size skips that
+        # resize entirely and keeps the projection intrinsics exact.
+        disk_w = disk_h = None
+        if img_dir != scene_dir / "images":
+            try:
+                from PIL import Image
+                sample = next(p for p in sorted(img_dir.iterdir())
+                              if p.suffix.lower() in (".jpg", ".jpeg", ".png"))
+                disk_w, disk_h = Image.open(sample).size
+            except (StopIteration, OSError):
+                disk_w = disk_h = None
+        if width is None:
+            width = disk_w if disk_w is not None else native_w // downsample
+        if height is None:
+            height = disk_h if disk_h is not None else native_h // downsample
 
     sx = width / native_w
     sy = height / native_h

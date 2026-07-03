@@ -79,8 +79,8 @@ def main() -> None:
     ap.add_argument("--height", type=int, default=None,
                     help="force render height (overrides --downsample)")
     ap.add_argument("--preview-every", type=int, default=2000)
-    ap.add_argument("--log-every", type=int, default=500) # -> this one is slowing down stuff
-    ap.add_argument("--densify-every", type=int, default=500)
+    ap.add_argument("--log-every", type=int, default=10000) 
+    ap.add_argument("--densify-every", type=int, default=100)
     ap.add_argument("--densify-from", type=int, default=500)
     ap.add_argument("--densify-to", type=int, default=15000)
     #ap.add_argument("--opacity-reset-iters", type=int, nargs="*", default=[3000])
@@ -155,8 +155,7 @@ def main() -> None:
             "t_opacity": cfg.t_opacity,
             "t_big_scale": cfg.t_big_scale,
             "opacity_cap": cfg.opacity_cap,
-            "grow_scale3d": args.grow_scale3d,
-            "prune_scale3d": args.prune_scale3d,
+            "grow_scale3d": args.grow_scale3d
         },
         "max_splats": args.max_splats,
         "z_near_cull": args.z_near_cull,
@@ -168,17 +167,34 @@ def main() -> None:
     targets_srgb = [load_image(e, scene.image_dir, W, H,
                                load_alpha=use_alpha)
                     for e in scene.images]
-    targets_linear = [_srgb_to_linear(t[..., :3]) for t in targets_srgb]
+
+    # Linear targets are only needed for the PSNR/MSE readback (current cam
+    # on log iters + all cams in the final metrics pass). Computing all N
+    # upfront wastes ~38ms/cam on scenes with hundreds of views; memoize
+    # each on first use instead.
+    _targets_linear_cache: dict[int, np.ndarray] = {}
+    def targets_linear(cam_i: int) -> np.ndarray:
+        t = _targets_linear_cache.get(cam_i)
+        if t is None:
+            t = _srgb_to_linear(targets_srgb[cam_i][..., :3])
+            _targets_linear_cache[cam_i] = t
+        return t
+
+    # gt.png is a debug/preview artifact, not used by training. Re-encoding
+    # and writing every GT costs ~100ms/cam; skip any that already exist.
     for cam_i, (entry, tgt) in enumerate(zip(scene.images, targets_srgb)):
         cam_dir = cams_dir / f"cam_{cam_i:02d}"
         cam_dir.mkdir(parents=True, exist_ok=True)
+        gt_path = cam_dir / "gt.png"
+        if gt_path.exists():
+            continue
         if use_alpha and tgt.shape[-1] == 4:
             # Save RGBA so transparent background is visible in the GT.
             gt_rgba = (tgt * 255 + 0.5).clip(0, 255).astype(np.uint8)
-            Image.fromarray(gt_rgba, mode="RGBA").save(cam_dir / "gt.png")
+            Image.fromarray(gt_rgba, mode="RGBA").save(gt_path)
         else:
             gt_rgb = (tgt[..., :3] * 255 + 0.5).clip(0, 255).astype(np.uint8)
-            Image.fromarray(gt_rgb, mode="RGB").save(cam_dir / "gt.png")
+            Image.fromarray(gt_rgb, mode="RGB").save(gt_path)
 
     device = create_device(backend=args.backend)
     pipeline = Pipeline(
@@ -267,8 +283,7 @@ def main() -> None:
                 stats = pipeline.densify_simple(
                     densify_cfg,
                     grad_thresh=args.grad_thresh,
-                    scale_thresh=extent * args.grow_scale3d,
-                    prune_max_scale=extent * args.prune_scale3d
+                    scale_thresh=extent * args.grow_scale3d
                 )
             else:
                 # Score-ranked densification with importance scoring.
@@ -316,9 +331,9 @@ def main() -> None:
                 print(msg)
                 log_txt.write(f"# ABORT: {msg}\n")
                 break
-            mse = float(np.mean((rendered - targets_linear[cam_idx]) ** 2))
+            mse = float(np.mean((rendered - targets_linear(cam_idx)) ** 2))
             rolling_loss = mse if rolling_loss is None else 0.98 * rolling_loss + 0.02 * mse
-            psnr = _psnr_linear(rendered, targets_linear[cam_idx])
+            psnr = _psnr_linear(rendered, targets_linear(cam_idx))
 
             elapsed = time.time() - t_start
             it_per_s = it / elapsed
@@ -421,7 +436,7 @@ def main() -> None:
     for cam_i, entry in enumerate(scene.images):
         pipeline.render(entry.camera)
         r_lin = pipeline.read_output_image()[..., :3]
-        t_lin = targets_linear[cam_i]
+        t_lin = targets_linear(cam_i)
         mse_lin = float(np.mean((r_lin - t_lin) ** 2))
 
         r_srgb = np.clip(r_lin, 0.0, 1.0) ** (1.0 / 2.2)
