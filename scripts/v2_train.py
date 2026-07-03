@@ -49,10 +49,21 @@ def _psnr_linear(linear_rendered: np.ndarray, linear_target: np.ndarray) -> floa
     return -10.0 * math.log10(mse)
 
 
+def _linear_to_srgb(c: np.ndarray) -> np.ndarray:
+    """True sRGB OETF — the exact inverse of _srgb_to_linear (used on GT in
+    the loss). Using an approximate power(1/2.2) instead lifts darks
+    (~+0.03 at 0.05) and compresses contrast, so a converged render displays
+    greyer than its GT even at zero loss. Matching the real curve makes the
+    preview and GT line up."""
+    c = np.clip(c, 0.0, 1.0)
+    low = c * 12.92
+    high = 1.055 * np.power(np.clip(c, 1e-7, None), 1.0 / 2.4) - 0.055
+    return np.where(c <= 0.0031308, low, high)
+
+
 def _save_srgb_png(rgb_linear: np.ndarray, path: Path) -> None:
-    rgb = np.clip(rgb_linear, 0.0, 1.0)
-    rgb_srgb = np.power(rgb, 1.0 / 2.2)
-    rgba = np.concatenate([rgb_srgb, np.ones_like(rgb[..., :1])], axis=-1)
+    rgb_srgb = _linear_to_srgb(rgb_linear)
+    rgba = np.concatenate([rgb_srgb, np.ones_like(rgb_srgb[..., :1])], axis=-1)
     png = (rgba * 255.0 + 0.5).astype(np.uint8)
     Image.fromarray(png, mode="RGBA").save(path)
 
@@ -103,7 +114,7 @@ def main() -> None:
                     help="profile one full step every N iters (0 to disable)")
     ap.add_argument("--simple-densify", action="store_true",
                     help="use reference 3DGS threshold-based densification instead of score-ranked")
-    ap.add_argument("--grad-thresh", type=float, default=0.0002,
+    ap.add_argument("--grad-thresh", type=float, default=0.0001,
                     help="gradient threshold for simple densification (reference 3DGS default)")
     ap.add_argument("--no-viewer", action="store_true", help="disable live viewer")
     ap.add_argument("--backend", type=str, default="vulkan", choices=["vulkan", "d3d12"])
@@ -439,7 +450,9 @@ def main() -> None:
         t_lin = targets_linear(cam_i)
         mse_lin = float(np.mean((r_lin - t_lin) ** 2))
 
-        r_srgb = np.clip(r_lin, 0.0, 1.0) ** (1.0 / 2.2)
+        # True sRGB OETF (matches the GT's own encoding), not power(1/2.2),
+        # so the sRGB PSNR compares like-for-like against t_srgb.
+        r_srgb = _linear_to_srgb(r_lin)
         t_srgb = targets_srgb[cam_i][..., :3]
         mse_srgb = float(np.mean((r_srgb - t_srgb) ** 2))
 
