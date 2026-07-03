@@ -118,7 +118,8 @@ class Pipeline:
         self.k_identify_tile_ranges = mk(tb / "tile_ranges.slang", "identifyTileRanges")
         self.k_forward = mk(tb / "forward.slang", "forwardRasterize")
         self.k_loss = mk(loss / "l2_linear.slang", "computeLossGrad")
-        self.k_loss_ssim = mk(loss / "ssim_loss.slang", "computeSSIMLossGrad")
+        self.k_ssim_maps = mk(loss / "ssim_loss.slang", "ssimComputeMaps")
+        self.k_ssim_grad = mk(loss / "ssim_loss.slang", "ssimGradient")
         self.k_regularization = mk(loss / "regularization.slang", "addRegularization")
         self.k_backward = mk(tb / "backward.slang", "backwardRasterize")
 
@@ -471,10 +472,24 @@ class Pipeline:
         b = self.buffers
         target = getattr(self, "_active_target", None) or b.target_image
         if self.lambda_ssim > 0:
-            self._dispatch(self.k_loss_ssim,
+            # Two-pass SSIM: pass 1 builds the m1/m2/m3 back-projection maps,
+            # pass 2 convolves them and blends with the L1 + alpha gradient.
+            self._dispatch(self.k_ssim_maps,
                 thread_count=[self.width, self.height, 1],
                 output_image=b.output_image,
                 target_image=target,
+                ssim_m1=b.ssim_m1,
+                ssim_m2=b.ssim_m2,
+                ssim_m3=b.ssim_m3,
+                frame_dim=spy.uint2(self.width, self.height),
+            )
+            self._dispatch(self.k_ssim_grad,
+                thread_count=[self.width, self.height, 1],
+                output_image=b.output_image,
+                target_image=target,
+                ssim_m1=b.ssim_m1,
+                ssim_m2=b.ssim_m2,
+                ssim_m3=b.ssim_m3,
                 dL_dC=b.dL_dC_texture,
                 frame_dim=spy.uint2(self.width, self.height),
                 lambda_ssim=self.lambda_ssim,

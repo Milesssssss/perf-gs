@@ -88,6 +88,10 @@ class GaussianBuffers:
     # --- v1 training resources ---
     target_image: spy.Texture          # rgba32_float, SRV (read-only in shaders)
     dL_dC_texture: spy.Texture         # rgba32_float, UAV+SRV
+    # SSIM two-pass back-projection maps (m1/m2/m3), only used when lambda_ssim>0.
+    ssim_m1: spy.Texture | None = None  # rgba32_float, WxH
+    ssim_m2: spy.Texture | None = None  # rgba32_float, WxH
+    ssim_m3: spy.Texture | None = None  # rgba32_float, WxH
     grad_buffers: dict[str, spy.NDBuffer] = field(default_factory=dict)  # name -> int32[max_splats]
     adam_state: spy.NDBuffer | None = None  # AdamState[max_splats]
     saturation_flag: spy.NDBuffer | None = None  # uint[1]
@@ -210,6 +214,9 @@ def allocate(
         usage=spy.TextureUsage.shader_resource | spy.TextureUsage.unordered_access,
     )
     dL_dC_texture = _tex(spy.Format.rgba32_float, "dL_dC")
+    ssim_m1 = _tex(spy.Format.rgba32_float, "ssim_m1")
+    ssim_m2 = _tex(spy.Format.rgba32_float, "ssim_m2")
+    ssim_m3 = _tex(spy.Format.rgba32_float, "ssim_m3")
 
     grad_buffers: dict[str, spy.NDBuffer] = {
         name: spy.NDBuffer(device=device, dtype="int64_t", shape=(max_splats,))
@@ -297,6 +304,9 @@ def allocate(
         gaussian_count_per_pixel=gaussian_count_per_pixel,
         target_image=target_image,
         dL_dC_texture=dL_dC_texture,
+        ssim_m1=ssim_m1,
+        ssim_m2=ssim_m2,
+        ssim_m3=ssim_m3,
         grad_buffers=grad_buffers,
         adam_state=adam_state,
         saturation_flag=saturation_flag,

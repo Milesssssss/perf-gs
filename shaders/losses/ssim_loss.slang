@@ -1,19 +1,39 @@
-// Combined L1 + SSIM loss with alpha supervision.
+// Combined L1 + SSIM photometric loss with alpha supervision.
 //
 // 3DGS loss: L = (1 - lambda_ssim) * L1 + lambda_ssim * (1 - SSIM)
-// Default lambda_ssim = 0.2.
 //
-// SSIM is computed per-pixel using an 11x11 Gaussian-weighted window
-// (sigma=1.5). The gradient dL/dC is written to the dL_dC UAV texture.
+// The SSIM term is the MEAN over pixels of a per-pixel SSIM computed on an
+// 11x11 Gaussian-weighted window (sigma=1.5). Its gradient is NOT local: a
+// pixel x(p) enters the window of every neighbour q within the radius, so
+//   dL_ssim/dx(p) = sum_{q : |q-p|<=R} d(1-SSIM(q))/dx(p).
+// The exact gradient is therefore a TWO-PASS operation (this is what the
+// reference fused-SSIM / autograd implementations do):
 //
-// Implementation uses shared memory for the Gaussian-weighted local
-// statistics (mu, sigma, cross-correlation) to avoid redundant texture
-// reads across neighboring pixels in a tile.
+//   Pass 1 (ssimComputeMaps): for each window centre q, compute the local
+//     statistics (mu_x, mu_y, sigma_x2, sigma_y2, sigma_xy), the partial
+//     derivatives of SSIM(q) w.r.t. mu_x/sigma_x2/sigma_xy, and reduce them
+//     into three "back-projection" maps:
+//         m1 = dS/dmu_x - 2*mu_x*dS/dsigma_x2 - mu_y*dS/dsigma_xy
+//         m2 = 2 * dS/dsigma_x2
+//         m3 = dS/dsigma_xy
+//     (derivation: mu_x, sigma_x2, sigma_xy are the only x-dependent stats;
+//      d(mu_x)/dx_q = w, d(sigma_x2)/dx_q = 2w(x_q-mu_x),
+//      d(sigma_xy)/dx_q = w(y_q-mu_y), and the w's are supplied by the
+//      pass-2 convolution, so the maps hold the per-window coefficients.)
+//
+//   Pass 2 (ssimGradient): convolve m1,m2,m3 with the SAME Gaussian and
+//     assemble the per-pixel SSIM gradient
+//         dSSIM_total/dx(p) = conv(m1)(p) + x(p)*conv(m2)(p) + y(p)*conv(m3)(p)
+//     then blend with the L1 gradient and the alpha term and write dL_dC.
+//
+// Gradients are in the SUM-over-pixels convention (no 1/N), matching the L1
+// kernel in l2_linear.slang; the /(W*H) normalization happens once in Adam.
+// SSIM is evaluated in the same linear colour space the L1 loss uses (target
+// is srgb_to_linear'd), so the two terms are consistent.
 
 #include "../common/types.slang"
 
-static const int WINDOW_RADIUS = 5;  // 11x11 window
-static const int WINDOW_SIZE = 11;
+static const int WINDOW_RADIUS = 5;   // 11x11 window
 static const float SIGMA = 1.5;
 static const float C1 = 0.0001;  // (0.01)^2
 static const float C2 = 0.0009;  // (0.03)^2
@@ -32,41 +52,92 @@ static float3 srgb_to_linear(float3 c)
     );
 }
 
-// Precomputed 1D Gaussian kernel weights for sigma=1.5, window=11.
-// Generated from: exp(-0.5 * ((i - 5) / 1.5)^2) normalized to sum=1.
-static const float gauss1d[11] = {
-    0.01111,  // i=0, offset=-5
-    0.03315,  // i=1, offset=-4
-    0.07511,  // i=2, offset=-3
-    0.12924,  // i=3, offset=-2
-    0.16886,  // i=4, offset=-1
-    0.16760,  // i=5, offset= 0
-    0.16886,  // i=4 mirrored, but normalized set uses actual gaussian vals
-    0.12924,
-    0.07511,
-    0.03315,
-    0.01111
-};
-
-// Correct normalized Gaussian kernel (sigma=1.5, size=11).
-// w[i] = exp(-0.5*((i-5)/1.5)^2), sum-normalized.
-float gaussWeight(int i, int j)
+// Unnormalized Gaussian weight for window offset (di,dj) in [-R,R].
+static float gaussWeightRaw(int di, int dj)
 {
-    // Separable: w2d[i][j] = w1d[i] * w1d[j].
-    // Precompute once via the analytical formula rather than a LUT to
-    // keep the shader self-contained and exact.
-    float di = float(i - WINDOW_RADIUS);
-    float dj = float(j - WINDOW_RADIUS);
-    float g = exp(-0.5 * (di * di + dj * dj) / (SIGMA * SIGMA));
-    return g;
+    return exp(-0.5 * float(di * di + dj * dj) / (SIGMA * SIGMA));
 }
 
+// --- Pass 1: compute the three back-projection maps m1,m2,m3 (per channel) ---
 [shader("compute")]
 [numthreads(16, 16, 1)]
-void computeSSIMLossGrad(
+void ssimComputeMaps(
+    uint3 dtid: SV_DispatchThreadID,
+    RWTexture2D<float4> output_image,   // rendered (linear, premult-over-black)
+    RWTexture2D<float4> target_image,   // GT (sRGB in .rgb)
+    RWTexture2D<float4> ssim_m1,
+    RWTexture2D<float4> ssim_m2,
+    RWTexture2D<float4> ssim_m3,
+    uniform uint2 frame_dim)
+{
+    uint2 p = dtid.xy;
+    if (p.x >= frame_dim.x || p.y >= frame_dim.y) return;
+
+    float3 mu_x = float3(0.0), mu_y = float3(0.0);
+    float3 Ex2 = float3(0.0), Ey2 = float3(0.0), Exy = float3(0.0);
+    float w_sum = 0.0;
+
+    for (int di = -WINDOW_RADIUS; di <= WINDOW_RADIUS; di++)
+    {
+        for (int dj = -WINDOW_RADIUS; dj <= WINDOW_RADIUS; dj++)
+        {
+            int2 q = int2(p) + int2(dj, di);
+            q = clamp(q, int2(0, 0), int2(frame_dim) - 1);
+            float w = gaussWeightRaw(di, dj);
+            w_sum += w;
+
+            float3 xq = output_image[uint2(q)].rgb;
+            float3 yq = srgb_to_linear(target_image[uint2(q)].rgb);
+
+            mu_x += w * xq;  mu_y += w * yq;
+            Ex2  += w * xq * xq;
+            Ey2  += w * yq * yq;
+            Exy  += w * xq * yq;
+        }
+    }
+
+    float inv_w = 1.0 / w_sum;
+    mu_x *= inv_w;  mu_y *= inv_w;
+    float3 sigma_x2 = Ex2 * inv_w - mu_x * mu_x;
+    float3 sigma_y2 = Ey2 * inv_w - mu_y * mu_y;
+    float3 sigma_xy = Exy * inv_w - mu_x * mu_y;
+
+    float3 A = 2.0 * mu_x * mu_y + C1;
+    float3 B = 2.0 * sigma_xy + C2;
+    float3 Cc = mu_x * mu_x + mu_y * mu_y + C1;
+    float3 D = sigma_x2 + sigma_y2 + C2;
+
+    float3 CcD = Cc * D;
+    // Partial derivatives of SSIM(q) w.r.t. the local statistics.
+    float3 dS_dmux = 2.0 * B * (mu_y * Cc - mu_x * A) / (Cc * Cc * D);
+    float3 dS_dsx2 = -A * B / (Cc * D * D);
+    float3 dS_dsxy = 2.0 * A / CcD;
+
+    // The window weights w (and inv_w) are re-applied in pass 2 via the same
+    // Gaussian convolution, so the maps store the pre-weight coefficients.
+    // sigma stats used the same inv_w-normalized window, so fold inv_w in here
+    // once: d(mu_x)/dx_q = w*inv_w, d(sigma_x2)/dx_q = 2*w*inv_w*(x_q-mu_x),
+    // d(sigma_xy)/dx_q = w*inv_w*(y_q-mu_y). The pass-2 conv supplies w; inv_w
+    // is constant across the window (uniform Gaussian) so we bake it in now.
+    float3 m1 = (dS_dmux - 2.0 * mu_x * dS_dsx2 - mu_y * dS_dsxy) * inv_w;
+    float3 m2 = (2.0 * dS_dsx2) * inv_w;
+    float3 m3 = (dS_dsxy) * inv_w;
+
+    ssim_m1[p] = float4(m1, 0.0);
+    ssim_m2[p] = float4(m2, 0.0);
+    ssim_m3[p] = float4(m3, 0.0);
+}
+
+// --- Pass 2: convolve the maps, assemble SSIM grad, blend with L1 + alpha ---
+[shader("compute")]
+[numthreads(16, 16, 1)]
+void ssimGradient(
     uint3 dtid: SV_DispatchThreadID,
     RWTexture2D<float4> output_image,
     RWTexture2D<float4> target_image,
+    RWTexture2D<float4> ssim_m1,
+    RWTexture2D<float4> ssim_m2,
+    RWTexture2D<float4> ssim_m3,
     RWTexture2D<float4> dL_dC,
     uniform uint2 frame_dim,
     uniform float lambda_ssim,
@@ -75,93 +146,37 @@ void computeSSIMLossGrad(
     uint2 p = dtid.xy;
     if (p.x >= frame_dim.x || p.y >= frame_dim.y) return;
 
-    float4 rendered_full = output_image[p];
-    float4 target_full = target_image[p];
-    float3 x_center = rendered_full.rgb;
-    float3 T_srgb_center = target_full.rgb;
-    float3 y_center = srgb_to_linear(T_srgb_center);
+    float4 rendered = output_image[p];
+    float4 target = target_image[p];
+    float3 x = rendered.rgb;
+    float3 y = srgb_to_linear(target.rgb);
 
-    // --- L1 gradient: d/dC of |C - T| = sign(C - T) ---
-    float3 diff = x_center - y_center;
-    float3 grad_l1 = sign(diff);
-
-    // --- SSIM gradient ---
-    // Compute local statistics over 11x11 Gaussian-weighted window.
-    float3 mu_x = float3(0, 0, 0);
-    float3 mu_y = float3(0, 0, 0);
-    float3 sigma_x2 = float3(0, 0, 0);
-    float3 sigma_y2 = float3(0, 0, 0);
-    float3 sigma_xy = float3(0, 0, 0);
-    float w_sum = 0.0;
-
+    // Convolve the back-projection maps with the SAME Gaussian.
+    float3 cm1 = float3(0.0), cm2 = float3(0.0), cm3 = float3(0.0);
     for (int di = -WINDOW_RADIUS; di <= WINDOW_RADIUS; di++)
     {
         for (int dj = -WINDOW_RADIUS; dj <= WINDOW_RADIUS; dj++)
         {
             int2 q = int2(p) + int2(dj, di);
-            // Clamp to image bounds.
             q = clamp(q, int2(0, 0), int2(frame_dim) - 1);
-
-            float w = gaussWeight(di + WINDOW_RADIUS, dj + WINDOW_RADIUS);
-            w_sum += w;
-
-            float3 x_q = output_image[uint2(q)].rgb;
-            float3 y_q = srgb_to_linear(target_image[uint2(q)].rgb);
-
-            mu_x += w * x_q;
-            mu_y += w * y_q;
-            sigma_x2 += w * x_q * x_q;
-            sigma_y2 += w * y_q * y_q;
-            sigma_xy += w * x_q * y_q;
+            float w = gaussWeightRaw(di, dj);
+            cm1 += w * ssim_m1[uint2(q)].rgb;
+            cm2 += w * ssim_m2[uint2(q)].rgb;
+            cm3 += w * ssim_m3[uint2(q)].rgb;
         }
     }
 
-    float inv_w = 1.0 / w_sum;
-    mu_x *= inv_w;
-    mu_y *= inv_w;
-    sigma_x2 = sigma_x2 * inv_w - mu_x * mu_x;
-    sigma_y2 = sigma_y2 * inv_w - mu_y * mu_y;
-    sigma_xy = sigma_xy * inv_w - mu_x * mu_y;
+    // dSSIM_total/dx(p); loss uses (1 - SSIM) so negate. Sum convention.
+    float3 grad_ssim = -(cm1 + x * cm2 + y * cm3);
 
-    // SSIM per channel.
-    float3 num = (2.0 * mu_x * mu_y + C1) * (2.0 * sigma_xy + C2);
-    float3 den = (mu_x * mu_x + mu_y * mu_y + C1) * (sigma_x2 + sigma_y2 + C2);
-    float3 ssim_val = num / max(den, float3(1e-12, 1e-12, 1e-12));
+    // L1 gradient (matches l2_linear.slang): d|x-y|/dx = sign(x-y).
+    float3 grad_l1 = sign(x - y);
 
-    // d(SSIM)/d(x_center): the derivative of SSIM w.r.t. the center pixel.
-    // Using the simplified form for the gradient contribution at the center pixel.
-    // d(1-SSIM)/dC ≈ -d(SSIM)/dC
-    // The full analytical gradient involves the window-weighted contribution.
-    // Approximate: treat center pixel's weight in mu_x and sigma terms.
-    float w_center = gaussWeight(WINDOW_RADIUS, WINDOW_RADIUS) * inv_w;
-
-    // d(mu_x)/d(x_center) = w_center
-    // d(sigma_x2)/d(x_center) = 2 * w_center * (x_center - mu_x)
-    // d(sigma_xy)/d(x_center) = w_center * (y_center - mu_y)
-    float3 A = 2.0 * mu_y + C1 / max(2.0 * mu_x, float3(1e-12, 1e-12, 1e-12));
-    float3 B = 2.0 * (x_center - mu_x);
-    float3 C_term = mu_x * mu_x + mu_y * mu_y + C1;
-    float3 D = sigma_x2 + sigma_y2 + C2;
-
-    // Gradient of (1-SSIM) w.r.t. x_center (per channel):
-    float3 grad_ssim = w_center * (
-        ((2.0 * mu_y * (2.0 * sigma_xy + C2) + (2.0 * mu_x * mu_y + C1) * 2.0 * (y_center - mu_y)) * den
-         - num * (2.0 * mu_x * (sigma_x2 + sigma_y2 + C2) + (mu_x * mu_x + mu_y * mu_y + C1) * 2.0 * (x_center - mu_x)))
-        / max(den * den, float3(1e-12, 1e-12, 1e-12))
-    );
-    grad_ssim = -grad_ssim;  // We want d(1-SSIM)/dC = -d(SSIM)/dC
-
-    // Combined gradient.
     float3 grad_rgb = (1.0 - lambda_ssim) * grad_l1 + lambda_ssim * grad_ssim;
 
-    // Alpha gradient (same as before).
     float grad_alpha = 0.0;
     if (w_alpha > 0.0)
-    {
-        float A_rendered = rendered_full.a;
-        float A_target = target_full.a;
-        grad_alpha = 2.0 * w_alpha * (A_rendered - A_target);
-    }
+        grad_alpha = w_alpha * sign(rendered.a - target.a);
 
     dL_dC[p] = float4(grad_rgb, grad_alpha);
 }
