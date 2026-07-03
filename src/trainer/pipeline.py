@@ -1049,7 +1049,8 @@ Pipeline.densify = densify  # type: ignore[attr-defined]
 
 def densify_simple(self: Pipeline, cfg: DensifyConfig,
                    grad_thresh: float = 0.0002,
-                   scale_thresh: float | None = None) -> dict:
+                   scale_thresh: float | None = None,
+                   prune_max_scale: float | None = None) -> dict:
     """Reference 3DGS densification: threshold on avg_grad, split/clone by scale.
 
     No rank-selection, no importance scoring, no growth budget. Every gaussian
@@ -1080,6 +1081,7 @@ def densify_simple(self: Pipeline, cfg: DensifyConfig,
         action=b.action_buffer.storage,
         grad_thresh=grad_thresh,
         scale_thresh=scale_thresh,
+        max_scale=prune_max_scale,
         t_opacity=cfg.t_opacity,
         t_big_scale=cfg.t_big_scale,
         max_splats=self.max_splats,

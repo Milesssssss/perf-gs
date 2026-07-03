@@ -79,7 +79,7 @@ def main() -> None:
     ap.add_argument("--height", type=int, default=None,
                     help="force render height (overrides --downsample)")
     ap.add_argument("--preview-every", type=int, default=2000)
-    ap.add_argument("--log-every", type=int, default=0) # -> this one is slowing down stuff
+    ap.add_argument("--log-every", type=int, default=500) # -> this one is slowing down stuff
     ap.add_argument("--densify-every", type=int, default=500)
     ap.add_argument("--densify-from", type=int, default=500)
     ap.add_argument("--densify-to", type=int, default=15000)
@@ -93,9 +93,9 @@ def main() -> None:
     ap.add_argument("--scale-reg", type=float, default=0.01)
     ap.add_argument("--w-alpha", type=float, default=0.1,
                     help="alpha loss weight; set > 0 for RGBA targets (e.g. 1.0)")
-    ap.add_argument("--lambda-ssim", type=float, default=0,
+    ap.add_argument("--lambda-ssim", type=float, default=0.2,
                     help="SSIM loss weight (3DGS default 0.2); 0 = pure L2")
-    ap.add_argument("--max-splats", type=int, default=4_000_000)
+    ap.add_argument("--max-splats", type=int, default=5_000_000)
     ap.add_argument("--z-near-cull", type=float, default=0.01,
                     help="view-space depth floor for bin cull; raise for scenes "
                          "where points can land near a camera pose (e.g. 0.2)")
@@ -109,7 +109,9 @@ def main() -> None:
     ap.add_argument("--backend", type=str, default="vulkan", choices=["vulkan", "d3d12"])
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--run-name", type=str, default=None)
-    ap.add_argument("--init_opacity", type=float, default=0.1, help="initial opacity for all splats")
+    ap.add_argument("--init-opacity", type=float, default=0.1, help="initial opacity for all splats")
+    ap.add_argument("--grow-scale3d", type=float, default=0.01, help="GSs with 3d scale (normalized by scene_scale below this "
+                    "value will be duplicated. Above will be split. Default is 0.01")
     args = ap.parse_args()
 
     run_name = args.run_name or datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -153,6 +155,8 @@ def main() -> None:
             "t_opacity": cfg.t_opacity,
             "t_big_scale": cfg.t_big_scale,
             "opacity_cap": cfg.opacity_cap,
+            "grow_scale3d": args.grow_scale3d,
+            "prune_scale3d": args.prune_scale3d,
         },
         "max_splats": args.max_splats,
         "z_near_cull": args.z_near_cull,
@@ -254,7 +258,6 @@ def main() -> None:
         #    densify_json.write(json.dumps({"iter": it, "event": "opacity_reset"}) + "\n")
         #    print(f"iter {it}: opacity reset")
 
-
         densify_cfg = cfg
         if do_densify:
 
@@ -264,7 +267,8 @@ def main() -> None:
                 stats = pipeline.densify_simple(
                     densify_cfg,
                     grad_thresh=args.grad_thresh,
-                    scale_thresh=extent * 0.01,
+                    scale_thresh=extent * args.grow_scale3d,
+                    prune_max_scale=extent * args.prune_scale3d
                 )
             else:
                 # Score-ranked densification with importance scoring.
