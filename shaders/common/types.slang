@@ -13,7 +13,9 @@ struct Gaussian3D
                             // real probability in [0, 1]. Parameterized as a logit
                             // so Adam's opacity LR operates on an unbounded scalar
                             // (matches gsplat; see shaders/primitives/gaussian/eval.slang).
-    float3 color_logit;     // sigmoid(color_logit) = linear RGB in [0, 1]
+    float3 sh0;             // SH band-0 (DC) color coeff; linear RGB = 0.5 + C0*sh0
+                            // (affine, unbounded — see shDC in math.slang). Replaces
+                            // the old sigmoid(color_logit) parameterization.
 };
 
 struct Projected2DGaussian

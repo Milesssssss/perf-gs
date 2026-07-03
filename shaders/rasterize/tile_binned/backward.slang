@@ -137,11 +137,11 @@ void backwardRasterize(
             float denom = 1.0 - alpha;
             float T_i = T_post / denom;
 
-            var dp_color_logit = diffPair(g.color_logit);
-            float3 c_i = sigmoid3(dp_color_logit.p);
+            var dp_sh0 = diffPair(g.sh0);
+            float3 c_i = shDC(dp_sh0.p);
 
             float3 dL_dc_i = dL_dC * (alpha * T_i);
-            bwd_diff(sigmoid3)(dp_color_logit, dL_dc_i);
+            bwd_diff(shDC)(dp_sh0, dL_dc_i);
 
             float3 dC_dalpha = c_i * T_i - C_behind / denom;
 
@@ -158,7 +158,7 @@ void backwardRasterize(
             local_dp_mean_2d = dp_mean_2d.d;
             local_dp_cov2d = dp_cov2d.d;
             local_dp_opacity = dp_opacity.d;
-            local_dp_color = dp_color_logit.d;
+            local_dp_color = dp_sh0.d;
 
             if (alpha >= ALPHA_MIN_TRACK)
             {

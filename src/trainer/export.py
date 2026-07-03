@@ -39,8 +39,9 @@ def save_ply(pipeline: Pipeline, path: str | Path) -> None:
     Inverse of :func:`trainer.dataset.load_ply`:
     - The GPU stores opacity as a pre-sigmoid logit; the .ply format
       also stores pre-sigmoid opacity, so we write it directly.
-    - ``color_logit`` is converted back to linear RGB via sigmoid, then
-      to SH DC via ``f_dc = (rgb - 0.5) / SH_C0``.
+    - ``sh0`` is the SH band-0 DC coeff: linear RGB = 0.5 + C0*sh0. We
+      re-encode that linear color to sRGB and back-solve f_dc so standard
+      viewers (which render SH_C0*f_dc + 0.5 as sRGB) display it correctly.
 
     Only the 14 fields M1/M2 produce are written; higher-order SH bands
     land in a later milestone when they matter.
@@ -56,12 +57,12 @@ def save_ply(pipeline: Pipeline, path: str | Path) -> None:
     log_scale = floats[:, 3:6]
     rot_quat = floats[:, 6:10]
     opacity_logit = floats[:, 10].astype(np.float32)   # stored as logit already
-    color_logit = floats[:, 11:14]
+    sh0 = floats[:, 11:14]
 
-    # Our renderer: color = sigmoid(color_logit) in LINEAR space.
-    # 3DGS PLY convention: rendered_color = SH_C0 * f_dc + 0.5
-    # Viewers expect this to produce sRGB values, so we convert linear→sRGB first.
-    linear_rgb = 1.0 / (1.0 + np.exp(-color_logit))
+    # Our renderer: color = 0.5 + SH_C0 * sh0 in LINEAR space (band-0 DC).
+    # 3DGS PLY convention: viewers render SH_C0 * f_dc + 0.5 and expect sRGB,
+    # so recover our linear color then encode to sRGB before back-solving f_dc.
+    linear_rgb = 0.5 + _SH_C0 * sh0
     srgb_rgb = np.where(linear_rgb <= 0.0031308,
                         linear_rgb * 12.92,
                         1.055 * np.power(np.clip(linear_rgb, 0.0031308, None), 1.0/2.4) - 0.055)

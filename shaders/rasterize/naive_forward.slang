@@ -51,7 +51,7 @@ void naiveForward(
             continue;
 
         float alpha = evalGaussian2DFromCov(pixel_center, mean_2d, cov2d, gauss.opacity);
-        float3 color_rgb = sigmoid3(gauss.color_logit);
+        float3 color_rgb = shDC(gauss.sh0);
 
         C += color_rgb * alpha * T;
         T *= (1.0 - alpha);

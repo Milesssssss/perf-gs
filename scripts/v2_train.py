@@ -102,11 +102,11 @@ def main() -> None:
     ap.add_argument("--opacity-cap", type=float, default=0.8)
     ap.add_argument("--opacity-reg", type=float, default=0.01)
     ap.add_argument("--scale-reg", type=float, default=0.01)
-    ap.add_argument("--w-alpha", type=float, default=0.1,
+    ap.add_argument("--w-alpha", type=float, default=0.0,
                     help="alpha loss weight; set > 0 for RGBA targets (e.g. 1.0)")
     ap.add_argument("--lambda-ssim", type=float, default=0.2,
                     help="SSIM loss weight (3DGS default 0.2); 0 = pure L2")
-    ap.add_argument("--max-splats", type=int, default=5_000_000)
+    ap.add_argument("--max-splats", type=int, default=6_500_000)
     ap.add_argument("--z-near-cull", type=float, default=0.01,
                     help="view-space depth floor for bin cull; raise for scenes "
                          "where points can land near a camera pose (e.g. 0.2)")
@@ -114,7 +114,7 @@ def main() -> None:
                     help="profile one full step every N iters (0 to disable)")
     ap.add_argument("--simple-densify", action="store_true",
                     help="use reference 3DGS threshold-based densification instead of score-ranked")
-    ap.add_argument("--grad-thresh", type=float, default=0.0001,
+    ap.add_argument("--grad-thresh", type=float, default=0.0002,
                     help="gradient threshold for simple densification (reference 3DGS default)")
     ap.add_argument("--no-viewer", action="store_true", help="disable live viewer")
     ap.add_argument("--backend", type=str, default="vulkan", choices=["vulkan", "d3d12"])

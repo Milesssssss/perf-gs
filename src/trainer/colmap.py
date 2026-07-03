@@ -27,7 +27,7 @@ from pathlib import Path
 
 import numpy as np
 
-from trainer.dataset import Camera
+from trainer.dataset import Camera, _SH_C0
 
 
 @dataclass
@@ -176,15 +176,14 @@ def _projection_matrix(fx: float, fy: float, cx: float, cy: float,
     return M
 
 
-def _srgb_colors_to_logits(srgb: np.ndarray) -> np.ndarray:
-    """Convert sRGB [0,1] colors to sigmoid-logit space for color_logit param."""
-    # sRGB -> linear
+def _srgb_colors_to_sh0(srgb: np.ndarray) -> np.ndarray:
+    """Convert sRGB [0,1] point colors to the SH band-0 (DC) coefficient the
+    renderer expects: linear_rgb = 0.5 + C0*sh0  =>  sh0 = (linear_rgb - 0.5)/C0.
+    The renderer composites in LINEAR space, so we linearize first. No clamp/
+    logit — sh0 is unbounded (affine), which is the point of the SH0 switch."""
     linear = np.where(srgb <= 0.04045, srgb / 12.92,
                       ((srgb + 0.055) / 1.055) ** 2.4).astype(np.float32)
-    # Clamp to avoid log(0) or log(inf)
-    linear = np.clip(linear, 1e-5, 1.0 - 1e-5)
-    # linear -> logit: sigmoid^-1(x) = log(x / (1-x))
-    return np.log(linear / (1.0 - linear)).astype(np.float32)
+    return ((linear - 0.5) / _SH_C0).astype(np.float32)
 
 
 def _find_sparse_dir(scene_dir: Path) -> tuple[Path | None, str]:
@@ -418,8 +417,9 @@ def load_colmap(
         # Initial opacity 0.1 (probability; converted to logit by
         # write_gaussians before upload).
         "opacities": np.full(n, init_opacity, dtype=np.float32),
-        # Color logits from SfM point colors. Convert sRGB -> linear -> logit.
-        "color_logits": _srgb_colors_to_logits(pts_colors),
+        # SH band-0 (DC) color coeff from SfM point colors (sRGB -> linear -> sh0).
+        # Dict key stays "color_logits" as the buffers.write_gaussians plumbing name.
+        "color_logits": _srgb_colors_to_sh0(pts_colors),
     }
 
     # Scene extent: radius of the camera bounding sphere * 1.1 (gsplat/3DGS

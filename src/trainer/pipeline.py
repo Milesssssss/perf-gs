@@ -58,7 +58,7 @@ class AdamLRs:
     scale: float = 5e-3
     rot: float = 1e-3
     opacity: float = 2.5e-2
-    color: float = 2.5e-3
+    color: float = 2.5e-3 # in reality this is the SH0 LR
 
 def _make_kernel(device: spy.Device, path: Path, entry: str) -> spy.ComputeKernel:
     program = device.load_program(str(path), [entry])

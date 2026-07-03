@@ -130,7 +130,7 @@ void adamStep(
     g.opacity = adam_scalar(g.opacity, g_op, s.opacity_m, s.opacity_v,
                             cfg.lr_opacity, cfg.bias_correction1, cfg.bias_correction2);
 
-    g.color_logit = adam_vec3(g.color_logit, g_color, s.color_m, s.color_v,
+    g.sh0 = adam_vec3(g.sh0, g_color, s.color_m, s.color_v,
                               cfg.lr_color, cfg.bias_correction1, cfg.bias_correction2);
 
     gaussians[idx] = g;

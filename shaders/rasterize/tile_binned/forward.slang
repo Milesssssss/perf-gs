@@ -73,7 +73,7 @@ void forwardRasterize(
 
         float alpha_raw = evalGaussian2DFromCov(pixel_center, proj.mean, proj.cov2d, g.opacity);
         float alpha = min(alpha_raw, ALPHA_MAX);
-        float3 color_rgb = sigmoid3(g.color_logit);
+        float3 color_rgb = shDC(g.sh0);
 
         C += color_rgb * alpha * T;
         T *= (1.0 - alpha);

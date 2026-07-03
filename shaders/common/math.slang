@@ -18,6 +18,22 @@ float3 sigmoid3(float3 v)
     return float3(sigmoid(v.x), sigmoid(v.y), sigmoid(v.z));
 }
 
+// Spherical-harmonics band-0 (DC) color activation, matching 3DGS/INRIA:
+//   color = 0.5 + C0 * sh0,   C0 = 0.5 * sqrt(1/pi).
+// This is an AFFINE (unbounded) map, unlike the old sigmoid. Its Jacobian is
+// the constant C0, so it does NOT attenuate the color gradient for bright
+// values the way sigmoid'(x)=sigma*(1-sigma) collapses toward white — which
+// is the whole reason for the switch. Band-0 is view-independent (constant
+// over directions); higher bands would add view dependence later.
+static const float SH_C0 = 0.28209479177387814;
+
+[Differentiable]
+[PreferRecompute]
+float3 shDC(float3 sh0)
+{
+    return 0.5 + SH_C0 * sh0;
+}
+
 // Rotation matrix from a (w, x, y, z) quaternion. The input is normalized
 // inside the function so callers can pass an un-normalized quaternion during
 // training — the normalization is part of the differentiable path.

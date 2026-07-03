@@ -126,8 +126,9 @@ _PLY_REQUIRED_FIELDS = (
 # derived from the spherical harmonic basis normalization:
 #   SH_C0 = 0.5 * sqrt(1 / pi) ≈ 0.28209479
 # The linear RGB from just the DC term is: rgb = 0.5 + SH_C0 * f_dc.
-# For the v0 plain-RGB trainer (sigmoid activation, no SH), we convert to
-# a color_logit that reproduces the same linear RGB via sigmoid.
+# The trainer's color param IS this band-0 coefficient (sh0), rendered with
+# the same affine map (color = 0.5 + SH_C0 * sh0), so f_dc maps to sh0 as an
+# identity — no sigmoid activation.
 _SH_C0 = 0.28209479177387814
 
 
@@ -189,19 +190,17 @@ def load_ply(path: str | Path) -> dict[str, np.ndarray]:
     opacity_logit = np.asarray(verts["opacity"], dtype=np.float32)
     opacity = 1.0 / (1.0 + np.exp(-opacity_logit))
 
+    # PLY stores the SH band-0 DC coefficient. Our renderer's color is
+    # linear = 0.5 + C0*sh0, the same mapping the DC term already uses, so
+    # sh0 = f_dc directly (no sigmoid-logit conversion; affine is unbounded).
     f_dc = np.stack(
         [verts["f_dc_0"], verts["f_dc_1"], verts["f_dc_2"]], axis=-1
     ).astype(np.float32)
-    linear_rgb = 0.5 + _SH_C0 * f_dc
-    # Clip strictly away from {0, 1} so log(rgb / (1 - rgb)) is finite.
-    # 1e-5 sits at the float32 numerical floor, not a magnitude guess.
-    linear_rgb = np.clip(linear_rgb, 1e-5, 1.0 - 1e-5)
-    color_logit = np.log(linear_rgb / (1.0 - linear_rgb))
 
     return {
         "means": means,
         "log_scales": log_scales,
         "rot_quats": rot_quats,
         "opacities": opacity.astype(np.float32),
-        "color_logits": color_logit.astype(np.float32),
+        "color_logits": f_dc.astype(np.float32),
     }
