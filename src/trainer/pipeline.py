@@ -245,14 +245,23 @@ class Pipeline:
         """Create a new rgba32_float target texture and upload into it.
 
         Accepts (H, W, 3) RGB or (H, W, 4) RGBA. RGB is padded with
-        alpha=1. For RGBA inputs, RGB is premultiplied by alpha so that
-        transparent regions have RGB=0 (matching our renderer's black
-        background where nothing is rendered).
+        alpha=1.
+
+        For RGBA inputs the RGB target is the STRAIGHT (un-premultiplied)
+        sRGB color and the alpha channel is the raw GT coverage. This
+        matches gsplat's objective: it compares the premultiplied-over-black
+        render against the straight gt_rgb via L1, with a separate alpha
+        (coverage) loss. Premultiplying the RGB target instead (target = a*c)
+        is satisfiable at LOW coverage, so the RGB loss stops pushing the
+        silhouette outward — measured as ~0.15 sRGB darker edges and a
+        6-8% coverage shortfall (smaller silhouette) vs gsplat. Keeping the
+        target straight lets the RGB residual drive edge coverage/brightness
+        up to full, as gsplat does.
         """
         if img.ndim == 3 and img.shape[2] == 4:
             assert img.shape[:2] == (self.height, self.width)
             rgba = img.astype(np.float32).copy()
-            rgba[..., :3] *= rgba[..., 3:4]
+            # Straight sRGB RGB + raw alpha — no premultiply (see docstring).
         else:
             assert img.shape == (self.height, self.width, 3), (
                 f"target shape {img.shape} != ({self.height}, {self.width}, 3)"
@@ -724,6 +733,15 @@ def _srgb_to_linear_np(c: np.ndarray) -> np.ndarray:
     low = c / 12.92
     high = np.power(np.clip((c + 0.055) / 1.055, 1e-7, None), 2.4)
     return np.where(c <= 0.04045, low, high).astype(np.float32)
+
+
+def _linear_to_srgb_np(c: np.ndarray) -> np.ndarray:
+    """Inverse of _srgb_to_linear_np. Exact round-trip so that the loss
+    shader's srgb_to_linear(target) recovers the linear value we intend."""
+    c = np.clip(c, 0.0, None)
+    low = c * 12.92
+    high = 1.055 * np.power(np.clip(c, 1e-7, None), 1.0 / 2.4) - 0.055
+    return np.where(c <= 0.0031308, low, high).astype(np.float32)
 
 
 # -------- densification methods on Pipeline (added via monkey-patch-style

@@ -298,6 +298,7 @@ def load_colmap(
     width: int | None = None,
     height: int | None = None,
     downsample: int = 1,
+    init_opacity: float = 0.1,
 ) -> ColmapDataset:
     """Load a COLMAP scene, auto-detecting text vs binary format.
 
@@ -399,7 +400,7 @@ def load_colmap(
         "rot_quats": np.tile(np.array([1, 0, 0, 0], dtype=np.float32), (n, 1)),
         # Initial opacity 0.1 (probability; converted to logit by
         # write_gaussians before upload).
-        "opacities": np.full(n, 0.01, dtype=np.float32),
+        "opacities": np.full(n, init_opacity, dtype=np.float32),
         # Color logits from SfM point colors. Convert sRGB -> linear -> logit.
         "color_logits": _srgb_colors_to_logits(pts_colors),
     }

@@ -67,8 +67,8 @@ def _render_all_cameras(pipeline: Pipeline, scene, iter_idx: int, cams_dir: Path
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    #ap.add_argument("--scene", type=str, default="datasets/360_v2/bicycle")
-    ap.add_argument("--scene", type=str, default="datasets/synthetic/suzanne_blender")
+    ap.add_argument("--scene", type=str, default="datasets/360_v2/bicycle")
+    #ap.add_argument("--scene", type=str, default="datasets/synthetic/suzanne_blender")
 
     ap.add_argument("--iters", type=int, default=30000)
     ap.add_argument("--downsample", type=int, default=4,
@@ -78,8 +78,8 @@ def main() -> None:
                     help="force render width (overrides --downsample)")
     ap.add_argument("--height", type=int, default=None,
                     help="force render height (overrides --downsample)")
-    ap.add_argument("--preview-every", type=int, default=2000)
-    ap.add_argument("--log-every", type=int, default=500)
+    ap.add_argument("--preview-every", type=int, default=6000)
+    ap.add_argument("--log-every", type=int, default=0) # -> this one is slowing down stuff
     ap.add_argument("--densify-every", type=int, default=500)
     ap.add_argument("--densify-from", type=int, default=500)
     ap.add_argument("--densify-to", type=int, default=15000)
@@ -109,6 +109,7 @@ def main() -> None:
     ap.add_argument("--backend", type=str, default="vulkan", choices=["vulkan", "d3d12"])
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--run-name", type=str, default=None)
+    ap.add_argument("--init_opacity", type=float, default=0.1, help="initial opacity for all splats")
     args = ap.parse_args()
 
     run_name = args.run_name or datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -118,7 +119,7 @@ def main() -> None:
     cams_dir.mkdir(parents=True, exist_ok=True)
 
     scene = load_colmap(args.scene, width=args.width, height=args.height,
-                        downsample=args.downsample)
+                        downsample=args.downsample, init_opacity=args.init_opacity)
     n_cams = len(scene.images)
     n_init = scene.initial_points["means"].shape[0]
     extent = scene.scene_extent

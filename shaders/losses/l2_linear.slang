@@ -47,7 +47,7 @@ void computeLossGrad(
     float3 T_srgb = target.rgb;
     float3 T_linear = srgb_to_linear(T_srgb);
 
-    // the subgradient of an absolute value is the sign of its argument
+    // the subgradient of an absolute value is the sign of its argument :)
     float3 grad_rgb = sign(C - T_linear);
 
     float grad_alpha = 0.0;
