@@ -78,7 +78,7 @@ def main() -> None:
                     help="force render width (overrides --downsample)")
     ap.add_argument("--height", type=int, default=None,
                     help="force render height (overrides --downsample)")
-    ap.add_argument("--preview-every", type=int, default=6000)
+    ap.add_argument("--preview-every", type=int, default=2000)
     ap.add_argument("--log-every", type=int, default=0) # -> this one is slowing down stuff
     ap.add_argument("--densify-every", type=int, default=500)
     ap.add_argument("--densify-from", type=int, default=500)
@@ -91,7 +91,7 @@ def main() -> None:
     ap.add_argument("--opacity-cap", type=float, default=0.8)
     ap.add_argument("--opacity-reg", type=float, default=0.01)
     ap.add_argument("--scale-reg", type=float, default=0.01)
-    ap.add_argument("--w-alpha", type=float, default=0.2,
+    ap.add_argument("--w-alpha", type=float, default=0.1,
                     help="alpha loss weight; set > 0 for RGBA targets (e.g. 1.0)")
     ap.add_argument("--lambda-ssim", type=float, default=0,
                     help="SSIM loss weight (3DGS default 0.2); 0 = pure L2")
@@ -254,8 +254,11 @@ def main() -> None:
         #    densify_json.write(json.dumps({"iter": it, "event": "opacity_reset"}) + "\n")
         #    print(f"iter {it}: opacity reset")
 
-        if False:
-            densify_cfg = cfg
+
+        densify_cfg = cfg
+        if do_densify:
+
+            stats = {}
 
             if args.simple_densify:
                 stats = pipeline.densify_simple(
@@ -275,16 +278,18 @@ def main() -> None:
 
                 pipeline.compute_importance_scores(score_cameras, score_targets, densify_cfg)
                 stats = pipeline.densify(densify_cfg,
-                                         densify_step=densify_step,
-                                         n_densify_steps=n_densify_steps,
-                                         init_count=n_init)
+                                            densify_step=densify_step,
+                                            n_densify_steps=n_densify_steps,
+                                            init_count=n_init)
+
             pipeline.clear_tracking()
             cur_n_gaussians = stats["final_count"]
             densify_json.write(json.dumps({"iter": it, "event": "densify", **stats}) + "\n")
             print(f"iter {it}: densify  "
-                  f"keep={stats['n_keep']} split={stats['n_split']} "
-                  f"clone={stats['n_clone']} prune={stats['n_prune']} "
-                  f"| pre={stats['pre_count']} -> post={stats['final_count']}")
+                    f"keep={stats['n_keep']} split={stats['n_split']} "
+                    f"clone={stats['n_clone']} prune={stats['n_prune']} "
+                    f"| pre={stats['pre_count']} -> post={stats['final_count']}")
+
 
         # Loss/PSNR require a GPU→CPU readback of the output image.
         # Sampling this every step would serialize the training loop and

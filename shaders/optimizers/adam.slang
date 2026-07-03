@@ -124,14 +124,7 @@ void adamStep(
 
     g.rot_quat = adam_vec4(g.rot_quat, g_rot, s.rot_m, s.rot_v,
                            cfg.lr_rot, cfg.bias_correction1, cfg.bias_correction2);
-    // Re-project the quaternion onto the unit sphere after the step. Adam
-    // updates the 4 raw components independently, so the stored quat drifts
-    // off unit length (measured: 93% of quats reached norm ~0.89, tail 0.62).
-    // matrixFromQuaternion normalizes internally so the forward still works,
-    // but the un-normalized quat makes the effective rotation step scale by
-    // 1/|q|^2 through the normalization Jacobian — per-gaussian-inconsistent
-    // rotation learning that lets orientations settle into degenerate/needle
-    // alignments. Renormalizing keeps the rotation LR well-conditioned.
+
     g.rot_quat = normalize(g.rot_quat);
 
     g.opacity = adam_scalar(g.opacity, g_op, s.opacity_m, s.opacity_v,
