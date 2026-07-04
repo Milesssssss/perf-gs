@@ -386,6 +386,21 @@ def write_gaussians(
     set_num_gaussians(buffers, n)
 
 
+def write_gaussians_raw(buffers: GaussianBuffers, floats: np.ndarray, n: int) -> None:
+    """Upload a snapshot already in the packed 14-float Gaussian3D layout
+    (mean3, log_scale3, rot_quat4, opacity1, sh0_3) straight into the GPU
+    buffer. Used by the live viewer, which receives snapshots from the
+    trainer via the shared-memory splat stream — no per-field unpacking.
+
+    ``floats`` must hold at least ``n * 14`` float32 values."""
+    assert n <= buffers.max_splats, f"{n} gaussians exceeds max_splats {buffers.max_splats}"
+    n_floats = n * 14
+    block = np.ascontiguousarray(floats[:n_floats].astype(np.float32, copy=False))
+    if n > 0:
+        buffers.gaussians.copy_from_numpy(block)
+    set_num_gaussians(buffers, n)
+
+
 def zero_adam_state(buffers: GaussianBuffers) -> None:
     """Reset all Adam first/second-moment state to zero.
 

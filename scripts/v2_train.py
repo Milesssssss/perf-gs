@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import sys
 import time
 from datetime import datetime
 from pathlib import Path
@@ -32,7 +33,6 @@ from PIL import Image
 from trainer.colmap import load_colmap, load_image
 from trainer.device import create_device
 from trainer.export import render_to_png, save_ply
-from trainer.viewer import Viewer
 from trainer.pipeline import AdamLRs, DensifyConfig, Pipeline
 
 
@@ -97,7 +97,11 @@ def main() -> None:
     #ap.add_argument("--opacity-reset-iters", type=int, nargs="*", default=[3000])
     ap.add_argument("--n-scoring-views", type=int, default=10)
     ap.add_argument("--loss-thresh", type=float, default=0.1)
-    ap.add_argument("--t-opacity", type=float, default=0.005)
+    ap.add_argument("--t-opacity", type=float, default=0.005,
+                    help="prune splats with sigmoid(opacity) below this. MUST stay BELOW "
+                         "--opacity-reset-value (default 0.01): opacity reset clamps every "
+                         "splat down to the reset value, so a floor above it prunes the "
+                         "entire scene the instant reset fires. 3DGS: prune 0.005 < reset 0.01.")
     ap.add_argument("--t-big-scale", type=float, default=0.1)
     ap.add_argument("--opacity-cap", type=float, default=0.8)
     ap.add_argument("--opacity-reg", type=float, default=0.01)
@@ -114,9 +118,18 @@ def main() -> None:
                     help="profile one full step every N iters (0 to disable)")
     ap.add_argument("--simple-densify", action="store_true",
                     help="use reference 3DGS threshold-based densification instead of score-ranked")
-    ap.add_argument("--grad-thresh", type=float, default=0.0002,
-                    help="gradient threshold for simple densification (reference 3DGS default)")
-    ap.add_argument("--no-viewer", action="store_true", help="disable live viewer")
+    ap.add_argument("--grad-thresh", type=float, default=0.0003,
+                    help="gradient threshold for simple densification (reference 3DGS default)") #higher as we use absgrad by default
+    ap.add_argument("--no-viewer", action="store_true", help="disable live viewer stream")
+    ap.add_argument("--launch-viewer", action="store_true",
+                    help="auto-launch the standalone viewer as a child process "
+                         "(still fully decoupled; a viewer crash won't affect training)")
+    ap.add_argument("--stream-max-splats", type=int, default=2_000_000,
+                    help="capacity of the live-viewer shared-memory stream (splats). "
+                         "Snapshots beyond this are truncated for viewing only.")
+    ap.add_argument("--stream-every", type=int, default=200,
+                    help="stream a gaussian snapshot to the live viewer every N iters "
+                         "(each push does a GPU readback; keep coarse).")
     ap.add_argument("--backend", type=str, default="vulkan", choices=["vulkan", "d3d12"])
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--run-name", type=str, default=None)
@@ -210,6 +223,7 @@ def main() -> None:
             Image.fromarray(gt_rgb, mode="RGB").save(gt_path)
 
     device = create_device(backend=args.backend)
+
     pipeline = Pipeline(
         device=device, width=W, height=H,
         max_splats=args.max_splats,
@@ -222,12 +236,42 @@ def main() -> None:
     pipeline.set_gaussians_from_numpy(**scene.initial_points)
     pipeline.clear_tracking()
 
-    # Launch live viewer.
-    viewer = None
+    # Live viewing is fully decoupled: instead of an in-process viewer sharing
+    # this device's GPU queue, we stream CPU snapshots of the gaussian buffer
+    # into shared memory. A separate `scripts/stream_viewer.py` process renders
+    # them independently — no shared device, no cross-thread queue submission,
+    # and the viewer crashing/closing cannot affect training. Launch the viewer
+    # with the stream name printed below (or it auto-reads outputs/.splat_stream).
+    stream_writer = None
     if not args.no_viewer:
-        viewer = Viewer(device, width=W, height=H,
-                        max_splats=args.max_splats)
-        viewer.start()
+        from trainer.splat_stream import SplatStreamWriter, STREAM_LOCK_FILE_DEFAULT
+        stream_writer = SplatStreamWriter(capacity=args.stream_max_splats)
+        try:
+            lock_path = Path(STREAM_LOCK_FILE_DEFAULT)
+            lock_path.parent.mkdir(parents=True, exist_ok=True)
+            lock_path.write_text(stream_writer.name)
+        except OSError:
+            pass
+        print(f"[SplatStream] serving on {stream_writer.name!r} "
+              f"(capacity {args.stream_max_splats}). "
+              f"View with: python scripts/stream_viewer.py --stream {stream_writer.name}")
+
+    # Optionally spawn the viewer as a CHILD PROCESS. It still runs fully
+    # independently (its own device/queue/window); we just launch and reap it
+    # for convenience. A viewer crash does not affect training; when training
+    # exits we terminate the child.
+    viewer_proc = None
+    if stream_writer is not None and args.launch_viewer:
+        import subprocess
+        viewer_script = str(Path(__file__).resolve().parent / "stream_viewer.py")
+        cmd = [sys.executable, viewer_script,
+               "--stream", stream_writer.name,
+               "--backend", args.backend]
+        try:
+            viewer_proc = subprocess.Popen(cmd)
+            print(f"[SplatStream] launched viewer subprocess (pid {viewer_proc.pid})")
+        except OSError as e:
+            print(f"[SplatStream] failed to launch viewer: {e}")
 
     # Pre-upload every target image as its own GPU texture. Per-iter we
     # just swap the active reference — no CPU→GPU upload in the hot loop.
@@ -270,9 +314,11 @@ def main() -> None:
         lrs = AdamLRs(mean=lr_mean_init * (decay ** (it - 1)))
         pipeline.train_step(entry.camera, lrs=lrs)
 
-        # Update viewer every 100 iters.
-        if viewer and it % 100 == 0:
-            viewer.update_gaussians(pipeline)
+        # Stream a gaussian snapshot to the live viewer every N iters. This
+        # does a GPU->CPU readback (which also drains the async queue, bounding
+        # how far the CPU runs ahead), so keep the cadence coarse.
+        if stream_writer is not None and it % args.stream_every == 0:
+            stream_writer.push(pipeline, it)
 
         # Densification schedule.
         do_densify = (args.densify_from <= it <= args.densify_to
@@ -428,8 +474,16 @@ def main() -> None:
                   f"adam={timings['adam_ms']:.1f}  total={timings['total_ms']:.1f} ms  "
                   f"n_g={cur_n_gaussians}")
 
-    if viewer:
-        viewer.stop()
+    if stream_writer is not None:
+        # Signal the viewer to exit, let it see the flag and detach, THEN
+        # unlink the shared memory (so the reader never touches freed memory).
+        stream_writer.signal_closed()
+        if viewer_proc is not None:
+            try:
+                viewer_proc.wait(timeout=5)
+            except Exception:
+                viewer_proc.terminate()
+        stream_writer.close()
     if profile_json:
         profile_json.close()
     log_txt.close()

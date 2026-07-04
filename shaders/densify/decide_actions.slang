@@ -61,17 +61,18 @@ void decideActions(
         return;
     }
 
-    // Low-opacity pruning (budget-limited).
+    // Low-opacity pruning — UNBUDGETED. A splat below t_opacity contributes
+    // essentially nothing; INRIA/3DGS prune ALL such splats every opacity
+    // sweep, which is how they clear the transparent floater haze. The old
+    // budget cap (at most 50% of count) could not keep up when a large
+    // fraction of splats were sub-threshold, so the haze persisted (measured:
+    // 77% of our splats < 0.1 opacity vs INRIA 47%). Pruning is unconditional
+    // here; the prune_budget still limits nothing on this path.
     if (opacity < t_opacity)
     {
-        int remaining;
-        InterlockedAdd(prune_budget[0], -1, remaining);
-        if (remaining > 0)
-        {
-            action[i] = ACTION_PRUNE;
-            densify_score[i] = 0.0;
-            return;
-        }
+        action[i] = ACTION_PRUNE;
+        densify_score[i] = 0.0;
+        return;
     }
 
     // Densification score: combines multiple signals (inspired by Taming 3DGS §3.3).

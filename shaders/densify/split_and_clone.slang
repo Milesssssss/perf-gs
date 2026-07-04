@@ -138,17 +138,17 @@ void splitAndClone(
     }
     else if (a == ACTION_CLONE)
     {
-        // Duplicate parent but halve opacity on both so the combined
-        // alpha contribution is unchanged: sigmoid(new_logit) = sigmoid(old_logit) / 2.
-        // new_logit = log(p/2 / (1 - p/2)) where p = sigmoid(old_logit).
-        float p = 1.0 / (1.0 + exp(-parent.opacity));
-        float half_p = p * 0.5;
-        float new_logit = log(half_p / (1.0 - half_p));
-
+        // Exact duplicate of the parent — opacity COPIED UNCHANGED, matching
+        // 3DGS/gsplat duplicate(). The previous code halved opacity on both
+        // parent and copy ("to keep combined alpha unchanged"), but that is
+        // wrong: (1) it contradicts the reference (clone copies as-is), and
+        // (2) halving is not even alpha-neutral — two overlapping p/2 clones
+        // composite to p - p^2/4 != p. Repeated clone generations drove
+        // opacity toward zero, manufacturing the sub-0.1 floater haze.
+        // The clone gets a fresh (zeroed) Adam state so parent and child
+        // diverge under per-iter gradient noise instead of stepping in
+        // lockstep; the parent slot is left untouched.
         Gaussian3D clone = parent;
-        clone.opacity = new_logit;
-        gaussians[i].opacity = new_logit;
-        adam_state[i] = _zero_adam();
 
         uint tail;
         InterlockedAdd(num_gaussians_counter[0], 1u, tail);

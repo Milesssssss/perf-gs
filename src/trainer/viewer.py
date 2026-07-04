@@ -169,17 +169,34 @@ class _ShaderWatcher:
 class Viewer:
     def __init__(self, device: spy.Device, width: int = 960, height: int = 540,
                  max_splats: int = 500_000, fovy: float = 45.0,
-                 hot_reload: bool = False):
+                 hot_reload: bool = False, max_sort_pairs: int | None = None,
+                 gpu_lock=None):
         self.device = device
         self.width = width
         self.height = height
         self.max_splats = max_splats
         self.fovy = fovy
         self.hot_reload = hot_reload
+        # Shared GPU-queue lock (see Pipeline.gpu_lock). The viewer render loop
+        # runs on a background thread and MUST hold this lock around every
+        # queue operation (submit / present / wait_for_idle / acquire) so it
+        # never races the training thread's submits on the shared VkQueue.
+        import contextlib
+        self.gpu_lock = gpu_lock if gpu_lock is not None else contextlib.nullcontext()
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
+        # The viewer only RENDERS a single static view (never trains/densifies),
+        # so a splat covers far fewer tiles than the training pipeline's
+        # max_splats*16 headroom assumes. Sizing the viewer's sort-pair buffers
+        # at that headroom doubles the whole allocation (~2.5 GB of sort buffers
+        # alone at 6.5M splats) and OOMs the device on top of the training
+        # pipeline — surfacing as a generic "Vulkan returned a failure" at
+        # startup. Cap the viewer at a modest per-splat tile budget.
+        if max_sort_pairs is None:
+            max_sort_pairs = max(2_000_000, max_splats * 4)
         self._pipeline = Pipeline(
             device=device, width=width, height=height, max_splats=max_splats,
+            max_sort_pairs=max_sort_pairs,
         )
         self._pipeline.lambda_ssim = 0.0
         self._pipeline.w_alpha = 0.0
@@ -199,7 +216,9 @@ class Viewer:
         encoder = self.device.create_command_encoder()
         encoder.copy_buffer(dst_g, 0, src_g, 0, src_g.size)
         encoder.copy_buffer(dst_n, 0, src_n, 0, src_n.size)
-        self.device.submit_command_buffer(encoder.finish())
+        cmd = encoder.finish()
+        with self.gpu_lock:
+            self.device.submit_command_buffer(cmd)
         self._has_data = True
 
     def start(self):
@@ -286,10 +305,11 @@ class Viewer:
                 new_w, new_h = window.width, window.height
                 if new_w > 0 and new_h > 0:
                     try:
-                        self.device.wait_for_idle()
-                        surface.unconfigure()
-                        self.device.wait_for_idle()
-                        surface.configure(width=new_w, height=new_h)
+                        with self.gpu_lock:
+                            self.device.wait_for_idle()
+                            surface.unconfigure()
+                            self.device.wait_for_idle()
+                            surface.configure(width=new_w, height=new_h)
                         configured = True
                     except Exception as e:
                         print(f"[Viewer] reconfigure failed: {e}")
@@ -310,13 +330,19 @@ class Viewer:
 
             camera = cam.get_camera(self.width, self.height, self.fovy)
             try:
-                self._pipeline._run_forward(camera)
-                surface_tex = surface.acquire_next_image()
-                encoder = self.device.create_command_encoder()
-                encoder.blit(surface_tex, self._pipeline.buffers.output_image)
-                cmd = encoder.finish()
-                self.device.submit_command_buffer(cmd)
-                surface.present()
+                # Hold the shared GPU-queue lock across the ENTIRE frame: the
+                # forward pass issues many immediate per-kernel submits (its
+                # _dispatch runs with no encoder), and the blit/acquire/present
+                # are queue ops too. All of it must be serialized against the
+                # training thread's submits on the shared VkQueue.
+                with self.gpu_lock:
+                    self._pipeline._run_forward(camera)
+                    surface_tex = surface.acquire_next_image()
+                    encoder = self.device.create_command_encoder()
+                    encoder.blit(surface_tex, self._pipeline.buffers.output_image)
+                    cmd = encoder.finish()
+                    self.device.submit_command_buffer(cmd)
+                    surface.present()
             except Exception as e:
                 if not getattr(self, '_err_printed', False):
                     print(f"[Viewer] frame error: {e}")

@@ -39,7 +39,12 @@ class DensifyConfig:
     """
     n_scoring_views: int = 10       # cameras sampled for importance scoring
     loss_thresh: float = 0.1        # L1 threshold for binary error mask
-    t_opacity: float = 0.005        # prune if sigmoid(opacity) < this
+    t_opacity: float = 0.005        # prune if sigmoid(opacity) < this. MUST stay BELOW
+                                    # t_opacity_reset_value (0.01): reset clamps opacity down
+                                    # to the reset value, so a floor ABOVE it prunes every
+                                    # splat the instant reset fires (total wipeout). 3DGS uses
+                                    # prune 0.005 < reset 0.01 so reset splats survive and only
+                                    # genuinely-dead ones decaying below 0.005 get culled.
     t_big_scale: float = 0.1        # prune if max_scale > this (world-space floater removal)
     opacity_cap: float = 0.8        # post-densify opacity cap (softer than reset)
     t_opacity_reset_value: float = 0.01  # reset opacity to this value
@@ -83,6 +88,9 @@ def _module_for_reflection(device: spy.Device) -> spy.Module:
     )
 
 
+import contextlib
+
+
 class Pipeline:
     def __init__(
         self,
@@ -91,8 +99,19 @@ class Pipeline:
         height: int,
         max_splats: int = 500_000,
         max_sort_pairs: int | None = None,
+        gpu_lock: "contextlib.AbstractContextManager | None" = None,
     ) -> None:
         self.device = device
+        # Serializes GPU queue access (submit/present/wait_for_idle) against
+        # any OTHER thread sharing this device — notably the live Viewer, which
+        # runs its render loop on a background thread. Vulkan requires queue
+        # submission to be externally synchronized; without this, the training
+        # thread and viewer thread race on the shared VkQueue, which
+        # non-deterministically either faults the device ("Vulkan returned a
+        # failure") or thrashes (both threads stall fighting for the queue).
+        # Defaults to a no-op so single-threaded use (tests, --no-viewer) is
+        # unchanged.
+        self.gpu_lock = gpu_lock if gpu_lock is not None else contextlib.nullcontext()
         self.width = width
         self.height = height
         self.max_splats = max_splats
@@ -219,6 +238,11 @@ class Pipeline:
         )
         buffers.zero_adam_state(self.buffers)
         self.iteration = 0
+
+    def set_gaussians_raw(self, floats: np.ndarray, count: int) -> None:
+        """Upload a snapshot already in the packed 14-float layout (from the
+        splat stream). Render-only path — does not touch Adam state."""
+        buffers.write_gaussians_raw(self.buffers, floats, count)
 
     def set_target_image(self, rgb: np.ndarray) -> None:
         """Upload a target image into the pipeline's owned texture. Call
@@ -712,7 +736,9 @@ class Pipeline:
         enc.push_debug_group("adam", spy.math.float3(0.2, 0.6, 1.0))
         self._run_adam(lrs)
         enc.pop_debug_group()
-        self.device.submit_command_buffer(enc.finish())
+        cmd = enc.finish()
+        with self.gpu_lock:
+            self.device.submit_command_buffer(cmd)
         self._encoder = None
 
     # ------------------------------------------------------------------
