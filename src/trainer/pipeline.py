@@ -1092,11 +1092,19 @@ Pipeline.densify = densify  # type: ignore[attr-defined]
 
 def densify_simple(self: Pipeline, cfg: DensifyConfig,
                    grad_thresh: float = 0.0002,
-                   scale_thresh: float | None = None) -> dict:
+                   scale_thresh: float | None = None,
+                   prune_big_scale: float | None = None,
+                   allow_scale_prune: bool = True) -> dict:
     """Reference 3DGS densification: threshold on avg_grad, split/clone by scale.
 
     No rank-selection, no importance scoring, no growth budget. Every gaussian
     that exceeds grad_thresh gets densified. Simple and proven.
+
+    ``prune_big_scale`` is the world-space max-scale prune threshold
+    (gsplat prune_scale3d * scene_scale). ``allow_scale_prune`` gates it so the
+    caller can disable big-scale pruning until after the first opacity reset,
+    matching gsplat's ``step > reset_every`` guard. Low-opacity pruning is
+    always active.
     """
     ACTION_KEEP = 0
     ACTION_SPLIT = 1
@@ -1147,6 +1155,7 @@ def densify_simple(self: Pipeline, cfg: DensifyConfig,
     #  our_signal > 0.0002 * (H*W*3)        (scale the threshold up) <- what we did
     channels = 3.0
     grad_thresh_internal = grad_thresh * (self.width * self.height * channels)
+    big_scale = prune_big_scale if prune_big_scale is not None else cfg.t_big_scale
     self._dispatch(self.k_decide_actions_simple,
         thread_count=[self.max_splats, 1, 1],
         gaussians=b.gaussians.storage,
@@ -1157,7 +1166,8 @@ def densify_simple(self: Pipeline, cfg: DensifyConfig,
         grad_thresh=grad_thresh_internal,
         scale_thresh=scale_thresh,
         t_opacity=cfg.t_opacity,
-        t_big_scale=cfg.t_big_scale,
+        t_big_scale=big_scale,
+        allow_scale_prune=1 if allow_scale_prune else 0,
         max_splats=self.max_splats,
     )
     self.device.wait_for_idle()

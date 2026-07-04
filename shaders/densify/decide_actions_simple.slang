@@ -27,7 +27,8 @@ void decideActionsSimple(
     uniform float grad_thresh,
     uniform float scale_thresh,
     uniform float t_opacity,
-    uniform float t_big_scale,
+    uniform float t_big_scale,      // world-space; caller passes prune_scale3d * scene_scale
+    uniform uint allow_scale_prune, // 0 until after the first opacity reset (matches gsplat)
     uniform uint max_splats)
 {
     uint i = dtid.x;
@@ -46,15 +47,19 @@ void decideActionsSimple(
     float max_scale = max(scale.x, max(scale.y, scale.z));
     float opacity = sigmoid(g.opacity);
 
-    // Prune: too big.
-    if (max_scale > t_big_scale)
+    // Prune: too transparent (always active, like gsplat's prune_opa).
+    if (opacity < t_opacity)
     {
         action[i] = ACTION_PRUNE;
         return;
     }
 
-    // Prune: too transparent.
-    if (opacity < t_opacity)
+    // Prune: too big — ONLY after the first opacity reset (gsplat gates this
+    // on step > reset_every). Pruning large splats from the start deletes the
+    // big kNN-init blobs in sparse/distant regions before densification can
+    // subdivide them into detail. t_big_scale is already scene-scale-normalized
+    // by the caller (prune_scale3d * scene_extent).
+    if (allow_scale_prune != 0u && max_scale > t_big_scale)
     {
         action[i] = ACTION_PRUNE;
         return;

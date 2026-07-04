@@ -103,9 +103,15 @@ def main() -> None:
                          "splat down to the reset value, so a floor above it prunes the "
                          "entire scene the instant reset fires. 3DGS: prune 0.005 < reset 0.01.")
     ap.add_argument("--t-big-scale", type=float, default=0.1)
+    ap.add_argument("--prune-scale3d", type=float, default=0.1,
+                    help="prune splats whose max 3D scale exceeds this * scene_extent "
+                         "(gsplat prune_scale3d). Only active after the first opacity reset.")
+    ap.add_argument("--reset-every", type=int, default=3000,
+                    help="opacity-reset interval (gsplat reset_every). Big-scale prune is "
+                         "disabled until after the first reset.")
     ap.add_argument("--opacity-cap", type=float, default=0.8)
-    ap.add_argument("--opacity-reg", type=float, default=0.01)
-    ap.add_argument("--scale-reg", type=float, default=0.01)
+    ap.add_argument("--opacity-reg", type=float, default=0.00)
+    ap.add_argument("--scale-reg", type=float, default=0.00)
     ap.add_argument("--w-alpha", type=float, default=0.0,
                     help="alpha loss weight; set > 0 for RGBA targets (e.g. 1.0)")
     ap.add_argument("--lambda-ssim", type=float, default=0.2,
@@ -118,8 +124,10 @@ def main() -> None:
                     help="profile one full step every N iters (0 to disable)")
     ap.add_argument("--simple-densify", action="store_true",
                     help="use reference 3DGS threshold-based densification instead of score-ranked")
-    ap.add_argument("--grad-thresh", type=float, default=0.0003,
-                    help="gradient threshold for simple densification (reference 3DGS default)") #higher as we use absgrad by default
+    ap.add_argument("--grad-thresh", type=float, default=0.0008,
+                    help="2D-gradient densification threshold. gsplat uses 0.0002 for "
+                         "vanilla grad and ~0.0008 for absgrad; our accumulator is an "
+                         "abs-sum (absgrad-like), so 0.0008 matches. Lower = more growth.")
     ap.add_argument("--no-viewer", action="store_true", help="disable live viewer stream")
     ap.add_argument("--launch-viewer", action="store_true",
                     help="auto-launch the standalone viewer as a child process "
@@ -327,26 +335,34 @@ def main() -> None:
         # Densification schedule.
         do_densify = (args.densify_from <= it <= args.densify_to
                       and (it - args.densify_from) % args.densify_every == 0)
-        do_opacity_reset = (it % 3000 == 0 and it >= args.densify_from and it <= args.densify_to)
+        do_opacity_reset = (it % args.reset_every == 0 and it >= args.densify_from and it <= args.densify_to)
         do_log = args.log_every > 0 and ((it % args.log_every == 0) or (it == 1) or (it == args.iters))
         do_preview = args.preview_every > 0 and ((it % args.preview_every == 0) or (it == args.iters))
 
-        # for now no opacity reset, i do not like it.
-        if do_opacity_reset:
-           pipeline.reset_opacity(cfg)
-           densify_json.write(json.dumps({"iter": it, "event": "opacity_reset"}) + "\n")
-           print(f"iter {it}: opacity reset")
-
         densify_cfg = cfg
+        # gsplat DefaultStrategy schedule interaction: densify runs every
+        # refine_every, but NOT in a step that also resets opacity (a reset
+        # clamps everything to the reset value, so pruning in the same step
+        # would nuke freshly-reset splats). Skip densify on reset steps.
+        if do_densify and do_opacity_reset:
+            do_densify = False
+
         if do_densify:
 
             stats = {}
 
             if args.simple_densify:
+                # gsplat gates the too-big prune on step > reset_every: don't
+                # delete large kNN-init blobs before densification can split
+                # them. And normalize the prune threshold by scene extent
+                # (gsplat prune_scale3d * scene_scale).
+                allow_scale_prune = it > args.reset_every
                 stats = pipeline.densify_simple(
                     densify_cfg,
                     grad_thresh=args.grad_thresh,
-                    scale_thresh=extent * args.grow_scale3d
+                    scale_thresh=extent * args.grow_scale3d,
+                    prune_big_scale=extent * args.prune_scale3d,
+                    allow_scale_prune=allow_scale_prune,
                 )
             else:
                 # Score-ranked densification with importance scoring.
@@ -371,6 +387,14 @@ def main() -> None:
                     f"keep={stats['n_keep']} split={stats['n_split']} "
                     f"clone={stats['n_clone']} prune={stats['n_prune']} "
                     f"| pre={stats['pre_count']} -> post={stats['final_count']}")
+
+        # Opacity reset AFTER densify (gsplat resets at the end of
+        # step_post_backward). Skipped on densify steps above, so they never
+        # collide within one iteration.
+        if do_opacity_reset:
+            pipeline.reset_opacity(cfg)
+            densify_json.write(json.dumps({"iter": it, "event": "opacity_reset"}) + "\n")
+            print(f"iter {it}: opacity reset")
 
 
         # Loss/PSNR require a GPU→CPU readback of the output image.
