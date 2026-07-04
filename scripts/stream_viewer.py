@@ -39,13 +39,14 @@ from trainer.dataset import Camera
 from trainer.device import create_device
 from trainer.pipeline import Pipeline
 from trainer.splat_stream import SplatStreamReader, STREAM_LOCK_FILE_DEFAULT
-from trainer.viewer import FlyCamera, _build_proj_matrix
+from trainer.viewer import FlyCamera
 
 STREAM_LOCK_FILE = Path(STREAM_LOCK_FILE_DEFAULT)
 
 SHIFT_BOOST = 8.0     # multiplier while Shift held
 CTRL_SLOW = 0.15      # multiplier while Ctrl held
 WHEEL_STEP = 1.25     # base-speed factor per wheel notch
+ROLL_SPEED = 60.0     # degrees/sec while R (left) / T (right) held
 
 
 def main() -> None:
@@ -90,36 +91,63 @@ def main() -> None:
 
     # Optional: dataset camera poses for the snap-to-camera UI.
     cam_names: list[str] = []
-    cam_views: list[np.ndarray] = []
+    cam_cameras: list[Camera] = []   # full dataset Camera (view + proj + size)
+    scene_res: tuple[int, int] | None = None
+    scene_fovy: float | None = None
     if args.scene:
         try:
             from trainer.colmap import load_colmap
             scene = load_colmap(args.scene, downsample=args.downsample)
             for i, e in enumerate(scene.images):
                 cam_names.append(f"camera {i}: " + e.image_name)
-                cam_views.append(np.asarray(e.camera.view_matrix, dtype=np.float64))
-            print(f"loaded {len(cam_names)} camera poses from {args.scene}")
+                cam_cameras.append(e.camera)
+            if scene.images:
+                # Every camera in a COLMAP scene shares one render resolution
+                # (the loader forces a single width/height). The snapped view
+                # must render at that EXACT resolution AND with the camera's
+                # real projection to match the trainer's saved previews: the
+                # old fixed 960x540 + fovy=45 buffer got BOTH wrong — the FOV
+                # mismatch (e.g. 45 vs the real ~39) shrinks the splats, and
+                # the aspect mismatch (16:9 vs the real 3:2) stretches the frame
+                # and surrounds the subject with extra dark background (which
+                # reads as "darker"). See project.slang: on-screen splat size is
+                # P[i][i]*frame_dim*0.5 and NDC->pixel uses frame_dim, so both
+                # the projection and the buffer size/aspect must match.
+                cam0 = scene.images[0].camera
+                scene_res = cam0.image_size
+                # Derive the vertical FOV so free-fly uses the same lens as the
+                # dataset (no FOV jump when leaving a snapped pose). P[1][1] =
+                # cot(fovy/2) in our projection convention.
+                scene_fovy = math.degrees(2.0 * math.atan(1.0 / float(cam0.proj_matrix[1, 1])))
+            print(f"loaded {len(cam_names)} camera poses from {args.scene}"
+                  + (f" (render res {scene_res[0]}x{scene_res[1]}, "
+                     f"fovy {scene_fovy:.1f}\N{DEGREE SIGN})" if scene_res else ""))
         except Exception as e:
             print(f"could not load --scene poses ({e}); camera snap disabled")
 
     cap = args.max_splats or reader.capacity
     device = create_device(backend=args.backend)
-    pipeline = Pipeline(device=device, width=args.width, height=args.height,
+    # Render at the dataset's native resolution when a scene is loaded so the
+    # snap-to-camera view matches the trainer's saved renders exactly; fall
+    # back to the requested --width/--height for free-fly-only use.
+    render_w, render_h = scene_res if scene_res is not None else (args.width, args.height)
+    fovy = scene_fovy if scene_fovy is not None else args.fovy
+    pipeline = Pipeline(device=device, width=render_w, height=render_h,
                         max_splats=cap)
     pipeline.lambda_ssim = 0.0
     pipeline.w_alpha = 0.0
 
-    window = spy.Window(width=args.width, height=args.height,
+    window = spy.Window(width=render_w, height=render_h,
                         title=f"3DGS Live — {stream_name}")
     surface = device.create_surface(window)
-    surface.configure(width=args.width, height=args.height)
+    surface.configure(width=render_w, height=render_h)
 
     # --- ImGui UI ---
     ui = spy.ui.Context(device)
     ui_panel = spy.ui.Window(ui.screen, "Viewer", position=spy.float2(10, 10),
                              size=spy.float2(260, 0))
     spy.ui.Text(ui_panel, "WASD move | Shift boost | Ctrl slow")
-    spy.ui.Text(ui_panel, "wheel: speed | drag: look")
+    spy.ui.Text(ui_panel, "wheel: speed | drag: look | R/T: roll")
     status_text = spy.ui.Text(ui_panel, "waiting for data...")
 
     cam = FlyCamera()
@@ -127,11 +155,12 @@ def main() -> None:
     speed_prop = spy.ui.SliderFloat(ui_panel, "speed", value=cam.speed,
                                     min=0.01, max=50.0)
 
-    # When a dataset camera is selected we render its EXACT view matrix (roll
-    # included) rather than the fly-cam's yaw/pitch approximation, so the
-    # snapped view aligns pixel-for-pixel with GT. Any WASD/look clears it and
-    # hands control back to the fly-cam (seeded from that pose).
-    snapped_view = [None]  # holds the exact GT world->view matrix, or None
+    # When a dataset camera is selected we render its EXACT view AND projection
+    # matrices (roll + real FOV/aspect included) rather than the fly-cam's
+    # yaw/pitch + guessed-FOV approximation, so the snapped view aligns
+    # pixel-for-pixel with the trainer's saved renders. Any WASD/look clears it
+    # and hands control back to the fly-cam (seeded from that pose).
+    snapped_cam = [None]  # holds the exact dataset Camera, or None (free fly)
 
     if cam_names:
         # ListBox of dataset cameras; selecting one snaps to its exact pose.
@@ -140,13 +169,14 @@ def main() -> None:
 
         def on_cam_select(selected: int):
             idx = selected - 1  # 0 == "(free fly)"
-            if 0 <= idx < len(cam_views):
+            if 0 <= idx < len(cam_cameras):
                 # Seed the fly-cam (so leaving the snap continues from here)
-                # AND record the exact view matrix for pixel-accurate display.
-                cam.set_from_view_matrix(cam_views[idx])
-                snapped_view[0] = cam_views[idx]
+                # AND record the exact Camera for pixel-accurate display.
+                cam.set_from_view_matrix(np.asarray(cam_cameras[idx].view_matrix,
+                                                    dtype=np.float64))
+                snapped_cam[0] = cam_cameras[idx]
             else:
-                snapped_view[0] = None  # "(free fly)"
+                snapped_cam[0] = None  # "(free fly)"
         cam_box.callback = on_cam_select
     else:
         cam_box = None
@@ -155,7 +185,8 @@ def main() -> None:
     mouse_captured = False
     last_mouse = [0.0, 0.0]
     key_map = {spy.KeyCode.w: "w", spy.KeyCode.a: "a", spy.KeyCode.s: "s",
-               spy.KeyCode.d: "d", spy.KeyCode.q: "q", spy.KeyCode.e: "e"}
+               spy.KeyCode.d: "d", spy.KeyCode.q: "q", spy.KeyCode.e: "e",
+               spy.KeyCode.r: "r", spy.KeyCode.t: "t"}  # r/t: roll left/right
     mods = {"shift": False, "ctrl": False}
 
     def on_key(event):
@@ -195,7 +226,7 @@ def main() -> None:
             dy = event.pos[1] - last_mouse[1]
             last_mouse[0], last_mouse[1] = event.pos[0], event.pos[1]
             if dx or dy:
-                snapped_view[0] = None  # looking around leaves the snapped pose
+                snapped_cam[0] = None  # looking around leaves the snapped pose
             cam.rotate(dx, dy)
 
     needs_reconfigure = False
@@ -250,9 +281,17 @@ def main() -> None:
         base_speed = cam.speed
         cam.speed = base_speed * boost
         if keys_held:
-            snapped_view[0] = None  # moving leaves the snapped pose
+            snapped_cam[0] = None  # moving/rolling leaves the snapped pose
         cam.move(keys_held, dt)
         cam.speed = base_speed  # restore un-boosted base for the slider
+        # R rolls left, T rolls right (continuous while held). Roll persists on
+        # the fly-cam, so it survives leaving a snapped pose. Ctrl slows it for
+        # fine control, matching the movement modifier.
+        roll_rate = ROLL_SPEED * (CTRL_SLOW if mods["ctrl"] else 1.0)
+        if "r" in keys_held:
+            cam.roll_by(+roll_rate * dt)
+        if "t" in keys_held:
+            cam.roll_by(-roll_rate * dt)
 
         poll_accum += dt
         if poll_accum >= 0.1:
@@ -277,16 +316,19 @@ def main() -> None:
         # camera-resolution check in _run_forward. Take the projection aspect
         # from the WINDOW so geometry stays undistorted after the blit stretch.
         win_aspect = window.width / max(window.height, 1)
-        if snapped_view[0] is not None:
-            # Use the dataset camera's EXACT view matrix (preserves roll) so the
-            # snapped view matches GT; only the projection is rebuilt at the
-            # viewer's render resolution/aspect.
-            proj = _build_proj_matrix(args.fovy, win_aspect)
-            camera = Camera(view_matrix=snapped_view[0].astype(np.float32),
-                            proj_matrix=proj,
+        if snapped_cam[0] is not None:
+            # Use the dataset camera's EXACT view AND projection matrices so the
+            # snapped view matches the trainer's saved renders pixel-for-pixel.
+            # The pipeline is sized to the dataset resolution (see above), so
+            # image_size already matches the camera's real intrinsics — no FOV
+            # or aspect substitution, which is what previously shrank the splats
+            # and darkened the frame.
+            sc = snapped_cam[0]
+            camera = Camera(view_matrix=np.asarray(sc.view_matrix, dtype=np.float32),
+                            proj_matrix=np.asarray(sc.proj_matrix, dtype=np.float32),
                             image_size=(pipeline.width, pipeline.height))
         else:
-            camera = cam.get_camera(pipeline.width, pipeline.height, args.fovy,
+            camera = cam.get_camera(pipeline.width, pipeline.height, fovy,
                                     aspect=win_aspect)
         try:
             pipeline._run_forward(camera)
