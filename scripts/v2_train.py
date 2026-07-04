@@ -264,9 +264,13 @@ def main() -> None:
     if stream_writer is not None and args.launch_viewer:
         import subprocess
         viewer_script = str(Path(__file__).resolve().parent / "stream_viewer.py")
+        # Pass the scene + downsample so the child viewer loads the same camera
+        # poses and offers the snap-to-camera dropdown.
         cmd = [sys.executable, viewer_script,
                "--stream", stream_writer.name,
-               "--backend", args.backend]
+               "--backend", args.backend,
+               "--scene", args.scene,
+               "--downsample", str(args.downsample)]
         try:
             viewer_proc = subprocess.Popen(cmd)
             print(f"[SplatStream] launched viewer subprocess (pid {viewer_proc.pid})")

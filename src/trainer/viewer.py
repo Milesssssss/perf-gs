@@ -32,10 +32,15 @@ from trainer.pipeline import Pipeline
 
 
 def _build_view_matrix(eye: np.ndarray, forward: np.ndarray, up: np.ndarray) -> np.ndarray:
+    # RIGHT-HANDED basis (det +1), matching the COLMAP view matrices the
+    # splats were trained with. The previous r = cross(forward, up) is the
+    # negation of the right-handed r = cross(up, forward), which flipped the
+    # X axis (det -1) and rendered the scene left-right MIRRORED relative to
+    # the trainer's own renders. Using cross(up, forward) fixes the mirror.
     f = forward / np.linalg.norm(forward)
-    r = np.cross(f, up)
+    r = np.cross(up, f)
     r = r / np.linalg.norm(r)
-    u = np.cross(r, f)
+    u = np.cross(f, r)
     M = np.eye(4, dtype=np.float32)
     M[0, :3] = r
     M[1, :3] = u
@@ -80,9 +85,11 @@ class FlyCamera:
 
     @property
     def right(self) -> np.ndarray:
+        # cross(up, forward) to match the right-handed _build_view_matrix
+        # basis; otherwise D-strafe would move opposite the camera's right.
         f = self.forward
         up = np.array([0.0, 1.0, 0.0])
-        r = np.cross(f, up)
+        r = np.cross(up, f)
         n = np.linalg.norm(r)
         return r / n if n > 1e-8 else np.array([1.0, 0.0, 0.0])
 
@@ -102,17 +109,46 @@ class FlyCamera:
             self.eye[1] -= vel
 
     def rotate(self, dx: float, dy: float):
-        self.yaw += -dx * self.sensitivity
+        # +dx on yaw: in the right-handed basis, screen-right is view +x, and
+        # forward gains +x as yaw increases, so drag-right must INCREASE yaw
+        # ("look right"). The old -dx was tuned to the pre-fix left-handed
+        # (mirrored) basis and now reads as inverted. Pitch is unchanged by the
+        # handedness fix (Y axis untouched), so its sign is left as-is.
+        self.yaw += dx * self.sensitivity
         self.pitch += -dy * self.sensitivity
         self.pitch = max(-89.0, min(89.0, self.pitch))
 
-    def get_camera(self, width: int, height: int, fovy: float = 45.0) -> Camera:
+    def set_from_view_matrix(self, view: np.ndarray) -> None:
+        """Snap this fly-cam to a world->view matrix (e.g. a dataset camera
+        pose). Recovers eye + yaw/pitch so subsequent WASD/look continue
+        smoothly from the snapped pose.
+
+        Our view matrix rows are (right, up, forward) and translation is
+        -R @ eye, so eye = -R^T @ t and the world-space forward is row 2.
+        The forward parameterization is
+          f = (cos(p)sin(y), -sin(p), cos(p)cos(y)),
+        which inverts to pitch = asin(-f_y), yaw = atan2(f_x, f_z)."""
+        view = np.asarray(view, dtype=np.float64)
+        R = view[:3, :3]
+        t = view[:3, 3]
+        self.eye = (-R.T @ t).astype(np.float64)
+        f = R[2] / (np.linalg.norm(R[2]) + 1e-12)  # world-space forward
+        self.pitch = math.degrees(math.asin(max(-1.0, min(1.0, -f[1]))))
+        self.yaw = math.degrees(math.atan2(f[0], f[2]))
+
+    def get_camera(self, width: int, height: int, fovy: float = 45.0,
+                   aspect: float | None = None) -> Camera:
+        """Build a Camera at render resolution (width, height). ``aspect``
+        overrides the projection aspect ratio when the display surface has a
+        different aspect than the render buffer (e.g. a fixed-size render blit
+        into a resized window) — passing the window aspect here keeps geometry
+        undistorted instead of stretched."""
         view = _build_view_matrix(
             self.eye.astype(np.float32),
             self.forward.astype(np.float32),
             np.array([0.0, 1.0, 0.0], dtype=np.float32),
         )
-        proj = _build_proj_matrix(fovy, width / height)
+        proj = _build_proj_matrix(fovy, aspect if aspect is not None else width / height)
         return Camera(view_matrix=view, proj_matrix=proj, image_size=(width, height))
 
 
