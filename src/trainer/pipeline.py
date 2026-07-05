@@ -153,6 +153,7 @@ class Pipeline:
 
         sort = SHADERS_DIR / "sort"
         self.k_radix_init_global_hist = mk(sort / "device_radix_sort.slang", "initGlobalHist")
+        self.k_radix_prepare_dispatch = mk(sort / "device_radix_sort.slang", "prepareDispatchArgs")
         self.k_radix_upsweep = mk(sort / "device_radix_sort.slang", "upsweep")
         self.k_radix_scan = mk(sort / "device_radix_sort.slang", "scan")
         self.k_radix_downsweep = mk(sort / "device_radix_sort.slang", "downsweep")
@@ -226,6 +227,38 @@ class Pipeline:
             label = _kernel_labels.get(id(kernel), "unknown")
             self._encoder.insert_debug_marker(label, spy.math.float3(0.6, 0.8, 1.0))
         kernel.dispatch(command_encoder=self._encoder, **kwargs)
+
+    def _dispatch_indirect(self, kernel, args_buf: spy.NDBuffer, offset: int = 0,
+                           **kwargs) -> None:
+        """Dispatch a compute kernel indirectly (group count read from args_buf
+        at `offset` bytes as three uint32s: groups_x, groups_y, groups_z).
+
+        Opens a scoped compute pass on the active encoder, binds the pipeline,
+        writes entry-point parameters via a ShaderCursor (matching
+        kernel.dispatch(**kwargs) semantics), then dispatch_compute_indirect.
+        If no encoder is active (e.g. from render()) a transient encoder is
+        created and submitted so this helper works from any caller.
+        """
+        enc = self._encoder
+        transient = enc is None
+        if transient:
+            enc = self.device.create_command_encoder()
+        label = _kernel_labels.get(id(kernel), "unknown")
+        enc.insert_debug_marker(label, spy.math.float3(0.6, 0.8, 1.0))
+        pass_enc = enc.begin_compute_pass()
+        try:
+            shader_obj = pass_enc.bind_pipeline(kernel.pipeline)
+            cursor = spy.ShaderCursor(shader_obj).find_entry_point(0)
+            cursor.write(kwargs)
+            pass_enc.dispatch_compute_indirect(
+                spy.BufferOffsetPair(args_buf.storage, offset)
+            )
+        finally:
+            pass_enc.end()
+        if transient:
+            cmd = enc.finish()
+            with self.gpu_lock:
+                self.device.submit_command_buffer(cmd)
 
     @contextlib.contextmanager
     def _marker_group(self, label: str, color=(0.5, 0.7, 0.9)):
@@ -373,6 +406,16 @@ class Pipeline:
         dst_lo, dst_hi, dst_v = b.sort_keys_lo_b, b.sort_keys_hi_b, b.sort_values_b
         max_blocks = (self.max_sort_pairs + _RADIX_PART_SIZE - 1) // _RADIX_PART_SIZE
 
+        # Prepare indirect-dispatch args from the GPU-resident count
+        # scan_total[0]. Upsweep and downsweep are then launched with
+        # active_blocks groups instead of max_blocks — dispatch cost scales
+        # with the frame's actual pair count, not the max_sort_pairs cap.
+        self._dispatch(self.k_radix_prepare_dispatch,
+            thread_count=[1, 1, 1],
+            n_buf=b.scan_total.storage,
+            dispatch_args=b.radix_dispatch_args.storage,
+        )
+
         # Clear b_global_hist once at the start of the whole sort;
         # subsequent atomic adds during upsweep accumulate into disjoint
         # per-pass regions (offset = pass_idx * 256).
@@ -385,8 +428,8 @@ class Pipeline:
             radix_shift = (pass_idx % 4) * 8
             key_word = 0 if pass_idx < 4 else 1
             with self._marker_group(f"pass_{pass_idx}", (0.9, 0.55, 0.2)):
-                self._dispatch(self.k_radix_upsweep,
-                    thread_count=[max_blocks * _RADIX_US_DIM, 1, 1],
+                self._dispatch_indirect(self.k_radix_upsweep,
+                    b.radix_dispatch_args,
                     keys_lo=src_lo.storage, keys_hi=src_hi.storage,
                     b_pass_hist=b.radix_pass_hist.storage,
                     b_global_hist=b.radix_global_hist.storage,
@@ -400,8 +443,8 @@ class Pipeline:
                     n_buf=b.scan_total.storage,
                     max_blocks=max_blocks,
                 )
-                self._dispatch(self.k_radix_downsweep,
-                    thread_count=[max_blocks * _RADIX_D_DIM, 1, 1],
+                self._dispatch_indirect(self.k_radix_downsweep,
+                    b.radix_dispatch_args,
                     keys_lo_in=src_lo.storage, keys_hi_in=src_hi.storage, values_in=src_v.storage,
                     keys_lo_out=dst_lo.storage, keys_hi_out=dst_hi.storage, values_out=dst_v.storage,
                     b_pass_hist=b.radix_pass_hist.storage,

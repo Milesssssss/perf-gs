@@ -152,7 +152,7 @@ def main() -> None:
                     help="force render width (overrides --downsample)")
     ap.add_argument("--height", type=int, default=None,
                     help="force render height (overrides --downsample)")
-    ap.add_argument("--preview-every", type=int, default=2000)
+    ap.add_argument("--preview-every", type=int, default=0)
     ap.add_argument("--log-every", type=int, default=10000) 
     ap.add_argument("--densify-every", type=int, default=100)
     ap.add_argument("--densify-from", type=int, default=500)
@@ -552,8 +552,6 @@ def main() -> None:
             cur_n_gaussians = stats["final_count"]
             densify_json.write(json.dumps({"iter": it, "event": "densify", **stats}) + "\n")
             print(f"iter {it}: densify  "
-                    f"keep={stats['n_keep']} split={stats['n_split']} "
-                    f"clone={stats['n_clone']} prune={stats['n_prune']} "
                     f"| pre={stats['pre_count']} -> post={stats['final_count']}")
 
         # Opacity reset AFTER densify (gsplat resets at the end of

@@ -122,6 +122,30 @@ void initGlobalHist(
 }
 
 // ===========================================================================
+// PrepareDispatchArgs — writes indirect-dispatch args for upsweep/downsweep
+// ===========================================================================
+// Single-thread kernel. Reads n_buf[0], computes active_blocks, and writes
+// two DispatchIndirectCommand triples (each: groups_x, groups_y, groups_z):
+//   args[0..2] = (active_blocks, 1, 1)   — upsweep + downsweep group count
+//   (scan is dispatched normally with 256 groups.)
+[shader("compute")]
+[numthreads(1, 1, 1)]
+void prepareDispatchArgs(
+    StructuredBuffer<uint> n_buf,
+    RWStructuredBuffer<uint> dispatch_args)
+{
+    uint n = n_buf[0];
+    uint active_blocks = (n + PART_SIZE - 1u) / PART_SIZE;
+    // Vulkan/D3D12 require at least (1,1,1) even for zero-work dispatches
+    // (else the driver may error). If active_blocks==0, launch 1 group; the
+    // in-shader early-out on (g >= active_blocks) makes it a no-op.
+    uint g = (active_blocks == 0u) ? 1u : active_blocks;
+    dispatch_args[0] = g;
+    dispatch_args[1] = 1u;
+    dispatch_args[2] = 1u;
+}
+
+// ===========================================================================
 // Upsweep — per-partition digit histogram
 // ===========================================================================
 //

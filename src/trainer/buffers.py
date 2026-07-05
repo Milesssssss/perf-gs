@@ -66,14 +66,18 @@ class GaussianBuffers:
     sort_keys_hi_b: spy.NDBuffer
     sort_values_b: spy.NDBuffer
     # DeviceRadixSort scratch (ported from GPUSorting).
-    # radix_global_hist : uint[256 * 8], per-pass device digit offsets;
-    #                     one 256-region per pass, cleared once at start.
-    # radix_pass_hist   : uint[256 * max_blocks], per-(digit, partition)
-    #                     counts, transposed layout with fixed stride =
-    #                     max_blocks so indexing is uniform across
-    #                     upsweep / scan / downsweep.
+    # radix_global_hist   : uint[256 * 8], per-pass device digit offsets;
+    #                       one 256-region per pass, cleared once at start.
+    # radix_pass_hist     : uint[256 * max_blocks], per-(digit, partition)
+    #                       counts, transposed layout with fixed stride =
+    #                       max_blocks so indexing is uniform across
+    #                       upsweep / scan / downsweep.
+    # radix_dispatch_args : uint[3], indirect (groups_x, 1, 1) written by
+    #                       prepareDispatchArgs so upsweep/downsweep scale
+    #                       with active_blocks instead of max_blocks.
     radix_global_hist: spy.NDBuffer
     radix_pass_hist: spy.NDBuffer
+    radix_dispatch_args: spy.NDBuffer
     # Per-tile sorted entry ranges.
     tile_start: spy.NDBuffer                # uint[num_tiles]
     tile_end: spy.NDBuffer                  # uint[num_tiles]
@@ -186,6 +190,15 @@ def allocate(
     radix_pass_hist = spy.NDBuffer(
         device=device, dtype="uint", shape=(256 * max_blocks,),
     )
+    # Indirect args need BufferUsage.indirect_argument in addition to
+    # shader_resource | unordered_access (default) so the kernel can write
+    # to it AND the driver can read it as dispatch args.
+    radix_dispatch_args = spy.NDBuffer(
+        device=device, dtype="uint", shape=(3,),
+        usage=(spy.BufferUsage.shader_resource
+               | spy.BufferUsage.unordered_access
+               | spy.BufferUsage.indirect_argument),
+    )
     tile_start = spy.NDBuffer(device=device, dtype="uint", shape=(num_tiles,))
     tile_end = spy.NDBuffer(device=device, dtype="uint", shape=(num_tiles,))
 
@@ -288,6 +301,7 @@ def allocate(
         sort_values_b=sort_values_b,
         radix_global_hist=radix_global_hist,
         radix_pass_hist=radix_pass_hist,
+        radix_dispatch_args=radix_dispatch_args,
         tile_start=tile_start,
         tile_end=tile_end,
         output_image=output_image,
