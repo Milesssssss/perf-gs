@@ -209,29 +209,26 @@ def main() -> None:
                     "value will be duplicated. Above will be split. Default is 0.01")
     ap.add_argument("--opacity-reset-value", type=float, default=0.01, help="value to reset opacity to when doing opacity reset")
     ap.add_argument("--profile-run", action="store_true",
-                    help="Nsight Graphics profiling mode: skip all I/O/previews/"
-                         "densify/final-metrics, open a window and Present() one frame "
-                         "per training step so Nsight Graphics has a frame boundary to "
-                         "capture on. Nsight Graphics is a graphics-API debugger that "
-                         "hooks the Vulkan device and delimits work by Present, so it "
-                         "needs a real windowed, presenting Vulkan app (it cannot "
-                         "connect to a headless process). Runs until the window is "
-                         "closed; each captured frame is one full train_step with its "
-                         "push_debug_group phase markers (clear_grads/forward/loss/"
-                         "backward/regularization/adam).")
-    ap.add_argument("--profile-warmup", type=int, default=50,
-                    help="train_steps to run before entering the present loop under "
-                         "--profile-run (reach steady state / warm caches / compile "
-                         "kernels so a capture reflects real hot-loop cost).")
+                    help="Nsight Graphics profiling mode. Runs a NORMAL training loop "
+                         "(densify + logs still on, per your schedule) but also opens "
+                         "a Vulkan window and Present()s one frame per train_step so "
+                         "Nsight has a frame boundary to capture on. Auto-disables the "
+                         "viewer stream (a second device pollutes the capture) and the "
+                         "final I/O-heavy metrics pass. Launch this process as the "
+                         "Nsight Graphics target (or connect), then capture a frame: "
+                         "each frame is one full train_step (clear_grads/forward/loss/"
+                         "backward/regularization/adam) with its push_debug_group "
+                         "phase markers; densify iters also appear in the tree.")
     args = ap.parse_args()
 
     if args.profile_run:
         # A profile run is a clean, self-contained presenting Vulkan app: no
         # viewer stream (a second device/window pollutes the capture), and no
-        # validation layers (the Khronos validation layer conflicts with
-        # Nsight's injection layer and breaks the connection).
+        # previews (frame-boundary I/O breaks Nsight's step-per-frame cadence).
+        # Vulkan is the only backend Nsight Graphics can hook.
         args.no_viewer = True
         args.backend = "vulkan"
+        args.preview_every = 0
 
     run_name = args.run_name or datetime.now().strftime("%Y%m%d_%H%M%S")
     run_dir = Path("outputs/train") / run_name
@@ -376,94 +373,56 @@ def main() -> None:
     target_textures = [pipeline.create_target_texture(t) for t in targets_srgb]
 
     # ------------------------------------------------------------------
-    # Nsight Graphics profiling mode.
+    # Nsight Graphics profiling: window + present hook.
     #
-    # Runs ONLY the hot loop (train_step) with no readbacks/previews/densify/IO,
-    # opening a window and Present()ing one frame per step so Nsight Graphics
-    # has a frame boundary to capture on. Launch this process as the Nsight
-    # Graphics target (or connect to it), then capture a frame — each frame is
-    # one full train_step, and the pipeline's push_debug_group phases
-    # (clear_grads/forward/loss/backward/regularization/adam) show as the scope
-    # tree in the capture.
+    # Nsight Graphics is a graphics-API debugger that hooks the Vulkan device
+    # and delimits work by Present, so profiling needs a real windowed,
+    # presenting Vulkan app. When --profile-run is set we open a window,
+    # create a swapchain surface, and Present() one frame per iter — same
+    # normal training loop otherwise (densify + logs still run). The viewer
+    # stream is disabled to avoid a second device/window polluting the
+    # capture. Launch this process as the Nsight target (or connect), then
+    # capture a frame: each frame is one full train_step (clear_grads/
+    # forward/loss/backward/regularization/adam), plus densify on schedule.
+    profile_window = None
+    profile_surface = None
     if args.profile_run:
         import slangpy as spy
-        rng = np.random.default_rng(args.seed)
-        lr = 1.6e-4 * extent
-
-        window = spy.Window(width=W, height=H, title="3DGS profile (Nsight Graphics)")
-        surface = pipeline.device.create_surface(window)
-        surface.configure(width=W, height=H)
-
-        def _present() -> None:
-            """Best-effort present of the latest render (the frame boundary
-            Nsight captures on). acquire_next_image can RAISE (not just return
-            None) when the window is minimized/resized/loses the swapchain, so
-            we catch it and reconfigure — a dropped frame must never kill the
-            training loop we're profiling."""
-            nonlocal surface
-            surf_tex = None
-            try:
-                surf_tex = surface.acquire_next_image()
-            except Exception:
-                surf_tex = None
-            if surf_tex is None:
-                # Swapchain went stale (resize/minimize). Rebuild it.
-                try:
-                    w, h = max(window.width, 1), max(window.height, 1)
-                    pipeline.device.wait_for_idle()
-                    surface.unconfigure()
-                    surface.configure(width=w, height=h)
-                except Exception:
-                    pass
-                return
-            enc = pipeline.device.create_command_encoder()
-            enc.blit(surf_tex, pipeline.buffers.output_image)
-            pipeline.device.submit_command_buffer(enc.finish())
-            surface.present()
-
-        def _one_step(i: int) -> None:
-            ci = int(rng.integers(0, n_cams))
-            pipeline.set_target_texture(target_textures[ci])
-            cam = scene.images[ci].camera
-            # Training ALWAYS runs (this is what we profile). train_step ran the
-            # forward pass for this camera, so output_image holds a valid render.
-            pipeline.train_step(cam, lrs=AdamLRs(mean=lr))
-            window.process_events()
-            _present()
-
-        cur_n = int(pipeline.buffers.num_gaussians_counter.to_numpy().view(np.uint32)[0])
-        print(f"[profile-run] backend={args.backend} res={W}x{H} n_gaussians={cur_n}")
-
-        # Warm up: reach steady state, warm caches, force kernel compilation so
-        # a capture reflects real hot-loop cost, not startup.
-        print(f"[profile-run] warmup {args.profile_warmup} steps...")
-        for i in range(args.profile_warmup):
-            _one_step(i)
-        pipeline.device.wait_for_idle()
-
+        profile_window = spy.Window(width=W, height=H,
+                                    title="3DGS profile (Nsight Graphics)")
+        profile_surface = pipeline.device.create_surface(profile_window)
+        profile_surface.configure(width=W, height=H)
         print("[profile-run] presenting one frame per train_step for Nsight "
               "Graphics. Launch this process as the ngfx target (or connect), "
-              "then capture a frame: each frame is one full train_step "
-              "(forward/loss/backward/adam) with its debug-group markers. "
-              "Close the window to quit.")
-        i = 0
-        t_hb = time.perf_counter()
-        while not window.should_close():
-            _one_step(i)
-            i += 1
-            if i % 500 == 0:
-                pipeline.device.wait_for_idle()
-                now = time.perf_counter()
-                print(f"[profile-run] {i} frames  ({500/(now-t_hb):.1f} fps)  n_g={cur_n}")
-                t_hb = now
-        print(f"\n[profile-run] window closed after {i} frames.")
+              "then capture a frame. Densify + logs still run on schedule; "
+              "close the window (or reach --iters) to quit.")
+
+    def _profile_present() -> None:
+        """Best-effort present of the latest render (Nsight's frame boundary).
+        acquire_next_image can RAISE (not just return None) when the window is
+        minimized/resized/loses the swapchain, so we catch it and reconfigure —
+        a dropped frame must never kill the training loop we're profiling."""
+        if profile_surface is None:
+            return
+        nonlocal_surface = profile_surface
+        surf_tex = None
         try:
-            window.close()
+            surf_tex = nonlocal_surface.acquire_next_image()
         except Exception:
-            pass
-        if stream_writer is not None:
-            stream_writer.close()
-        return
+            surf_tex = None
+        if surf_tex is None:
+            try:
+                w, h = max(profile_window.width, 1), max(profile_window.height, 1)
+                pipeline.device.wait_for_idle()
+                nonlocal_surface.unconfigure()
+                nonlocal_surface.configure(width=w, height=h)
+            except Exception:
+                pass
+            return
+        enc = pipeline.device.create_command_encoder()
+        enc.blit(surf_tex, pipeline.buffers.output_image)
+        pipeline.device.submit_command_buffer(enc.finish())
+        nonlocal_surface.present()
 
 
     profile_json = (run_dir / "profile_log.jsonl").open("w", buffering=1) if args.profile_every > 0 else None
@@ -512,7 +471,14 @@ def main() -> None:
             if oldest:  # 0 means "no submit yet"
                 pipeline.device.wait_for_submit(oldest)
 
-    for it in range(1, args.iters + 1):
+    # Loop termination: normally we stop at args.iters, but under
+    # --profile-run we also stop when the user closes the profile window
+    # (so Nsight can capture and quit cleanly).
+    it = 0
+    while it < args.iters:
+        if profile_window is not None and profile_window.should_close():
+            break
+        it += 1
         cam_idx = int(rng.integers(0, n_cams))
         entry = scene.images[cam_idx]
         pipeline.set_target_texture(target_textures[cam_idx])
@@ -523,6 +489,14 @@ def main() -> None:
         lrs = AdamLRs(mean=lr_mean_init * (decay ** (it - 1)))
         pipeline.train_step(entry.camera, lrs=lrs)
         submit_id_ring.append(pipeline.last_submit_id)
+
+        # Profile hook: Present() the just-rendered frame so Nsight has a
+        # frame boundary to capture on. train_step ran the forward for this
+        # camera, so output_image is fresh. Pump events first so window
+        # close/resize is picked up promptly.
+        if profile_window is not None:
+            profile_window.process_events()
+            _profile_present()
 
         # Stream a gaussian snapshot to the live viewer every N iters. This
         # does a GPU->CPU readback (which also drains the async queue, bounding
@@ -651,6 +625,12 @@ def main() -> None:
         if profile_json and args.profile_every > 0 and it % args.profile_every == 0:
             run_profiling_step(pipeline, scene, n_cams, rng, lr_mean_init, it, decay)
 
+    if profile_window is not None:
+        try:
+            profile_window.close()
+        except Exception:
+            pass
+
     if stream_writer is not None:
         # Signal the viewer to exit, let it see the flag and detach, THEN
         # unlink the shared memory (so the reader never touches freed memory).
@@ -668,6 +648,14 @@ def main() -> None:
     log_txt.close()
     log_json.close()
     densify_json.close()
+
+    # Under --profile-run we skip the final I/O-heavy metrics pass:
+    # per-camera renders + PSNR + PLY export pollute the capture window
+    # cadence and add minutes of stalled I/O. The profile is done when
+    # the user closes the window (or iters completes).
+    if args.profile_run:
+        print("[profile-run] finished; skipping final metrics / PLY export.")
+        return
 
     # Post-training per-camera metrics. Include BOTH the full-frame PSNR
     # (linear and sRGB) and the foreground-masked sRGB PSNR — the latter

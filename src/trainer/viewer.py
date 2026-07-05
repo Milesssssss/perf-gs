@@ -140,11 +140,23 @@ class FlyCamera:
     def rotate(self, dx: float, dy: float):
         # +dx on yaw: in the right-handed basis, screen-right is view +x, and
         # forward gains +x as yaw increases, so drag-right must INCREASE yaw
-        # ("look right"). The old -dx was tuned to the pre-fix left-handed
-        # (mirrored) basis and now reads as inverted. Pitch is unchanged by the
-        # handedness fix (Y axis untouched), so its sign is left as-is.
-        self.yaw += dx * self.sensitivity
-        self.pitch += -dy * self.sensitivity
+        # ("look right"). Pitch: mouse-up (dy<0 in screen coords) should tilt
+        # the view upward, hence the -dy sign below.
+        #
+        # Roll compensation: yaw/pitch are defined against WORLD up (see
+        # _base_frame using [0,1,0]), so applying raw dx→yaw / dy→pitch tilts
+        # around world axes. When the camera is rolled, screen-right and
+        # screen-up are rotated by `roll` in that world-up basis; mouse
+        # motion must be rotated back into the world-up basis before feeding
+        # yaw/pitch, or a rolled camera's mouse-look will spin around the
+        # wrong axis. At roll=0 this reduces to the identity, so unrolled
+        # look-around is unchanged.
+        a = math.radians(self.roll)
+        ca, sa = math.cos(a), math.sin(a)
+        dx_world =  ca * dx + sa * dy
+        dy_world = -sa * dx + ca * dy
+        self.yaw += dx_world * self.sensitivity
+        self.pitch += -dy_world * self.sensitivity
         self.pitch = max(-89.0, min(89.0, self.pitch))
 
     def set_from_view_matrix(self, view: np.ndarray) -> None:
