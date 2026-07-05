@@ -132,7 +132,8 @@ void initGlobalHist(
 [numthreads(1, 1, 1)]
 void prepareDispatchArgs(
     StructuredBuffer<uint> n_buf,
-    RWStructuredBuffer<uint> dispatch_args)
+    RWStructuredBuffer<uint> dispatch_args,
+    uniform uint max_blocks)   // defensive cap: never launch more groups than we have scratch for
 {
     uint n = n_buf[0];
     uint active_blocks = (n + PART_SIZE - 1u) / PART_SIZE;
@@ -140,6 +141,8 @@ void prepareDispatchArgs(
     // (else the driver may error). If active_blocks==0, launch 1 group; the
     // in-shader early-out on (g >= active_blocks) makes it a no-op.
     uint g = (active_blocks == 0u) ? 1u : active_blocks;
+    // Clamp: if n is somehow corrupted, don't queue billions of workgroups.
+    g = min(g, max_blocks);
     dispatch_args[0] = g;
     dispatch_args[1] = 1u;
     dispatch_args[2] = 1u;

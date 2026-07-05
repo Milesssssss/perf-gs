@@ -129,6 +129,16 @@ class GaussianBuffers:
     scan_block_sums_l2: spy.NDBuffer | None = None  # uint[max_l2_blocks]
     scan_total: spy.NDBuffer | None = None          # uint[1]
 
+    # --- densify_simple wait-free dispatch state ---
+    # Snapshots of num_gaussians_counter[0] taken via snapshotCount so that
+    # splitAndClone/buildPruneMask/scatterCompact can read the counts they
+    # need as GPU-resident buffers instead of via CPU readback.
+    densify_pre_count: spy.NDBuffer | None = None      # uint[1]
+    densify_post_count: spy.NDBuffer | None = None     # uint[1]
+    # DispatchIndirect args (groups_x, 1, 1) for the pre-count-sized
+    # splitAndClone dispatch. Also requires BufferUsage.indirect_argument.
+    densify_dispatch_args: spy.NDBuffer | None = None  # uint[3]
+
     # --- sizes ---
     max_splats: int = 0
     max_sort_pairs: int = 0
@@ -282,6 +292,16 @@ def allocate(
     )
     scan_total = spy.NDBuffer(device=device, dtype="uint", shape=(1,))
 
+    # Densify wait-free-dispatch state (see densify_dispatch.slang).
+    densify_pre_count = spy.NDBuffer(device=device, dtype="uint", shape=(1,))
+    densify_post_count = spy.NDBuffer(device=device, dtype="uint", shape=(1,))
+    densify_dispatch_args = spy.NDBuffer(
+        device=device, dtype="uint", shape=(3,),
+        usage=(spy.BufferUsage.shader_resource
+               | spy.BufferUsage.unordered_access
+               | spy.BufferUsage.indirect_argument),
+    )
+
     num_gaussians_counter.copy_from_numpy(np.zeros(1, dtype=np.uint32))
     saturation_flag.copy_from_numpy(np.zeros(1, dtype=np.uint32))
     training_step.copy_from_numpy(np.zeros(1, dtype=np.uint32))
@@ -335,6 +355,9 @@ def allocate(
         scan_block_sums=scan_block_sums,
         scan_block_sums_l2=scan_block_sums_l2,
         scan_total=scan_total,
+        densify_pre_count=densify_pre_count,
+        densify_post_count=densify_post_count,
+        densify_dispatch_args=densify_dispatch_args,
         max_splats=max_splats,
         max_sort_pairs=max_sort_pairs,
         width=width,

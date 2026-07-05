@@ -24,10 +24,12 @@ void scatterCompact(
     StructuredBuffer<uint>       scan,
     RWStructuredBuffer<Gaussian3D> gaussians_out,
     RWStructuredBuffer<AdamState>  adam_state_out,
-    uniform uint post_count)
+    uniform uint max_splats)
 {
+    // Dispatched over [max_splats]; buildPruneMask zeroes valid_mask for
+    // i >= post_count, so those slots are naturally skipped here.
     uint i = dtid.x;
-    if (i >= post_count) return;
+    if (i >= max_splats) return;
     if (valid_mask[i] == 0u) return;
     uint dst = scan[i];
     gaussians_out[dst]  = gaussians_in[i];

@@ -198,7 +198,7 @@ def main() -> None:
     ap.add_argument("--stream-max-splats", type=int, default=2_000_000,
                     help="capacity of the live-viewer shared-memory stream (splats). "
                          "Snapshots beyond this are truncated for viewing only.")
-    ap.add_argument("--stream-every", type=int, default=200,
+    ap.add_argument("--stream-every", type=int, default=80,
                     help="stream a gaussian snapshot to the live viewer every N iters "
                          "(each push does a GPU readback; keep coarse).")
     ap.add_argument("--backend", type=str, default="vulkan", choices=["vulkan", "d3d12"])
@@ -491,13 +491,38 @@ def main() -> None:
     # per-iter counter readback. Updated from densify() return values.
     cur_n_gaussians = n_init
 
+    # ---- Queue-depth backpressure (fence-based) ----
+    # Nothing in the hot loop drains the GPU queue anymore (wait_for_idle
+    # removed from densify_simple). Without backpressure, the CPU races
+    # ahead: train_step submits accumulate faster than the GPU can retire
+    # them, and any subsequent wait_for_idle (e.g. the log-every render at
+    # iter 10000) drains a huge backlog — showing up as multi-minute stalls.
+    #
+    # Fix: keep a rolling window of the last MAX_QUEUE_DEPTH submit IDs.
+    # Before recording a new one, wait for the oldest to complete. This
+    # bounds queue depth to ~MAX_QUEUE_DEPTH iterations of latency without
+    # ever calling wait_for_idle in the hot path.
+    MAX_QUEUE_DEPTH = 4
+    submit_id_ring: list[int] = []
+
+    def _bound_queue():
+        # Wait on the oldest submit if the queue is full.
+        if len(submit_id_ring) >= MAX_QUEUE_DEPTH:
+            oldest = submit_id_ring.pop(0)
+            if oldest:  # 0 means "no submit yet"
+                pipeline.device.wait_for_submit(oldest)
+
     for it in range(1, args.iters + 1):
         cam_idx = int(rng.integers(0, n_cams))
         entry = scene.images[cam_idx]
         pipeline.set_target_texture(target_textures[cam_idx])
 
+        # Backpressure before submitting more work.
+        _bound_queue()
+
         lrs = AdamLRs(mean=lr_mean_init * (decay ** (it - 1)))
         pipeline.train_step(entry.camera, lrs=lrs)
+        submit_id_ring.append(pipeline.last_submit_id)
 
         # Stream a gaussian snapshot to the live viewer every N iters. This
         # does a GPU->CPU readback (which also drains the async queue, bounding
@@ -548,11 +573,25 @@ def main() -> None:
                                             n_densify_steps=n_densify_steps,
                                             init_count=n_init)
 
+            # densify_simple did its own submit_command_buffer inside
+            # (one encoder for the whole pass). Add its submit to the
+            # backpressure ring so it's subject to the same queue-depth cap.
+            if pipeline.last_submit_id:
+                submit_id_ring.append(pipeline.last_submit_id)
             pipeline.clear_tracking()
-            cur_n_gaussians = stats["final_count"]
+            # densify_simple runs wait-free and returns None for counts
+            # (they live GPU-side); the log-every branch below reads the
+            # counter on its own cadence. densify()'s stats are still
+            # populated synchronously.
+            if stats.get("final_count") is not None:
+                cur_n_gaussians = stats["final_count"]
             densify_json.write(json.dumps({"iter": it, "event": "densify", **stats}) + "\n")
+            pre_s = stats.get("pre_count")
+            final_s = stats.get("final_count")
+            pre_str = "?" if pre_s is None else str(pre_s)
+            final_str = "?" if final_s is None else str(final_s)
             print(f"iter {it}: densify  "
-                    f"| pre={stats['pre_count']} -> post={stats['final_count']}")
+                    f"| pre={pre_str} -> post={final_str}")
 
         # Opacity reset AFTER densify (gsplat resets at the end of
         # step_post_backward). Skipped on densify steps above, so they never
@@ -566,12 +605,17 @@ def main() -> None:
         if it % 10 == 0:
             print(f"iter {it}: train step done.")
 
-        if do_log or do_preview:
+        if it > 1 and (do_log or do_preview):
             #TODO: why is this render here and gated by the densify?
             if do_densify:
                 pipeline.render(entry.camera)
 
             pipeline.device.wait_for_idle()
+            # Refresh cur_n_gaussians on log ticks — wait-free densify_simple
+            # keeps the count GPU-side, so we sample it here at log cadence.
+            cur_n_gaussians = int(
+                pipeline.buffers.num_gaussians_counter.to_numpy().view(np.uint32)[0]
+            )
             rendered = pipeline.read_output_image()[..., :3]
             if not np.all(np.isfinite(rendered)):
                 n_nan = int(np.sum(~np.isfinite(rendered)))
@@ -598,6 +642,7 @@ def main() -> None:
                 "n_gaussians": cur_n_gaussians, "it_per_s": it_per_s,
                 "elapsed_s": elapsed,
             }) + "\n")
+            _render_all_cameras(pipeline, scene, it, cams_dir)
 
         if do_preview:
             _render_all_cameras(pipeline, scene, it, cams_dir)

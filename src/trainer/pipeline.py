@@ -175,6 +175,8 @@ class Pipeline:
         self.k_compute_l1_minmax = mk(densify / "compute_error_mask.slang", "computeL1MinMax")
         self.k_compute_error_mask = mk(densify / "compute_error_mask.slang", "computeErrorMask")
         self.k_score_forward = mk(densify / "score_forward.slang", "scoreForward")
+        self.k_densify_snapshot = mk(densify / "densify_dispatch.slang", "snapshotCount")
+        self.k_densify_prepare_args = mk(densify / "densify_dispatch.slang", "prepareDensifyArgs")
 
         scan = SHADERS_DIR / "common" / "scan.slang"
         self.k_scan_block = mk(scan, "scanBlock")
@@ -201,6 +203,13 @@ class Pipeline:
 
         # When set, all dispatches route through this encoder (for debug markers).
         self._encoder: spy.CommandEncoder | None = None
+
+        # ID of the most recent submit_command_buffer call. Callers (the train
+        # loop) can wait on this via device.wait_for_submit(id) to bound queue
+        # depth without a full wait_for_idle. Kept up to date by every submit
+        # site in this file (train_step, densify_simple, _dispatch_indirect
+        # transient submits).
+        self.last_submit_id: int = 0
 
         # Near-plane cull distance used by the bin kernel.
         self.z_near_cull = 0.01
@@ -245,6 +254,14 @@ class Pipeline:
             enc = self.device.create_command_encoder()
         label = _kernel_labels.get(id(kernel), "unknown")
         enc.insert_debug_marker(label, spy.math.float3(0.6, 0.8, 1.0))
+        # HAZARD: the args_buf was written by a preceding kernel dispatch
+        # (e.g. prepareDispatchArgs). dispatch_compute_indirect reads it as
+        # driver-consumed indirect arguments; without a barrier the read
+        # may race the write and pick up garbage → a catastrophic group
+        # count. Insert a global barrier to force write-visibility before
+        # the indirect fetch. Cheap compared to the cost of the failure
+        # mode (a 32-bit garbage groups_x can queue billions of workgroups).
+        enc.global_barrier()
         pass_enc = enc.begin_compute_pass()
         try:
             shader_obj = pass_enc.bind_pipeline(kernel.pipeline)
@@ -258,7 +275,7 @@ class Pipeline:
         if transient:
             cmd = enc.finish()
             with self.gpu_lock:
-                self.device.submit_command_buffer(cmd)
+                self.last_submit_id = self.device.submit_command_buffer(cmd)
 
     @contextlib.contextmanager
     def _marker_group(self, label: str, color=(0.5, 0.7, 0.9)):
@@ -414,6 +431,7 @@ class Pipeline:
             thread_count=[1, 1, 1],
             n_buf=b.scan_total.storage,
             dispatch_args=b.radix_dispatch_args.storage,
+            max_blocks=max_blocks,
         )
 
         # Clear b_global_hist once at the start of the whole sort;
@@ -825,7 +843,7 @@ class Pipeline:
         enc.pop_debug_group()
         cmd = enc.finish()
         with self.gpu_lock:
-            self.device.submit_command_buffer(cmd)
+            self.last_submit_id = self.device.submit_command_buffer(cmd)
         self._encoder = None
 
     # ------------------------------------------------------------------
@@ -1117,37 +1135,42 @@ def densify(self: Pipeline, cfg: DensifyConfig,
     b.action_buffer.copy_from_numpy(action_upload)
 
     # Phase C: split and clone (may increment counter).
+    # The shader now reads pre_count from a GPU buffer (unified path with
+    # densify_simple's wait-free dispatch); upload our Python-known value.
+    b.densify_pre_count.copy_from_numpy(np.array([pre_count], dtype=np.uint32))
     self._dispatch(self.k_split_and_clone,
         thread_count=[pre_count, 1, 1],
         gaussians=b.gaussians.storage,
         adam_state=b.adam_state.storage,
         num_gaussians_counter=b.num_gaussians_counter.storage,
         action=b.action_buffer.storage,
-        pre_count=pre_count,
+        pre_count_buf=b.densify_pre_count.storage,
         max_splats=self.max_splats,
     )
     self.device.wait_for_idle()
     post_split_count = int(b.num_gaussians_counter.to_numpy().view(np.uint32)[0])
     post_split_count = min(post_split_count, self.max_splats)
 
-    # Phases D/E: compact.
+    # Phases D/E: compact. Same upload-then-pass-buffer pattern.
+    b.densify_post_count.copy_from_numpy(np.array([post_split_count], dtype=np.uint32))
     self._dispatch(self.k_build_prune_mask,
-        thread_count=[post_split_count, 1, 1],
+        thread_count=[self.max_splats, 1, 1],
         action=b.action_buffer.storage,
         valid_mask=b.valid_mask_buffer.storage,
-        pre_count=pre_count,
-        post_count=post_split_count,
+        pre_count_buf=b.densify_pre_count.storage,
+        post_count_buf=b.densify_post_count.storage,
+        max_splats=self.max_splats,
     )
-    self._scan(post_split_count)
+    self._scan(self.max_splats)
     self._dispatch(self.k_scatter_compact,
-        thread_count=[post_split_count, 1, 1],
+        thread_count=[self.max_splats, 1, 1],
         gaussians_in=b.gaussians.storage,
         adam_state_in=b.adam_state.storage,
         valid_mask=b.valid_mask_buffer.storage,
         scan=b.scan_buffer.storage,
         gaussians_out=b.gaussians_scratch.storage,
         adam_state_out=b.adam_state_scratch.storage,
-        post_count=post_split_count,
+        max_splats=self.max_splats,
     )
 
     b.gaussians, b.gaussians_scratch = b.gaussians_scratch, b.gaussians
@@ -1198,11 +1221,12 @@ def densify_simple(self: Pipeline, cfg: DensifyConfig,
     if scale_thresh is None:
         scale_thresh = cfg.t_big_scale * 0.1
 
-    self.device.wait_for_idle()
-    pre_count = int(b.num_gaussians_counter.to_numpy().view(np.uint32)[0])
-    if pre_count == 0:
-        return {"pre_count": 0, "post_split_count": 0, "final_count": 0,
-                "n_split": 0, "n_clone": 0, "n_prune": 0, "n_keep": 0}
+    # Record all densify dispatches into ONE encoder + ONE submit so the
+    # whole pass is a single command buffer with no mid-flight submit
+    # overhead. Uses the same pattern as train_step.
+    enc = self.device.create_command_encoder()
+    self._encoder = enc
+    enc.push_debug_group("densify_simple", spy.math.float3(0.8, 0.4, 0.9))
 
     # ``grad_thresh`` is expressed in gsplat's convention: the NDC-space
     # densification gradient of the MEAN L1 loss (F.l1_loss averages over
@@ -1213,14 +1237,37 @@ def densify_simple(self: Pipeline, cfg: DensifyConfig,
     # accumulator. So we scale the threshold UP by H*W*channels here to
     # compare against our sum-convention signal. With this, grad_thresh
     # stays resolution- and convention-compatible with gsplat's 0.0002.
-
-    #gsplat: loss = F.l1_loss(...) = mean over all pixels and channels = sum / (H·W·3). ours: the loss shader emits raw sign(C−T) per pixel/channel, a sum, no division.
-    # gsplat_signal > 0.0002
-    #  our_signal / (H*W*3) > 0.0002        (scale the signal down)
-    #  our_signal > 0.0002 * (H*W*3)        (scale the threshold up) <- what we did
     channels = 3.0
     grad_thresh_internal = grad_thresh * (self.width * self.height * channels)
     big_scale = prune_big_scale if prune_big_scale is not None else cfg.t_big_scale
+
+    # ---- Wait-free densify pipeline (all GPU, no CPU readbacks) ----
+    #
+    # Counts flow like this:
+    #   num_gaussians_counter[0] ─(snapshot)─▶ densify_pre_count[0]
+    #                                             │
+    #     ┌───────────────────────────────────────┘
+    #     ▼
+    #   splitAndClone atomically bumps num_gaussians_counter[0]
+    #     │
+    #     └─(snapshot)─▶ densify_post_count[0]
+    #                       │
+    #     ┌─────────────────┴──────────────────────┐
+    #     ▼                                        ▼
+    #   buildPruneMask over [max_splats]         scatterCompact over [max_splats]
+    #     (zeros valid_mask tail beyond           (skips i where valid_mask=0)
+    #      post_count)
+    #     │
+    #     ▼
+    #   _scan over max_splats → scan_total[0] = final_count
+    #     │
+    #     └─(snapshot)─▶ num_gaussians_counter[0]  (final_count)
+    #
+    # Everything except splitAndClone runs at [max_splats] and self-bounds
+    # off the snapshot buffers, so we only need one indirect-dispatch path.
+
+    # Phase A: decide actions. Dispatches [max_splats]; shader early-outs
+    # per-thread on i >= num_gaussians_counter[0] (GPU-resident).
     self._dispatch(self.k_decide_actions_simple,
         thread_count=[self.max_splats, 1, 1],
         gaussians=b.gaussians.storage,
@@ -1235,53 +1282,93 @@ def densify_simple(self: Pipeline, cfg: DensifyConfig,
         allow_scale_prune=1 if allow_scale_prune else 0,
         max_splats=self.max_splats,
     )
-    self.device.wait_for_idle()
 
-    # Phase C: split and clone.
-    self._dispatch(self.k_split_and_clone,
-        thread_count=[pre_count, 1, 1],
+    # Snapshot pre_count = num_gaussians_counter[0] (before splitAndClone
+    # atomically bumps it). Then compute indirect-dispatch args from that
+    # snapshot for splitAndClone.
+    self._dispatch(self.k_densify_snapshot,
+        thread_count=[1, 1, 1],
+        src=b.num_gaussians_counter.storage,
+        dst=b.densify_pre_count.storage,
+    )
+    self._dispatch(self.k_densify_prepare_args,
+        thread_count=[1, 1, 1],
+        count_buf=b.densify_pre_count.storage,
+        dispatch_args=b.densify_dispatch_args.storage,
+        max_splats=self.max_splats,
+    )
+
+    # Phase B: split and clone. Indirect so group count scales with
+    # pre_count, not max_splats.
+    self._dispatch_indirect(self.k_split_and_clone,
+        b.densify_dispatch_args,
         gaussians=b.gaussians.storage,
         adam_state=b.adam_state.storage,
         num_gaussians_counter=b.num_gaussians_counter.storage,
         action=b.action_buffer.storage,
-        pre_count=pre_count,
+        pre_count_buf=b.densify_pre_count.storage,
         max_splats=self.max_splats,
     )
-    self.device.wait_for_idle()
-    post_split_count = int(b.num_gaussians_counter.to_numpy().view(np.uint32)[0])
-    post_split_count = min(post_split_count, self.max_splats)
 
-    # Phases D/E: compact (remove pruned).
+    # Snapshot post_count = num_gaussians_counter[0] (after splitAndClone).
+    self._dispatch(self.k_densify_snapshot,
+        thread_count=[1, 1, 1],
+        src=b.num_gaussians_counter.storage,
+        dst=b.densify_post_count.storage,
+    )
+
+    # Phase C: mark valid. Dispatched over [max_splats]; shader zeros
+    # valid_mask for i >= post_count so the subsequent max_splats-wide
+    # scan sees a padded 0-tail.
     self._dispatch(self.k_build_prune_mask,
-        thread_count=[post_split_count, 1, 1],
+        thread_count=[self.max_splats, 1, 1],
         action=b.action_buffer.storage,
         valid_mask=b.valid_mask_buffer.storage,
-        pre_count=pre_count,
-        post_count=post_split_count,
+        pre_count_buf=b.densify_pre_count.storage,
+        post_count_buf=b.densify_post_count.storage,
+        max_splats=self.max_splats,
     )
-    self._scan(post_split_count)
+
+    # Phase D: prefix-scan valid_mask into scan_buffer. Runs at max_splats
+    # (the tail 0s contribute nothing to scan_total[0]).
+    self._scan(self.max_splats)
+
+    # Phase E: scatter live gaussians into scratch. Dispatched over
+    # [max_splats]; skips slots where valid_mask=0 (includes the tail).
     self._dispatch(self.k_scatter_compact,
-        thread_count=[post_split_count, 1, 1],
+        thread_count=[self.max_splats, 1, 1],
         gaussians_in=b.gaussians.storage,
         adam_state_in=b.adam_state.storage,
         valid_mask=b.valid_mask_buffer.storage,
         scan=b.scan_buffer.storage,
         gaussians_out=b.gaussians_scratch.storage,
         adam_state_out=b.adam_state_scratch.storage,
-        post_count=post_split_count,
+        max_splats=self.max_splats,
     )
 
     b.gaussians, b.gaussians_scratch = b.gaussians_scratch, b.gaussians
     b.adam_state, b.adam_state_scratch = b.adam_state_scratch, b.adam_state
 
-    self.device.wait_for_idle()
-    final_count = int(b.scan_total.to_numpy().view(np.uint32)[0])
-    b.num_gaussians_counter.copy_from_numpy(np.array([final_count], dtype=np.uint32))
+    # Final: num_gaussians_counter[0] = scan_total[0]. GPU copy — no
+    # readback, no upload.
+    self._dispatch(self.k_densify_snapshot,
+        thread_count=[1, 1, 1],
+        src=b.scan_total.storage,
+        dst=b.num_gaussians_counter.storage,
+    )
 
+    enc.pop_debug_group()
+    cmd = enc.finish()
+    with self.gpu_lock:
+        self.last_submit_id = self.device.submit_command_buffer(cmd)
+    self._encoder = None
+
+    # No wait_for_idle. Return an empty stats dict; the caller reads
+    # num_gaussians_counter on its own cadence (e.g. log-every).
     return {
-        "pre_count": pre_count,
-        "post_split_count": post_split_count,
-        "final_count": final_count,
+        "pre_count": None,
+        "post_split_count": None,
+        "final_count": None,
     }
 
 

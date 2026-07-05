@@ -106,10 +106,14 @@ void splitAndClone(
     RWStructuredBuffer<AdamState> adam_state,
     RWStructuredBuffer<uint> num_gaussians_counter,
     StructuredBuffer<uint> action,
-    uniform uint pre_count,       // num_gaussians_counter[0] BEFORE this dispatch
+    // Snapshot of num_gaussians_counter[0] taken BEFORE this dispatch.
+    // Kept in a separate buffer so we can atomically bump the counter
+    // without racing our own bounds check. Written by snapshotCount.
+    StructuredBuffer<uint> pre_count_buf,
     uniform uint max_splats)
 {
     uint i = dtid.x;
+    uint pre_count = pre_count_buf[0];
     if (i >= pre_count) return;
 
     uint a = action[i];
