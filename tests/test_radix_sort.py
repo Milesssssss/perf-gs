@@ -1,7 +1,8 @@
 """Radix sort correctness test.
 
-Sorts random (key64, value) pairs with our 8-pass LSB radix sort and
-compares against numpy reference (sort by full 64-bit key).
+Sorts random (key64, value) pairs with the ported DeviceRadixSort
+(shaders/sort/device_radix_sort.slang) and compares against a numpy
+reference (sort by full 64-bit key).
 """
 
 from __future__ import annotations
@@ -16,7 +17,13 @@ from trainer.device import SHADERS_DIR, create_device
 BACKENDS = ["vulkan", "d3d12"]
 
 
-SORT_BLOCK_SIZE = 256  # must match radix_sort.slang
+# Must match device_radix_sort.slang.
+PART_SIZE = 2048
+US_DIM = 128
+SCAN_DIM = 128
+D_DIM = 256
+RADIX = 256
+GLOBAL_HIST_SIZE = RADIX * 8  # 2048 — one 256-region per pass
 
 
 def _make_device_and_kernels(backend: str):
@@ -24,9 +31,9 @@ def _make_device_and_kernels(backend: str):
         device = create_device(backend=backend)
     except Exception as exc:
         pytest.skip(f"backend {backend!r} unavailable: {exc}")
-    path = str(SHADERS_DIR / "sort" / "radix_sort.slang")
+    path = str(SHADERS_DIR / "sort" / "device_radix_sort.slang")
     kernels = {}
-    for ep in ("blockSort", "globalScan", "scanDigitTotals", "scatterFinal"):
+    for ep in ("initGlobalHist", "upsweep", "scan", "downsweep"):
         program = device.load_program(path, [ep])
         kernels[ep] = device.create_compute_kernel(program)
     return device, kernels
@@ -34,11 +41,10 @@ def _make_device_and_kernels(backend: str):
 
 def _radix_sort(device, kernels, keys_lo: np.ndarray, keys_hi: np.ndarray,
                 values: np.ndarray):
-    # Buffers sized to a block-aligned upper bound so the shader can
-    # dispatch whole blocks without checking per-thread overrun.
     n = keys_lo.shape[0]
-    cap = max(SORT_BLOCK_SIZE, ((n + SORT_BLOCK_SIZE - 1) // SORT_BLOCK_SIZE) * SORT_BLOCK_SIZE)
-    num_blocks = cap // SORT_BLOCK_SIZE
+    # Capacity rounded up to a partition multiple; max_blocks derived from it.
+    cap = max(PART_SIZE, ((n + PART_SIZE - 1) // PART_SIZE) * PART_SIZE)
+    max_blocks = cap // PART_SIZE
 
     kA_lo = spy.NDBuffer(device=device, dtype="uint", shape=(cap,))
     kA_hi = spy.NDBuffer(device=device, dtype="uint", shape=(cap,))
@@ -47,9 +53,8 @@ def _radix_sort(device, kernels, keys_lo: np.ndarray, keys_hi: np.ndarray,
     kB_hi = spy.NDBuffer(device=device, dtype="uint", shape=(cap,))
     vB    = spy.NDBuffer(device=device, dtype="uint", shape=(cap,))
 
-    # Pad input arrays up to cap with 0xFFFFFFFF so any OOB reads
-    # are treated as sentinels by the shader (matches its n_buf-gated
-    # logic).
+    # Pad up to cap with SENTINEL (0xFFFFFFFF) so partial-partition loads
+    # match what the shader would read out of a fully-allocated buffer.
     def _pad(a):
         out = np.full(cap, 0xFFFFFFFF, dtype=np.uint32)
         out[:n] = a.astype(np.uint32)
@@ -58,52 +63,54 @@ def _radix_sort(device, kernels, keys_lo: np.ndarray, keys_hi: np.ndarray,
     kA_hi.copy_from_numpy(_pad(keys_hi))
     vA.copy_from_numpy(_pad(values))
 
-    block_hist   = spy.NDBuffer(device=device, dtype="uint", shape=(num_blocks * 256,))
-    block_start  = spy.NDBuffer(device=device, dtype="uint", shape=(num_blocks * 256,))
-    block_prefix = spy.NDBuffer(device=device, dtype="uint", shape=(num_blocks * 256,))
-    digit_total  = spy.NDBuffer(device=device, dtype="uint", shape=(256,))
-    digit_base   = spy.NDBuffer(device=device, dtype="uint", shape=(256,))
+    pass_hist   = spy.NDBuffer(device=device, dtype="uint", shape=(RADIX * max_blocks,))
+    global_hist = spy.NDBuffer(device=device, dtype="uint", shape=(GLOBAL_HIST_SIZE,))
 
     n_buf = spy.NDBuffer(device=device, dtype="uint", shape=(1,))
     n_buf.copy_from_numpy(np.array([n], dtype=np.uint32))
 
+    # Clear global_hist once at the start of the whole sort.
+    kernels["initGlobalHist"].dispatch(
+        thread_count=[GLOBAL_HIST_SIZE, 1, 1],
+        b_global_hist=global_hist.storage,
+    )
+
     src_lo, src_hi, src_v = kA_lo, kA_hi, vA
     dst_lo, dst_hi, dst_v = kB_lo, kB_hi, vB
     for pass_idx in range(8):
-        kernels["blockSort"].dispatch(
-            thread_count=[num_blocks * 256, 1, 1],
-            keys_lo=src_lo.storage, keys_hi=src_hi.storage, values=src_v.storage,
-            block_hist=block_hist.storage, block_start=block_start.storage,
-            n_buf=n_buf.storage, pass_idx=pass_idx,
-        )
-        kernels["globalScan"].dispatch(
-            thread_count=[256, 1, 1],
-            block_hist=block_hist.storage,
-            block_prefix=block_prefix.storage,
-            digit_total=digit_total.storage,
+        radix_shift = (pass_idx % 4) * 8
+        key_word = 0 if pass_idx < 4 else 1
+
+        kernels["upsweep"].dispatch(
+            thread_count=[max_blocks * US_DIM, 1, 1],
+            keys_lo=src_lo.storage, keys_hi=src_hi.storage,
+            b_pass_hist=pass_hist.storage,
+            b_global_hist=global_hist.storage,
             n_buf=n_buf.storage,
+            radix_shift=radix_shift, key_word=key_word,
+            pass_idx=pass_idx, max_blocks=max_blocks,
         )
-        kernels["scanDigitTotals"].dispatch(
-            thread_count=[256, 1, 1],
-            digit_total=digit_total.storage,
-            digit_global_base=digit_base.storage,
+        kernels["scan"].dispatch(
+            thread_count=[RADIX * SCAN_DIM, 1, 1],
+            b_pass_hist=pass_hist.storage,
+            n_buf=n_buf.storage,
+            max_blocks=max_blocks,
         )
-        kernels["scatterFinal"].dispatch(
-            thread_count=[cap, 1, 1],
+        kernels["downsweep"].dispatch(
+            thread_count=[max_blocks * D_DIM, 1, 1],
             keys_lo_in=src_lo.storage, keys_hi_in=src_hi.storage, values_in=src_v.storage,
-            block_start=block_start.storage,
-            block_prefix=block_prefix.storage,
-            digit_global_base=digit_base.storage,
             keys_lo_out=dst_lo.storage, keys_hi_out=dst_hi.storage, values_out=dst_v.storage,
-            n_buf=n_buf.storage, pass_idx=pass_idx,
+            b_pass_hist=pass_hist.storage,
+            b_global_hist=global_hist.storage,
+            n_buf=n_buf.storage,
+            radix_shift=radix_shift, key_word=key_word,
+            pass_idx=pass_idx, max_blocks=max_blocks,
         )
         src_lo, dst_lo = dst_lo, src_lo
         src_hi, dst_hi = dst_hi, src_hi
         src_v, dst_v = dst_v, src_v
 
     device.wait_for_idle()
-    # Only the first n slots hold real sorted data; slots [n, cap) still
-    # hold whatever sentinel state the sort left there, which we ignore.
     out_lo = np.frombuffer(src_lo.to_numpy().tobytes(), dtype=np.uint32)[:n]
     out_hi = np.frombuffer(src_hi.to_numpy().tobytes(), dtype=np.uint32)[:n]
     out_v  = np.frombuffer(src_v.to_numpy().tobytes(), dtype=np.uint32)[:n]

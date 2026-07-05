@@ -75,6 +75,69 @@ def _render_all_cameras(pipeline: Pipeline, scene, iter_idx: int, cams_dir: Path
         out_path = cams_dir / f"cam_{cam_i:02d}" / f"iter_{iter_idx:06d}.png"
         _save_srgb_png(img, out_path)
 
+def run_profiling_step(pipeline: Pipeline, scene, n_cams: int, rng, lr_mean_init, it: int, decay: float) -> None:
+    import time as _time
+    pipeline.device.wait_for_idle()
+
+    prof_cam_idx = int(rng.integers(0, n_cams))
+    prof_entry = scene.images[prof_cam_idx]
+    pipeline.set_target_texture(scene.images[prof_cam_idx].target_texture)
+    prof_lrs = AdamLRs(mean=lr_mean_init * (decay ** (it - 1)))
+
+    # Warm up (avoid cold-cache effects).
+    pipeline._clear_grads()
+    pipeline._run_forward(prof_entry.camera)
+    pipeline._run_loss()
+    pipeline._run_backward()
+    pipeline._run_regularization()
+    pipeline._run_adam(prof_lrs)
+    pipeline.device.wait_for_idle()
+
+    timings = {}
+
+    t0 = _time.perf_counter()
+    pipeline._clear_grads()
+    pipeline.device.wait_for_idle()
+    timings["clear_grads_ms"] = (_time.perf_counter() - t0) * 1000
+
+    t0 = _time.perf_counter()
+    pipeline._run_forward(prof_entry.camera)
+    pipeline.device.wait_for_idle()
+    timings["forward_ms"] = (_time.perf_counter() - t0) * 1000
+
+    t0 = _time.perf_counter()
+    pipeline._run_loss()
+    pipeline.device.wait_for_idle()
+    timings["loss_ms"] = (_time.perf_counter() - t0) * 1000
+
+    t0 = _time.perf_counter()
+    pipeline._run_backward()
+    pipeline.device.wait_for_idle()
+    timings["backward_ms"] = (_time.perf_counter() - t0) * 1000
+
+    t0 = _time.perf_counter()
+    pipeline._run_regularization()
+    pipeline.device.wait_for_idle()
+    timings["regularization_ms"] = (_time.perf_counter() - t0) * 1000
+
+    t0 = _time.perf_counter()
+    pipeline._run_adam(prof_lrs)
+    pipeline.device.wait_for_idle()
+    timings["adam_ms"] = (_time.perf_counter() - t0) * 1000
+
+    timings["total_ms"] = sum(timings.values())
+    timings["iter"] = it
+    timings["n_gaussians"] = pipeline.n_gaussians
+
+    profile_json.write(json.dumps(timings) + "\n")
+    print(f"iter {it}: PROFILE  "
+            f"fwd={timings['forward_ms']:.1f}  loss={timings['loss_ms']:.1f}  "
+            f"bwd={timings['backward_ms']:.1f}  reg={timings['regularization_ms']:.1f}  "
+            f"adam={timings['adam_ms']:.1f}  total={timings['total_ms']:.1f} ms  "
+            f"n_g={pipeline.n_gaussians}")
+
+
+
 
 def main() -> None:
     ap = argparse.ArgumentParser()
@@ -366,7 +429,7 @@ def main() -> None:
             # forward pass for this camera, so output_image holds a valid render.
             pipeline.train_step(cam, lrs=AdamLRs(mean=lr))
             window.process_events()
-            _present()  # best-effort; never raises out
+            _present()
 
         cur_n = int(pipeline.buffers.num_gaussians_counter.to_numpy().view(np.uint32)[0])
         print(f"[profile-run] backend={args.backend} res={W}x{H} n_gaussians={cur_n}")
@@ -380,7 +443,7 @@ def main() -> None:
 
         print("[profile-run] presenting one frame per train_step for Nsight "
               "Graphics. Launch this process as the ngfx target (or connect), "
-              "then capture a frame — each frame is one full train_step "
+              "then capture a frame: each frame is one full train_step "
               "(forward/loss/backward/adam) with its debug-group markers. "
               "Close the window to quit.")
         i = 0
@@ -402,9 +465,6 @@ def main() -> None:
             stream_writer.close()
         return
 
-    print("A")
-    #_render_all_cameras(pipeline, scene, 0, cams_dir)
-    print("B")
 
     profile_json = (run_dir / "profile_log.jsonl").open("w", buffering=1) if args.profile_every > 0 else None
     log_txt = (run_dir / "log.txt").open("w", buffering=1)
@@ -453,10 +513,7 @@ def main() -> None:
         do_preview = args.preview_every > 0 and ((it % args.preview_every == 0) or (it == args.iters))
 
         densify_cfg = cfg
-        # gsplat DefaultStrategy schedule interaction: densify runs every
-        # refine_every, but NOT in a step that also resets opacity (a reset
-        # clamps everything to the reset value, so pruning in the same step
-        # would nuke freshly-reset splats). Skip densify on reset steps.
+        # Skip densify on reset steps.
         if do_densify and do_opacity_reset:
             do_densify = False
 
@@ -465,10 +522,8 @@ def main() -> None:
             stats = {}
 
             if args.simple_densify:
-                # gsplat gates the too-big prune on step > reset_every: don't
-                # delete large kNN-init blobs before densification can split
-                # them. And normalize the prune threshold by scene extent
-                # (gsplat prune_scale3d * scene_scale).
+                # we gate the too-big prune on step > reset_every: don't delete large kNN-init blobs before densification can split them
+                #And normalize the prune threshold by scene extent
                 allow_scale_prune = it > args.reset_every
                 stats = pipeline.densify_simple(
                     densify_cfg,
@@ -510,18 +565,14 @@ def main() -> None:
             print(f"iter {it}: opacity reset")
 
 
-        # Loss/PSNR require a GPU→CPU readback of the output image.
-        # Sampling this every step would serialize the training loop and
-        # tank GPU utilization; do it only on log boundaries. Same for
-        # the NaN/Inf safety check (PLAN.md Q17): if the forward has
-        # gone non-finite, it's not going to recover in a few hundred
-        # iters, so checking at log cadence is plenty timely.
         if it % 10 == 0:
             print(f"iter {it}: train step done.")
 
         if do_log or do_preview:
+            #TODO: why is this render here and gated by the densify?
             if do_densify:
                 pipeline.render(entry.camera)
+
             pipeline.device.wait_for_idle()
             rendered = pipeline.read_output_image()[..., :3]
             if not np.all(np.isfinite(rendered)):
@@ -555,65 +606,7 @@ def main() -> None:
 
         # Per-phase profiling: time each phase of a full training step.
         if profile_json and args.profile_every > 0 and it % args.profile_every == 0:
-            import time as _time
-            pipeline.device.wait_for_idle()
-
-            prof_cam_idx = int(rng.integers(0, n_cams))
-            prof_entry = scene.images[prof_cam_idx]
-            pipeline.set_target_texture(target_textures[prof_cam_idx])
-            prof_lrs = AdamLRs(mean=lr_mean_init * (decay ** (it - 1)))
-
-            # Warm up (avoid cold-cache effects).
-            pipeline._clear_grads()
-            pipeline._run_forward(prof_entry.camera)
-            pipeline._run_loss()
-            pipeline._run_backward()
-            pipeline._run_regularization()
-            pipeline._run_adam(prof_lrs)
-            pipeline.device.wait_for_idle()
-
-            timings = {}
-
-            t0 = _time.perf_counter()
-            pipeline._clear_grads()
-            pipeline.device.wait_for_idle()
-            timings["clear_grads_ms"] = (_time.perf_counter() - t0) * 1000
-
-            t0 = _time.perf_counter()
-            pipeline._run_forward(prof_entry.camera)
-            pipeline.device.wait_for_idle()
-            timings["forward_ms"] = (_time.perf_counter() - t0) * 1000
-
-            t0 = _time.perf_counter()
-            pipeline._run_loss()
-            pipeline.device.wait_for_idle()
-            timings["loss_ms"] = (_time.perf_counter() - t0) * 1000
-
-            t0 = _time.perf_counter()
-            pipeline._run_backward()
-            pipeline.device.wait_for_idle()
-            timings["backward_ms"] = (_time.perf_counter() - t0) * 1000
-
-            t0 = _time.perf_counter()
-            pipeline._run_regularization()
-            pipeline.device.wait_for_idle()
-            timings["regularization_ms"] = (_time.perf_counter() - t0) * 1000
-
-            t0 = _time.perf_counter()
-            pipeline._run_adam(prof_lrs)
-            pipeline.device.wait_for_idle()
-            timings["adam_ms"] = (_time.perf_counter() - t0) * 1000
-
-            timings["total_ms"] = sum(timings.values())
-            timings["iter"] = it
-            timings["n_gaussians"] = cur_n_gaussians
-
-            profile_json.write(json.dumps(timings) + "\n")
-            print(f"iter {it}: PROFILE  "
-                  f"fwd={timings['forward_ms']:.1f}  loss={timings['loss_ms']:.1f}  "
-                  f"bwd={timings['backward_ms']:.1f}  reg={timings['regularization_ms']:.1f}  "
-                  f"adam={timings['adam_ms']:.1f}  total={timings['total_ms']:.1f} ms  "
-                  f"n_g={cur_n_gaussians}")
+            run_profiling_step(pipeline, scene, n_cams, rng, lr_mean_init, it, decay)
 
     if stream_writer is not None:
         # Signal the viewer to exit, let it see the flag and detach, THEN
@@ -625,8 +618,10 @@ def main() -> None:
             except Exception:
                 viewer_proc.terminate()
         stream_writer.close()
+
     if profile_json:
         profile_json.close()
+
     log_txt.close()
     log_json.close()
     densify_json.close()

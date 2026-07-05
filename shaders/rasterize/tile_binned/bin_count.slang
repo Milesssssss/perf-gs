@@ -16,6 +16,8 @@
 #include "../../primitives/gaussian/snugbox.slang"
 #include "../../primitives/gaussian/accutile.slang"
 
+//TODO: I believe this and bin_emit.slang could be merged into a single kernel, mot likely
+
 static const uint TILE_SIZE = 16;
 
 [shader("compute")]

@@ -65,18 +65,15 @@ class GaussianBuffers:
     sort_keys_lo_b: spy.NDBuffer
     sort_keys_hi_b: spy.NDBuffer
     sort_values_b: spy.NDBuffer
-    # Block-local radix sort scratch.
-    # block_hist        : uint[num_sort_blocks * 256], per-(block, digit) count
-    # block_start       : uint[num_sort_blocks * 256], digit's exclusive-scan
-    #                     position within its block's sorted LDS layout
-    # block_prefix      : uint[num_sort_blocks * 256], per-(block, digit) global prefix
-    # digit_total       : uint[256], per-digit total count
-    # digit_global_base : uint[256], exclusive scan of digit_total
-    radix_block_hist: spy.NDBuffer
-    radix_block_start: spy.NDBuffer
-    radix_block_prefix: spy.NDBuffer
-    radix_digit_total: spy.NDBuffer
-    radix_digit_global_base: spy.NDBuffer
+    # DeviceRadixSort scratch (ported from GPUSorting).
+    # radix_global_hist : uint[256 * 8], per-pass device digit offsets;
+    #                     one 256-region per pass, cleared once at start.
+    # radix_pass_hist   : uint[256 * max_blocks], per-(digit, partition)
+    #                     counts, transposed layout with fixed stride =
+    #                     max_blocks so indexing is uniform across
+    #                     upsweep / scan / downsweep.
+    radix_global_hist: spy.NDBuffer
+    radix_pass_hist: spy.NDBuffer
     # Per-tile sorted entry ranges.
     tile_start: spy.NDBuffer                # uint[num_tiles]
     tile_end: spy.NDBuffer                  # uint[num_tiles]
@@ -178,20 +175,17 @@ def allocate(
     sort_keys_lo_b = spy.NDBuffer(device=device, dtype="uint", shape=(max_sort_pairs,))
     sort_keys_hi_b = spy.NDBuffer(device=device, dtype="uint", shape=(max_sort_pairs,))
     sort_values_b = spy.NDBuffer(device=device, dtype="uint", shape=(max_sort_pairs,))
-    # Block-local radix sort. SORT_BLOCK_SIZE=256 must match shader.
-    _SORT_BLOCK_SIZE = 256
-    num_sort_blocks = (max_sort_pairs + _SORT_BLOCK_SIZE - 1) // _SORT_BLOCK_SIZE
-    radix_block_hist = spy.NDBuffer(
-        device=device, dtype="uint", shape=(num_sort_blocks * 256,),
+    # DeviceRadixSort scratch. _RADIX_PART_SIZE = 2048 must match
+    # device_radix_sort.slang's PART_SIZE.
+    _RADIX_PART_SIZE = 2048
+    _RADIX_GLOBAL_HIST_SIZE = 256 * 8  # one 256-region per pass, 8 passes
+    max_blocks = (max_sort_pairs + _RADIX_PART_SIZE - 1) // _RADIX_PART_SIZE
+    radix_global_hist = spy.NDBuffer(
+        device=device, dtype="uint", shape=(_RADIX_GLOBAL_HIST_SIZE,),
     )
-    radix_block_start = spy.NDBuffer(
-        device=device, dtype="uint", shape=(num_sort_blocks * 256,),
+    radix_pass_hist = spy.NDBuffer(
+        device=device, dtype="uint", shape=(256 * max_blocks,),
     )
-    radix_block_prefix = spy.NDBuffer(
-        device=device, dtype="uint", shape=(num_sort_blocks * 256,),
-    )
-    radix_digit_total = spy.NDBuffer(device=device, dtype="uint", shape=(256,))
-    radix_digit_global_base = spy.NDBuffer(device=device, dtype="uint", shape=(256,))
     tile_start = spy.NDBuffer(device=device, dtype="uint", shape=(num_tiles,))
     tile_end = spy.NDBuffer(device=device, dtype="uint", shape=(num_tiles,))
 
@@ -292,11 +286,8 @@ def allocate(
         sort_keys_lo_b=sort_keys_lo_b,
         sort_keys_hi_b=sort_keys_hi_b,
         sort_values_b=sort_values_b,
-        radix_block_hist=radix_block_hist,
-        radix_block_start=radix_block_start,
-        radix_block_prefix=radix_block_prefix,
-        radix_digit_total=radix_digit_total,
-        radix_digit_global_base=radix_digit_global_base,
+        radix_global_hist=radix_global_hist,
+        radix_pass_hist=radix_pass_hist,
         tile_start=tile_start,
         tile_end=tile_end,
         output_image=output_image,

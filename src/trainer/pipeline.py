@@ -23,6 +23,13 @@ from trainer.device import SHADERS_DIR
 
 SCAN_BLOCK_SIZE = 1024  # must match shaders/common/scan.slang
 
+# DeviceRadixSort constants — must match shaders/sort/device_radix_sort.slang.
+_RADIX_PART_SIZE = 2048
+_RADIX_US_DIM = 128
+_RADIX_SCAN_DIM = 128
+_RADIX_D_DIM = 256
+_RADIX_GLOBAL_HIST_SIZE = 256 * 8
+
 
 @dataclass
 class DensifyConfig:
@@ -145,10 +152,10 @@ class Pipeline:
         self.k_backward = mk(tb / "backward.slang", "backwardRasterize")
 
         sort = SHADERS_DIR / "sort"
-        self.k_radix_block_sort = mk(sort / "radix_sort.slang", "blockSort")
-        self.k_radix_global_scan = mk(sort / "radix_sort.slang", "globalScan")
-        self.k_radix_scan_digit_totals = mk(sort / "radix_sort.slang", "scanDigitTotals")
-        self.k_radix_scatter_final = mk(sort / "radix_sort.slang", "scatterFinal")
+        self.k_radix_init_global_hist = mk(sort / "device_radix_sort.slang", "initGlobalHist")
+        self.k_radix_upsweep = mk(sort / "device_radix_sort.slang", "upsweep")
+        self.k_radix_scan = mk(sort / "device_radix_sort.slang", "scan")
+        self.k_radix_downsweep = mk(sort / "device_radix_sort.slang", "downsweep")
         self.k_adam = mk(opt / "adam.slang", "adamStep")
         self.k_grad_clear = mk(opt / "grad_utils.slang", "clearGradBuffer")
         self.k_saturation_check = mk(opt / "grad_utils.slang", "checkSaturation")
@@ -347,14 +354,16 @@ class Pipeline:
         self._camera_buffer.copy_from_numpy(np.ascontiguousarray(data.view(np.uint8)))
 
     def _radix_sort_pairs(self) -> tuple[spy.NDBuffer, spy.NDBuffer, spy.NDBuffer]:
-        """Block-local 8-pass LSB radix sort. Returns the (keys_lo,
-        keys_hi, values) triplet holding the sorted result.
+        """DeviceRadixSort (ported from GPUSorting, MIT). Returns the
+        (keys_lo, keys_hi, values) triplet holding the sorted result.
 
-        Per-pass structure (see shaders/sort/radix_sort.slang):
-          blockSort       — in-place block sort + per-block digit counts
-          globalScan      — per-(block, digit) running prefix + digit totals
-          scanDigitTotals — exclusive scan of the 256 digit totals
-          scatterFinal    — O(1)/thread scatter to the destination buffers
+        Per-pass structure (see shaders/sort/device_radix_sort.slang):
+          upsweep    — per-partition digit histogram + atomic add to
+                       b_global_hist for this pass.
+          scan       — one workgroup per digit, exclusive scan across
+                       active partitions in b_pass_hist.
+          downsweep  — wave-multisplit rank + scatter of the 3-word
+                       record to the *_out buffers.
 
         ``n`` (the actual pair count) lives in ``scan_total[0]`` on the
         GPU; Python never reads it back in the hot path.
@@ -362,42 +371,44 @@ class Pipeline:
         b = self.buffers
         src_lo, src_hi, src_v = b.sort_keys_lo_a, b.sort_keys_hi_a, b.sort_values_a
         dst_lo, dst_hi, dst_v = b.sort_keys_lo_b, b.sort_keys_hi_b, b.sort_values_b
-        num_sort_blocks = (self.max_sort_pairs + 255) // 256
+        max_blocks = (self.max_sort_pairs + _RADIX_PART_SIZE - 1) // _RADIX_PART_SIZE
+
+        # Clear b_global_hist once at the start of the whole sort;
+        # subsequent atomic adds during upsweep accumulate into disjoint
+        # per-pass regions (offset = pass_idx * 256).
+        self._dispatch(self.k_radix_init_global_hist,
+            thread_count=[_RADIX_GLOBAL_HIST_SIZE, 1, 1],
+            b_global_hist=b.radix_global_hist.storage,
+        )
 
         for pass_idx in range(8):
-            # One group per LSB pass so the capture shows which of the 8 passes
-            # (and which of its 4 kernels) dominates the sort.
+            radix_shift = (pass_idx % 4) * 8
+            key_word = 0 if pass_idx < 4 else 1
             with self._marker_group(f"pass_{pass_idx}", (0.9, 0.55, 0.2)):
-                self._dispatch(self.k_radix_block_sort,
-                    thread_count=[num_sort_blocks * 256, 1, 1],
+                self._dispatch(self.k_radix_upsweep,
+                    thread_count=[max_blocks * _RADIX_US_DIM, 1, 1],
                     keys_lo=src_lo.storage, keys_hi=src_hi.storage,
-                    values=src_v.storage,
-                    block_hist=b.radix_block_hist.storage,
-                    block_start=b.radix_block_start.storage,
+                    b_pass_hist=b.radix_pass_hist.storage,
+                    b_global_hist=b.radix_global_hist.storage,
                     n_buf=b.scan_total.storage,
-                    pass_idx=pass_idx,
+                    radix_shift=radix_shift, key_word=key_word,
+                    pass_idx=pass_idx, max_blocks=max_blocks,
                 )
-                self._dispatch(self.k_radix_global_scan,
-                    thread_count=[256, 1, 1],
-                    block_hist=b.radix_block_hist.storage,
-                    block_prefix=b.radix_block_prefix.storage,
-                    digit_total=b.radix_digit_total.storage,
+                self._dispatch(self.k_radix_scan,
+                    thread_count=[256 * _RADIX_SCAN_DIM, 1, 1],
+                    b_pass_hist=b.radix_pass_hist.storage,
                     n_buf=b.scan_total.storage,
+                    max_blocks=max_blocks,
                 )
-                self._dispatch(self.k_radix_scan_digit_totals,
-                    thread_count=[256, 1, 1],
-                    digit_total=b.radix_digit_total.storage,
-                    digit_global_base=b.radix_digit_global_base.storage,
-                )
-                self._dispatch(self.k_radix_scatter_final,
-                    thread_count=[self.max_sort_pairs, 1, 1],
+                self._dispatch(self.k_radix_downsweep,
+                    thread_count=[max_blocks * _RADIX_D_DIM, 1, 1],
                     keys_lo_in=src_lo.storage, keys_hi_in=src_hi.storage, values_in=src_v.storage,
-                    block_start=b.radix_block_start.storage,
-                    block_prefix=b.radix_block_prefix.storage,
-                    digit_global_base=b.radix_digit_global_base.storage,
                     keys_lo_out=dst_lo.storage, keys_hi_out=dst_hi.storage, values_out=dst_v.storage,
+                    b_pass_hist=b.radix_pass_hist.storage,
+                    b_global_hist=b.radix_global_hist.storage,
                     n_buf=b.scan_total.storage,
-                    pass_idx=pass_idx,
+                    radix_shift=radix_shift, key_word=key_word,
+                    pass_idx=pass_idx, max_blocks=max_blocks,
                 )
             src_lo, dst_lo = dst_lo, src_lo
             src_hi, dst_hi = dst_hi, src_hi
@@ -810,7 +821,6 @@ def _srgb_to_linear_np(c: np.ndarray) -> np.ndarray:
     high = np.power(np.clip((c + 0.055) / 1.055, 1e-7, None), 2.4)
     return np.where(c <= 0.04045, low, high).astype(np.float32)
 
-
 def _linear_to_srgb_np(c: np.ndarray) -> np.ndarray:
     """Inverse of _srgb_to_linear_np. Exact round-trip so that the loss
     shader's srgb_to_linear(target) recovers the linear value we intend."""
@@ -1139,35 +1149,14 @@ def densify_simple(self: Pipeline, cfg: DensifyConfig,
     matching gsplat's ``step > reset_every`` guard. Low-opacity pruning is
     always active.
     """
-    ACTION_KEEP = 0
-    ACTION_SPLIT = 1
-    ACTION_CLONE = 2
-    ACTION_PRUNE = 3
 
     b = self.buffers
-
-    # Per-phase timing. Enable with TRAINER_DENSIFY_TIMING=1. Each mark
-    # syncs the GPU so the elapsed time is attributed to the phase that
-    # produced the work, not to a later sync that happens to drain it.
-    import os, time as _time
-    _timing = os.environ.get("TRAINER_DENSIFY_TIMING") == "1"
-    _t_prev = [None]
-    def _mark(label: str) -> None:
-        if not _timing:
-            return
-        self.device.wait_for_idle()
-        now = _time.perf_counter()
-        if _t_prev[0] is not None:
-            print(f"    [densify] {label:22s} {(now - _t_prev[0]) * 1000:9.1f} ms")
-        _t_prev[0] = now
 
     if scale_thresh is None:
         scale_thresh = cfg.t_big_scale * 0.1
 
-    _mark("start")
     self.device.wait_for_idle()
     pre_count = int(b.num_gaussians_counter.to_numpy().view(np.uint32)[0])
-    _mark("initial sync+count")
     if pre_count == 0:
         return {"pre_count": 0, "post_split_count": 0, "final_count": 0,
                 "n_split": 0, "n_clone": 0, "n_prune": 0, "n_keep": 0}
@@ -1204,29 +1193,6 @@ def densify_simple(self: Pipeline, cfg: DensifyConfig,
         max_splats=self.max_splats,
     )
     self.device.wait_for_idle()
-    _mark("decide_actions")
-
-    # TODO: this readback is slowing down the densification step a lot. Like some seconds.
-
-    # actions_raw = b.action_buffer.to_numpy()
-    # actions = np.frombuffer(actions_raw.tobytes(), dtype=np.uint32)[:pre_count].copy()
-# 
-    # # Cap growth to avoid blowing past max_splats.
-    # n_grow = int((actions == ACTION_SPLIT).sum()) * 2 + int((actions == ACTION_CLONE).sum())
-    # n_prune_count = int((actions == ACTION_PRUNE).sum())
-    # projected = pre_count + n_grow - n_prune_count
-    # if projected > self.max_splats:
-    #     # Too many — disable cloning/splitting for gaussians until budget fits.
-    #     grow_indices = np.where((actions == ACTION_SPLIT) | (actions == ACTION_CLONE))[0]
-    #     excess = projected - self.max_splats
-    #     # Remove excess from end of grow list.
-    #     if excess > 0 and len(grow_indices) > 0:
-    #         remove = grow_indices[-min(excess, len(grow_indices)):]
-    #         actions[remove] = ACTION_KEEP
-# 
-    #     action_upload = np.zeros(self.max_splats, dtype=np.uint32)
-    #     action_upload[:pre_count] = actions
-    #     b.action_buffer.copy_from_numpy(action_upload)
 
     # Phase C: split and clone.
     self._dispatch(self.k_split_and_clone,
@@ -1241,7 +1207,6 @@ def densify_simple(self: Pipeline, cfg: DensifyConfig,
     self.device.wait_for_idle()
     post_split_count = int(b.num_gaussians_counter.to_numpy().view(np.uint32)[0])
     post_split_count = min(post_split_count, self.max_splats)
-    _mark("split_and_clone")
 
     # Phases D/E: compact (remove pruned).
     self._dispatch(self.k_build_prune_mask,
@@ -1269,21 +1234,11 @@ def densify_simple(self: Pipeline, cfg: DensifyConfig,
     self.device.wait_for_idle()
     final_count = int(b.scan_total.to_numpy().view(np.uint32)[0])
     b.num_gaussians_counter.copy_from_numpy(np.array([final_count], dtype=np.uint32))
-    _mark("prune_mask+scan+compact")
-
-    # n_keep  = int((actions == ACTION_KEEP).sum())
-    # n_split = int((actions == ACTION_SPLIT).sum())
-    # n_clone = int((actions == ACTION_CLONE).sum())
-    # n_prune = int((actions == ACTION_PRUNE).sum())
 
     return {
         "pre_count": pre_count,
         "post_split_count": post_split_count,
         "final_count": final_count,
-        "n_keep": -1,
-        "n_split": -1,
-        "n_clone": -1,
-        "n_prune": -1,
     }
 
 
