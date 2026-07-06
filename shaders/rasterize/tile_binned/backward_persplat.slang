@@ -46,7 +46,7 @@ static const float ALPHA_MIN_TRACK = 1.0 / 255.0;
 // away and the scale is 1.0, so there is zero overhead. Only the per-PIXEL
 // cost is reduced; the per-splat projection backward + atomics run once per
 // splat regardless, so speedup is sub-linear in STRIDE.
-static const uint BACKWARD_PIXEL_STRIDE = 1u;
+static const uint BACKWARD_PIXEL_STRIDE = 4u;
 
 // Per-pixel constants staged in LDS once (avoids re-reading global textures
 // on every bucket). dL_dC (rgb) + dL_dA (a) + T_final + C_total (rgb) = 8
@@ -56,6 +56,15 @@ groupshared float  gs_Tfinal[TILE_AREA];
 groupshared float3 gs_Ctotal[TILE_AREA];
 groupshared uint   gs_processed[TILE_AREA];
 groupshared uint   gs_max_processed;     // deepest splat any pixel processed
+
+// Per-bucket checkpoints staged in LDS. The pixel loop needs one warp-uniform
+// checkpoint per pixel: raster_checkpoints[cp_bucket*256 + p]. Issued inline it
+// was 256 broadcast global loads/bucket on the critical path -> LSU-bound. Each
+// of the NUM_WARPS warps instead batch-loads its own bucket's 256 (T,C) entries
+// here in 8 lane-coalesced loads, then reads from LDS. Cost: 8*256*8 B = 16 KB
+// (this is the dominant occupancy pressure; if it becomes the limiter the fix
+// is a 32-thread-per-bucket dispatch, which needs only 2 KB here).
+groupshared uint2  gs_checkpoints[NUM_WARPS][TILE_AREA];
 
 [shader("compute")]
 [numthreads(256, 1, 1)]
@@ -74,16 +83,16 @@ void backwardRasterizePerSplat(
     RWTexture2D<float> output_transmittance,
     RWTexture2D<uint> gaussian_count_per_pixel,
     RWTexture2D<float4> dL_dC_texture,
-    RWStructuredBuffer<int64_t> grad_mean_x,
-    RWStructuredBuffer<int64_t> grad_mean_y,
-    RWStructuredBuffer<int64_t> grad_mean_z,
-    RWStructuredBuffer<int64_t> grad_log_scale_x,
-    RWStructuredBuffer<int64_t> grad_log_scale_y,
-    RWStructuredBuffer<int64_t> grad_log_scale_z,
-    RWStructuredBuffer<int64_t> grad_rot_w,
-    RWStructuredBuffer<int64_t> grad_rot_x,
-    RWStructuredBuffer<int64_t> grad_rot_y,
-    RWStructuredBuffer<int64_t> grad_rot_z,
+    // 2D gradient seeds, summed over all tiles a gaussian touches. The 3D
+    // projection backward (mean/scale/rot) is deferred to projection_backward.
+    // slang, which runs it ONCE per gaussian on these sums (projection is
+    // linear in the seed: sum_k J^T g_k == J^T sum_k g_k). Opacity/color are
+    // 2D-level already, so they stay here as final grads.
+    RWStructuredBuffer<int64_t> grad_mean2d_x,
+    RWStructuredBuffer<int64_t> grad_mean2d_y,
+    RWStructuredBuffer<int64_t> grad_cov2d_a,
+    RWStructuredBuffer<int64_t> grad_cov2d_b,
+    RWStructuredBuffer<int64_t> grad_cov2d_c,
     RWStructuredBuffer<int64_t> grad_opacity,
     RWStructuredBuffer<int64_t> grad_color_r,
     RWStructuredBuffer<int64_t> grad_color_g,
@@ -197,6 +206,28 @@ void backwardRasterizePerSplat(
         // stay valid (all 32 lanes continue together).
         uint bucket_first_splat = bucket * RASTER_BUCKET_SIZE;
 
+        // --- Coalesced batch-stage this warp's 256 checkpoints into LDS ---
+        // The pixel loop reads one warp-uniform checkpoint per pixel. Issued
+        // inline that was 256 global loads/bucket on the critical path (all 32
+        // lanes hammering the same address -> LSU-issue-bound). Instead, the 32
+        // lanes cooperatively load the bucket's 256 (T,C) entries in 8 fully
+        // coalesced passes (lane L loads e = L, L+32, ...), then the pixel loop
+        // reads from LDS. The bucket loop trip count is block-uniform, so these
+        // group barriers are legal inside it.
+        //   barrier #1 (WAR): don't overwrite entries the previous iteration's
+        //     pixel loop may still be reading. Redundant but harmless on iter 0.
+        //   barrier #2 (RAW): pixel-loop reads must see the staged writes. The
+        //     read is cross-lane (lane L reads entry p written by lane p%32),
+        //     so a warp-uniform read alone is not safe without this sync.
+        GroupMemoryBarrierWithGroupSync();
+        if (bucket_valid)
+        {
+            uint cp_base = checkpointIndex(cp_bucket, 0u);
+            for (uint e = lane; e < TILE_AREA; e += RASTER_BUCKET_SIZE)
+                gs_checkpoints[warp_idx][e] = raster_checkpoints[cp_base + e];
+        }
+        GroupMemoryBarrierWithGroupSync();
+
         // --- Pixel loop: all 32 lanes lockstep so wave scans are valid ---
         for (uint p = 0u; p < TILE_AREA; ++p)
         {
@@ -222,10 +253,11 @@ void backwardRasterizePerSplat(
             bool contributes = splat_valid && (local_splat < processed);
 
             // Read the bucket checkpoint for pixel p (in-front-of-bucket
-            // (T, C)). Only meaningful if the pixel reached this bucket,
-            // i.e. some lane here is active; masked lanes ignore the value.
+            // (T, C)) from LDS (batch-staged above). Only meaningful if the
+            // pixel reached this bucket, i.e. some lane here is active; masked
+            // lanes ignore the value.
             float T_ck; float3 C_ck;
-            unpackCheckpoint(raster_checkpoints[checkpointIndex(cp_bucket, p)], T_ck, C_ck);
+            unpackCheckpoint(gs_checkpoints[warp_idx][p], T_ck, C_ck);
 
             // Pixel center for pixel-in-tile p (computed unconditionally so
             // it's in scope for the eval backward below).
@@ -320,24 +352,16 @@ void backwardRasterizePerSplat(
                 acc_absy *= s;
             }
 
-            var dp_mean      = diffPair(g.mean);
-            var dp_log_scale = diffPair(g.log_scale);
-            var dp_rot_quat  = diffPair(g.rot_quat);
-            bwd_diff(projectGaussian3DTo2D)(
-                dp_mean, dp_log_scale, dp_rot_quat,
-                world_to_view, view_to_clip, frame_dim,
-                acc_mean2d, acc_cov2d, 0.0, 0.0);
-
-            InterlockedAdd(grad_mean_x[g_idx], toFixed(dp_mean.d.x));
-            InterlockedAdd(grad_mean_y[g_idx], toFixed(dp_mean.d.y));
-            InterlockedAdd(grad_mean_z[g_idx], toFixed(dp_mean.d.z));
-            InterlockedAdd(grad_log_scale_x[g_idx], toFixed(dp_log_scale.d.x));
-            InterlockedAdd(grad_log_scale_y[g_idx], toFixed(dp_log_scale.d.y));
-            InterlockedAdd(grad_log_scale_z[g_idx], toFixed(dp_log_scale.d.z));
-            InterlockedAdd(grad_rot_w[g_idx], toFixed(dp_rot_quat.d.x));
-            InterlockedAdd(grad_rot_x[g_idx], toFixed(dp_rot_quat.d.y));
-            InterlockedAdd(grad_rot_y[g_idx], toFixed(dp_rot_quat.d.z));
-            InterlockedAdd(grad_rot_z[g_idx], toFixed(dp_rot_quat.d.w));
+            // Emit the SUMMED 2D gradients (mean2d, cov2d) for this splat's
+            // contribution to this tile. projection_backward.slang applies the
+            // 3D projection backward once per gaussian on the full sum. The
+            // heavy quaternion/cov Jacobian no longer runs K times per gaussian
+            // in this hot loop.
+            InterlockedAdd(grad_mean2d_x[g_idx], toFixed(acc_mean2d.x));
+            InterlockedAdd(grad_mean2d_y[g_idx], toFixed(acc_mean2d.y));
+            InterlockedAdd(grad_cov2d_a[g_idx], toFixed(acc_cov2d.x));
+            InterlockedAdd(grad_cov2d_b[g_idx], toFixed(acc_cov2d.y));
+            InterlockedAdd(grad_cov2d_c[g_idx], toFixed(acc_cov2d.z));
             InterlockedAdd(grad_opacity[g_idx], toFixed(acc_opacity));
             InterlockedAdd(grad_color_r[g_idx], toFixed(acc_color.x));
             InterlockedAdd(grad_color_g[g_idx], toFixed(acc_color.y));

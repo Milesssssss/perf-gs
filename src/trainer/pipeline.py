@@ -152,6 +152,7 @@ class Pipeline:
         self.k_regularization = mk(loss / "regularization.slang", "addRegularization")
         self.k_backward = mk(tb / "backward.slang", "backwardRasterize")
         self.k_backward_persplat = mk(tb / "backward_persplat.slang", "backwardRasterizePerSplat")
+        self.k_projection_backward = mk(tb / "projection_backward.slang", "projectionBackward")
 
         sort = SHADERS_DIR / "sort"
         self.k_radix_init_global_hist = mk(sort / "device_radix_sort.slang", "initGlobalHist")
@@ -629,6 +630,14 @@ class Pipeline:
                 grad_buffer=b.grad_buffers[name].storage,
                 max_splats=self.max_splats,
             )
+        # The 2D grad seeds are atomic-accumulated by the blend backward, so
+        # they must start each iteration at zero too.
+        for name in b.grad_2d_seed_buffers:
+            self._dispatch(self.k_grad_clear,
+                thread_count=[self.max_splats, 1, 1],
+                grad_buffer=b.grad_2d_seed_buffers[name].storage,
+                max_splats=self.max_splats,
+            )
 
     def _run_loss(self) -> None:
         b = self.buffers
@@ -673,6 +682,7 @@ class Pipeline:
     def _run_backward(self) -> None:
         b = self.buffers
         gb = b.grad_buffers
+        sb = b.grad_2d_seed_buffers
         # The forward left the sorted gaussian-id buffer on one of the two
         # ping-pong slots. We cache it during _run_forward.
         sorted_values = getattr(self, "_sorted_values", b.sort_values_a)
@@ -695,16 +705,11 @@ class Pipeline:
                     output_transmittance=b.output_transmittance,
                     gaussian_count_per_pixel=b.gaussian_count_per_pixel,
                     dL_dC_texture=b.dL_dC_texture,
-                    grad_mean_x=gb["mean_x"].storage,
-                    grad_mean_y=gb["mean_y"].storage,
-                    grad_mean_z=gb["mean_z"].storage,
-                    grad_log_scale_x=gb["log_scale_x"].storage,
-                    grad_log_scale_y=gb["log_scale_y"].storage,
-                    grad_log_scale_z=gb["log_scale_z"].storage,
-                    grad_rot_w=gb["rot_w"].storage,
-                    grad_rot_x=gb["rot_x"].storage,
-                    grad_rot_y=gb["rot_y"].storage,
-                    grad_rot_z=gb["rot_z"].storage,
+                    grad_mean2d_x=sb["mean2d_x"].storage,
+                    grad_mean2d_y=sb["mean2d_y"].storage,
+                    grad_cov2d_a=sb["cov2d_a"].storage,
+                    grad_cov2d_b=sb["cov2d_b"].storage,
+                    grad_cov2d_c=sb["cov2d_c"].storage,
                     grad_opacity=gb["opacity"].storage,
                     grad_color_r=gb["color_r"].storage,
                     grad_color_g=gb["color_g"].storage,
@@ -716,6 +721,33 @@ class Pipeline:
                     pixel_phase=self._backward_pixel_phase,
                 )
                 self._backward_pixel_phase += 1
+                # Per-gaussian projection backward: turn the summed 2D grads
+                # into 3D mean/scale/rot grads, ONCE per gaussian. Must run
+                # before regularization (which InterlockedAdds onto the 3D
+                # grads this kernel direct-stores).
+                with self._marker_group("projection_backward", (0.95, 0.5, 0.2)):
+                    self._dispatch(self.k_projection_backward,
+                        thread_count=[self.max_splats, 1, 1],
+                        gaussians=b.gaussians.storage,
+                        num_gaussians_counter=b.num_gaussians_counter.storage,
+                        camera=self._camera_buffer,
+                        grad_mean2d_x=sb["mean2d_x"].storage,
+                        grad_mean2d_y=sb["mean2d_y"].storage,
+                        grad_cov2d_a=sb["cov2d_a"].storage,
+                        grad_cov2d_b=sb["cov2d_b"].storage,
+                        grad_cov2d_c=sb["cov2d_c"].storage,
+                        grad_mean_x=gb["mean_x"].storage,
+                        grad_mean_y=gb["mean_y"].storage,
+                        grad_mean_z=gb["mean_z"].storage,
+                        grad_log_scale_x=gb["log_scale_x"].storage,
+                        grad_log_scale_y=gb["log_scale_y"].storage,
+                        grad_log_scale_z=gb["log_scale_z"].storage,
+                        grad_rot_w=gb["rot_w"].storage,
+                        grad_rot_x=gb["rot_x"].storage,
+                        grad_rot_y=gb["rot_y"].storage,
+                        grad_rot_z=gb["rot_z"].storage,
+                        max_splats=self.max_splats,
+                    )
             else:
                 self._dispatch(self.k_backward,
                     thread_count=[b.num_tiles_x * 16, b.num_tiles_y * 16, 1],

@@ -44,6 +44,16 @@ GRAD_SCALAR_COMPONENTS = (
     "color_r", "color_g", "color_b",
 )
 
+# Per-gaussian 2D gradient seeds, summed across all tiles a gaussian touches
+# by the blend backward (backward_persplat.slang). projection_backward.slang
+# then applies the 3D projection backward ONCE per gaussian on these sums,
+# instead of once per (gaussian, tile). Atomic-accumulated, so cleared each
+# iteration alongside GRAD_SCALAR_COMPONENTS.
+GRAD_2D_SEED_COMPONENTS = (
+    "mean2d_x", "mean2d_y",
+    "cov2d_a", "cov2d_b", "cov2d_c",
+)
+
 
 @dataclass
 class GaussianBuffers:
@@ -108,6 +118,9 @@ class GaussianBuffers:
     ssim_m2: spy.Texture | None = None  # rgba32_float, WxH
     ssim_m3: spy.Texture | None = None  # rgba32_float, WxH
     grad_buffers: dict[str, spy.NDBuffer] = field(default_factory=dict)  # name -> int32[max_splats]
+    # Per-gaussian summed 2D grad seeds (mean2d/cov2d) bridging the split
+    # backward: blend kernel accumulates, projection kernel consumes.
+    grad_2d_seed_buffers: dict[str, spy.NDBuffer] = field(default_factory=dict)
     adam_state: spy.NDBuffer | None = None  # AdamState[max_splats]
     saturation_flag: spy.NDBuffer | None = None  # uint[1]
     training_step: spy.NDBuffer | None = None    # uint[1] (Adam bias correction)
@@ -266,6 +279,10 @@ def allocate(
         name: spy.NDBuffer(device=device, dtype="int64_t", shape=(max_splats,))
         for name in GRAD_SCALAR_COMPONENTS
     }
+    grad_2d_seed_buffers: dict[str, spy.NDBuffer] = {
+        name: spy.NDBuffer(device=device, dtype="int64_t", shape=(max_splats,))
+        for name in GRAD_2D_SEED_COMPONENTS
+    }
 
     adam_state = spy.NDBuffer(device=device, dtype=adam_type, shape=(max_splats,))
 
@@ -364,6 +381,7 @@ def allocate(
         ssim_m2=ssim_m2,
         ssim_m3=ssim_m3,
         grad_buffers=grad_buffers,
+        grad_2d_seed_buffers=grad_2d_seed_buffers,
         adam_state=adam_state,
         saturation_flag=saturation_flag,
         training_step=training_step,
