@@ -214,11 +214,24 @@ def main() -> None:
                          "a Vulkan window and Present()s one frame per train_step so "
                          "Nsight has a frame boundary to capture on. Auto-disables the "
                          "viewer stream (a second device pollutes the capture) and the "
-                         "final I/O-heavy metrics pass. Launch this process as the "
-                         "Nsight Graphics target (or connect), then capture a frame: "
-                         "each frame is one full train_step (clear_grads/forward/loss/"
-                         "backward/regularization/adam) with its push_debug_group "
-                         "phase markers; densify iters also appear in the tree.")
+                         "final I/O-heavy metrics pass.")
+    ap.add_argument("--capture-iter", type=int, default=0,
+                    help="Programmatic Nsight Graphics capture: trigger a capture at "
+                         "this iteration for apples-to-apples before/after comparisons. "
+                         "Requires --profile-run and the Nsight Graphics SDK. Launch "
+                         "this process DIRECTLY (from terminal / VSCode) - NOT from "
+                         "Nsight UI - because self-injection is the only API path that "
+                         "supports programmatic triggering. Set to 0 (default) to "
+                         "disable. See src/trainer/ngfx_capture.py for details.")
+    ap.add_argument("--capture-activity", type=str, default="trace",
+                    choices=["trace", "frame"],
+                    help="Which Nsight activity to inject: 'trace' = GPU Trace (HW "
+                         "counters, SM/L2/VRAM throughputs); 'frame' = Frame Debugger "
+                         "(API-call tree + per-dispatch timings, no HW counters).")
+    ap.add_argument("--capture-project", type=str, default=None,
+                    help="Path to an .ngfx-proj file saved from Nsight UI "
+                         "(File > Save Project As). REQUIRED for 'trace' to "
+                         "record any metrics; optional for 'frame'.")
     args = ap.parse_args()
 
     if args.profile_run:
@@ -229,6 +242,25 @@ def main() -> None:
         args.no_viewer = True
         args.backend = "vulkan"
         args.preview_every = 0
+
+    # Programmatic Nsight capture: inject BEFORE any Vulkan driver load. If the
+    # SDK isn't installed or injection fails, we log and continue without
+    # captures - training still runs normally.
+    ngfx_cap = None
+    if args.capture_iter > 0:
+        if not args.profile_run:
+            print("[capture] --capture-iter requires --profile-run. ignoring.")
+        else:
+            from trainer.ngfx_capture import NgfxCapture
+            ngfx_cap = NgfxCapture()
+            if not ngfx_cap.inject(activity=args.capture_activity,
+                                   project_path=args.capture_project):
+                ngfx_cap = None
+            else:
+                proj_msg = (f" (project={args.capture_project})"
+                            if args.capture_project else "")
+                print(f"[capture] will trigger Nsight {args.capture_activity!r} "
+                      f"capture at iter {args.capture_iter}{proj_msg}")
 
     run_name = args.run_name or datetime.now().strftime("%Y%m%d_%H%M%S")
     run_dir = Path("outputs/train") / run_name
@@ -475,18 +507,129 @@ def main() -> None:
     # --profile-run we also stop when the user closes the profile window
     # (so Nsight can capture and quit cleanly).
     it = 0
+    # State machine for the capture:
+    #   armed: at iter == capture_iter we drain the queue and fire the trigger
+    #          BEFORE Present, so the presented frame contains exactly one
+    #          fully-completed iter's work.
+    #   hold : after firing, we keep Present()ing the SAME output_image
+    #          (no more train_steps) for capture_hold_frames iters so
+    #          Nsight's multi-frame collection sees identical content and
+    #          the capture doesn't drift across whatever number of frames
+    #          it actually samples.
+    # Capture protocol: when we reach iter == capture_iter, we drain the
+    # queue after that iter's train_step, run the trigger inline, then
+    # burn a fixed number of Presents of the frozen image so Nsight's
+    # counter-sampling window falls entirely inside frames of identical
+    # content. Then training resumes.
     while it < args.iters:
         if profile_window is not None and profile_window.should_close():
             break
         it += 1
+
         cam_idx = int(rng.integers(0, n_cams))
         entry = scene.images[cam_idx]
         pipeline.set_target_texture(target_textures[cam_idx])
+
+        # Print cam_idx for the first iter so seed determinism is
+        # verifiable across runs (should always print the same value
+        # given the same --seed).
+        if it == 1:
+            print(f"[determinism] iter 1 cam_idx={cam_idx} (should match "
+                  f"across same-seed runs)")
 
         # Backpressure before submitting more work.
         _bound_queue()
 
         lrs = AdamLRs(mean=lr_mean_init * (decay ** (it - 1)))
+
+        # ---- Deterministic capture protocol for GPU Trace ----
+        #
+        # GPU Trace is NOT a single-frame debugger. It is a continuous
+        # hardware-counter profiler: after arm it samples counters across
+        # a collection window (~1-2 seconds) of CONTINUOUSLY-PRESENTED
+        # frames, replaying/re-sampling the recurring per-frame workload.
+        # It needs a steady stream of representative frames for the whole
+        # window - freezing on a static blit after one train_step gives
+        # it nothing to sample (that's why earlier attempts were empty /
+        # truncated / marker-less).
+        #
+        # So at capture_iter we enter a dedicated capture loop that keeps
+        # presenting representative frames, made deterministic + stable by:
+        #   - PIN the camera to capture_iter's camera. Every frame in the
+        #     window renders the same view, so whichever frame Nsight
+        #     samples shows the same camera across runs.
+        #   - lr = 0 so the Adam step still runs (full backward workload
+        #     IS profiled) but gaussians never move -> every frame is
+        #     bit-identical -> the sampled counters are reproducible.
+        #   - No densify / opacity-reset / readback in the loop, so the
+        #     workload shape is a pure, stable train_step.
+        # The process stays alive (loop until window close) so Nsight's
+        # overlay can open the capture UI; killing it early tears the
+        # overlay down before the UI appears.
+        if ngfx_cap is not None and it == args.capture_iter:
+            print(f"[capture] draining queue at iter {it}...")
+            pipeline.device.wait_for_idle()
+            submit_id_ring.clear()
+            try:
+                n_g_capture = int(
+                    pipeline.buffers.num_gaussians_counter.to_numpy().view(np.uint32)[0])
+            except Exception:
+                n_g_capture = -1
+            print(f"[capture] state @ iter {it}: cam_idx={cam_idx}  "
+                  f"n_gaussians={n_g_capture}")
+
+            pinned_camera = entry.camera
+            # Zero ALL learning rates (mean/scale/rot/opacity/color) so the
+            # Adam step runs its full workload but no parameter moves -> every
+            # frame in the collection window is bit-identical.
+            frozen_lrs = AdamLRs(mean=0.0, scale=0.0, rot=0.0,
+                                 opacity=0.0, color=0.0)
+
+            # Warm up a few frames of the pinned, frozen workload BEFORE
+            # arming so Nsight sees a steady state (caches warm, no
+            # first-frame compile/alloc spikes) when it starts sampling.
+            print("[capture] warming up pinned/frozen frames before arm...")
+            for _ in range(8):
+                if profile_window is not None:
+                    profile_window.process_events()
+                pipeline.train_step(pinned_camera, lrs=frozen_lrs)
+                if profile_window is not None:
+                    _profile_present()
+            pipeline.device.wait_for_idle()
+
+            print(f"[capture] triggering Nsight capture at iter {it}")
+            ngfx_cap.trigger()
+
+            # Continuous capture loop: keep presenting the identical,
+            # representative frame so Nsight can complete its multi-sample
+            # collection. Runs until the profile window is closed.
+            print("[capture] presenting pinned/frozen frames continuously for "
+                  "GPU Trace; close the profile window when Nsight is done.")
+            import time as _t
+            while True:
+                if profile_window is not None:
+                    if profile_window.should_close():
+                        break
+                    profile_window.process_events()
+                pipeline.train_step(pinned_camera, lrs=frozen_lrs)
+                if profile_window is not None:
+                    _profile_present()
+                else:
+                    _t.sleep(0.01)
+
+            if profile_window is not None:
+                try:
+                    profile_window.close()
+                except Exception:
+                    pass
+            log_txt.close()
+            log_json.close()
+            densify_json.close()
+            if profile_json:
+                profile_json.close()
+            print("[capture] window closed, exiting.")
+            sys.exit(0)
+
         pipeline.train_step(entry.camera, lrs=lrs)
         submit_id_ring.append(pipeline.last_submit_id)
 

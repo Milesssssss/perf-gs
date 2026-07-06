@@ -30,7 +30,32 @@ static const uint CH_ITER_X    = 9;
 static const uint CH_ITER_Y    = 10;
 static const uint NUM_CHANNELS = 11;
 
-groupshared float gs_reduce[NUM_CHANNELS * TILE_AREA];
+// Warp-partial reduction slots. 256 threads / 32-lane wave = 8 warps
+// (WGE16-only path; matches every desktop GPU we target — same assumption
+// the radix sort makes). Each warp writes ONE partial sum per channel via
+// WaveActiveSum. Then a single cross-warp step sums the 8 slots into a
+// per-channel total. Footprint: 11 * 8 * 4 = 352 B (was 11 * 256 * 4 = 11 KB).
+// Freeing 10 KB of groupshared memory raises occupancy on top of eliminating
+// the eight barrier'd reduction rounds.
+static const uint MAX_WARPS = 8u;
+groupshared float gs_warp[NUM_CHANNELS * MAX_WARPS];
+
+// Sixteen final atomic operands, populated then consumed in parallel by
+// threads 0..15 (one InterlockedAdd each) instead of 16 serial atomics on
+// thread 0:
+//   [0]     opacity
+//   [1..3]  color_r/g/b
+//   [4..5]  iter_x/iter_y (2D-gradient magnitude for densification)
+//   [6..8]  mean_x/y/z             (projection backward outputs)
+//   [9..11] log_scale_x/y/z
+//   [12..15] rot_w/x/y/z
+// Slots 0..5 come straight from the eval reduction; slots 6..15 come from
+// the projection backward, which takes the reduced mean2d/cov2d gradients
+// as inputs and is still run by thread 0 (small serial compute, does not
+// parallelise cleanly across channels).
+static const uint NUM_ATOMICS = 16u;
+groupshared float gs_atomic[NUM_ATOMICS];
+
 groupshared uint gs_max_processed;
 groupshared Gaussian3D gs_gauss;
 groupshared Projected2DGaussian gs_proj;
@@ -170,48 +195,86 @@ void backwardRasterize(
             T_post = T_i;
         }
 
-        // --- Phase 3: Parallel reduction ---
-        gs_reduce[CH_MEAN2D_X * TILE_AREA + tid] = local_dp_mean_2d.x;
-        gs_reduce[CH_MEAN2D_Y * TILE_AREA + tid] = local_dp_mean_2d.y;
-        gs_reduce[CH_COV2D_0  * TILE_AREA + tid] = local_dp_cov2d.x;
-        gs_reduce[CH_COV2D_1  * TILE_AREA + tid] = local_dp_cov2d.y;
-        gs_reduce[CH_COV2D_2  * TILE_AREA + tid] = local_dp_cov2d.z;
-        gs_reduce[CH_OPACITY  * TILE_AREA + tid] = local_dp_opacity;
-        gs_reduce[CH_COLOR_R  * TILE_AREA + tid] = local_dp_color.x;
-        gs_reduce[CH_COLOR_G  * TILE_AREA + tid] = local_dp_color.y;
-        gs_reduce[CH_COLOR_B  * TILE_AREA + tid] = local_dp_color.z;
-        gs_reduce[CH_ITER_X   * TILE_AREA + tid] = local_abs_mean2d_x;
-        gs_reduce[CH_ITER_Y   * TILE_AREA + tid] = local_abs_mean2d_y;
+        // --- Phase 3a: Warp-level reduction ---
+        // Each warp collapses its 32 lanes' contributions to a single sum
+        // per channel with WaveActiveSum (one hardware shuffle instruction,
+        // no barrier). Lane 0 of each warp writes the partial into a small
+        // shared array indexed by (channel, warp_idx). This replaces 8
+        // barrier'd LDS rounds with a single WaveActiveSum + one barrier.
+        uint lane = WaveGetLaneIndex();
+        uint warp_idx = tid / WaveGetLaneCount();
+
+        float w_mean2d_x = WaveActiveSum(local_dp_mean_2d.x);
+        float w_mean2d_y = WaveActiveSum(local_dp_mean_2d.y);
+        float w_cov2d_0  = WaveActiveSum(local_dp_cov2d.x);
+        float w_cov2d_1  = WaveActiveSum(local_dp_cov2d.y);
+        float w_cov2d_2  = WaveActiveSum(local_dp_cov2d.z);
+        float w_opacity  = WaveActiveSum(local_dp_opacity);
+        float w_color_r  = WaveActiveSum(local_dp_color.x);
+        float w_color_g  = WaveActiveSum(local_dp_color.y);
+        float w_color_b  = WaveActiveSum(local_dp_color.z);
+        float w_iter_x   = WaveActiveSum(local_abs_mean2d_x);
+        float w_iter_y   = WaveActiveSum(local_abs_mean2d_y);
+
+        if (lane == 0u)
+        {
+            gs_warp[CH_MEAN2D_X * MAX_WARPS + warp_idx] = w_mean2d_x;
+            gs_warp[CH_MEAN2D_Y * MAX_WARPS + warp_idx] = w_mean2d_y;
+            gs_warp[CH_COV2D_0  * MAX_WARPS + warp_idx] = w_cov2d_0;
+            gs_warp[CH_COV2D_1  * MAX_WARPS + warp_idx] = w_cov2d_1;
+            gs_warp[CH_COV2D_2  * MAX_WARPS + warp_idx] = w_cov2d_2;
+            gs_warp[CH_OPACITY  * MAX_WARPS + warp_idx] = w_opacity;
+            gs_warp[CH_COLOR_R  * MAX_WARPS + warp_idx] = w_color_r;
+            gs_warp[CH_COLOR_G  * MAX_WARPS + warp_idx] = w_color_g;
+            gs_warp[CH_COLOR_B  * MAX_WARPS + warp_idx] = w_color_b;
+            gs_warp[CH_ITER_X   * MAX_WARPS + warp_idx] = w_iter_x;
+            gs_warp[CH_ITER_Y   * MAX_WARPS + warp_idx] = w_iter_y;
+        }
         GroupMemoryBarrierWithGroupSync();
 
-        //These two next phases are probably causing quite a bit of divergence, but
-        //it may still be a win overall compared to doing the projection backward in every thread
-        //Ideally while some threads are doing the reduction and the first one the proj backward
-        // could we have one of the threads that finishes the reduction early be the one issuing
-        // the mem read to load the gaussian in the GS mem? Rn thread 0 has to do the single proj + atomics and issue the mem read for next splat.
-        
-        [ForceUnroll]
-        for (uint stride = TILE_AREA >> 1; stride > 0; stride >>= 1)
+        // --- Phase 3b: Cross-warp reduction ---
+        // 11 channels × 8 warp partials → 11 totals. Assign channel to
+        // thread `tid == channel_idx`; each of threads 0..10 sequentially
+        // sums 8 values (fully in registers, no LDS conflict). Stores the
+        // 6 direct-atomic totals (opacity/color_rgb/iter_xy) into gs_atomic;
+        // stashes the 5 projection-inputs (mean2d + cov2d) in a small
+        // scratch that thread 0 will pick up next.
+        //
+        // Two extra shared floats to pass mean2d/cov2d to thread 0's
+        // projection. Cheap.
+        float total = 0.0;
+        if (tid < NUM_CHANNELS)
         {
-            if (tid < stride)
-            {
-                [ForceUnroll]
-                for (uint ch = 0; ch < NUM_CHANNELS; ++ch)
-                    gs_reduce[ch * TILE_AREA + tid] += gs_reduce[ch * TILE_AREA + tid + stride];
-            }
-            GroupMemoryBarrierWithGroupSync();
+            [ForceUnroll]
+            for (uint w = 0u; w < MAX_WARPS; ++w)
+                total += gs_warp[tid * MAX_WARPS + w];
         }
+        // Write the 6 straight-through totals directly to gs_atomic[0..5].
+        // Slot mapping matches the InterlockedAdd order below.
+        if (tid == CH_OPACITY) gs_atomic[0] = total;
+        if (tid == CH_COLOR_R) gs_atomic[1] = total;
+        if (tid == CH_COLOR_G) gs_atomic[2] = total;
+        if (tid == CH_COLOR_B) gs_atomic[3] = total;
+        if (tid == CH_ITER_X)  gs_atomic[4] = total;
+        if (tid == CH_ITER_Y)  gs_atomic[5] = total;
+        // The 5 projection-input totals go into gs_warp[0..4] (reusing the
+        // buffer, safe because Phase 3a's writes are behind us).
+        if (tid == CH_MEAN2D_X) gs_warp[0] = total;
+        if (tid == CH_MEAN2D_Y) gs_warp[1] = total;
+        if (tid == CH_COV2D_0)  gs_warp[2] = total;
+        if (tid == CH_COV2D_1)  gs_warp[3] = total;
+        if (tid == CH_COV2D_2)  gs_warp[4] = total;
+        GroupMemoryBarrierWithGroupSync();
 
-        // --- Phase 4: Single projection backward + atomics (thread 0) ---
+        // --- Phase 4a: Projection backward (thread 0) ---
+        // The projection backward is small serial compute (< 100 flops of
+        // matmuls) that doesn't parallelise cleanly across its 10 outputs,
+        // so it stays on thread 0. It writes to gs_atomic[6..15] where
+        // threads 6..15 will pick each output up for their atomic.
         if (tid == 0)
         {
-            float2 sum_dp_mean_2d = float2(
-                gs_reduce[CH_MEAN2D_X * TILE_AREA],
-                gs_reduce[CH_MEAN2D_Y * TILE_AREA]);
-            float3 sum_dp_cov2d = float3(
-                gs_reduce[CH_COV2D_0 * TILE_AREA],
-                gs_reduce[CH_COV2D_1 * TILE_AREA],
-                gs_reduce[CH_COV2D_2 * TILE_AREA]);
+            float2 sum_dp_mean_2d = float2(gs_warp[0], gs_warp[1]);
+            float3 sum_dp_cov2d   = float3(gs_warp[2], gs_warp[3], gs_warp[4]);
 
             var dp_mean      = diffPair(g.mean);
             var dp_log_scale = diffPair(g.log_scale);
@@ -221,22 +284,45 @@ void backwardRasterize(
                 world_to_view, view_to_clip, frame_dim,
                 sum_dp_mean_2d, sum_dp_cov2d, 0.0, 0.0);
 
-            InterlockedAdd(grad_mean_x[g_idx], toFixed(dp_mean.d.x));
-            InterlockedAdd(grad_mean_y[g_idx], toFixed(dp_mean.d.y));
-            InterlockedAdd(grad_mean_z[g_idx], toFixed(dp_mean.d.z));
-            InterlockedAdd(grad_log_scale_x[g_idx], toFixed(dp_log_scale.d.x));
-            InterlockedAdd(grad_log_scale_y[g_idx], toFixed(dp_log_scale.d.y));
-            InterlockedAdd(grad_log_scale_z[g_idx], toFixed(dp_log_scale.d.z));
-            InterlockedAdd(grad_rot_w[g_idx], toFixed(dp_rot_quat.d.x));
-            InterlockedAdd(grad_rot_x[g_idx], toFixed(dp_rot_quat.d.y));
-            InterlockedAdd(grad_rot_y[g_idx], toFixed(dp_rot_quat.d.z));
-            InterlockedAdd(grad_rot_z[g_idx], toFixed(dp_rot_quat.d.w));
-            InterlockedAdd(grad_opacity[g_idx], toFixed(gs_reduce[CH_OPACITY * TILE_AREA]));
-            InterlockedAdd(grad_color_r[g_idx], toFixed(gs_reduce[CH_COLOR_R * TILE_AREA]));
-            InterlockedAdd(grad_color_g[g_idx], toFixed(gs_reduce[CH_COLOR_G * TILE_AREA]));
-            InterlockedAdd(grad_color_b[g_idx], toFixed(gs_reduce[CH_COLOR_B * TILE_AREA]));
-            InterlockedAdd(grad_2d_x_iter[g_idx], toFixed(gs_reduce[CH_ITER_X * TILE_AREA]));
-            InterlockedAdd(grad_2d_y_iter[g_idx], toFixed(gs_reduce[CH_ITER_Y * TILE_AREA]));
+            gs_atomic[6]  = dp_mean.d.x;
+            gs_atomic[7]  = dp_mean.d.y;
+            gs_atomic[8]  = dp_mean.d.z;
+            gs_atomic[9]  = dp_log_scale.d.x;
+            gs_atomic[10] = dp_log_scale.d.y;
+            gs_atomic[11] = dp_log_scale.d.z;
+            gs_atomic[12] = dp_rot_quat.d.x;
+            gs_atomic[13] = dp_rot_quat.d.y;
+            gs_atomic[14] = dp_rot_quat.d.z;
+            gs_atomic[15] = dp_rot_quat.d.w;
+        }
+        GroupMemoryBarrierWithGroupSync();
+
+        // --- Phase 4b: Parallel atomics (threads 0..15) ---
+        // 16 InterlockedAdds go out in one wave instead of 16 sequential
+        // atomics on thread 0. Each thread picks the slot matching its
+        // tid and issues its own atomic to the corresponding grad_* buffer.
+        // Since all writes target *different* buffers, there's no contention
+        // between the 16 threads.
+        if (tid < NUM_ATOMICS)
+        {
+            float v = gs_atomic[tid];
+            int64_t fx = toFixed(v);
+            if      (tid == 0)  InterlockedAdd(grad_opacity[g_idx],     fx);
+            else if (tid == 1)  InterlockedAdd(grad_color_r[g_idx],     fx);
+            else if (tid == 2)  InterlockedAdd(grad_color_g[g_idx],     fx);
+            else if (tid == 3)  InterlockedAdd(grad_color_b[g_idx],     fx);
+            else if (tid == 4)  InterlockedAdd(grad_2d_x_iter[g_idx],   fx);
+            else if (tid == 5)  InterlockedAdd(grad_2d_y_iter[g_idx],   fx);
+            else if (tid == 6)  InterlockedAdd(grad_mean_x[g_idx],      fx);
+            else if (tid == 7)  InterlockedAdd(grad_mean_y[g_idx],      fx);
+            else if (tid == 8)  InterlockedAdd(grad_mean_z[g_idx],      fx);
+            else if (tid == 9)  InterlockedAdd(grad_log_scale_x[g_idx], fx);
+            else if (tid == 10) InterlockedAdd(grad_log_scale_y[g_idx], fx);
+            else if (tid == 11) InterlockedAdd(grad_log_scale_z[g_idx], fx);
+            else if (tid == 12) InterlockedAdd(grad_rot_w[g_idx],       fx);
+            else if (tid == 13) InterlockedAdd(grad_rot_x[g_idx],       fx);
+            else if (tid == 14) InterlockedAdd(grad_rot_y[g_idx],       fx);
+            else if (tid == 15) InterlockedAdd(grad_rot_z[g_idx],       fx);
         }
 
         GroupMemoryBarrierWithGroupSync();
