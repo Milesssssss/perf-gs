@@ -42,6 +42,7 @@ groupshared float4 gs_dLdC[TILE_AREA];   // rgb = dL_dC, a = dL_dA
 groupshared float  gs_Tfinal[TILE_AREA];
 groupshared float3 gs_Ctotal[TILE_AREA];
 groupshared uint   gs_processed[TILE_AREA];
+groupshared uint   gs_max_processed;     // deepest splat any pixel processed
 
 [shader("compute")]
 [numthreads(256, 1, 1)]
@@ -122,9 +123,20 @@ void backwardRasterizePerSplat(
     }
     GroupMemoryBarrierWithGroupSync();
 
+    // Deepest splat any pixel in this tile actually processed. Pixels
+    // early-break (forward T < 1e-4), so max_processed <= tile_count and is
+    // usually far smaller in dense tiles. Buckets beyond ceil(max/P) have
+    // zero contributing pixels -> skip them entirely (saturation early-out).
+    if (tid == 0u) gs_max_processed = 0u;
+    GroupMemoryBarrierWithGroupSync();
+    InterlockedMax(gs_max_processed, gs_processed[tid]);
+    GroupMemoryBarrierWithGroupSync();
+    uint max_processed = gs_max_processed;
+
     uint lane = WaveGetLaneIndex();          // splat within the bucket [0,32)
     uint warp_idx = tid / WaveGetLaneCount(); // which bucket (offset from base)
-    uint num_buckets = (tile_count + RASTER_BUCKET_SIZE - 1u) / RASTER_BUCKET_SIZE;
+    // Truncate to the buckets some pixel actually reached (vs. tile_count).
+    uint num_buckets = (max_processed + RASTER_BUCKET_SIZE - 1u) / RASTER_BUCKET_SIZE;
 
     // --- Bucket loop: 8 warps handle 8 consecutive buckets per iteration ---
     for (uint base_bucket = 0u; base_bucket < num_buckets; base_bucket += NUM_WARPS)
@@ -160,14 +172,28 @@ void backwardRasterizePerSplat(
         float3 c_i = shDC(sh0);
 
         uint cp_bucket = tile_bucket_base + bucket;
+        // First splat index of this bucket. A pixel contributes to this
+        // bucket only if its ray reached at least this splat
+        // (processed[p] > bucket_first_splat); otherwise ALL 32 lanes are
+        // masked for that pixel and it produces zero gradient. `bucket` is
+        // warp-uniform, so this skip is warp-uniform -> the wave scans below
+        // stay valid (all 32 lanes continue together).
+        uint bucket_first_splat = bucket * RASTER_BUCKET_SIZE;
 
         // --- Pixel loop: all 32 lanes lockstep so wave scans are valid ---
         for (uint p = 0u; p < TILE_AREA; ++p)
         {
+            // Per-bucket saturation skip: if pixel p's ray terminated before
+            // this bucket, no lane contributes -> skip the eval + wave ops
+            // entirely. Warp-uniform (bucket + gs_processed[p] are uniform
+            // across the 32 lanes), so this does not desync the wave scans.
+            uint processed = gs_processed[p];
+            if (processed <= bucket_first_splat)
+                continue;
+
             // Early-break mask: pixel p only contributes gradient to splats
             // it actually processed (local_splat < processed[p]). Masked
             // lanes contribute alpha=0 -> scan identity (oma=1, cαT=0).
-            uint processed = gs_processed[p];
             bool contributes = splat_valid && (local_splat < processed);
 
             // Read the bucket checkpoint for pixel p (in-front-of-bucket
