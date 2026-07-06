@@ -175,4 +175,63 @@ void computeExtremumOffsets(EllipseParams e, out float x_d_args, out float y_d_a
     y_d_args = sqrt(max((e.b * e.b * e.t) / (ac_minus_bb * max(e.c, 1e-20)), 0.0));
 }
 
+// ----- Tile-level enumeration (shared by bin_count and bin_emit) -----
+//
+// The two binning kernels MUST enumerate the IDENTICAL set of tiles: bin_count
+// sizes the prefix-scan offsets, bin_emit writes into them. If emit writes a
+// different tile count than was counted, the scan offsets no longer line up
+// and the radix sort reads garbage. To make agreement structural rather than
+// hoped-for, both kernels call these helpers with the same inputs (bin_emit
+// reads the SAME stored projected_2d bin_count wrote, so mean/cov/opacity are
+// bit-identical) — the only float-sensitive work lives here, once.
+
+static const uint ACCUTILE_TILE_SIZE = 16u;
+
+// Iterate the shorter tile-axis (Speedy-Splat: fewer strips = less work, and
+// each strip prunes the corner tiles the SnugBox rectangle would over-count).
+// Returns true to iterate rows (loop ty, range tx); false to iterate columns.
+bool accuTileIterateRows(uint2 tile_min, uint2 tile_max)
+{
+    uint nx = tile_max.x - tile_min.x + 1u;
+    uint ny = tile_max.y - tile_min.y + 1u;
+    return ny <= nx;
+}
+
+// Inclusive tx range the ellipse actually crosses within tile row `ty`.
+// Returns false when the ellipse misses every tile in the row.
+bool accuTileRowTiles(
+    EllipseParams e, float2 mean_2d,
+    float2 bbox_min, float2 bbox_max, float y_d_args,
+    uint ty, uint tile_min_x, uint tile_max_x,
+    out uint tx_lo, out uint tx_hi)
+{
+    tx_lo = 0u; tx_hi = 0u;
+    float row_y_bot = float(ty * ACCUTILE_TILE_SIZE);
+    float row_y_top = float((ty + 1u) * ACCUTILE_TILE_SIZE);
+    float2 xr = accuTileRowXRange(e, mean_2d.y, bbox_min.x, bbox_max.x,
+                                  y_d_args, mean_2d, row_y_bot, row_y_top);
+    if (xr.x > xr.y) return false;   // sentinel: no intersection this row
+    tx_lo = max(uint(xr.x) / ACCUTILE_TILE_SIZE, tile_min_x);
+    tx_hi = min(uint(xr.y) / ACCUTILE_TILE_SIZE, tile_max_x);
+    return tx_lo <= tx_hi;
+}
+
+// Inclusive ty range the ellipse actually crosses within tile column `tx`.
+bool accuTileColTiles(
+    EllipseParams e, float2 mean_2d,
+    float2 bbox_min, float2 bbox_max, float x_d_args,
+    uint tx, uint tile_min_y, uint tile_max_y,
+    out uint ty_lo, out uint ty_hi)
+{
+    ty_lo = 0u; ty_hi = 0u;
+    float col_x_left  = float(tx * ACCUTILE_TILE_SIZE);
+    float col_x_right = float((tx + 1u) * ACCUTILE_TILE_SIZE);
+    float2 yr = accuTileColYRange(e, mean_2d.x, bbox_min.y, bbox_max.y,
+                                  x_d_args, mean_2d, col_x_left, col_x_right);
+    if (yr.x > yr.y) return false;
+    ty_lo = max(uint(yr.x) / ACCUTILE_TILE_SIZE, tile_min_y);
+    ty_hi = min(uint(yr.y) / ACCUTILE_TILE_SIZE, tile_max_y);
+    return ty_lo <= ty_hi;
+}
+
 #endif // TRAINER_GAUSSIAN_ACCUTILE_SLANG

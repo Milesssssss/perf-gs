@@ -153,7 +153,7 @@ def main() -> None:
     ap.add_argument("--height", type=int, default=None,
                     help="force render height (overrides --downsample)")
     ap.add_argument("--preview-every", type=int, default=0)
-    ap.add_argument("--log-every", type=int, default=10000) 
+    ap.add_argument("--log-every", type=int, default=0) 
     ap.add_argument("--densify-every", type=int, default=100)
     ap.add_argument("--densify-from", type=int, default=500)
     ap.add_argument("--densify-to", type=int, default=15000)
@@ -768,6 +768,23 @@ def main() -> None:
         if profile_json and args.profile_every > 0 and it % args.profile_every == 0:
             run_profiling_step(pipeline, scene, n_cams, rng, lr_mean_init, it, decay)
 
+    # Pure training wall-clock: measured right after the loop, BEFORE the
+    # final metrics pass and any teardown, so it's a clean before/after
+    # benchmark of the training loop itself. Drain the GPU queue first —
+    # queue-depth backpressure lets the CPU run ahead, so without this the
+    # timer would miss in-flight GPU work.
+    pipeline.device.wait_for_idle()
+    train_wall_s = time.time() - t_start
+    completed_iters = it
+    print(f"[train] loop done: {completed_iters} iters in {train_wall_s:.1f}s "
+          f"({completed_iters / max(train_wall_s, 1e-9):.1f} it/s)")
+    log_json.write(json.dumps({
+        "event": "train_complete",
+        "iters": completed_iters,
+        "train_wall_s": train_wall_s,
+        "it_per_s": completed_iters / max(train_wall_s, 1e-9),
+    }) + "\n")
+
     if profile_window is not None:
         try:
             profile_window.close()
@@ -810,6 +827,11 @@ def main() -> None:
     total_mse_srgb = 0.0
     total_mse_srgb_mask = 0.0
     n_mask_used = 0
+
+    #render all cameras in the scene and store them as PNGs in the run_dir/cams/cam_XX/ folder, and compute PSNR/MSE metrics
+
+    _render_all_cameras(pipeline, scene, args.iters, cams_dir)
+
     for cam_i, entry in enumerate(scene.images):
         pipeline.render(entry.camera)
         r_lin = pipeline.read_output_image()[..., :3]
@@ -853,6 +875,10 @@ def main() -> None:
         "per_cam": per_cam,
         "n_cams": n_cams,
         "iters": args.iters,
+        # Pure training-loop wall-clock (excludes this final metrics pass),
+        # captured right after the loop with the GPU drained.
+        "train_wall_s": train_wall_s,
+        "train_it_per_s": completed_iters / max(train_wall_s, 1e-9),
         "final_n_gaussians": int(pipeline.buffers.num_gaussians_counter.to_numpy().view(np.uint32)[0]),
     }
     (run_dir / "final_psnr.json").write_text(json.dumps(summary, indent=2))

@@ -69,15 +69,49 @@ void binEmit(
     uint write_slot = tile_offset_per_gaussian[gid];
     uint key_lo = depthToSortable(proj.depth_vs);
 
-    for (uint ty = tile_min.y; ty <= tile_max.y; ++ty)
+    // AccuTile: emit only the tiles the ellipse actually crosses. This walk
+    // MUST visit the same tiles bin_count summed (same stored projection →
+    // bit-identical ellipse), or write_slot overruns/underruns the scanned
+    // offset and the sort reads garbage. Shared helpers keep the two in lock
+    // step; see accutile.slang.
+    EllipseParams e;
+    if (!computeEllipseParams(cov2d, g.opacity, e))
+        return;
+    float x_d_args, y_d_args;
+    computeExtremumOffsets(e, x_d_args, y_d_args);
+
+    if (accuTileIterateRows(tile_min, tile_max))
+    {
+        for (uint ty = tile_min.y; ty <= tile_max.y; ++ty)
+        {
+            uint tx_lo, tx_hi;
+            if (!accuTileRowTiles(e, mean_2d, bbox_min, bbox_max, y_d_args,
+                                  ty, tile_min.x, tile_max.x, tx_lo, tx_hi))
+                continue;
+            for (uint tx = tx_lo; tx <= tx_hi; ++tx)
+            {
+                keys_hi[write_slot] = ty * num_tiles.x + tx;
+                keys_lo[write_slot] = key_lo;
+                values[write_slot] = gid;
+                write_slot++;
+            }
+        }
+    }
+    else
     {
         for (uint tx = tile_min.x; tx <= tile_max.x; ++tx)
         {
-            uint tile_id = ty * num_tiles.x + tx;
-            keys_hi[write_slot] = tile_id;
-            keys_lo[write_slot] = key_lo;
-            values[write_slot] = gid;
-            write_slot++;
+            uint ty_lo, ty_hi;
+            if (!accuTileColTiles(e, mean_2d, bbox_min, bbox_max, x_d_args,
+                                  tx, tile_min.y, tile_max.y, ty_lo, ty_hi))
+                continue;
+            for (uint ty = ty_lo; ty <= ty_hi; ++ty)
+            {
+                keys_hi[write_slot] = ty * num_tiles.x + tx;
+                keys_lo[write_slot] = key_lo;
+                values[write_slot] = gid;
+                write_slot++;
+            }
         }
     }
 }

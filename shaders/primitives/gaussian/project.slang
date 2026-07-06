@@ -1,5 +1,5 @@
+//[PreferRecompute]
 [Differentiable]
-[PreferRecompute]
 void projectGaussian3DTo2D(
     float3 mean,
     float3 log_scale,

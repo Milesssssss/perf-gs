@@ -233,6 +233,13 @@ class Pipeline:
         # per-pixel backward.slang, kept for side-by-side comparison / fallback.
         self.use_persplat_backward = True
 
+        # Rotating phase for the transposed backward's stochastic pixel
+        # subsampling (BACKWARD_PIXEL_STRIDE in backward_persplat.slang).
+        # Incremented each backward so the visited pixel subset alternates;
+        # a plain int is fine (the shader takes it mod STRIDE). Irrelevant
+        # when STRIDE == 1.
+        self._backward_pixel_phase = 0
+
     def on_hot_reload(self) -> None:
         """Refresh reflection-dependent objects after device.reload_all_programs().
         Camera buffer is raw bytes so it survives reload. Only the module
@@ -704,7 +711,11 @@ class Pipeline:
                     grad_color_b=gb["color_b"].storage,
                     grad_2d_x_iter=b.grad_2d_x_iter.storage,
                     grad_2d_y_iter=b.grad_2d_y_iter.storage,
+                    # SGD pixel-subsampling phase; rotates each backward so the
+                    # visited subset alternates (no-op at BACKWARD_PIXEL_STRIDE=1).
+                    pixel_phase=self._backward_pixel_phase,
                 )
+                self._backward_pixel_phase += 1
             else:
                 self._dispatch(self.k_backward,
                     thread_count=[b.num_tiles_x * 16, b.num_tiles_y * 16, 1],

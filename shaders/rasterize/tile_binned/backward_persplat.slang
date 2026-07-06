@@ -35,6 +35,19 @@ static const uint NUM_WARPS = TILE_AREA / 32u;         // 8 (assumes wave=32)
 static const float ALPHA_MAX = 0.99;
 static const float ALPHA_MIN_TRACK = 1.0 / 255.0;
 
+// Stochastic pixel subsampling (SGD over the tile's pixels). When > 1, each
+// backward visits only 1/STRIDE of the tile's pixels, cutting the per-pixel
+// eval + wave-scan work. To stay an UNBIASED gradient estimator:
+//   - the visited subset alternates each iteration via `pixel_phase` (host
+//     toggles 0..STRIDE-1), so every pixel contributes in expectation;
+//   - the accumulated per-splat gradient is scaled by STRIDE to compensate
+//     for summing only 1/STRIDE of the pixels (keeps the LR unchanged).
+// STRIDE == 1 (default) is the exact full-pixel backward: the skip folds
+// away and the scale is 1.0, so there is zero overhead. Only the per-PIXEL
+// cost is reduced; the per-splat projection backward + atomics run once per
+// splat regardless, so speedup is sub-linear in STRIDE.
+static const uint BACKWARD_PIXEL_STRIDE = 1u;
+
 // Per-pixel constants staged in LDS once (avoids re-reading global textures
 // on every bucket). dL_dC (rgb) + dL_dA (a) + T_final + C_total (rgb) = 8
 // floats/pixel * 256 = 2048 floats = 8 KB.
@@ -76,7 +89,11 @@ void backwardRasterizePerSplat(
     RWStructuredBuffer<int64_t> grad_color_g,
     RWStructuredBuffer<int64_t> grad_color_b,
     RWStructuredBuffer<int64_t> grad_2d_x_iter,
-    RWStructuredBuffer<int64_t> grad_2d_y_iter)
+    RWStructuredBuffer<int64_t> grad_2d_y_iter,
+    // Per-iteration phase in [0, BACKWARD_PIXEL_STRIDE) selecting which pixel
+    // subset this backward visits. Host toggles it each iter so the SGD is
+    // unbiased. Ignored when BACKWARD_PIXEL_STRIDE == 1.
+    uniform uint pixel_phase)
 {
     uint tid = gtid.x;
     uint2 frame_dim_px = uint2(camera[0].image_size);
@@ -191,6 +208,14 @@ void backwardRasterizePerSplat(
             if (processed <= bucket_first_splat)
                 continue;
 
+            // Stochastic pixel subsampling: visit only pixels whose index is
+            // congruent to the current phase mod STRIDE. Depends solely on p
+            // and pixel_phase (both warp-uniform), so all 32 lanes skip
+            // together -> wave scans below stay valid. Folds away at STRIDE=1.
+            if (BACKWARD_PIXEL_STRIDE > 1u &&
+                (p % BACKWARD_PIXEL_STRIDE) != (pixel_phase % BACKWARD_PIXEL_STRIDE))
+                continue;
+
             // Early-break mask: pixel p only contributes gradient to splats
             // it actually processed (local_splat < processed[p]). Masked
             // lanes contribute alpha=0 -> scan identity (oma=1, cαT=0).
@@ -278,6 +303,23 @@ void backwardRasterizePerSplat(
         // --- Per-splat projection backward + atomics (one lane per splat) ---
         if (splat_valid)
         {
+            // SGD scale: we summed only 1/STRIDE of the pixels, so scale the
+            // accumulated gradient up by STRIDE to make it an unbiased
+            // estimate of the full-pixel sum (keeps the LR unchanged). All
+            // six accumulators — including the densification-tracking abs
+            // sums — are scaled together so downstream thresholds see the
+            // same magnitude as the full backward. Folds to *1.0 at STRIDE=1.
+            if (BACKWARD_PIXEL_STRIDE > 1u)
+            {
+                float s = float(BACKWARD_PIXEL_STRIDE);
+                acc_mean2d *= s;
+                acc_cov2d  *= s;
+                acc_opacity *= s;
+                acc_color  *= s;
+                acc_absx *= s;
+                acc_absy *= s;
+            }
+
             var dp_mean      = diffPair(g.mean);
             var dp_log_scale = diffPair(g.log_scale);
             var dp_rot_quat  = diffPair(g.rot_quat);

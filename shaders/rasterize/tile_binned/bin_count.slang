@@ -77,6 +77,36 @@ void binCount(
     uint2 tile_max = uint2(bbox_max) / TILE_SIZE;
     tile_max = min(tile_max, num_tiles - 1);
 
-    uint count = (tile_max.x - tile_min.x + 1) * (tile_max.y - tile_min.y + 1);
+    // AccuTile: count only the tiles the ellipse actually crosses, not every
+    // tile in the SnugBox rectangle. Iterate the shorter axis, summing the
+    // per-strip tile range. bin_emit re-runs the IDENTICAL walk (same stored
+    // projection) so its write count matches this exactly — see accutile.slang.
+    EllipseParams e;
+    if (!computeEllipseParams(cov2d, g.opacity, e))
+        return;
+    float x_d_args, y_d_args;
+    computeExtremumOffsets(e, x_d_args, y_d_args);
+
+    uint count = 0u;
+    if (accuTileIterateRows(tile_min, tile_max))
+    {
+        for (uint ty = tile_min.y; ty <= tile_max.y; ++ty)
+        {
+            uint tx_lo, tx_hi;
+            if (accuTileRowTiles(e, mean_2d, bbox_min, bbox_max, y_d_args,
+                                 ty, tile_min.x, tile_max.x, tx_lo, tx_hi))
+                count += tx_hi - tx_lo + 1u;
+        }
+    }
+    else
+    {
+        for (uint tx = tile_min.x; tx <= tile_max.x; ++tx)
+        {
+            uint ty_lo, ty_hi;
+            if (accuTileColTiles(e, mean_2d, bbox_min, bbox_max, x_d_args,
+                                 tx, tile_min.y, tile_max.y, ty_lo, ty_hi))
+                count += ty_hi - ty_lo + 1u;
+        }
+    }
     tile_count_per_gaussian[gid] = count;
 }

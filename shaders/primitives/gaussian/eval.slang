@@ -16,8 +16,8 @@
 
 #include "../../common/math.slang"
 
+//[PreferRecompute]
 [Differentiable]
-[PreferRecompute]
 float evalGaussian2DFromCov(
     no_diff float2 pixel,
     float2 mean_2d,
