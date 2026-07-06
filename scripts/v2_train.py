@@ -141,7 +141,7 @@ def run_profiling_step(pipeline: Pipeline, scene, n_cams: int, rng, lr_mean_init
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--scene", type=str, default="datasets/360_v2/garden")
+    ap.add_argument("--scene", type=str, default="datasets/360_v2/bicycle")
     #ap.add_argument("--scene", type=str, default="datasets/synthetic/suzanne_blender")
 
     ap.add_argument("--iters", type=int, default=30000)
@@ -198,7 +198,7 @@ def main() -> None:
     ap.add_argument("--stream-max-splats", type=int, default=2_000_000,
                     help="capacity of the live-viewer shared-memory stream (splats). "
                          "Snapshots beyond this are truncated for viewing only.")
-    ap.add_argument("--stream-every", type=int, default=80,
+    ap.add_argument("--stream-every", type=int, default=100000,
                     help="stream a gaussian snapshot to the live viewer every N iters "
                          "(each push does a GPU readback; keep coarse).")
     ap.add_argument("--backend", type=str, default="vulkan", choices=["vulkan", "d3d12"])

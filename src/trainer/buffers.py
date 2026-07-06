@@ -82,6 +82,20 @@ class GaussianBuffers:
     tile_start: spy.NDBuffer                # uint[num_tiles]
     tile_end: spy.NDBuffer                  # uint[num_tiles]
 
+    # Ragged (CSR) forward-checkpoint state for the transposed backward.
+    # bucket_count       : uint[num_tiles], ceil(tile_len / P) per tile
+    # bucket_offsets     : uint[num_tiles], exclusive scan of bucket_count
+    #                      (base bucket index of each tile in the flat buffer)
+    # bucket_offset_total: uint[1], total buckets used this frame (scan total)
+    # raster_checkpoints : uint2[max_buckets * 256], (T,R,G,B) fp16 per pixel
+    #                      per bucket. max_buckets = ceil(max_sort_pairs/P)
+    #                      + num_tiles (tight upper bound on sum of per-tile
+    #                      ceil(len/P), no readback needed).
+    bucket_count: spy.NDBuffer
+    bucket_offsets: spy.NDBuffer
+    bucket_offset_total: spy.NDBuffer
+    raster_checkpoints: spy.NDBuffer
+
     output_image: spy.Texture          # rgba32_float, UAV+SRV
     output_transmittance: spy.Texture  # r32_float
     gaussian_count_per_pixel: spy.Texture  # r32_uint
@@ -212,6 +226,19 @@ def allocate(
     tile_start = spy.NDBuffer(device=device, dtype="uint", shape=(num_tiles,))
     tile_end = spy.NDBuffer(device=device, dtype="uint", shape=(num_tiles,))
 
+    # Ragged forward-checkpoint state. _RASTER_BUCKET_SIZE must match
+    # RASTER_BUCKET_SIZE in checkpoint.slang.
+    _RASTER_BUCKET_SIZE = 128
+    # Tight upper bound on total buckets: sum_t ceil(len_t / P) <
+    # (sum_t len_t)/P + num_tiles = max_sort_pairs/P + num_tiles.
+    max_buckets = (max_sort_pairs + _RASTER_BUCKET_SIZE - 1) // _RASTER_BUCKET_SIZE + num_tiles
+    bucket_count = spy.NDBuffer(device=device, dtype="uint", shape=(num_tiles,))
+    bucket_offsets = spy.NDBuffer(device=device, dtype="uint", shape=(num_tiles,))
+    bucket_offset_total = spy.NDBuffer(device=device, dtype="uint", shape=(1,))
+    raster_checkpoints = spy.NDBuffer(
+        device=device, dtype="uint2", shape=(max_buckets * 256,),
+    )
+
     def _tex(fmt: spy.Format, label: str, usage: spy.TextureUsage | None = None) -> spy.Texture:
         return device.create_texture(
             type=spy.TextureType.texture_2d,
@@ -324,6 +351,10 @@ def allocate(
         radix_dispatch_args=radix_dispatch_args,
         tile_start=tile_start,
         tile_end=tile_end,
+        bucket_count=bucket_count,
+        bucket_offsets=bucket_offsets,
+        bucket_offset_total=bucket_offset_total,
+        raster_checkpoints=raster_checkpoints,
         output_image=output_image,
         output_transmittance=output_transmittance,
         gaussian_count_per_pixel=gaussian_count_per_pixel,

@@ -124,7 +124,7 @@ class Pipeline:
         self.height = height
         self.max_splats = max_splats
         if max_sort_pairs is None:
-            max_sort_pairs = max(buffers.DEFAULT_MAX_SORT_PAIRS, max_splats * 16)
+            max_sort_pairs = max(buffers.DEFAULT_MAX_SORT_PAIRS, max_splats * 2)
         self.max_sort_pairs = max_sort_pairs
 
         self.module = _module_for_reflection(device)
@@ -144,12 +144,14 @@ class Pipeline:
         self.k_bin_emit = mk(tb / "bin_emit.slang", "binEmit")
         self.k_clear_tile_ranges = mk(tb / "tile_ranges.slang", "clearTileRanges")
         self.k_identify_tile_ranges = mk(tb / "tile_ranges.slang", "identifyTileRanges")
+        self.k_bucket_count = mk(tb / "bucket_count.slang", "bucketCount")
         self.k_forward = mk(tb / "forward.slang", "forwardRasterize")
         self.k_loss = mk(loss / "l2_linear.slang", "computeLossGrad")
         self.k_ssim_maps = mk(loss / "ssim_loss.slang", "ssimComputeMaps")
         self.k_ssim_grad = mk(loss / "ssim_loss.slang", "ssimGradient")
         self.k_regularization = mk(loss / "regularization.slang", "addRegularization")
         self.k_backward = mk(tb / "backward.slang", "backwardRasterize")
+        self.k_backward_persplat = mk(tb / "backward_persplat.slang", "backwardRasterizePerSplat")
 
         sort = SHADERS_DIR / "sort"
         self.k_radix_init_global_hist = mk(sort / "device_radix_sort.slang", "initGlobalHist")
@@ -223,6 +225,13 @@ class Pipeline:
 
         # SSIM loss mixing. 0 = pure L2, >0 = L1+SSIM blend (3DGS default 0.2).
         self.lambda_ssim = 0.2
+
+        # Backward variant selector. True = transposed per-splat
+        # backward_persplat.slang (default; splat-parallel with checkpoint
+        # reconstruction, validated gradient-equivalent to the per-pixel
+        # kernel in tests/test_backward_persplat.py). False = the original
+        # per-pixel backward.slang, kept for side-by-side comparison / fallback.
+        self.use_persplat_backward = True
 
     def on_hot_reload(self) -> None:
         """Refresh reflection-dependent objects after device.reload_all_programs().
@@ -558,6 +567,25 @@ class Pipeline:
         # cached it in self._sorted_values for the backward.
         self._sorted_values = sorted_v
 
+        # Phase 5b: per-tile bucket count + CSR offset scan for the ragged
+        # forward-checkpoint buffer consumed by the transposed backward.
+        # bucket_offsets[t] = exclusive scan of ceil(tile_len[t] / P);
+        # its total (buckets used this frame) goes to bucket_offset_total.
+        with self._marker_group("bucket_scan", (0.4, 0.6, 0.7)):
+            self._dispatch(self.k_bucket_count,
+                thread_count=[num_tiles, 1, 1],
+                tile_start=b.tile_start.storage,
+                tile_end=b.tile_end.storage,
+                bucket_count=b.bucket_count.storage,
+                num_tiles=num_tiles,
+            )
+            self._scan(
+                n=num_tiles,
+                in_buf=b.bucket_count,
+                out_buf=b.bucket_offsets,
+                total_buf=b.bucket_offset_total,
+            )
+
         # Phase 6: forward rasterize.
         with self._marker_group("rasterize", (0.2, 0.8, 0.3)):
             self._dispatch(self.k_forward,
@@ -568,6 +596,8 @@ class Pipeline:
                 tile_end=b.tile_end.storage,
                 sorted_gaussian_ids=sorted_v.storage,
                 camera=self._camera_buffer,
+                bucket_offsets=b.bucket_offsets.storage,
+                raster_checkpoints=b.raster_checkpoints.storage,
                 output_image=b.output_image,
                 output_transmittance=b.output_transmittance,
                 gaussian_count_per_pixel=b.gaussian_count_per_pixel,
@@ -640,35 +670,71 @@ class Pipeline:
         # ping-pong slots. We cache it during _run_forward.
         sorted_values = getattr(self, "_sorted_values", b.sort_values_a)
         with self._marker_group("rasterize_backward", (0.9, 0.3, 0.3)):
-            self._dispatch(self.k_backward,
-                thread_count=[b.num_tiles_x * 16, b.num_tiles_y * 16, 1],
-                gaussians=b.gaussians.storage,
-                projected_2d=b.projected_2d.storage,
-                tile_start=b.tile_start.storage,
-                tile_end=b.tile_end.storage,
-                sorted_gaussian_ids=sorted_values.storage,
-                camera=self._camera_buffer,
-                output_image=b.output_image,
-                output_transmittance=b.output_transmittance,
-                gaussian_count_per_pixel=b.gaussian_count_per_pixel,
-                dL_dC_texture=b.dL_dC_texture,
-                grad_mean_x=gb["mean_x"].storage,
-                grad_mean_y=gb["mean_y"].storage,
-                grad_mean_z=gb["mean_z"].storage,
-                grad_log_scale_x=gb["log_scale_x"].storage,
-                grad_log_scale_y=gb["log_scale_y"].storage,
-                grad_log_scale_z=gb["log_scale_z"].storage,
-                grad_rot_w=gb["rot_w"].storage,
-                grad_rot_x=gb["rot_x"].storage,
-                grad_rot_y=gb["rot_y"].storage,
-                grad_rot_z=gb["rot_z"].storage,
-                grad_opacity=gb["opacity"].storage,
-                grad_color_r=gb["color_r"].storage,
-                grad_color_g=gb["color_g"].storage,
-                grad_color_b=gb["color_b"].storage,
-                grad_2d_x_iter=b.grad_2d_x_iter.storage,
-                grad_2d_y_iter=b.grad_2d_y_iter.storage,
-            )
+            if self.use_persplat_backward:
+                # Transposed per-splat backward: one workgroup (256 threads)
+                # per tile, splat-parallel with checkpoint reconstruction.
+                num_tiles = b.num_tiles_x * b.num_tiles_y
+                self._dispatch(self.k_backward_persplat,
+                    thread_count=[num_tiles * 256, 1, 1],
+                    gaussians=b.gaussians.storage,
+                    projected_2d=b.projected_2d.storage,
+                    tile_start=b.tile_start.storage,
+                    tile_end=b.tile_end.storage,
+                    sorted_gaussian_ids=sorted_values.storage,
+                    bucket_offsets=b.bucket_offsets.storage,
+                    raster_checkpoints=b.raster_checkpoints.storage,
+                    camera=self._camera_buffer,
+                    output_image=b.output_image,
+                    output_transmittance=b.output_transmittance,
+                    gaussian_count_per_pixel=b.gaussian_count_per_pixel,
+                    dL_dC_texture=b.dL_dC_texture,
+                    grad_mean_x=gb["mean_x"].storage,
+                    grad_mean_y=gb["mean_y"].storage,
+                    grad_mean_z=gb["mean_z"].storage,
+                    grad_log_scale_x=gb["log_scale_x"].storage,
+                    grad_log_scale_y=gb["log_scale_y"].storage,
+                    grad_log_scale_z=gb["log_scale_z"].storage,
+                    grad_rot_w=gb["rot_w"].storage,
+                    grad_rot_x=gb["rot_x"].storage,
+                    grad_rot_y=gb["rot_y"].storage,
+                    grad_rot_z=gb["rot_z"].storage,
+                    grad_opacity=gb["opacity"].storage,
+                    grad_color_r=gb["color_r"].storage,
+                    grad_color_g=gb["color_g"].storage,
+                    grad_color_b=gb["color_b"].storage,
+                    grad_2d_x_iter=b.grad_2d_x_iter.storage,
+                    grad_2d_y_iter=b.grad_2d_y_iter.storage,
+                )
+            else:
+                self._dispatch(self.k_backward,
+                    thread_count=[b.num_tiles_x * 16, b.num_tiles_y * 16, 1],
+                    gaussians=b.gaussians.storage,
+                    projected_2d=b.projected_2d.storage,
+                    tile_start=b.tile_start.storage,
+                    tile_end=b.tile_end.storage,
+                    sorted_gaussian_ids=sorted_values.storage,
+                    camera=self._camera_buffer,
+                    output_image=b.output_image,
+                    output_transmittance=b.output_transmittance,
+                    gaussian_count_per_pixel=b.gaussian_count_per_pixel,
+                    dL_dC_texture=b.dL_dC_texture,
+                    grad_mean_x=gb["mean_x"].storage,
+                    grad_mean_y=gb["mean_y"].storage,
+                    grad_mean_z=gb["mean_z"].storage,
+                    grad_log_scale_x=gb["log_scale_x"].storage,
+                    grad_log_scale_y=gb["log_scale_y"].storage,
+                    grad_log_scale_z=gb["log_scale_z"].storage,
+                    grad_rot_w=gb["rot_w"].storage,
+                    grad_rot_x=gb["rot_x"].storage,
+                    grad_rot_y=gb["rot_y"].storage,
+                    grad_rot_z=gb["rot_z"].storage,
+                    grad_opacity=gb["opacity"].storage,
+                    grad_color_r=gb["color_r"].storage,
+                    grad_color_g=gb["color_g"].storage,
+                    grad_color_b=gb["color_b"].storage,
+                    grad_2d_x_iter=b.grad_2d_x_iter.storage,
+                    grad_2d_y_iter=b.grad_2d_y_iter.storage,
+                )
         # Fold the per-iter 2D grad vector into the window-level
         # mag + visibility accumulators. Gsplat semantics: the signal
         # driving densification is the NORM OF THE SUM of per-pixel
@@ -897,9 +963,14 @@ def _linear_to_srgb_np(c: np.ndarray) -> np.ndarray:
 
 def _scan(self: Pipeline, n: int,
           in_buf: spy.NDBuffer | None = None,
-          out_buf: spy.NDBuffer | None = None) -> None:
+          out_buf: spy.NDBuffer | None = None,
+          total_buf: spy.NDBuffer | None = None) -> None:
     """Run a multi-level Blelloch scan on ``in_buf`` into ``out_buf``,
-    writing the total into ``scan_total[0]``.
+    writing the total into ``total_buf[0]`` (default ``scan_total[0]``).
+
+    ``total_buf`` lets a caller redirect the scan total to a dedicated
+    buffer instead of the shared ``scan_total`` (which holds num_rendered
+    during the forward pass and must not be clobbered by a side scan).
 
     Supports up to SCAN_BLOCK_SIZE^3 (~1 billion) elements via 3 levels.
     """
@@ -908,6 +979,8 @@ def _scan(self: Pipeline, n: int,
         in_buf = b.valid_mask_buffer
     if out_buf is None:
         out_buf = b.scan_buffer
+    if total_buf is None:
+        total_buf = b.scan_total
 
     num_blocks = max(1, (n + SCAN_BLOCK_SIZE - 1) // SCAN_BLOCK_SIZE)
 
@@ -925,7 +998,7 @@ def _scan(self: Pipeline, n: int,
         self._dispatch(self.k_scan_block_sums,
             thread_count=[SCAN_BLOCK_SIZE, 1, 1],
             block_sums=b.scan_block_sums.storage,
-            total_out=b.scan_total.storage,
+            total_out=total_buf.storage,
             num_blocks=num_blocks,
         )
     else:
@@ -942,7 +1015,7 @@ def _scan(self: Pipeline, n: int,
         self._dispatch(self.k_scan_block_sums,
             thread_count=[SCAN_BLOCK_SIZE, 1, 1],
             block_sums=b.scan_block_sums_l2.storage,
-            total_out=b.scan_total.storage,
+            total_out=total_buf.storage,
             num_blocks=num_l2_blocks,
         )
         self._dispatch(self.k_add_block_offsets,
