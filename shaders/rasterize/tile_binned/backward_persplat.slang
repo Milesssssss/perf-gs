@@ -60,11 +60,16 @@ groupshared uint   gs_max_processed;     // deepest splat any pixel processed
 // Per-bucket checkpoints staged in LDS. The pixel loop needs one warp-uniform
 // checkpoint per pixel: raster_checkpoints[cp_bucket*256 + p]. Issued inline it
 // was 256 broadcast global loads/bucket on the critical path -> LSU-bound. Each
-// of the NUM_WARPS warps instead batch-loads its own bucket's 256 (T,C) entries
-// here in 8 lane-coalesced loads, then reads from LDS. Cost: 8*256*8 B = 16 KB
-// (this is the dominant occupancy pressure; if it becomes the limiter the fix
-// is a 32-thread-per-bucket dispatch, which needs only 2 KB here).
-groupshared uint2  gs_checkpoints[NUM_WARPS][TILE_AREA];
+// of the NUM_WARPS warps instead batch-loads its bucket's entries here, then
+// reads from LDS.
+//
+// Only the STRIDE-subsampled pixels are ever read (the pixel loop `continue`s
+// on the rest before touching this array), so we stage ONLY those: TILE_AREA /
+// STRIDE entries per warp, compacted by k = (p - phase) / STRIDE. At STRIDE=4
+// this is 64 not 256 -> 4 KB not 16 KB, which is what lifts the shared-memory
+// occupancy cap. Folds to the full 256 at STRIDE=1 (phase=0, k=p).
+static const uint STAGED_PIXELS = TILE_AREA / BACKWARD_PIXEL_STRIDE;
+groupshared uint2  gs_checkpoints[NUM_WARPS][STAGED_PIXELS];
 
 [shader("compute")]
 [numthreads(256, 1, 1)]
@@ -223,8 +228,14 @@ void backwardRasterizePerSplat(
         if (bucket_valid)
         {
             uint cp_base = checkpointIndex(cp_bucket, 0u);
-            for (uint e = lane; e < TILE_AREA; e += RASTER_BUCKET_SIZE)
-                gs_checkpoints[warp_idx][e] = raster_checkpoints[cp_base + e];
+            uint phase = pixel_phase % BACKWARD_PIXEL_STRIDE;  // 0 at STRIDE=1
+            // Compact: LDS slot k holds pixel p = phase + k*STRIDE, i.e. exactly
+            // the pixels the loop below visits. Global reads are STRIDE-strided
+            // (mild coalescing loss) but this is once/bucket and shrinks LDS to
+            // STAGED_PIXELS, which is the point.
+            for (uint k = lane; k < STAGED_PIXELS; k += RASTER_BUCKET_SIZE)
+                gs_checkpoints[warp_idx][k] =
+                    raster_checkpoints[cp_base + phase + k * BACKWARD_PIXEL_STRIDE];
         }
         GroupMemoryBarrierWithGroupSync();
 
@@ -253,11 +264,13 @@ void backwardRasterizePerSplat(
             bool contributes = splat_valid && (local_splat < processed);
 
             // Read the bucket checkpoint for pixel p (in-front-of-bucket
-            // (T, C)) from LDS (batch-staged above). Only meaningful if the
-            // pixel reached this bucket, i.e. some lane here is active; masked
-            // lanes ignore the value.
+            // (T, C)) from LDS (batch-staged above). Only reached for visited
+            // pixels (p % STRIDE == phase), which are compacted to slot
+            // k = (p - phase) / STRIDE; folds to k = p at STRIDE=1. Only
+            // meaningful if the pixel reached this bucket; masked lanes ignore.
+            uint k_cp = (p - (pixel_phase % BACKWARD_PIXEL_STRIDE)) / BACKWARD_PIXEL_STRIDE;
             float T_ck; float3 C_ck;
-            unpackCheckpoint(gs_checkpoints[warp_idx][p], T_ck, C_ck);
+            unpackCheckpoint(gs_checkpoints[warp_idx][k_cp], T_ck, C_ck);
 
             // Pixel center for pixel-in-tile p (computed unconditionally so
             // it's in scope for the eval backward below).

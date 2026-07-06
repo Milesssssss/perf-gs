@@ -477,6 +477,8 @@ def main() -> None:
     decay = (lr_mean_final / lr_mean_init) ** (1.0 / max(args.iters, 1))
 
     t_start = time.time()
+    t_last = t_start
+    it_last = 0
     rolling_loss = None
     # Track the current live gaussian count Python-side to avoid a
     # per-iter counter readback. Updated from densify() return values.
@@ -720,7 +722,9 @@ def main() -> None:
 
 
         if it % 10 == 0:
-            print(f"iter {it}: train step done.")
+            print(f"iter {it}: train step done. It/s:" f"{(it - it_last) / max(time.time() - t_last, 1e-9):.1f}" " total training time:" f"{(time.time() - t_start) // 60:.0f}min {(time.time() - t_start) % 60:.1f}sec")
+            t_last = time.time()
+            it_last = it
 
         if it > 1 and (do_log or do_preview):
             #TODO: why is this render here and gated by the densify?
