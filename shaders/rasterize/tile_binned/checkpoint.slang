@@ -23,16 +23,15 @@
 #ifndef TRAINER_RASTER_CHECKPOINT_SLANG
 #define TRAINER_RASTER_CHECKPOINT_SLANG
 
-// Splats per bucket. Memory<->recompute dial: larger P = fewer checkpoints
-// (less VRAM). The checkpoint buffer costs (256 pixels * 8 B) / P bytes per
-// sorted splat-tile pair, so doubling P halves the buffer. The backward
-// processes a bucket as P/32 serial 32-lane chunks (RASTER_BUCKET_CHUNKS),
-// carrying the running (T, C) forward from the checkpoint across chunks, so
-// P is decoupled from the 32-lane wave and can exceed 32.
-// MUST match _RASTER_BUCKET_SIZE in src/trainer/buffers.py + pipeline.py.
-// Must be a multiple of 32 (the wave width the backward assumes).
-static const uint RASTER_BUCKET_SIZE = 128u;
-static const uint RASTER_BUCKET_CHUNKS = RASTER_BUCKET_SIZE / 32u;  // 4
+// Splats per bucket. Tied to a 32-lane wave: the transposed backward
+// processes one bucket as one 32-lane warp, using a single WavePrefixProduct
+// / WavePrefixSum across the bucket to reconstruct (T, C). P MUST equal the
+// wave width (32) — the backward's `local_splat = bucket*P + lane` with
+// lane in [0,32) only covers 32 splats per bucket, so P>32 would silently
+// drop the rest. Shrinking the checkpoint buffer must be done by capping
+// max_sort_pairs, NOT by raising P.
+// MUST match _RASTER_BUCKET_SIZE in src/trainer/buffers.py.
+static const uint RASTER_BUCKET_SIZE = 32u;
 
 // Pack (a, b) two floats into one uint as two fp16 halves (a low, b high).
 uint packHalf2(float a, float b)

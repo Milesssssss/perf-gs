@@ -228,7 +228,7 @@ def allocate(
 
     # Ragged forward-checkpoint state. _RASTER_BUCKET_SIZE must match
     # RASTER_BUCKET_SIZE in checkpoint.slang.
-    _RASTER_BUCKET_SIZE = 128
+    _RASTER_BUCKET_SIZE = 32
     # Tight upper bound on total buckets: sum_t ceil(len_t / P) <
     # (sum_t len_t)/P + num_tiles = max_sort_pairs/P + num_tiles.
     max_buckets = (max_sort_pairs + _RASTER_BUCKET_SIZE - 1) // _RASTER_BUCKET_SIZE + num_tiles
