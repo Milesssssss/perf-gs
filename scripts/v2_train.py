@@ -80,7 +80,7 @@ def main() -> None:
                     help="force render width (overrides --downsample)")
     ap.add_argument("--height", type=int, default=None,
                     help="force render height (overrides --downsample)")
-    ap.add_argument("--preview-every", type=int, default=2000)
+    ap.add_argument("--preview-every", type=int, default=0)
     ap.add_argument("--log-every", type=int, default=0)
     ap.add_argument("--render-all-every", type=int, default=0,
                     help="dump PNGs for ALL cameras every N iters. 0 (default) "
@@ -137,7 +137,7 @@ def main() -> None:
     ap.add_argument("--stream-max-splats", type=int, default=6_500_000,
                     help="capacity of the live-viewer shared-memory stream (splats). "
                          "Snapshots beyond this are truncated for viewing only.")
-    ap.add_argument("--stream-every", type=int, default=10,
+    ap.add_argument("--stream-every", type=int, default=40000,
                     help="push a gaussian snapshot to the in-process viewer every "
                          "N iters. Now a zero-copy GPU->GPU blit, so a fine cadence "
                          "is cheap (was coarse when it required a GPU->CPU readback).")
@@ -285,7 +285,16 @@ def main() -> None:
             gt_rgb = (tgt[..., :3] * 255 + 0.5).clip(0, 255).astype(np.uint8)
             Image.fromarray(gt_rgb, mode="RGB").save(gt_path)
 
-    device = create_device(backend=args.backend)
+    # Under --profile-run, compile shaders with source-level debug info so
+    # Nsight Graphics can map counters / SASS back to Slang source lines.
+    # (On Vulkan there are no PDBs; this embeds NonSemantic.Shader.DebugInfo in
+    # the SPIR-V.) Optimization stays at the default level so the profiled code
+    # is the real optimized code.
+    device = create_device(backend=args.backend,
+                           shader_debug_info=args.profile_run)
+    if args.profile_run:
+        print("[profile-run] shaders compiled with source-level debug info "
+              "(SPIR-V NonSemantic.Shader.DebugInfo) for Nsight correlation.")
 
     # In-process live viewer runs its render loop on a background thread sharing
     # this device's VkQueue, so training + viewer submits must be serialized by
@@ -404,7 +413,7 @@ def main() -> None:
     # scale. Without this, centers move ~scene_extent times too slowly and
     # cannot migrate to the surface, leaving elongated/stuck splats.
     lr_mean_init = 1.6e-4 * extent
-    lr_mean_final = lr_mean_init * 1e-2
+    lr_mean_final = 1.6e-6 * extent
     decay = (lr_mean_final / lr_mean_init) ** (1.0 / max(args.iters, 1))
 
     # Optionally hold before training so the viewer can inspect the initialized

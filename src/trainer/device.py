@@ -23,21 +23,48 @@ _BACKEND_MAP: dict[Backend, spy.DeviceType] = {
 }
 
 
-def create_device(backend: Backend = "vulkan", enable_debug: bool = False) -> spy.Device:
+def create_device(
+    backend: Backend = "vulkan",
+    enable_debug: bool = False,
+    shader_debug_info: bool = False,
+) -> spy.Device:
     """Create a SlangPy device for the requested backend.
 
     :param backend: ``"vulkan"`` or ``"d3d12"``.
     :param enable_debug: turn on backend debug layers (Vulkan validation, D3D12
         debug layer). Useful during development; off by default because the
         layer-enabled path can pull in extra loader work.
+    :param shader_debug_info: compile shaders with source-level debug info so
+        Nsight Graphics can correlate counters/SASS back to Slang source lines.
+        On Vulkan there are no PDB files (a D3D concept); the equivalent is
+        ``NonSemantic.Shader.DebugInfo`` embedded in the SPIR-V, which Slang
+        emits when the ``debug_info`` compiler option is set. Optimization is
+        left at the default level so the profiled code is still the real,
+        optimized code — only source-line mapping is added. Off by default
+        because it enlarges shader binaries and is only useful under a profiler.
     :return: a configured :class:`slangpy.Device` with ``shaders/`` on the
         Slang include path.
     """
     if backend not in _BACKEND_MAP:
         raise ValueError(f"unknown backend {backend!r}; expected one of {list(_BACKEND_MAP)}")
 
-    return spy.create_device(
+    if not shader_debug_info:
+        return spy.create_device(
+            type=_BACKEND_MAP[backend],
+            enable_debug_layers=enable_debug,
+            include_paths=[SHADERS_DIR],
+        )
+
+    # spy.create_device() doesn't expose compiler_options, so drop to the
+    # underlying spy.Device to inject debug_info while replicating the
+    # convenience wrapper's include-path setup (slangpy's builtin SHADER_PATH
+    # first, then our shaders/). Hot reload stays on to match the normal path.
+    return spy.Device(
         type=_BACKEND_MAP[backend],
         enable_debug_layers=enable_debug,
-        include_paths=[SHADERS_DIR],
+        enable_hot_reload=True,
+        compiler_options={
+            "include_paths": [spy.SHADER_PATH, str(SHADERS_DIR)],
+            "debug_info": spy.SlangDebugInfoLevel.standard,
+        },
     )

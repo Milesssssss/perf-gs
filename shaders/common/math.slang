@@ -5,14 +5,14 @@
 #define TRAINER_MATH_SLANG
 
 [Differentiable]
-[PreferRecompute]
+[PreferRecompute(SideEffectBehavior.Allow)]
 float sigmoid(float x)
 {
     return 1.0 / (1.0 + exp(-x));
 }
 
 [Differentiable]
-[PreferRecompute]
+[PreferRecompute(SideEffectBehavior.Allow)]
 float3 sigmoid3(float3 v)
 {
     return float3(sigmoid(v.x), sigmoid(v.y), sigmoid(v.z));
@@ -28,7 +28,7 @@ float3 sigmoid3(float3 v)
 static const float SH_C0 = 0.28209479177387814;
 
 [Differentiable]
-[PreferRecompute]
+[PreferRecompute(SideEffectBehavior.Allow)]
 float3 shDC(float3 sh0)
 {
     return 0.5 + SH_C0 * sh0;
@@ -38,7 +38,7 @@ float3 shDC(float3 sh0)
 // inside the function so callers can pass an un-normalized quaternion during
 // training — the normalization is part of the differentiable path.
 [Differentiable]
-[PreferRecompute]
+[PreferRecompute(SideEffectBehavior.Allow)]
 float3x3 matrixFromQuaternion(float4 q)
 {
     q = normalize(q);
@@ -54,7 +54,7 @@ float3x3 matrixFromQuaternion(float4 q)
 // 3D covariance Σ = R S Sᵀ Rᵀ, with S = diag(scale). `scale` here is the
 // already-exponentiated per-axis scale (callers pass exp(log_scale)).
 [Differentiable]
-[PreferRecompute]
+[PreferRecompute(SideEffectBehavior.Allow)]
 float3x3 buildCovariance3D(float3 scale, float4 rot_quat)
 {
     float3x3 R = matrixFromQuaternion(rot_quat);

@@ -8,7 +8,7 @@
 
 static const float ADAM_BETA1 = 0.9;
 static const float ADAM_BETA2 = 0.999;
-static const float ADAM_EPSILON = 1e-8;
+static const float ADAM_EPSILON = 1e-15;
 
 struct AdamConfig
 {
