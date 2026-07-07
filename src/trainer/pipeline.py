@@ -522,6 +522,7 @@ class Pipeline:
                 num_gaussians_counter=b.num_gaussians_counter.storage,
                 camera=self._camera_buffer,
                 projected_2d=b.projected_2d.storage,
+                blend_data=b.blend_data.storage,
                 tile_count_per_gaussian=b.tile_count_per_gaussian.storage,
                 z_near=self.z_near_cull,
                 max_splats=self.max_splats,
@@ -612,11 +613,18 @@ class Pipeline:
             )
 
     def render(self, camera: Camera) -> None:
-        self._run_forward(camera)
-        self.device.wait_for_idle()
+        # Hold gpu_lock across the whole forward + drain: when an in-process
+        # viewer shares this device, its render thread submits on the same
+        # VkQueue. Without the lock, this forward + wait_for_idle races the
+        # viewer's submits/presents (non-deterministic stall or device fault).
+        # No-op lock in single-threaded use.
+        with self.gpu_lock:
+            self._run_forward(camera)
+            self.device.wait_for_idle()
 
     def read_output_image(self) -> np.ndarray:
-        return self.buffers.output_image.to_numpy()
+        with self.gpu_lock:
+            return self.buffers.output_image.to_numpy()
 
     # ------------------------------------------------------------------
     # Training
@@ -693,8 +701,7 @@ class Pipeline:
                 num_tiles = b.num_tiles_x * b.num_tiles_y
                 self._dispatch(self.k_backward_persplat,
                     thread_count=[num_tiles * 256, 1, 1],
-                    gaussians=b.gaussians.storage,
-                    projected_2d=b.projected_2d.storage,
+                    blend_data=b.blend_data.storage,
                     tile_start=b.tile_start.storage,
                     tile_end=b.tile_end.storage,
                     sorted_gaussian_ids=sorted_values.storage,

@@ -28,6 +28,7 @@ void binCount(
     StructuredBuffer<uint> num_gaussians_counter,
     StructuredBuffer<CameraData> camera,
     RWStructuredBuffer<Projected2DGaussian> projected_2d,
+    RWStructuredBuffer<BlendData> blend_data,          // [max_splats], compact blend gather record
     RWStructuredBuffer<uint> tile_count_per_gaussian,  // [max_splats]
     uniform float z_near,
     uniform uint max_splats)
@@ -58,6 +59,19 @@ void binCount(
     proj.cov2d = cov2d;
     proj.depth_vs = depth_vs;
     projected_2d[gid] = proj;
+
+    // Pack the compact blend record here: all four fields are already in hand
+    // (mean_2d/cov2d just computed, opacity/sh0 from g), so this is a free
+    // write — no extra global loads. The blend backward gathers this 36 B
+    // record instead of the 80 B (gaussians + projected_2d) pair, cutting L2
+    // pollution on its random-order gather. Written alongside projected_2d so
+    // it covers every projected gaussian the blend could reference.
+    BlendData bd;
+    bd.mean = mean_2d;
+    bd.cov2d = cov2d;
+    bd.opacity = g.opacity;
+    bd.sh0 = g.sh0;
+    blend_data[gid] = bd;
 
     if (depth_vs < z_near) return;
 

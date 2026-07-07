@@ -46,7 +46,7 @@ static const float ALPHA_MIN_TRACK = 1.0 / 255.0;
 // away and the scale is 1.0, so there is zero overhead. Only the per-PIXEL
 // cost is reduced; the per-splat projection backward + atomics run once per
 // splat regardless, so speedup is sub-linear in STRIDE.
-static const uint BACKWARD_PIXEL_STRIDE = 4u;
+static const uint BACKWARD_PIXEL_STRIDE = 1u;
 
 // Per-pixel constants staged in LDS once (avoids re-reading global textures
 // on every bucket). dL_dC (rgb) + dL_dA (a) + T_final + C_total (rgb) = 8
@@ -76,8 +76,11 @@ groupshared uint2  gs_checkpoints[NUM_WARPS][STAGED_PIXELS];
 void backwardRasterizePerSplat(
     uint3 gid: SV_GroupID,
     uint3 gtid: SV_GroupThreadID,
-    StructuredBuffer<Gaussian3D> gaussians,
-    StructuredBuffer<Projected2DGaussian> projected_2d,
+    // Compact per-gaussian blend record (mean, cov2d, opacity, sh0), packed by
+    // bin_count. Replaces the fat gaussians[]/projected_2d[] gather: the blend
+    // reads splats in random (sorted) order, so gathering only the 36 B it uses
+    // instead of 80 B roughly halves the bytes and lifts the L2 hit rate.
+    StructuredBuffer<BlendData> blend_data,
     StructuredBuffer<uint> tile_start,
     StructuredBuffer<uint> tile_end,
     StructuredBuffer<uint> sorted_gaussian_ids,
@@ -169,7 +172,10 @@ void backwardRasterizePerSplat(
     // Truncate to the buckets some pixel actually reached (vs. tile_count).
     uint num_buckets = (max_processed + RASTER_BUCKET_SIZE - 1u) / RASTER_BUCKET_SIZE;
 
+    //example: 96gs, 32 per bucket -> 3 buckets. warp_idx=0,1,2 valid; 3..7 skip.
+
     // --- Bucket loop: 8 warps handle 8 consecutive buckets per iteration ---
+    [loop]
     for (uint base_bucket = 0u; base_bucket < num_buckets; base_bucket += NUM_WARPS)
     {
         uint bucket = base_bucket + warp_idx;
@@ -181,14 +187,17 @@ void backwardRasterizePerSplat(
 
         // Load this lane's splat once (registers). Masked lanes hold junk
         // but never write output; they act as scan identities via alpha=0.
+        // Random (sorted-order) gather, so AoS wins over SoA — but we gather
+        // only the compact BlendData (mean/cov2d/opacity/sh0) this pass needs,
+        // not the full 80 B of gaussians[]+projected_2d[]. g_idx still comes
+        // from the cheap uint sorted_gaussian_ids gather (needed for the atomic
+        // scatter targets below).
         uint g_idx = 0u;
-        Gaussian3D g;
-        Projected2DGaussian proj;
+        BlendData blend_only_data;
         if (splat_valid)
         {
             g_idx = sorted_gaussian_ids[t_start + local_splat];
-            g = gaussians[g_idx];
-            proj = projected_2d[g_idx];
+            blend_only_data = blend_data[g_idx];
         }
 
         // Fat gradient accumulators for THIS lane's splat, summed over pixels.
@@ -199,7 +208,7 @@ void backwardRasterizePerSplat(
         float  acc_absx = 0.0;
         float  acc_absy = 0.0;
 
-        float3 sh0 = splat_valid ? g.sh0 : float3(0.0);
+        float3 sh0 = splat_valid ? blend_only_data.sh0 : float3(0.0);
         float3 c_i = shDC(sh0);
 
         uint cp_bucket = tile_bucket_base + bucket;
@@ -240,6 +249,7 @@ void backwardRasterizePerSplat(
         GroupMemoryBarrierWithGroupSync();
 
         // --- Pixel loop: all 32 lanes lockstep so wave scans are valid ---
+        [loop]
         for (uint p = 0u; p < TILE_AREA; ++p)
         {
             // Per-bucket saturation skip: if pixel p's ray terminated before
@@ -281,7 +291,7 @@ void backwardRasterizePerSplat(
             float alpha_grad_scale = 0.0;
             if (contributes)
             {
-                float alpha_raw = evalGaussian2DFromCov(pc, proj.mean, proj.cov2d, g.opacity);
+                float alpha_raw = evalGaussian2DFromCov(pc, blend_only_data.mean, blend_only_data.cov2d, blend_only_data.opacity);
                 alpha = min(alpha_raw, ALPHA_MAX);
                 alpha_grad_scale = (alpha_raw <= ALPHA_MAX) ? 1.0 : 0.0;
             }
@@ -317,25 +327,27 @@ void backwardRasterizePerSplat(
                 //            = sum_{j>i, j<processed} c_j*alpha_j*T_j.
                 float3 C_behind = C_total - cif - contrib;
 
-                // Color grad: dL_dc_i = dL_dC * (alpha * T_i), through shDC.
-                var dp_sh0 = diffPair(sh0);
-                float3 dL_dc_i = dL_dC * caT;
-                bwd_diff(shDC)(dp_sh0, dL_dc_i);
+                // Color grad seed: dL_dc_i = dL_dC * (alpha * T_i). shDC is
+                // affine (Jacobian = const SH_C0), so instead of calling
+                // bwd_diff(shDC) per pixel we accumulate the seed here and
+                // scale by SH_C0 once after the pixel loop. Exact, 256x fewer
+                // autodiff calls per bucket.
+                acc_color += dL_dC * caT;
 
                 float3 dC_dalpha = c_i * T_i - C_behind / denom;
                 float dL_dalpha = dot(dL_dC, dC_dalpha) + dL_dA * (T_final / denom);
                 float dL_d_alpha_raw = dL_dalpha * alpha_grad_scale;
 
-                var dp_mean_2d = diffPair(proj.mean);
-                var dp_cov2d   = diffPair(proj.cov2d);
-                var dp_opacity = diffPair(g.opacity);
+                var dp_mean_2d = diffPair(blend_only_data.mean);
+                var dp_cov2d   = diffPair(blend_only_data.cov2d);
+                var dp_opacity = diffPair(blend_only_data.opacity);
                 bwd_diff(evalGaussian2DFromCov)(
                     pc, dp_mean_2d, dp_cov2d, dp_opacity, dL_d_alpha_raw);
 
                 acc_mean2d += dp_mean_2d.d;
                 acc_cov2d  += dp_cov2d.d;
                 acc_opacity += dp_opacity.d;
-                acc_color  += dp_sh0.d;
+                // acc_color seed accumulated above (SH_C0 applied post-loop).
 
                 if (alpha >= ALPHA_MIN_TRACK)
                 {
@@ -348,6 +360,12 @@ void backwardRasterizePerSplat(
         // --- Per-splat projection backward + atomics (one lane per splat) ---
         if (splat_valid)
         {
+            // Apply shDC's constant Jacobian once for the whole bucket: the
+            // pixel loop accumulated the raw color-grad seed sum(dL_dC * caT);
+            // shDC = 0.5 + SH_C0*sh0, so d(loss)/d(sh0) = SH_C0 * that sum.
+            // Replaces 256 per-pixel bwd_diff(shDC) calls. Exact.
+            acc_color *= SH_C0;
+
             // SGD scale: we summed only 1/STRIDE of the pixels, so scale the
             // accumulated gradient up by STRIDE to make it an unbiased
             // estimate of the full-pixel sum (keeps the LR unchanged). All

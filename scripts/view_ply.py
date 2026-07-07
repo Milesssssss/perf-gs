@@ -37,6 +37,9 @@ def main() -> None:
     viewer = Viewer(device, width=args.width, height=args.height,
                     max_splats=max(args.max_splats, n), hot_reload=True)
     viewer.update_gaussians(pipeline)
+    # Static PLY view — there's no training to start; suppress the panel's
+    # "press Start Training" hint (the Start button is harmless if clicked).
+    viewer.set_training_active(True)
     viewer.start()
 
     print("viewer running — close the window to exit")

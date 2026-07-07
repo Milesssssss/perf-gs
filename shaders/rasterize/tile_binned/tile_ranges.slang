@@ -41,7 +41,7 @@ void identifyTileRanges(
     uint t = keys_hi[i];
     if (t >= num_tiles) return;  // robustness
 
-    // First entry, or previous entry is a different tile → start of t.
+    // First entry, or previous entry is a different tile -> start of t.
     if (i == 0)
     {
         tile_start[t] = 0;
@@ -56,7 +56,7 @@ void identifyTileRanges(
                 tile_end[t_prev] = i;
         }
     }
-    // Last entry of the whole array → end of its tile.
+    // Last entry of the whole array -> end of its tile
     if (i == n - 1)
     {
         tile_end[t] = n;

@@ -63,6 +63,8 @@ class GaussianBuffers:
 
     # --- per-frame forward scratch / output ---
     projected_2d: spy.NDBuffer
+    # Compact blend-backward gather record; packed by bin_count.
+    blend_data: spy.NDBuffer
 
     # v2.x uncapped-binning pipeline (replaces the legacy per-tile array).
     # See shaders/rasterize/tile_binned/bin_count.slang and bin_emit.slang.
@@ -194,6 +196,9 @@ def allocate(
     projected_type = module.layout.find_type_by_name("Projected2DGaussian")
     if projected_type is None:
         raise RuntimeError("shader module does not expose type 'Projected2DGaussian'")
+    blend_type = module.layout.find_type_by_name("BlendData")
+    if blend_type is None:
+        raise RuntimeError("shader module does not expose type 'BlendData'")
     adam_type = module.layout.find_type_by_name("AdamState")
     if adam_type is None:
         raise RuntimeError("shader module does not expose type 'AdamState'")
@@ -206,6 +211,9 @@ def allocate(
     num_gaussians_counter = spy.NDBuffer(device=device, dtype="uint", shape=(1,))
 
     projected_2d = spy.NDBuffer(device=device, dtype=projected_type, shape=(max_splats,))
+    # Compact per-gaussian blend gather record (mean/cov2d/opacity/sh0), packed
+    # by bin_count and consumed by the blend backward. GPU-internal scratch.
+    blend_data = spy.NDBuffer(device=device, dtype=blend_type, shape=(max_splats,))
 
     # v2.x uncapped-binning resources.
     tile_count_per_gaussian = spy.NDBuffer(device=device, dtype="uint", shape=(max_splats,))
@@ -372,6 +380,7 @@ def allocate(
         bucket_offsets=bucket_offsets,
         bucket_offset_total=bucket_offset_total,
         raster_checkpoints=raster_checkpoints,
+        blend_data=blend_data,
         output_image=output_image,
         output_transmittance=output_transmittance,
         gaussian_count_per_pixel=gaussian_count_per_pixel,

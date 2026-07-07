@@ -57,9 +57,9 @@ void projectionBackward(
 
     // Seed = accumulated 2D gradients. Depth/det seeds are 0 (the blend
     // backward produces no gradient w.r.t. depth_vs or cov2d_det).
-    float2 g_mean2d = float2(
+    float2 grad_mean2d = float2(
         fromFixed(grad_mean2d_x[gid]), fromFixed(grad_mean2d_y[gid]));
-    float3 g_cov2d = float3(
+    float3 grad_cov2d = float3(
         fromFixed(grad_cov2d_a[gid]), fromFixed(grad_cov2d_b[gid]),
         fromFixed(grad_cov2d_c[gid]));
 
@@ -68,10 +68,11 @@ void projectionBackward(
     var dp_mean      = diffPair(g.mean);
     var dp_log_scale = diffPair(g.log_scale);
     var dp_rot_quat  = diffPair(g.rot_quat);
+
     bwd_diff(projectGaussian3DTo2D)(
         dp_mean, dp_log_scale, dp_rot_quat,
         camera[0].view_matrix, camera[0].proj_matrix, camera[0].image_size,
-        g_mean2d, g_cov2d, 0.0, 0.0);
+        grad_mean2d, grad_cov2d, 0.0, 0.0);
 
     // Sole writer per gaussian -> direct store. Regularization / adam run in
     // later dispatches and InterlockedAdd on top, so store-then-add is safe.

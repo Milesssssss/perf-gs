@@ -153,8 +153,17 @@ class FlyCamera:
         # look-around is unchanged.
         a = math.radians(self.roll)
         ca, sa = math.cos(a), math.sin(a)
-        dx_world =  ca * dx + sa * dy
-        dy_world = -sa * dx + ca * dy
+        # Rotate the screen-space delta from the camera's ROLLED screen frame
+        # into the zero-roll (world-up) frame that yaw/pitch are defined in.
+        # The rolled right/up sit at angle +roll in the zero-roll basis, so
+        # mapping a rolled-frame delta back to it is a rotation by +roll:
+        #   [dx_w]   [ cos a  -sin a] [dx]
+        #   [dy_w] = [ sin a   cos a] [dy]
+        # At roll=0 this is the identity (unchanged level look-around). The
+        # previous matrix used the -roll rotation (wrong sign on both sa
+        # terms), which was correct only at roll=0 and skewed as roll grew.
+        dx_world = ca * dx - sa * dy
+        dy_world = sa * dx + ca * dy
         self.yaw += dx_world * self.sensitivity
         self.pitch += -dy_world * self.sensitivity
         self.pitch = max(-89.0, min(89.0, self.pitch))
@@ -276,6 +285,15 @@ class Viewer:
         self.gpu_lock = gpu_lock if gpu_lock is not None else contextlib.nullcontext()
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
+        # Set by the in-panel "Start Training" button. The trainer blocks on
+        # start_requested() before entering its loop when it wants the user to
+        # inspect the initialized gaussians first. Same-process handshake, so a
+        # plain Event — no shared-memory flag needed (cf. the old two-process
+        # splat stream).
+        self._start_event = threading.Event()
+        # Reflects the trainer's state so the panel can show "training" vs
+        # "inspecting init". The trainer sets this True once it starts looping.
+        self._training_active = False
         # The viewer only RENDERS a single static view (never trains/densifies),
         # so a splat covers far fewer tiles than the training pipeline's
         # max_splats*16 headroom assumes. Sizing the viewer's sort-pair buffers
@@ -312,6 +330,22 @@ class Viewer:
             self.device.submit_command_buffer(cmd)
         self._has_data = True
 
+    def start_requested(self) -> bool:
+        """True once the user pressed 'Start Training' in the viewer panel."""
+        return self._start_event.is_set()
+
+    def wait_for_start(self, poll: float = 0.05) -> None:
+        """Block until 'Start Training' is pressed or the viewer window closes
+        (so a closed viewer can't hang the trainer forever)."""
+        while not self._start_event.is_set():
+            if self._stop_event.is_set() or (self._thread and not self._thread.is_alive()):
+                break
+            time.sleep(poll)
+
+    def set_training_active(self, active: bool = True) -> None:
+        """Trainer tells the viewer it has begun (drives the panel label)."""
+        self._training_active = active
+
     def start(self):
         self._stop_event.clear()
         self._thread = threading.Thread(target=self._run, daemon=True)
@@ -335,6 +369,17 @@ class Viewer:
         surface.configure(width=self.width, height=self.height)
         needs_reconfigure = False
 
+        # --- ImGui panel: status + Start Training button ---
+        ui = spy.ui.Context(self.device)
+        ui_panel = spy.ui.Window(ui.screen, "Trainer", position=spy.float2(10, 10),
+                                 size=spy.float2(240, 0))
+        spy.ui.Text(ui_panel, "WASD move | drag look | R/T roll")
+        status_text = spy.ui.Text(ui_panel, "inspecting init")
+
+        def _on_start():
+            self._start_event.set()
+        spy.ui.Button(ui_panel, "Start Training", callback=_on_start)
+
         cam = FlyCamera()
         keys_held: set = set()
         mouse_captured = False
@@ -351,6 +396,8 @@ class Viewer:
 
         def on_key(event):
             nonlocal keys_held, mouse_captured
+            if ui.handle_keyboard_event(event):
+                return  # UI consumed it (typing in a widget)
             k = key_map.get(event.key)
             if event.is_key_press() or event.is_key_repeat():
                 if k:
@@ -363,6 +410,9 @@ class Viewer:
 
         def on_mouse(event):
             nonlocal mouse_captured, last_mouse_x, last_mouse_y
+            if ui.handle_mouse_event(event):
+                mouse_captured = False  # don't drive the camera from panel clicks
+                return
             if event.is_button_down():
                 mouse_captured = True
                 last_mouse_x = event.pos[0]
@@ -421,7 +471,23 @@ class Viewer:
             if "t" in keys_held:
                 cam.roll_by(-roll_speed * dt)
 
+            status_text.text = ("training" if self._training_active
+                                 else "inspecting init — press Start Training")
+
             if not self._has_data:
+                # Still pump the UI so the Start button is clickable before the
+                # first gaussian snapshot arrives.
+                try:
+                    with self.gpu_lock:
+                        surface_tex = surface.acquire_next_image()
+                        if surface_tex is not None:
+                            encoder = self.device.create_command_encoder()
+                            ui.begin_frame(window.width, window.height)
+                            ui.end_frame(surface_tex, encoder)
+                            self.device.submit_command_buffer(encoder.finish())
+                            surface.present()
+                except Exception:
+                    pass
                 time.sleep(0.016)
                 continue
 
@@ -437,6 +503,9 @@ class Viewer:
                     surface_tex = surface.acquire_next_image()
                     encoder = self.device.create_command_encoder()
                     encoder.blit(surface_tex, self._pipeline.buffers.output_image)
+                    # Draw the panel on top, same swapchain image + encoder.
+                    ui.begin_frame(window.width, window.height)
+                    ui.end_frame(surface_tex, encoder)
                     cmd = encoder.finish()
                     self.device.submit_command_buffer(cmd)
                     surface.present()

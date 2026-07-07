@@ -150,6 +150,19 @@ def main() -> None:
     spy.ui.Text(ui_panel, "wheel: speed | drag: look | R/T: roll")
     status_text = spy.ui.Text(ui_panel, "waiting for data...")
 
+    # "Start Training" button: when the trainer was launched with
+    # --wait-for-viewer, it holds after streaming the initial gaussians until
+    # this flag is set. Harmless otherwise (the trainer just never polls it).
+    # Local latch so the label reflects the click even before the trainer acts.
+    train_started = [False]
+
+    def _on_start_training():
+        train_started[0] = True
+        reader.request_start()
+
+    start_btn = spy.ui.Button(ui_panel, "Start Training", callback=_on_start_training)
+    start_status = spy.ui.Text(ui_panel, "")
+
     cam = FlyCamera()
     # Base move speed lives on the fly-cam; the slider edits it directly.
     speed_prop = spy.ui.SliderFloat(ui_panel, "speed", value=cam.speed,
@@ -305,6 +318,15 @@ def main() -> None:
 
         status_text.text = (f"iter {last_iter}  |  {last_count} splats  |  spd {cam.speed:.2f}"
                             if have_data else "waiting for data...")
+        # Reflect the start-training handshake. last_iter advances past 0 once
+        # the trainer leaves its pre-training wait, which is the real "training
+        # is running" signal; before the click we hint the user to press it.
+        if train_started[0] or last_iter > 0:
+            start_status.text = "training started" if last_iter > 0 else "start requested..."
+        elif have_data:
+            start_status.text = "inspecting init — press Start Training"
+        else:
+            start_status.text = ""
 
         if not have_data:
             time.sleep(0.02)

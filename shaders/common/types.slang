@@ -25,6 +25,22 @@ struct Projected2DGaussian
     float depth_vs;         // view-space depth (positive-z is forward in our convention)
 };
 
+// Compact per-gaussian record for the blend backward's HOT random gather.
+// The blend backward reads splats in sorted (tile, depth) order, so g_idx is
+// a random permutation and gaussians[g_idx] / projected_2d[g_idx] are scatter
+// gathers. Those two fat structs total 80 B but the blend uses only these 4
+// fields (36 B): gathering the whole 80 B pollutes L2 (~45% useful bytes).
+// This packs exactly what the blend needs into one 36 B record so the gather
+// is ~100% useful. Written by bin_count (which already has all four values in
+// hand), consumed by backward_persplat. NOT read back to the CPU.
+struct BlendData
+{
+    float2 mean;            // == Projected2DGaussian.mean
+    float3 cov2d;           // == Projected2DGaussian.cov2d
+    float  opacity;         // == Gaussian3D.opacity (pre-sigmoid logit)
+    float3 sh0;             // == Gaussian3D.sh0
+};
+
 struct CameraData
 {
     float4x4 view_matrix;   // world -> view

@@ -50,22 +50,10 @@ def _psnr_linear(linear_rendered: np.ndarray, linear_target: np.ndarray) -> floa
 
 
 def _linear_to_srgb(c: np.ndarray) -> np.ndarray:
-    """True sRGB OETF — the exact inverse of _srgb_to_linear (used on GT in
-    the loss). Using an approximate power(1/2.2) instead lifts darks
-    (~+0.03 at 0.05) and compresses contrast, so a converged render displays
-    greyer than its GT even at zero loss. Matching the real curve makes the
-    preview and GT line up."""
     c = np.clip(c, 0.0, 1.0)
     low = c * 12.92
     high = 1.055 * np.power(np.clip(c, 1e-7, None), 1.0 / 2.4) - 0.055
     return np.where(c <= 0.0031308, low, high)
-
-
-def _save_srgb_png(rgb_linear: np.ndarray, path: Path) -> None:
-    rgb_srgb = _linear_to_srgb(rgb_linear)
-    rgba = np.concatenate([rgb_srgb, np.ones_like(rgb_srgb[..., :1])], axis=-1)
-    png = (rgba * 255.0 + 0.5).astype(np.uint8)
-    Image.fromarray(png, mode="RGBA").save(path)
 
 
 def _render_all_cameras(pipeline: Pipeline, scene, iter_idx: int, cams_dir: Path) -> None:
@@ -73,70 +61,10 @@ def _render_all_cameras(pipeline: Pipeline, scene, iter_idx: int, cams_dir: Path
         pipeline.render(entry.camera)
         img = pipeline.read_output_image()[..., :3]
         out_path = cams_dir / f"cam_{cam_i:02d}" / f"iter_{iter_idx:06d}.png"
-        _save_srgb_png(img, out_path)
-
-def run_profiling_step(pipeline: Pipeline, scene, n_cams: int, rng, lr_mean_init, it: int, decay: float) -> None:
-    import time as _time
-    pipeline.device.wait_for_idle()
-
-    prof_cam_idx = int(rng.integers(0, n_cams))
-    prof_entry = scene.images[prof_cam_idx]
-    pipeline.set_target_texture(scene.images[prof_cam_idx].target_texture)
-    prof_lrs = AdamLRs(mean=lr_mean_init * (decay ** (it - 1)))
-
-    # Warm up (avoid cold-cache effects).
-    pipeline._clear_grads()
-    pipeline._run_forward(prof_entry.camera)
-    pipeline._run_loss()
-    pipeline._run_backward()
-    pipeline._run_regularization()
-    pipeline._run_adam(prof_lrs)
-    pipeline.device.wait_for_idle()
-
-    timings = {}
-
-    t0 = _time.perf_counter()
-    pipeline._clear_grads()
-    pipeline.device.wait_for_idle()
-    timings["clear_grads_ms"] = (_time.perf_counter() - t0) * 1000
-
-    t0 = _time.perf_counter()
-    pipeline._run_forward(prof_entry.camera)
-    pipeline.device.wait_for_idle()
-    timings["forward_ms"] = (_time.perf_counter() - t0) * 1000
-
-    t0 = _time.perf_counter()
-    pipeline._run_loss()
-    pipeline.device.wait_for_idle()
-    timings["loss_ms"] = (_time.perf_counter() - t0) * 1000
-
-    t0 = _time.perf_counter()
-    pipeline._run_backward()
-    pipeline.device.wait_for_idle()
-    timings["backward_ms"] = (_time.perf_counter() - t0) * 1000
-
-    t0 = _time.perf_counter()
-    pipeline._run_regularization()
-    pipeline.device.wait_for_idle()
-    timings["regularization_ms"] = (_time.perf_counter() - t0) * 1000
-
-    t0 = _time.perf_counter()
-    pipeline._run_adam(prof_lrs)
-    pipeline.device.wait_for_idle()
-    timings["adam_ms"] = (_time.perf_counter() - t0) * 1000
-
-    timings["total_ms"] = sum(timings.values())
-    timings["iter"] = it
-    timings["n_gaussians"] = pipeline.n_gaussians
-
-    profile_json.write(json.dumps(timings) + "\n")
-    print(f"iter {it}: PROFILE  "
-            f"fwd={timings['forward_ms']:.1f}  loss={timings['loss_ms']:.1f}  "
-            f"bwd={timings['backward_ms']:.1f}  reg={timings['regularization_ms']:.1f}  "
-            f"adam={timings['adam_ms']:.1f}  total={timings['total_ms']:.1f} ms  "
-            f"n_g={pipeline.n_gaussians}")
-
-
+        rgb_srgb = _linear_to_srgb(img)
+        rgba = np.concatenate([rgb_srgb, np.ones_like(rgb_srgb[..., :1])], axis=-1)
+        png = (rgba * 255.0 + 0.5).astype(np.uint8)
+        Image.fromarray(png, mode="RGBA").save(out_path)
 
 
 def main() -> None:
@@ -152,8 +80,14 @@ def main() -> None:
                     help="force render width (overrides --downsample)")
     ap.add_argument("--height", type=int, default=None,
                     help="force render height (overrides --downsample)")
-    ap.add_argument("--preview-every", type=int, default=0)
-    ap.add_argument("--log-every", type=int, default=0) 
+    ap.add_argument("--preview-every", type=int, default=2000)
+    ap.add_argument("--log-every", type=int, default=0)
+    ap.add_argument("--render-all-every", type=int, default=0,
+                    help="dump PNGs for ALL cameras every N iters. 0 (default) "
+                         "= follow the --preview-every tick (original behavior). "
+                         "Set a coarse value to dump less often: each sweep "
+                         "renders + reads back every camera under gpu_lock, "
+                         "briefly freezing the in-process viewer.")
     ap.add_argument("--densify-every", type=int, default=100)
     ap.add_argument("--densify-from", type=int, default=500)
     ap.add_argument("--densify-to", type=int, default=15000)
@@ -187,20 +121,26 @@ def main() -> None:
                     help="profile one full step every N iters (0 to disable)")
     ap.add_argument("--simple-densify", action="store_true",
                     help="use reference 3DGS threshold-based densification instead of score-ranked")
-    ap.add_argument("--grad-thresh", type=float, default=0.0004,
+    ap.add_argument("--grad-thresh", type=float, default=0.00065,
                     help="2D-gradient densification threshold. gsplat uses 0.0002 for "
                          "vanilla grad and ~0.0008 for absgrad; our accumulator is an "
                          "abs-sum (absgrad-like), so 0.0008 matches. Lower = more growth.")
     ap.add_argument("--no-viewer", action="store_true", help="disable live viewer stream")
     ap.add_argument("--launch-viewer", action="store_true",
-                    help="auto-launch the standalone viewer as a child process "
-                         "(still fully decoupled; a viewer crash won't affect training)")
-    ap.add_argument("--stream-max-splats", type=int, default=2_000_000,
+                    help="DEPRECATED / no-op: the live viewer is now in-process "
+                         "and starts automatically unless --no-viewer is given.")
+    ap.add_argument("--wait-for-viewer", action="store_true",
+                    help="after initializing the gaussians, stream the initial "
+                         "state and BLOCK until the viewer's 'Start Training' "
+                         "button is pressed (or Enter here). Lets you inspect "
+                         "the init before training begins. No-op with --no-viewer.")
+    ap.add_argument("--stream-max-splats", type=int, default=6_500_000,
                     help="capacity of the live-viewer shared-memory stream (splats). "
                          "Snapshots beyond this are truncated for viewing only.")
-    ap.add_argument("--stream-every", type=int, default=100000,
-                    help="stream a gaussian snapshot to the live viewer every N iters "
-                         "(each push does a GPU readback; keep coarse).")
+    ap.add_argument("--stream-every", type=int, default=10,
+                    help="push a gaussian snapshot to the in-process viewer every "
+                         "N iters. Now a zero-copy GPU->GPU blit, so a fine cadence "
+                         "is cheap (was coarse when it required a GPU->CPU readback).")
     ap.add_argument("--backend", type=str, default="vulkan", choices=["vulkan", "d3d12"])
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--run-name", type=str, default=None)
@@ -347,9 +287,22 @@ def main() -> None:
 
     device = create_device(backend=args.backend)
 
+    # In-process live viewer runs its render loop on a background thread sharing
+    # this device's VkQueue, so training + viewer submits must be serialized by
+    # a shared lock (see Pipeline.gpu_lock). Only needed when the viewer is on.
+    import threading as _threading
+    # RLock, NOT Lock: training-thread paths legitimately nest gpu_lock. render()
+    # takes it coarsely, then the transient-encoder branch of _dispatch /
+    # _dispatch_indirect inside the forward (radix sort) takes it AGAIN per
+    # submit. A non-reentrant Lock self-deadlocks the training thread the first
+    # time render() runs (the densify+preview tick around iter 2000). RLock lets
+    # the same thread re-enter while still blocking the viewer thread.
+    gpu_lock = _threading.RLock() if not args.no_viewer else None
+
     pipeline = Pipeline(
         device=device, width=W, height=H,
         max_splats=args.max_splats,
+        gpu_lock=gpu_lock,
     )
     pipeline.z_near_cull = args.z_near_cull
     pipeline.opacity_reg = args.opacity_reg
@@ -359,46 +312,24 @@ def main() -> None:
     pipeline.set_gaussians_from_numpy(**scene.initial_points)
     pipeline.clear_tracking()
 
-    # Live viewing is fully decoupled: instead of an in-process viewer sharing
-    # this device's GPU queue, we stream CPU snapshots of the gaussian buffer
-    # into shared memory. A separate `scripts/stream_viewer.py` process renders
-    # them independently — no shared device, no cross-thread queue submission,
-    # and the viewer crashing/closing cannot affect training. Launch the viewer
-    # with the stream name printed below (or it auto-reads outputs/.splat_stream).
-    stream_writer = None
+    # Live viewing is IN-PROCESS: a background-thread Viewer shares this
+    # device (serialized by gpu_lock). Streaming a snapshot is a zero-copy
+    # GPU->GPU buffer blit (viewer.update_gaussians) — no CPU readback, no
+    # numpy, no shared-memory re-upload — so it's cheap enough to run every
+    # few iters. Trade-off vs. the old shared-memory stream: the viewer shares
+    # the training queue, so a viewer crash can stall training.
+    viewer = None
     if not args.no_viewer:
-        from trainer.splat_stream import SplatStreamWriter, STREAM_LOCK_FILE_DEFAULT
-        stream_writer = SplatStreamWriter(capacity=args.stream_max_splats)
-        try:
-            lock_path = Path(STREAM_LOCK_FILE_DEFAULT)
-            lock_path.parent.mkdir(parents=True, exist_ok=True)
-            lock_path.write_text(stream_writer.name)
-        except OSError:
-            pass
-        print(f"[SplatStream] serving on {stream_writer.name!r} "
-              f"(capacity {args.stream_max_splats}). "
-              f"View with: python scripts/stream_viewer.py --stream {stream_writer.name}")
-
-    # Optionally spawn the viewer as a CHILD PROCESS. It still runs fully
-    # independently (its own device/queue/window); we just launch and reap it
-    # for convenience. A viewer crash does not affect training; when training
-    # exits we terminate the child.
-    viewer_proc = None
-    if stream_writer is not None and args.launch_viewer:
-        import subprocess
-        viewer_script = str(Path(__file__).resolve().parent / "stream_viewer.py")
-        # Pass the scene + downsample so the child viewer loads the same camera
-        # poses and offers the snap-to-camera dropdown.
-        cmd = [sys.executable, viewer_script,
-               "--stream", stream_writer.name,
-               "--backend", args.backend,
-               "--scene", args.scene,
-               "--downsample", str(args.downsample)]
-        try:
-            viewer_proc = subprocess.Popen(cmd)
-            print(f"[SplatStream] launched viewer subprocess (pid {viewer_proc.pid})")
-        except OSError as e:
-            print(f"[SplatStream] failed to launch viewer: {e}")
+        from trainer.viewer import Viewer
+        viewer = Viewer(
+            device=device, width=W, height=H,
+            max_splats=args.max_splats, fovy=args.fovy if hasattr(args, "fovy") else 45.0,
+            gpu_lock=gpu_lock,
+        )
+        viewer.update_gaussians(pipeline)  # show the initialized gaussians
+        viewer.start()
+        print("[viewer] in-process live viewer started "
+              "(GPU->GPU streaming; window has a Start Training button).")
 
     # Pre-upload every target image as its own GPU texture. Per-iter we
     # just swap the active reference — no CPU→GPU upload in the hot loop.
@@ -476,6 +407,35 @@ def main() -> None:
     lr_mean_final = lr_mean_init * 1e-2
     decay = (lr_mean_final / lr_mean_init) ** (1.0 / max(args.iters, 1))
 
+    # Optionally hold before training so the viewer can inspect the initialized
+    # gaussians. We push the initial snapshot (iter 0) so the viewer has data,
+    # then block until the viewer presses "Start Training" (sets the shared
+    # `start` flag) — or the user presses Enter in this terminal as a headless
+    # escape hatch. The wait sits BEFORE t_start so it isn't counted as train
+    # time. Only meaningful when a stream exists.
+    if args.wait_for_viewer and viewer is not None:
+        print("[wait-for-viewer] showing initialized gaussians. Waiting for the "
+              "viewer's 'Start Training' button (or press Enter here)...")
+        _enter = _threading.Event()
+
+        def _wait_enter():
+            try:
+                input()
+            except EOFError:
+                pass
+            _enter.set()
+
+        _threading.Thread(target=_wait_enter, daemon=True).start()
+        while not viewer.start_requested() and not _enter.is_set():
+            if viewer._thread is not None and not viewer._thread.is_alive():
+                print("[wait-for-viewer] viewer window closed; starting training.")
+                break
+            time.sleep(0.05)
+        print("[wait-for-viewer] starting training.")
+
+    if viewer is not None:
+        viewer.set_training_active(True)
+
     t_start = time.time()
     t_last = t_start
     it_last = 0
@@ -495,7 +455,7 @@ def main() -> None:
     # Before recording a new one, wait for the oldest to complete. This
     # bounds queue depth to ~MAX_QUEUE_DEPTH iterations of latency without
     # ever calling wait_for_idle in the hot path.
-    MAX_QUEUE_DEPTH = 4
+    MAX_QUEUE_DEPTH = 1
     submit_id_ring: list[int] = []
 
     def _bound_queue():
@@ -643,11 +603,12 @@ def main() -> None:
             profile_window.process_events()
             _profile_present()
 
-        # Stream a gaussian snapshot to the live viewer every N iters. This
-        # does a GPU->CPU readback (which also drains the async queue, bounding
-        # how far the CPU runs ahead), so keep the cadence coarse.
-        if stream_writer is not None and it % args.stream_every == 0:
-            stream_writer.push(pipeline, it)
+        # Push a gaussian snapshot to the in-process viewer every N iters.
+        # This is a zero-copy GPU->GPU buffer blit (no readback, no numpy, no
+        # device drain), so it can run at a fine cadence without stalling the
+        # training pipeline. Serialized against the viewer's render via gpu_lock.
+        if viewer is not None and it % args.stream_every == 0:
+            viewer.update_gaussians(pipeline)
 
         # Densification schedule.
         do_densify = (args.densify_from <= it <= args.densify_to
@@ -727,17 +688,16 @@ def main() -> None:
             it_last = it
 
         if it > 1 and (do_log or do_preview):
-            #TODO: why is this render here and gated by the densify?
-            if do_densify:
-                pipeline.render(entry.camera)
 
-            pipeline.device.wait_for_idle()
+            pipeline.render(entry.camera)
             # Refresh cur_n_gaussians on log ticks — wait-free densify_simple
             # keeps the count GPU-side, so we sample it here at log cadence.
             cur_n_gaussians = int(
                 pipeline.buffers.num_gaussians_counter.to_numpy().view(np.uint32)[0]
             )
+
             rendered = pipeline.read_output_image()[..., :3]
+
             if not np.all(np.isfinite(rendered)):
                 n_nan = int(np.sum(~np.isfinite(rendered)))
                 msg = (f"iter {it}: rendered image has {n_nan} non-finite pixels "
@@ -763,14 +723,18 @@ def main() -> None:
                 "n_gaussians": cur_n_gaussians, "it_per_s": it_per_s,
                 "elapsed_s": elapsed,
             }) + "\n")
-            _render_all_cameras(pipeline, scene, it, cams_dir)
 
-        if do_preview:
+        # All-camera PNG dump. Cadence: --render-all-every if set, else it
+        # follows the preview tick (restores the original behavior of dumping
+        # on preview). Each camera is a forward + readback under gpu_lock, which
+        # briefly freezes the in-process viewer for the sweep — set
+        # --render-all-every to a coarse value to make that rarer.
+        if args.render_all_every > 0:
+            do_render_all = (it % args.render_all_every == 0) or (it == args.iters)
+        else:
+            do_render_all = do_preview
+        if it > 1 and do_render_all:
             _render_all_cameras(pipeline, scene, it, cams_dir)
-
-        # Per-phase profiling: time each phase of a full training step.
-        if profile_json and args.profile_every > 0 and it % args.profile_every == 0:
-            run_profiling_step(pipeline, scene, n_cams, rng, lr_mean_init, it, decay)
 
     # Pure training wall-clock: measured right after the loop, BEFORE the
     # final metrics pass and any teardown, so it's a clean before/after
@@ -795,16 +759,20 @@ def main() -> None:
         except Exception:
             pass
 
-    if stream_writer is not None:
-        # Signal the viewer to exit, let it see the flag and detach, THEN
-        # unlink the shared memory (so the reader never touches freed memory).
-        stream_writer.signal_closed()
-        if viewer_proc is not None:
-            try:
-                viewer_proc.wait(timeout=5)
-            except Exception:
-                viewer_proc.terminate()
-        stream_writer.close()
+    if viewer is not None:
+        # Push the final state so the window shows the trained result, then
+        # leave the viewer running so the user can inspect it; it stops when
+        # they close the window or the process exits.
+        try:
+            viewer.update_gaussians(pipeline)
+        except Exception:
+            pass
+        print("[viewer] training done — viewer still live; close its window to exit.")
+        try:
+            if viewer._thread is not None:
+                viewer._thread.join()
+        except KeyboardInterrupt:
+            viewer.stop()
 
     if profile_json:
         profile_json.close()
