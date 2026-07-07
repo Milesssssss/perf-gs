@@ -46,7 +46,7 @@ static const float ALPHA_MIN_TRACK = 1.0 / 255.0;
 // away and the scale is 1.0, so there is zero overhead. Only the per-PIXEL
 // cost is reduced; the per-splat projection backward + atomics run once per
 // splat regardless, so speedup is sub-linear in STRIDE.
-static const uint BACKWARD_PIXEL_STRIDE = 1u;
+static const uint BACKWARD_PIXEL_STRIDE = 2u;
 
 // Per-pixel constants staged in LDS once (avoids re-reading global textures
 // on every bucket). dL_dC (rgb) + dL_dA (a) + T_final + C_total (rgb) = 8
@@ -69,7 +69,12 @@ groupshared uint   gs_max_processed;     // deepest splat any pixel processed
 // this is 64 not 256 -> 4 KB not 16 KB, which is what lifts the shared-memory
 // occupancy cap. Folds to the full 256 at STRIDE=1 (phase=0, k=p).
 static const uint STAGED_PIXELS = TILE_AREA / BACKWARD_PIXEL_STRIDE;
-groupshared uint2  gs_checkpoints[NUM_WARPS][STAGED_PIXELS];
+//static const uint STAGED_PIXELS = TILE_AREA / 1u;
+
+groupshared uint2  gs_checkpoints[NUM_WARPS][STAGED_PIXELS]; //Transmitt, R,G and B are already compressed to fp16. The limiting factor in this kernl is the groupshared memory.
+//on a 4080 we have ~100kb of gs mem. Each thread group is using ~25kb, meaning we can have 4 threagroups per SM, each TG is 256 threads == 8 warps. 8*4=32. The max warps in flight is 48 for a 4080, so
+// we cannot go over an occupancy of 2/3. Nsight captures in fact show 50/60% warp occupancy.
+// we most likely cannot compress the gs checkpoints more
 
 [shader("compute")]
 [numthreads(256, 1, 1)]
@@ -243,8 +248,7 @@ void backwardRasterizePerSplat(
             // (mild coalescing loss) but this is once/bucket and shrinks LDS to
             // STAGED_PIXELS, which is the point.
             for (uint k = lane; k < STAGED_PIXELS; k += RASTER_BUCKET_SIZE)
-                gs_checkpoints[warp_idx][k] =
-                    raster_checkpoints[cp_base + phase + k * BACKWARD_PIXEL_STRIDE];
+                gs_checkpoints[warp_idx][k] = raster_checkpoints[cp_base + phase + k * BACKWARD_PIXEL_STRIDE];
         }
         GroupMemoryBarrierWithGroupSync();
 
