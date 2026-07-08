@@ -160,7 +160,6 @@ class GaussianBuffers:
     # backward: blend kernel accumulates, projection kernel consumes.
     grad_2d_seed_buffers: dict[str, spy.NDBuffer] = field(init=False)
     adam_state: spy.NDBuffer = field(init=False)  # AdamState[max_splats]
-    saturation_flag: spy.NDBuffer = field(init=False)  # uint[1]
     training_step: spy.NDBuffer = field(init=False)    # uint[1] (Adam bias correction)
 
     # --- v2 densification tracking (accumulated over a window) ---
@@ -242,10 +241,10 @@ def _reflect_types(module: spy.Module) -> _ShaderTypes:
     expose one — e.g. the reflection module was loaded from a file that no
     longer transitively includes common/types.slang."""
     def need(name: str) -> object:
-        t = module.layout.find_type_by_name(name)
-        if t is None:
+        slang_type = module.layout.find_type_by_name(name)
+        if slang_type is None:
             raise RuntimeError(f"shader module does not expose type '{name}'")
-        return t
+        return slang_type
 
     return _ShaderTypes(
         gaussian=need("Gaussian3D"),
@@ -302,7 +301,7 @@ class _Alloc:
 
 def allocate(
     device: spy.Device,
-    module: spy.Module,
+    shared_data_module: spy.Module,
     max_splats: int,
     width: int,
     height: int,
@@ -315,7 +314,7 @@ def allocate(
     is declared exactly twice — once as a typed_buffer field on the dataclass, once
     here — which is the minimum that preserves typed_buffer attribute access.
     """
-    types = _reflect_types(module)
+    types = _reflect_types(shared_data_module)
     allocator = _Alloc(device, width, height)
 
     num_tiles_x = _ceil_div(width, TILE_SIZE)
@@ -388,7 +387,6 @@ def allocate(
     buffers.grad_2d_seed_buffers = {name: allocator.i64_buffer(max_splats) for name in GRAD_2D_SEED_COMPONENTS}
 
     buffers.adam_state = allocator.typed_buffer(types.adam, max_splats)
-    buffers.saturation_flag = allocator.uint_buffer(1)
     buffers.training_step = allocator.uint_buffer(1)
 
     # --- v2 densification tracking ---
@@ -421,9 +419,8 @@ def allocate(
     buffers.densify_post_count = allocator.uint_buffer(1)
     buffers.densify_dispatch_args = allocator.indirect_buffer()
 
-    buffers.num_gaussians_counter.copy_from_numpy(np.zeros(1, dtype=np.uint_buffer32))
-    buffers.saturation_flag.copy_from_numpy(np.zeros(1, dtype=np.uint_buffer32))
-    buffers.training_step.copy_from_numpy(np.zeros(1, dtype=np.uint_buffer32))
+    buffers.num_gaussians_counter.copy_from_numpy(np.zeros(1, dtype=np.uint32))
+    buffers.training_step.copy_from_numpy(np.zeros(1, dtype=np.uint32))
 
     return buffers
 

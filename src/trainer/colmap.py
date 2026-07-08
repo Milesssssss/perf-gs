@@ -27,6 +27,7 @@ from pathlib import Path
 
 import numpy as np
 
+from trainer.color import srgb_to_linear
 from trainer.dataset import Camera, _SH_C0
 
 
@@ -181,8 +182,7 @@ def _srgb_colors_to_sh0(srgb: np.ndarray) -> np.ndarray:
     renderer expects: linear_rgb = 0.5 + C0*sh0  =>  sh0 = (linear_rgb - 0.5)/C0.
     The renderer composites in LINEAR space, so we linearize first. No clamp/
     logit — sh0 is unbounded (affine), which is the point of the SH0 switch."""
-    linear = np.where(srgb <= 0.04045, srgb / 12.92,
-                      ((srgb + 0.055) / 1.055) ** 2.4).astype(np.float32)
+    linear = srgb_to_linear(srgb)
     return ((linear - 0.5) / _SH_C0).astype(np.float32)
 
 

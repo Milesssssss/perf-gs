@@ -16,9 +16,9 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+from _pipeline_testkit import TestPipeline
 from trainer.dataset import simple_camera
 from trainer.device import create_device
-from trainer.pipeline import Pipeline
 
 
 BACKENDS = ["vulkan", "d3d12"]
@@ -29,7 +29,7 @@ def _setup(backend: str, w: int, h: int, max_splats: int) -> Pipeline:
         device = create_device(backend=backend)
     except Exception as exc:
         pytest.skip(f"backend {backend!r} unavailable: {exc}")
-    return Pipeline(device=device, width=w, height=h, max_splats=max_splats)
+    return TestPipeline(device=device, width=w, height=h, max_splats=max_splats)
 
 
 @pytest.mark.parametrize("backend", BACKENDS)

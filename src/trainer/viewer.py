@@ -28,6 +28,7 @@ import slangpy as spy
 
 from trainer.dataset import Camera
 from trainer.device import SHADERS_DIR
+from trainer.config import RenderConfig
 from trainer.pipeline import Pipeline
 
 
@@ -306,9 +307,9 @@ class Viewer:
         self._pipeline = Pipeline(
             device=device, width=width, height=height, max_splats=max_splats,
             max_sort_pairs=max_sort_pairs,
+            # Render-only viewer: no loss, so SSIM/alpha weights are irrelevant.
+            cfg=RenderConfig(lambda_ssim=0.0, w_alpha=0.0),
         )
-        self._pipeline.lambda_ssim = 0.0
-        self._pipeline.w_alpha = 0.0
         self._has_data = False
         self._update_pending = False
 

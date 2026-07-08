@@ -8,6 +8,7 @@ import numpy as np
 from plyfile import PlyData, PlyElement
 from PIL import Image
 
+from trainer.color import linear_to_srgb
 from trainer.pipeline import Pipeline
 from trainer.dataset import Camera, _SH_C0
 
@@ -63,9 +64,7 @@ def save_ply(pipeline: Pipeline, path: str | Path) -> None:
     # 3DGS PLY convention: viewers render SH_C0 * f_dc + 0.5 and expect sRGB,
     # so recover our linear color then encode to sRGB before back-solving f_dc.
     linear_rgb = 0.5 + _SH_C0 * sh0
-    srgb_rgb = np.where(linear_rgb <= 0.0031308,
-                        linear_rgb * 12.92,
-                        1.055 * np.power(np.clip(linear_rgb, 0.0031308, None), 1.0/2.4) - 0.055)
+    srgb_rgb = linear_to_srgb(linear_rgb)
     f_dc = ((srgb_rgb - 0.5) / _SH_C0).astype(np.float32)
 
     dtype = [

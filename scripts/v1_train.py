@@ -37,6 +37,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
+from trainer.color import srgb_to_linear
 from trainer.colmap import load_colmap, load_image
 from trainer.device import create_device
 from trainer.export import render_to_png
@@ -44,9 +45,7 @@ from trainer.pipeline import AdamLRs, Pipeline
 
 
 def _srgb_to_linear(c: np.ndarray) -> np.ndarray:
-    low = c / 12.92
-    high = np.power(np.clip((c + 0.055) / 1.055, 1e-7, None), 2.4)
-    return np.where(c <= 0.04045, low, high).astype(np.float32)
+    return srgb_to_linear(c)
 
 
 def _psnr_linear(linear_rendered: np.ndarray, linear_target: np.ndarray) -> float:

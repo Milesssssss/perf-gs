@@ -33,13 +33,13 @@ from PIL import Image
 from trainer.colmap import load_colmap, load_image
 from trainer.device import create_device
 from trainer.export import render_to_png, save_ply
-from trainer.pipeline import AdamLRs, DensifyConfig, Pipeline
+from trainer.color import linear_to_srgb, srgb_to_linear
+from trainer.config import AdamLRs, RenderConfig
+from trainer.pipeline import DensifyConfig, Pipeline
 
 
 def _srgb_to_linear(c: np.ndarray) -> np.ndarray:
-    low = c / 12.92
-    high = np.power(np.clip((c + 0.055) / 1.055, 1e-7, None), 2.4)
-    return np.where(c <= 0.04045, low, high).astype(np.float32)
+    return srgb_to_linear(c)
 
 
 def _psnr_linear(linear_rendered: np.ndarray, linear_target: np.ndarray) -> float:
@@ -50,10 +50,8 @@ def _psnr_linear(linear_rendered: np.ndarray, linear_target: np.ndarray) -> floa
 
 
 def _linear_to_srgb(c: np.ndarray) -> np.ndarray:
-    c = np.clip(c, 0.0, 1.0)
-    low = c * 12.92
-    high = 1.055 * np.power(np.clip(c, 1e-7, None), 1.0 / 2.4) - 0.055
-    return np.where(c <= 0.0031308, low, high)
+    # Clip to displayable [0, 1] before the OETF (preview PNGs + sRGB PSNR).
+    return linear_to_srgb(np.clip(c, 0.0, 1.0))
 
 
 def _render_all_cameras(pipeline: Pipeline, scene, iter_idx: int, cams_dir: Path) -> None:
@@ -214,7 +212,7 @@ def main() -> None:
     n_init = scene.initial_points["means"].shape[0]
     extent = scene.scene_extent
     # Resolved width/height from the scene (may differ from args if args were None).
-    W, H = scene.images[0].camera.image_size
+    IMAGES_WIDTH, IMAGES_HEIGHT = scene.images[0].camera.image_size
     print(f"loaded {n_cams} cameras, {n_init} init points, scene_extent={extent:.3f}")
     #print(f"schedule: densify [{args.densify_from}, {args.densify_to}] every {args.densify_every}, "
     #      f"opacity_reset@{args.opacity_reset_iters or 'none'}")
@@ -233,7 +231,7 @@ def main() -> None:
     (run_dir / "config.json").write_text(json.dumps({
         "scene": args.scene,
         "iters": args.iters,
-        "width": W, "height": H,
+        "width": IMAGES_WIDTH, "height": IMAGES_HEIGHT,
         "preview_every": args.preview_every, "log_every": args.log_every,
         "densify_every": args.densify_every,
         "densify_from": args.densify_from, "densify_to": args.densify_to,
@@ -253,7 +251,7 @@ def main() -> None:
     }, indent=2))
 
     use_alpha = args.w_alpha > 0
-    targets_srgb = [load_image(e, scene.image_dir, W, H,
+    targets_srgb = [load_image(e, scene.image_dir, IMAGES_WIDTH, IMAGES_HEIGHT,
                                load_alpha=use_alpha)
                     for e in scene.images]
 
@@ -309,15 +307,17 @@ def main() -> None:
     gpu_lock = _threading.RLock() if not args.no_viewer else None
 
     pipeline = Pipeline(
-        device=device, width=W, height=H,
+        device=device, width=IMAGES_WIDTH, height=IMAGES_HEIGHT,
         max_splats=args.max_splats,
         gpu_lock=gpu_lock,
+        cfg=RenderConfig(
+            z_near_cull=args.z_near_cull,
+            opacity_reg=args.opacity_reg,
+            scale_reg=args.scale_reg,
+            w_alpha=args.w_alpha,
+            lambda_ssim=args.lambda_ssim,
+        ),
     )
-    pipeline.z_near_cull = args.z_near_cull
-    pipeline.opacity_reg = args.opacity_reg
-    pipeline.scale_reg = args.scale_reg
-    pipeline.w_alpha = args.w_alpha
-    pipeline.lambda_ssim = args.lambda_ssim
     pipeline.set_gaussians_from_numpy(**scene.initial_points)
     pipeline.clear_tracking()
 
@@ -331,7 +331,7 @@ def main() -> None:
     if not args.no_viewer:
         from trainer.viewer import Viewer
         viewer = Viewer(
-            device=device, width=W, height=H,
+            device=device, width=IMAGES_WIDTH, height=IMAGES_HEIGHT,
             max_splats=args.max_splats, fovy=args.fovy if hasattr(args, "fovy") else 45.0,
             gpu_lock=gpu_lock,
         )
@@ -360,10 +360,10 @@ def main() -> None:
     profile_surface = None
     if args.profile_run:
         import slangpy as spy
-        profile_window = spy.Window(width=W, height=H,
+        profile_window = spy.Window(width=IMAGES_WIDTH, height=IMAGES_HEIGHT,
                                     title="3DGS profile (Nsight Graphics)")
         profile_surface = pipeline.device.create_surface(profile_window)
-        profile_surface.configure(width=W, height=H)
+        profile_surface.configure(width=IMAGES_WIDTH, height=IMAGES_HEIGHT)
         print("[profile-run] presenting one frame per train_step for Nsight "
               "Graphics. Launch this process as the ngfx target (or connect), "
               "then capture a frame. Densify + logs still run on schedule; "
@@ -402,7 +402,7 @@ def main() -> None:
     log_json = (run_dir / "log.jsonl").open("w", buffering=1)
     densify_json = (run_dir / "densify_log.jsonl").open("w", buffering=1)
     log_txt.write(f"# v2 training log — scene={args.scene}, backend={args.backend}\n")
-    log_txt.write(f"# iters={args.iters}, resolution={W}x{H}, n_cams={n_cams}\n")
+    log_txt.write(f"# iters={args.iters}, resolution={IMAGES_WIDTH}x{IMAGES_HEIGHT}, n_cams={n_cams}\n")
     log_txt.write(f"# densify: every {args.densify_every} iters in "
                   f"[{args.densify_from}, {args.densify_to}]\n")
 
@@ -537,6 +537,7 @@ def main() -> None:
         # The process stays alive (loop until window close) so Nsight's
         # overlay can open the capture UI; killing it early tears the
         # overlay down before the UI appears.
+        #TODO: lets abstract away this nsight debugging code from the trainer script
         if ngfx_cap is not None and it == args.capture_iter:
             print(f"[capture] draining queue at iter {it}...")
             pipeline.device.wait_for_idle()
@@ -797,6 +798,8 @@ def main() -> None:
     if args.profile_run:
         print("[profile-run] finished; skipping final metrics / PLY export.")
         return
+
+    #TODO: Just make stuff under here into a cleaner post-training analysis routine
 
     # Post-training per-camera metrics. Include BOTH the full-frame PSNR
     # (linear and sRGB) and the foreground-masked sRGB PSNR — the latter

@@ -21,9 +21,10 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+from _pipeline_testkit import TestPipeline
+from trainer.config import RenderConfig
 from trainer.dataset import simple_camera
 from trainer.device import create_device
-from trainer.pipeline import Pipeline
 
 
 BACKENDS = ["vulkan", "d3d12"]
@@ -69,14 +70,13 @@ def _target(h: int, w: int) -> np.ndarray:
     return rgb
 
 
-def _setup_pipeline(backend: str, w: int, h: int) -> Pipeline:
+def _setup_pipeline(backend: str, w: int, h: int) -> TestPipeline:
     try:
         device = create_device(backend=backend)
     except Exception as exc:
         pytest.skip(f"backend {backend!r} unavailable: {exc}")
-    p = Pipeline(device=device, width=w, height=h, max_splats=16)
-    p.lambda_ssim = 0.0
-    p.w_alpha = 0.0
+    p = TestPipeline(device=device, width=w, height=h, max_splats=16,
+                     cfg=RenderConfig(lambda_ssim=0.0, w_alpha=0.0))
     return p
 
 
@@ -126,7 +126,7 @@ def _analytic_grads(backend: str) -> tuple[np.ndarray, dict[str, np.ndarray], fl
     return pipeline, grads, ref_loss
 
 
-def _loss_for(pipeline: Pipeline, scene: dict, camera) -> float:
+def _loss_for(pipeline: TestPipeline, scene: dict, camera) -> float:
     pipeline.set_gaussians_from_numpy(**scene)
     pipeline.forward_and_loss(camera)
     return pipeline.read_loss()

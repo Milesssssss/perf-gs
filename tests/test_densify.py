@@ -17,19 +17,20 @@ import numpy as np
 import pytest
 import slangpy as spy
 
+from _pipeline_testkit import TestPipeline
 from trainer.device import create_device
-from trainer.pipeline import DensifyConfig, Pipeline
+from trainer.pipeline import DensifyConfig
 
 
 BACKENDS = ["vulkan", "d3d12"]
 
 
-def _setup(backend: str) -> Pipeline:
+def _setup(backend: str) -> TestPipeline:
     try:
         device = create_device(backend=backend)
     except Exception as exc:
         pytest.skip(f"backend {backend!r} unavailable: {exc}")
-    return Pipeline(device=device, width=32, height=32, max_splats=32)
+    return TestPipeline(device=device, width=32, height=32, max_splats=32)
 
 
 def _read_gaussians(pipeline: Pipeline) -> np.ndarray:

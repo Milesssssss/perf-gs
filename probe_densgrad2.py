@@ -1,8 +1,9 @@
 import sys, numpy as np
 sys.path.insert(0,"src")
 from trainer.colmap import load_colmap, load_image
+from trainer.config import AdamLRs, RenderConfig
 from trainer.device import create_device
-from trainer.pipeline import AdamLRs, Pipeline
+from trainer.pipeline import Pipeline
 
 ITERS=600
 scene=load_colmap("datasets/synthetic/suzanne_blender",downsample=4)
@@ -10,8 +11,8 @@ n_cams=len(scene.images); extent=scene.scene_extent
 W,H=scene.images[0].camera.image_size
 targets=[load_image(e,scene.image_dir,W,H,load_alpha=True) for e in scene.images]
 dev=create_device(backend="vulkan")
-p=Pipeline(device=dev,width=W,height=H,max_splats=1_000_000)
-p.w_alpha=0.2; p.lambda_ssim=0; p.opacity_reg=0.0; p.scale_reg=0.0
+p=Pipeline(device=dev,width=W,height=H,max_splats=1_000_000,
+           cfg=RenderConfig(w_alpha=0.2, lambda_ssim=0, opacity_reg=0.0, scale_reg=0.0))
 p.set_gaussians_from_numpy(**scene.initial_points); p.clear_tracking()
 texs=[p.create_target_texture(t) for t in targets]
 lr0=1.6e-4*extent; decay=(1e-2)**(1.0/ITERS)

@@ -14,9 +14,10 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+from _pipeline_testkit import TestPipeline
+from trainer.config import RenderConfig
 from trainer.dataset import simple_camera
 from trainer.device import create_device
-from trainer.pipeline import Pipeline
 
 BACKENDS = ["vulkan", "d3d12"]
 
@@ -51,7 +52,7 @@ def _target(h: int, w: int) -> np.ndarray:
     return np.stack([xx, yy, (1.0 - xx) * yy], axis=-1).astype(np.float32)
 
 
-def _grads_with(pipeline: Pipeline, scene, camera, use_persplat: bool):
+def _grads_with(pipeline: TestPipeline, scene, camera, use_persplat: bool):
     pipeline.set_gaussians_from_numpy(**scene)
     pipeline.use_persplat_backward = use_persplat
     pipeline.forward_and_loss(camera)
@@ -72,9 +73,8 @@ def test_persplat_matches_perpixel(backend: str) -> None:
     # buckets per pixel and early-break in the densest tiles.
     W = H = 64
     n = 100
-    pipeline = Pipeline(device=device, width=W, height=H, max_splats=128)
-    pipeline.lambda_ssim = 0.0
-    pipeline.w_alpha = 0.0
+    pipeline = TestPipeline(device=device, width=W, height=H, max_splats=128,
+                            cfg=RenderConfig(lambda_ssim=0.0, w_alpha=0.0))
 
     scene = _deep_scene(n, seed=3)
     pipeline.set_target_image(_target(H, W))

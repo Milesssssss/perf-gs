@@ -1,8 +1,9 @@
 import sys, numpy as np
 sys.path.insert(0, "src")
 from trainer.colmap import load_colmap
+from trainer.config import AdamLRs, RenderConfig
 from trainer.device import create_device
-from trainer.pipeline import AdamLRs, Pipeline
+from trainer.pipeline import Pipeline
 
 ITERS = int(sys.argv[1]) if len(sys.argv) > 1 else 1500
 
@@ -21,12 +22,9 @@ from trainer.colmap import load_image
 targets_srgb = [load_image(e, scene.image_dir, W, H, load_alpha=True) for e in scene.images]
 
 device = create_device(backend="vulkan")
-pipeline = Pipeline(device=device, width=W, height=H, max_splats=1_000_000)
-pipeline.z_near_cull = 0.01
-pipeline.opacity_reg = 0.01
-pipeline.scale_reg = 0.01
-pipeline.w_alpha = 0.2
-pipeline.lambda_ssim = 0
+pipeline = Pipeline(device=device, width=W, height=H, max_splats=1_000_000,
+                    cfg=RenderConfig(z_near_cull=0.01, opacity_reg=0.01,
+                                     scale_reg=0.01, w_alpha=0.2, lambda_ssim=0))
 pipeline.set_gaussians_from_numpy(**scene.initial_points)
 pipeline.clear_tracking()
 target_textures = [pipeline.create_target_texture(t) for t in targets_srgb]
