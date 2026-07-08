@@ -16,19 +16,24 @@ import numpy as np
 import slangpy as spy
 
 from trainer import buffers
-from trainer.buffers import GRAD_SCALAR_COMPONENTS
+from trainer.buffers import (
+    GRAD_SCALAR_COMPONENTS,
+    GAUSSIAN_FLOAT_COUNT,
+    RADIX_GLOBAL_HIST_SIZE,
+    RADIX_PART_SIZE,
+    SCAN_BLOCK_SIZE,
+)
 from trainer.dataset import Camera
 from trainer.device import SHADERS_DIR
 
 
-SCAN_BLOCK_SIZE = 1024  # must match shaders/common/scan.slang
-
-# DeviceRadixSort constants — must match shaders/sort/device_radix_sort.slang.
-_RADIX_PART_SIZE = 2048
+# DeviceRadixSort dispatch dims — must match shaders/sort/device_radix_sort.slang.
+# (The layout-sizing constants RADIX_PART_SIZE / RADIX_GLOBAL_HIST_SIZE /
+# SCAN_BLOCK_SIZE are imported from buffers.py; these three are used only in
+# thread_count computations here, not in allocation.)
 _RADIX_US_DIM = 128
 _RADIX_SCAN_DIM = 128
 _RADIX_D_DIM = 256
-_RADIX_GLOBAL_HIST_SIZE = 256 * 8
 
 
 @dataclass
@@ -438,7 +443,7 @@ class Pipeline:
         b = self.buffers
         src_lo, src_hi, src_v = b.sort_keys_lo_a, b.sort_keys_hi_a, b.sort_values_a
         dst_lo, dst_hi, dst_v = b.sort_keys_lo_b, b.sort_keys_hi_b, b.sort_values_b
-        max_blocks = (self.max_sort_pairs + _RADIX_PART_SIZE - 1) // _RADIX_PART_SIZE
+        max_blocks = buffers._ceil_div(self.max_sort_pairs, RADIX_PART_SIZE)
 
         # Prepare indirect-dispatch args from the GPU-resident count
         # scan_total[0]. Upsweep and downsweep are then launched with
@@ -455,7 +460,7 @@ class Pipeline:
         # subsequent atomic adds during upsweep accumulate into disjoint
         # per-pass regions (offset = pass_idx * 256).
         self._dispatch(self.k_radix_init_global_hist,
-            thread_count=[_RADIX_GLOBAL_HIST_SIZE, 1, 1],
+            thread_count=[RADIX_GLOBAL_HIST_SIZE, 1, 1],
             b_global_hist=b.radix_global_hist.storage,
         )
 
@@ -690,7 +695,6 @@ class Pipeline:
     def _run_backward(self) -> None:
         b = self.buffers
         gb = b.grad_buffers
-        sb = b.grad_2d_seed_buffers
         # The forward left the sorted gaussian-id buffer on one of the two
         # ping-pong slots. We cache it during _run_forward.
         sorted_values = getattr(self, "_sorted_values", b.sort_values_a)
@@ -712,11 +716,7 @@ class Pipeline:
                     output_transmittance=b.output_transmittance,
                     gaussian_count_per_pixel=b.gaussian_count_per_pixel,
                     dL_dC_texture=b.dL_dC_texture,
-                    grad_mean2d_x=sb["mean2d_x"].storage,
-                    grad_mean2d_y=sb["mean2d_y"].storage,
-                    grad_cov2d_a=sb["cov2d_a"].storage,
-                    grad_cov2d_b=sb["cov2d_b"].storage,
-                    grad_cov2d_c=sb["cov2d_c"].storage,
+                    **b.grad_seed_kwargs(),
                     grad_opacity=gb["opacity"].storage,
                     grad_color_r=gb["color_r"].storage,
                     grad_color_g=gb["color_g"].storage,
@@ -738,11 +738,7 @@ class Pipeline:
                         gaussians=b.gaussians.storage,
                         num_gaussians_counter=b.num_gaussians_counter.storage,
                         camera=self._camera_buffer,
-                        grad_mean2d_x=sb["mean2d_x"].storage,
-                        grad_mean2d_y=sb["mean2d_y"].storage,
-                        grad_cov2d_a=sb["cov2d_a"].storage,
-                        grad_cov2d_b=sb["cov2d_b"].storage,
-                        grad_cov2d_c=sb["cov2d_c"].storage,
+                        **b.grad_seed_kwargs(),
                         grad_mean_x=gb["mean_x"].storage,
                         grad_mean_y=gb["mean_y"].storage,
                         grad_mean_z=gb["mean_z"].storage,
@@ -768,20 +764,7 @@ class Pipeline:
                     output_transmittance=b.output_transmittance,
                     gaussian_count_per_pixel=b.gaussian_count_per_pixel,
                     dL_dC_texture=b.dL_dC_texture,
-                    grad_mean_x=gb["mean_x"].storage,
-                    grad_mean_y=gb["mean_y"].storage,
-                    grad_mean_z=gb["mean_z"].storage,
-                    grad_log_scale_x=gb["log_scale_x"].storage,
-                    grad_log_scale_y=gb["log_scale_y"].storage,
-                    grad_log_scale_z=gb["log_scale_z"].storage,
-                    grad_rot_w=gb["rot_w"].storage,
-                    grad_rot_x=gb["rot_x"].storage,
-                    grad_rot_y=gb["rot_y"].storage,
-                    grad_rot_z=gb["rot_z"].storage,
-                    grad_opacity=gb["opacity"].storage,
-                    grad_color_r=gb["color_r"].storage,
-                    grad_color_g=gb["color_g"].storage,
-                    grad_color_b=gb["color_b"].storage,
+                    **b.grad_kwargs(),
                     grad_2d_x_iter=b.grad_2d_x_iter.storage,
                     grad_2d_y_iter=b.grad_2d_y_iter.storage,
                 )
@@ -866,26 +849,12 @@ class Pipeline:
         bc2 = 1.0 - 0.999 ** step
 
         b = self.buffers
-        gb = b.grad_buffers
         self._dispatch(self.k_adam,
             thread_count=[self.max_splats, 1, 1],
             gaussians=b.gaussians.storage,
             adam_state=b.adam_state.storage,
             num_gaussians_counter=b.num_gaussians_counter.storage,
-            grad_mean_x=gb["mean_x"].storage,
-            grad_mean_y=gb["mean_y"].storage,
-            grad_mean_z=gb["mean_z"].storage,
-            grad_log_scale_x=gb["log_scale_x"].storage,
-            grad_log_scale_y=gb["log_scale_y"].storage,
-            grad_log_scale_z=gb["log_scale_z"].storage,
-            grad_rot_w=gb["rot_w"].storage,
-            grad_rot_x=gb["rot_x"].storage,
-            grad_rot_y=gb["rot_y"].storage,
-            grad_rot_z=gb["rot_z"].storage,
-            grad_opacity=gb["opacity"].storage,
-            grad_color_r=gb["color_r"].storage,
-            grad_color_g=gb["color_g"].storage,
-            grad_color_b=gb["color_b"].storage,
+            **b.grad_kwargs(),
             cfg={
                 "lr_mean": lrs.mean,
                 "lr_scale": lrs.scale,
@@ -1223,7 +1192,7 @@ def densify(self: Pipeline, cfg: DensifyConfig,
     if growth > 0:
         # Read gaussian scales for split/clone classification.
         gauss_raw = b.gaussians.to_numpy()
-        gauss_floats = np.frombuffer(gauss_raw.tobytes(), dtype=np.float32).reshape(-1, 14)
+        gauss_floats = np.frombuffer(gauss_raw.tobytes(), dtype=np.float32).reshape(-1, GAUSSIAN_FLOAT_COUNT)
         scales = np.exp(gauss_floats[:pre_count, 3:6])
         # Surface area proxy: sum of pairwise axis products (∝ ellipsoid SA).
         sa = (scales[:, 0] * scales[:, 1]

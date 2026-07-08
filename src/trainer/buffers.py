@@ -24,7 +24,20 @@ import numpy as np
 import slangpy as spy
 
 
-TILE_SIZE = 16
+# --- Shader-layout constants ---
+# Each MUST match the named shader. There is no codegen bridge between Python
+# and Slang, so these comments are the contract that keeps the two in sync.
+# Consumers (pipeline.py) import these rather than redefining them, so the
+# value lives in exactly one place on the Python side.
+TILE_SIZE = 16                    # tile_binned/*.slang, densify/score_forward.slang
+RADIX_PART_SIZE = 2048            # sort/device_radix_sort.slang PART_SIZE (D_DIM * KEYS_PER_THREAD)
+RADIX_GLOBAL_HIST_SIZE = 256 * 8  # device_radix_sort.slang: one 256-region per pass, 8 passes
+SCAN_BLOCK_SIZE = 1024            # common/scan.slang SCAN_BLOCK_SIZE
+RASTER_BUCKET_SIZE = 32           # rasterize/tile_binned/checkpoint.slang RASTER_BUCKET_SIZE
+# Gaussian3D packed layout: 14 contiguous float32s, no padding —
+# mean(3) + log_scale(3) + rot_quat(4) + opacity(1) + sh0(3). Used by the CPU
+# marshalling in buffer_io.py and the densify readback in pipeline.py.
+GAUSSIAN_FLOAT_COUNT = 14
 
 # Default cap on the total number of (tile_id, depth, gaussian_idx) pairs
 # emitted by bin_emit before the global radix sort. A single gaussian
@@ -32,6 +45,11 @@ TILE_SIZE = 16
 # (average tile coverage with headroom) in allocate(); this constant
 # is only used when no explicit value is provided.
 DEFAULT_MAX_SORT_PAIRS = 8_000_000
+
+
+def _ceil_div(a: int, b: int) -> int:
+    """Ceiling division ``ceil(a / b)`` for non-negative ints."""
+    return (a + b - 1) // b
 
 
 # Names of the 14 scalar grad buffers (SoA). Order matches how the
@@ -57,26 +75,44 @@ GRAD_2D_SEED_COMPONENTS = (
 
 @dataclass
 class GaussianBuffers:
+    """Container for every GPU resource the trainer uses.
+
+    The 6 size fields are the only constructor inputs; every resource field is
+    ``field(init=False)`` and assigned by :func:`allocate` immediately after
+    construction. This keeps the resource fields honestly typed_buffer (no ``| None``)
+    without needing dummy defaults or a place in ``__init__`` — every buffer
+    below is ALWAYS allocated (see the module docstring: over-allocate once).
+    The comment banners are purely organizational.
+    """
+
+    # --- sizes (the only constructor inputs) ---
+    max_splats: int = 0
+    max_sort_pairs: int = 0
+    width: int = 0
+    height: int = 0
+    num_tiles_x: int = 0
+    num_tiles_y: int = 0
+
     # --- always-live gaussian state ---
-    gaussians: spy.NDBuffer
-    num_gaussians_counter: spy.NDBuffer
+    gaussians: spy.NDBuffer = field(init=False)
+    num_gaussians_counter: spy.NDBuffer = field(init=False)
 
     # --- per-frame forward scratch / output ---
-    projected_2d: spy.NDBuffer
+    projected_2d: spy.NDBuffer = field(init=False)
     # Compact blend-backward gather record; packed by bin_count.
-    blend_data: spy.NDBuffer
+    blend_data: spy.NDBuffer = field(init=False)
 
     # v2.x uncapped-binning pipeline (replaces the legacy per-tile array).
     # See shaders/rasterize/tile_binned/bin_count.slang and bin_emit.slang.
-    tile_count_per_gaussian: spy.NDBuffer   # uint[max_splats]
-    tile_offset_per_gaussian: spy.NDBuffer  # uint[max_splats] — scan output
+    tile_count_per_gaussian: spy.NDBuffer = field(init=False)   # uint[max_splats]
+    tile_offset_per_gaussian: spy.NDBuffer = field(init=False)  # uint[max_splats] — scan output
     # Ping-pong pair buffers for radix sort.
-    sort_keys_lo_a: spy.NDBuffer            # uint[max_sort_pairs]
-    sort_keys_hi_a: spy.NDBuffer
-    sort_values_a: spy.NDBuffer
-    sort_keys_lo_b: spy.NDBuffer
-    sort_keys_hi_b: spy.NDBuffer
-    sort_values_b: spy.NDBuffer
+    sort_keys_lo_a: spy.NDBuffer = field(init=False)            # uint[max_sort_pairs]
+    sort_keys_hi_a: spy.NDBuffer = field(init=False)
+    sort_values_a: spy.NDBuffer = field(init=False)
+    sort_keys_lo_b: spy.NDBuffer = field(init=False)
+    sort_keys_hi_b: spy.NDBuffer = field(init=False)
+    sort_values_b: spy.NDBuffer = field(init=False)
     # DeviceRadixSort scratch (ported from GPUSorting).
     # radix_global_hist   : uint[256 * 8], per-pass device digit offsets;
     #                       one 256-region per pass, cleared once at start.
@@ -87,12 +123,12 @@ class GaussianBuffers:
     # radix_dispatch_args : uint[3], indirect (groups_x, 1, 1) written by
     #                       prepareDispatchArgs so upsweep/downsweep scale
     #                       with active_blocks instead of max_blocks.
-    radix_global_hist: spy.NDBuffer
-    radix_pass_hist: spy.NDBuffer
-    radix_dispatch_args: spy.NDBuffer
+    radix_global_hist: spy.NDBuffer = field(init=False)
+    radix_pass_hist: spy.NDBuffer = field(init=False)
+    radix_dispatch_args: spy.NDBuffer = field(init=False)
     # Per-tile sorted entry ranges.
-    tile_start: spy.NDBuffer                # uint[num_tiles]
-    tile_end: spy.NDBuffer                  # uint[num_tiles]
+    tile_start: spy.NDBuffer = field(init=False)                # uint[num_tiles]
+    tile_end: spy.NDBuffer = field(init=False)                  # uint[num_tiles]
 
     # Ragged (CSR) forward-checkpoint state for the transposed backward.
     # bucket_count       : uint[num_tiles], ceil(tile_len / P) per tile
@@ -103,29 +139,29 @@ class GaussianBuffers:
     #                      per bucket. max_buckets = ceil(max_sort_pairs/P)
     #                      + num_tiles (tight upper bound on sum of per-tile
     #                      ceil(len/P), no readback needed).
-    bucket_count: spy.NDBuffer
-    bucket_offsets: spy.NDBuffer
-    bucket_offset_total: spy.NDBuffer
-    raster_checkpoints: spy.NDBuffer
+    bucket_count: spy.NDBuffer = field(init=False)
+    bucket_offsets: spy.NDBuffer = field(init=False)
+    bucket_offset_total: spy.NDBuffer = field(init=False)
+    raster_checkpoints: spy.NDBuffer = field(init=False)
 
-    output_image: spy.Texture          # rgba32_float, UAV+SRV
-    output_transmittance: spy.Texture  # r32_float
-    gaussian_count_per_pixel: spy.Texture  # r32_uint
+    output_image: spy.Texture = field(init=False)          # rgba32_float, UAV+SRV
+    output_transmittance: spy.Texture = field(init=False)  # r32_float
+    gaussian_count_per_pixel: spy.Texture = field(init=False)  # r32_uint
 
     # --- v1 training resources ---
-    target_image: spy.Texture          # rgba32_float, SRV (read-only in shaders)
-    dL_dC_texture: spy.Texture         # rgba32_float, UAV+SRV
+    target_image: spy.Texture = field(init=False)          # rgba32_float, SRV (read-only in shaders)
+    dL_dC_texture: spy.Texture = field(init=False)         # rgba32_float, UAV+SRV
     # SSIM two-pass back-projection maps (m1/m2/m3), only used when lambda_ssim>0.
-    ssim_m1: spy.Texture | None = None  # rgba32_float, WxH
-    ssim_m2: spy.Texture | None = None  # rgba32_float, WxH
-    ssim_m3: spy.Texture | None = None  # rgba32_float, WxH
-    grad_buffers: dict[str, spy.NDBuffer] = field(default_factory=dict)  # name -> int32[max_splats]
+    ssim_m1: spy.Texture = field(init=False)  # rgba32_float, WxH
+    ssim_m2: spy.Texture = field(init=False)  # rgba32_float, WxH
+    ssim_m3: spy.Texture = field(init=False)  # rgba32_float, WxH
+    grad_buffers: dict[str, spy.NDBuffer] = field(init=False)  # name -> int64[max_splats]
     # Per-gaussian summed 2D grad seeds (mean2d/cov2d) bridging the split
     # backward: blend kernel accumulates, projection kernel consumes.
-    grad_2d_seed_buffers: dict[str, spy.NDBuffer] = field(default_factory=dict)
-    adam_state: spy.NDBuffer | None = None  # AdamState[max_splats]
-    saturation_flag: spy.NDBuffer | None = None  # uint[1]
-    training_step: spy.NDBuffer | None = None    # uint[1] (Adam bias correction)
+    grad_2d_seed_buffers: dict[str, spy.NDBuffer] = field(init=False)
+    adam_state: spy.NDBuffer = field(init=False)  # AdamState[max_splats]
+    saturation_flag: spy.NDBuffer = field(init=False)  # uint[1]
+    training_step: spy.NDBuffer = field(init=False)    # uint[1] (Adam bias correction)
 
     # --- v2 densification tracking (accumulated over a window) ---
     # grad_mean_2d_mag_accum   : fixed-point sum of per-iter norm-of-sum
@@ -134,51 +170,134 @@ class GaussianBuffers:
     #                            gsplat's `state["count"]`.
     # grad_2d_{x,y}_iter       : per-iter vector accumulators; cleared by
     #                            accumulate_iter at each step end.
-    grad_mean_2d_mag_accum: spy.NDBuffer | None = None  # int32[max_splats], fixed-point
-    visibility_count_accum: spy.NDBuffer | None = None  # uint[max_splats]
-    grad_2d_x_iter: spy.NDBuffer | None = None          # int32[max_splats], fixed-point
-    grad_2d_y_iter: spy.NDBuffer | None = None          # int32[max_splats], fixed-point
+    grad_mean_2d_mag_accum: spy.NDBuffer = field(init=False)  # int64[max_splats], fixed-point
+    visibility_count_accum: spy.NDBuffer = field(init=False)  # uint[max_splats]
+    grad_2d_x_iter: spy.NDBuffer = field(init=False)          # int64[max_splats], fixed-point
+    grad_2d_y_iter: spy.NDBuffer = field(init=False)          # int64[max_splats], fixed-point
 
     # --- FastGS importance scoring ---
-    importance_score_accum: spy.NDBuffer | None = None  # uint[max_splats]
-    growth_budget: spy.NDBuffer | None = None           # int[1]
-    prune_budget: spy.NDBuffer | None = None            # int[1]
-    error_mask: spy.Texture | None = None               # r32_uint, WxH
-    l1_map: spy.Texture | None = None                   # r32_float, WxH
-    l1_minmax: spy.NDBuffer | None = None               # uint[2]
+    importance_score_accum: spy.NDBuffer = field(init=False)  # uint[max_splats]
+    growth_budget: spy.NDBuffer = field(init=False)           # int[1]
+    prune_budget: spy.NDBuffer = field(init=False)            # int[1]
+    error_mask: spy.Texture = field(init=False)               # r32_uint, WxH
+    l1_map: spy.Texture = field(init=False)                   # r32_float, WxH
+    l1_minmax: spy.NDBuffer = field(init=False)               # uint[2]
 
     # --- v2 densification scratch + pipeline state ---
-    densify_score: spy.NDBuffer | None = None       # float[max_splats]
-    gaussians_scratch: spy.NDBuffer | None = None   # Gaussian3D[max_splats]
-    adam_state_scratch: spy.NDBuffer | None = None  # AdamState[max_splats]
-    action_buffer: spy.NDBuffer | None = None       # uint[max_splats]
-    valid_mask_buffer: spy.NDBuffer | None = None   # uint[max_splats]
-    scan_buffer: spy.NDBuffer | None = None         # uint[max_splats]
-    scan_block_sums: spy.NDBuffer | None = None     # uint[max_blocks]
-    scan_block_sums_l2: spy.NDBuffer | None = None  # uint[max_l2_blocks]
-    scan_total: spy.NDBuffer | None = None          # uint[1]
+    densify_score: spy.NDBuffer = field(init=False)       # float[max_splats]
+    gaussians_scratch: spy.NDBuffer = field(init=False)   # Gaussian3D[max_splats]
+    adam_state_scratch: spy.NDBuffer = field(init=False)  # AdamState[max_splats]
+    action_buffer: spy.NDBuffer = field(init=False)       # uint[max_splats]
+    valid_mask_buffer: spy.NDBuffer = field(init=False)   # uint[max_splats]
+    scan_buffer: spy.NDBuffer = field(init=False)         # uint[max_splats]
+    scan_block_sums: spy.NDBuffer = field(init=False)     # uint[max_blocks]
+    scan_block_sums_l2: spy.NDBuffer = field(init=False)  # uint[max_l2_blocks]
+    scan_total: spy.NDBuffer = field(init=False)          # uint[1]
 
     # --- densify_simple wait-free dispatch state ---
     # Snapshots of num_gaussians_counter[0] taken via snapshotCount so that
     # splitAndClone/buildPruneMask/scatterCompact can read the counts they
     # need as GPU-resident buffers instead of via CPU readback.
-    densify_pre_count: spy.NDBuffer | None = None      # uint[1]
-    densify_post_count: spy.NDBuffer | None = None     # uint[1]
+    densify_pre_count: spy.NDBuffer = field(init=False)      # uint[1]
+    densify_post_count: spy.NDBuffer = field(init=False)     # uint[1]
     # DispatchIndirect args (groups_x, 1, 1) for the pre-count-sized
     # splitAndClone dispatch. Also requires BufferUsage.indirect_argument.
-    densify_dispatch_args: spy.NDBuffer | None = None  # uint[3]
-
-    # --- sizes ---
-    max_splats: int = 0
-    max_sort_pairs: int = 0
-    width: int = 0
-    height: int = 0
-    num_tiles_x: int = 0
-    num_tiles_y: int = 0
+    densify_dispatch_args: spy.NDBuffer = field(init=False)  # uint[3]
 
     @property
     def num_tiles(self) -> int:
         return self.num_tiles_x * self.num_tiles_y
+
+    def grad_kwargs(self) -> dict[str, spy.NDBuffer]:
+        """Dispatch bindings for the 14 SoA scalar gradients:
+        ``{"grad_<component>": buf.storage}``. The kwarg name is exactly
+        ``"grad_" + component``, matching the entry-point parameters in
+        adam.slang / backward.slang / projection_backward.slang
+        (grad_mean_x ... grad_color_b). Splat into a ``_dispatch`` call with
+        ``**b.grad_kwargs()`` — one dict built per dispatch, identical work
+        to the explicit per-component kwargs it replaces."""
+        return {f"grad_{name}": buf.storage for name, buf in self.grad_buffers.items()}
+
+    def grad_seed_kwargs(self) -> dict[str, spy.NDBuffer]:
+        """Dispatch bindings for the 5 summed 2D gradient seeds:
+        ``grad_mean2d_x``, ``grad_cov2d_a`` ... — consumed by
+        backward_persplat.slang and projection_backward.slang. Same
+        ``"grad_" + component`` naming rule as :meth:`grad_kwargs`."""
+        return {f"grad_{name}": buf.storage for name, buf in self.grad_2d_seed_buffers.items()}
+
+
+@dataclass
+class _ShaderTypes:
+    """The four Slang struct types :func:`allocate` sizes NDBuffers from,
+    resolved once via reflection."""
+    gaussian: object
+    projected: object
+    blend: object
+    adam: object
+
+
+def _reflect_types(module: spy.Module) -> _ShaderTypes:
+    """Look up the shader struct layouts by name (Python never duplicates the
+    memory layout). Raises with the offending name if the module doesn't
+    expose one — e.g. the reflection module was loaded from a file that no
+    longer transitively includes common/types.slang."""
+    def need(name: str) -> object:
+        t = module.layout.find_type_by_name(name)
+        if t is None:
+            raise RuntimeError(f"shader module does not expose type '{name}'")
+        return t
+
+    return _ShaderTypes(
+        gaussian=need("Gaussian3D"),
+        projected=need("Projected2DGaussian"),
+        blend=need("BlendData"),
+        adam=need("AdamState"),
+    )
+
+
+@dataclass
+class _Alloc:
+    """Construction-time buffer/texture factory. Captures the invariant
+    allocation args (device + frame dims) so each of the ~40 resources below
+    reads as one typed_buffer line instead of repeating ``device=``/``width=``/
+    ``height=``/``usage=``. Pure construction helper — not stored on
+    :class:`GaussianBuffers`, no per-frame cost."""
+    device: spy.Device
+    width: int
+    height: int
+
+    def typed_buffer(self, dtype, *shape) -> spy.NDBuffer:
+        return spy.NDBuffer(device=self.device, dtype=dtype, shape=shape)
+
+    def uint_buffer(self, *shape) -> spy.NDBuffer:
+        return self.typed_buffer("uint", *shape)
+
+    def i64_buffer(self, *shape) -> spy.NDBuffer:
+        return self.typed_buffer("int64_t", *shape)
+
+    def indirect_buffer(self) -> spy.NDBuffer:
+        # Indirect-arg buffers need BufferUsage.indirect_argument in addition
+        # to shader_resource | unordered_access (the NDBuffer default) so the
+        # kernel can WRITE the args AND the driver can READ them as dispatch
+        # args (uint[3] = groups_x, 1, 1).
+        return spy.NDBuffer(
+            device=self.device, dtype="uint", shape=(3,),
+            usage=(spy.BufferUsage.shader_resource
+                   | spy.BufferUsage.unordered_access
+                   | spy.BufferUsage.indirect_argument),
+        )
+
+    def tex(self, fmt: spy.Format, label: str,
+            usage: spy.TextureUsage | None = None) -> spy.Texture:
+        return self.device.create_texture(
+            type=spy.TextureType.texture_2d,
+            format=fmt,
+            width=self.width,
+            height=self.height,
+            usage=usage if usage is not None else (
+                spy.TextureUsage.shader_resource | spy.TextureUsage.unordered_access),
+            label=label,
+        )
 
 
 def allocate(
@@ -189,233 +308,33 @@ def allocate(
     height: int,
     max_sort_pairs: int = DEFAULT_MAX_SORT_PAIRS,
 ) -> GaussianBuffers:
-    """Allocate all GPU resources needed by forward + backward + Adam."""
-    gaussian_type = module.layout.find_type_by_name("Gaussian3D")
-    if gaussian_type is None:
-        raise RuntimeError("shader module does not expose type 'Gaussian3D'")
-    projected_type = module.layout.find_type_by_name("Projected2DGaussian")
-    if projected_type is None:
-        raise RuntimeError("shader module does not expose type 'Projected2DGaussian'")
-    blend_type = module.layout.find_type_by_name("BlendData")
-    if blend_type is None:
-        raise RuntimeError("shader module does not expose type 'BlendData'")
-    adam_type = module.layout.find_type_by_name("AdamState")
-    if adam_type is None:
-        raise RuntimeError("shader module does not expose type 'AdamState'")
+    """Allocate all GPU resources needed by forward + backward + Adam.
 
-    num_tiles_x = (width + TILE_SIZE - 1) // TILE_SIZE
-    num_tiles_y = (height + TILE_SIZE - 1) // TILE_SIZE
+    Constructs the :class:`GaussianBuffers` container from the size fields,
+    then assigns each resource via the :class:`_Alloc` factory. Every buffer
+    is declared exactly twice — once as a typed_buffer field on the dataclass, once
+    here — which is the minimum that preserves typed_buffer attribute access.
+    """
+    types = _reflect_types(module)
+    allocator = _Alloc(device, width, height)
+
+    num_tiles_x = _ceil_div(width, TILE_SIZE)
+    num_tiles_y = _ceil_div(height, TILE_SIZE)
     num_tiles = num_tiles_x * num_tiles_y
 
-    gaussians = spy.NDBuffer(device=device, dtype=gaussian_type, shape=(max_splats,))
-    num_gaussians_counter = spy.NDBuffer(device=device, dtype="uint", shape=(1,))
+    # DeviceRadixSort scratch sizing (see RADIX_PART_SIZE / RADIX_GLOBAL_HIST_SIZE).
+    max_blocks = _ceil_div(max_sort_pairs, RADIX_PART_SIZE)
+    # Ragged forward-checkpoint sizing (see RASTER_BUCKET_SIZE). Tight upper
+    # bound on total buckets: sum_t ceil(len_t / P) < (sum_t len_t)/P +
+    # num_tiles = max_sort_pairs/P + num_tiles.
+    max_buckets = _ceil_div(max_sort_pairs, RASTER_BUCKET_SIZE) + num_tiles
+    # Scan primitive uses SCAN_BLOCK_SIZE threads/block; number of blocks is
+    # ceil(N / SCAN_BLOCK_SIZE). Level-2 block sums enable the 3-level scan
+    # needed when max_splats > 1M.
+    num_l1_blocks = max(1, _ceil_div(max_splats, SCAN_BLOCK_SIZE))
+    num_l2_blocks = max(1, _ceil_div(num_l1_blocks, SCAN_BLOCK_SIZE))
 
-    projected_2d = spy.NDBuffer(device=device, dtype=projected_type, shape=(max_splats,))
-    # Compact per-gaussian blend gather record (mean/cov2d/opacity/sh0), packed
-    # by bin_count and consumed by the blend backward. GPU-internal scratch.
-    blend_data = spy.NDBuffer(device=device, dtype=blend_type, shape=(max_splats,))
-
-    # v2.x uncapped-binning resources.
-    tile_count_per_gaussian = spy.NDBuffer(device=device, dtype="uint", shape=(max_splats,))
-    tile_offset_per_gaussian = spy.NDBuffer(device=device, dtype="uint", shape=(max_splats,))
-    sort_keys_lo_a = spy.NDBuffer(device=device, dtype="uint", shape=(max_sort_pairs,))
-    sort_keys_hi_a = spy.NDBuffer(device=device, dtype="uint", shape=(max_sort_pairs,))
-    sort_values_a = spy.NDBuffer(device=device, dtype="uint", shape=(max_sort_pairs,))
-    sort_keys_lo_b = spy.NDBuffer(device=device, dtype="uint", shape=(max_sort_pairs,))
-    sort_keys_hi_b = spy.NDBuffer(device=device, dtype="uint", shape=(max_sort_pairs,))
-    sort_values_b = spy.NDBuffer(device=device, dtype="uint", shape=(max_sort_pairs,))
-    # DeviceRadixSort scratch. _RADIX_PART_SIZE = 2048 must match
-    # device_radix_sort.slang's PART_SIZE.
-    _RADIX_PART_SIZE = 2048
-    _RADIX_GLOBAL_HIST_SIZE = 256 * 8  # one 256-region per pass, 8 passes
-    max_blocks = (max_sort_pairs + _RADIX_PART_SIZE - 1) // _RADIX_PART_SIZE
-    radix_global_hist = spy.NDBuffer(
-        device=device, dtype="uint", shape=(_RADIX_GLOBAL_HIST_SIZE,),
-    )
-    radix_pass_hist = spy.NDBuffer(
-        device=device, dtype="uint", shape=(256 * max_blocks,),
-    )
-    # Indirect args need BufferUsage.indirect_argument in addition to
-    # shader_resource | unordered_access (default) so the kernel can write
-    # to it AND the driver can read it as dispatch args.
-    radix_dispatch_args = spy.NDBuffer(
-        device=device, dtype="uint", shape=(3,),
-        usage=(spy.BufferUsage.shader_resource
-               | spy.BufferUsage.unordered_access
-               | spy.BufferUsage.indirect_argument),
-    )
-    tile_start = spy.NDBuffer(device=device, dtype="uint", shape=(num_tiles,))
-    tile_end = spy.NDBuffer(device=device, dtype="uint", shape=(num_tiles,))
-
-    # Ragged forward-checkpoint state. _RASTER_BUCKET_SIZE must match
-    # RASTER_BUCKET_SIZE in checkpoint.slang.
-    _RASTER_BUCKET_SIZE = 32
-    # Tight upper bound on total buckets: sum_t ceil(len_t / P) <
-    # (sum_t len_t)/P + num_tiles = max_sort_pairs/P + num_tiles.
-    max_buckets = (max_sort_pairs + _RASTER_BUCKET_SIZE - 1) // _RASTER_BUCKET_SIZE + num_tiles
-    bucket_count = spy.NDBuffer(device=device, dtype="uint", shape=(num_tiles,))
-    bucket_offsets = spy.NDBuffer(device=device, dtype="uint", shape=(num_tiles,))
-    bucket_offset_total = spy.NDBuffer(device=device, dtype="uint", shape=(1,))
-    raster_checkpoints = spy.NDBuffer(
-        device=device, dtype="uint2", shape=(max_buckets * 256,),
-    )
-
-    def _tex(fmt: spy.Format, label: str, usage: spy.TextureUsage | None = None) -> spy.Texture:
-        return device.create_texture(
-            type=spy.TextureType.texture_2d,
-            format=fmt,
-            width=width,
-            height=height,
-            usage=usage if usage is not None else (spy.TextureUsage.shader_resource | spy.TextureUsage.unordered_access),
-            label=label,
-        )
-
-    output_image = _tex(spy.Format.rgba32_float, "output_image")
-    output_transmittance = _tex(spy.Format.r32_float, "output_transmittance")
-    gaussian_count_per_pixel = _tex(spy.Format.r32_uint, "gaussian_count_per_pixel")
-
-    target_image = _tex(
-        spy.Format.rgba32_float, "target_image",
-        usage=spy.TextureUsage.shader_resource | spy.TextureUsage.unordered_access,
-    )
-    dL_dC_texture = _tex(spy.Format.rgba32_float, "dL_dC")
-    ssim_m1 = _tex(spy.Format.rgba32_float, "ssim_m1")
-    ssim_m2 = _tex(spy.Format.rgba32_float, "ssim_m2")
-    ssim_m3 = _tex(spy.Format.rgba32_float, "ssim_m3")
-
-    grad_buffers: dict[str, spy.NDBuffer] = {
-        name: spy.NDBuffer(device=device, dtype="int64_t", shape=(max_splats,))
-        for name in GRAD_SCALAR_COMPONENTS
-    }
-    grad_2d_seed_buffers: dict[str, spy.NDBuffer] = {
-        name: spy.NDBuffer(device=device, dtype="int64_t", shape=(max_splats,))
-        for name in GRAD_2D_SEED_COMPONENTS
-    }
-
-    adam_state = spy.NDBuffer(device=device, dtype=adam_type, shape=(max_splats,))
-
-    saturation_flag = spy.NDBuffer(device=device, dtype="uint", shape=(1,))
-    training_step = spy.NDBuffer(device=device, dtype="uint", shape=(1,))
-
-    grad_mean_2d_mag_accum = spy.NDBuffer(device=device, dtype="int64_t", shape=(max_splats,))
-    visibility_count_accum = spy.NDBuffer(device=device, dtype="uint", shape=(max_splats,))
-    grad_2d_x_iter = spy.NDBuffer(device=device, dtype="int64_t", shape=(max_splats,))
-    grad_2d_y_iter = spy.NDBuffer(device=device, dtype="int64_t", shape=(max_splats,))
-
-    # FastGS importance scoring
-    importance_score_accum = spy.NDBuffer(device=device, dtype="uint", shape=(max_splats,))
-    growth_budget = spy.NDBuffer(device=device, dtype="int", shape=(1,))
-    prune_budget = spy.NDBuffer(device=device, dtype="int", shape=(1,))
-    error_mask = device.create_texture(
-        type=spy.TextureType.texture_2d,
-        format=spy.Format.r32_uint,
-        width=width, height=height,
-        usage=spy.TextureUsage.shader_resource | spy.TextureUsage.unordered_access,
-        label="error_mask",
-    )
-    l1_map = device.create_texture(
-        type=spy.TextureType.texture_2d,
-        format=spy.Format.r32_float,
-        width=width, height=height,
-        usage=spy.TextureUsage.shader_resource | spy.TextureUsage.unordered_access,
-        label="l1_map",
-    )
-    l1_minmax = spy.NDBuffer(device=device, dtype="uint", shape=(2,))
-
-    # v2 densification scratch
-    densify_score = spy.NDBuffer(device=device, dtype="float", shape=(max_splats,))
-    gaussians_scratch = spy.NDBuffer(device=device, dtype=gaussian_type, shape=(max_splats,))
-    adam_state_scratch = spy.NDBuffer(device=device, dtype=adam_type, shape=(max_splats,))
-    action_buffer = spy.NDBuffer(device=device, dtype="uint", shape=(max_splats,))
-    valid_mask_buffer = spy.NDBuffer(device=device, dtype="uint", shape=(max_splats,))
-    scan_buffer = spy.NDBuffer(device=device, dtype="uint", shape=(max_splats,))
-    # Scan primitive uses 1024 threads/block; number of blocks is ceil(N/1024).
-    # Allocate upper bound = ceil(max_splats / 1024).
-    num_l1_blocks = max(1, (max_splats + 1023) // 1024)
-    scan_block_sums = spy.NDBuffer(
-        device=device, dtype="uint",
-        shape=(num_l1_blocks,),
-    )
-    # Level-2 block sums for 3-level scan (needed when max_splats > 1M).
-    num_l2_blocks = max(1, (num_l1_blocks + 1023) // 1024)
-    scan_block_sums_l2 = spy.NDBuffer(
-        device=device, dtype="uint",
-        shape=(num_l2_blocks,),
-    )
-    scan_total = spy.NDBuffer(device=device, dtype="uint", shape=(1,))
-
-    # Densify wait-free-dispatch state (see densify_dispatch.slang).
-    densify_pre_count = spy.NDBuffer(device=device, dtype="uint", shape=(1,))
-    densify_post_count = spy.NDBuffer(device=device, dtype="uint", shape=(1,))
-    densify_dispatch_args = spy.NDBuffer(
-        device=device, dtype="uint", shape=(3,),
-        usage=(spy.BufferUsage.shader_resource
-               | spy.BufferUsage.unordered_access
-               | spy.BufferUsage.indirect_argument),
-    )
-
-    num_gaussians_counter.copy_from_numpy(np.zeros(1, dtype=np.uint32))
-    saturation_flag.copy_from_numpy(np.zeros(1, dtype=np.uint32))
-    training_step.copy_from_numpy(np.zeros(1, dtype=np.uint32))
-
-    # this is nuts
-    return GaussianBuffers(
-        gaussians=gaussians,
-        num_gaussians_counter=num_gaussians_counter,
-        projected_2d=projected_2d,
-        tile_count_per_gaussian=tile_count_per_gaussian,
-        tile_offset_per_gaussian=tile_offset_per_gaussian,
-        sort_keys_lo_a=sort_keys_lo_a,
-        sort_keys_hi_a=sort_keys_hi_a,
-        sort_values_a=sort_values_a,
-        sort_keys_lo_b=sort_keys_lo_b,
-        sort_keys_hi_b=sort_keys_hi_b,
-        sort_values_b=sort_values_b,
-        radix_global_hist=radix_global_hist,
-        radix_pass_hist=radix_pass_hist,
-        radix_dispatch_args=radix_dispatch_args,
-        tile_start=tile_start,
-        tile_end=tile_end,
-        bucket_count=bucket_count,
-        bucket_offsets=bucket_offsets,
-        bucket_offset_total=bucket_offset_total,
-        raster_checkpoints=raster_checkpoints,
-        blend_data=blend_data,
-        output_image=output_image,
-        output_transmittance=output_transmittance,
-        gaussian_count_per_pixel=gaussian_count_per_pixel,
-        target_image=target_image,
-        dL_dC_texture=dL_dC_texture,
-        ssim_m1=ssim_m1,
-        ssim_m2=ssim_m2,
-        ssim_m3=ssim_m3,
-        grad_buffers=grad_buffers,
-        grad_2d_seed_buffers=grad_2d_seed_buffers,
-        adam_state=adam_state,
-        saturation_flag=saturation_flag,
-        training_step=training_step,
-        grad_mean_2d_mag_accum=grad_mean_2d_mag_accum,
-        visibility_count_accum=visibility_count_accum,
-        grad_2d_x_iter=grad_2d_x_iter,
-        grad_2d_y_iter=grad_2d_y_iter,
-        importance_score_accum=importance_score_accum,
-        growth_budget=growth_budget,
-        prune_budget=prune_budget,
-        error_mask=error_mask,
-        l1_map=l1_map,
-        l1_minmax=l1_minmax,
-        densify_score=densify_score,
-        gaussians_scratch=gaussians_scratch,
-        adam_state_scratch=adam_state_scratch,
-        action_buffer=action_buffer,
-        valid_mask_buffer=valid_mask_buffer,
-        scan_buffer=scan_buffer,
-        scan_block_sums=scan_block_sums,
-        scan_block_sums_l2=scan_block_sums_l2,
-        scan_total=scan_total,
-        densify_pre_count=densify_pre_count,
-        densify_post_count=densify_post_count,
-        densify_dispatch_args=densify_dispatch_args,
+    buffers = GaussianBuffers(
         max_splats=max_splats,
         max_sort_pairs=max_sort_pairs,
         width=width,
@@ -424,77 +343,116 @@ def allocate(
         num_tiles_y=num_tiles_y,
     )
 
+    # --- always-live gaussian state ---
+    buffers.gaussians = allocator.typed_buffer(types.gaussian, max_splats)
+    buffers.num_gaussians_counter = allocator.uint_buffer(1)
 
-def set_num_gaussians(buffers: GaussianBuffers, n: int) -> None:
-    assert 0 <= n <= buffers.max_splats, (
-        f"num_gaussians {n} out of range [0, {buffers.max_splats}]"
-    )
-    buffers.num_gaussians_counter.copy_from_numpy(np.array([n], dtype=np.uint32))
+    # --- per-frame forward scratch / output ---
+    buffers.projected_2d = allocator.typed_buffer(types.projected, max_splats)
+    # Compact per-gaussian blend gather record (mean/cov2d/opacity/sh0), packed
+    # by bin_count and consumed by the blend backward. GPU-internal scratch.
+    buffers.blend_data = allocator.typed_buffer(types.blend, max_splats)
+
+    # v2.x uncapped-binning resources.
+    buffers.tile_count_per_gaussian = allocator.uint_buffer(max_splats)
+    buffers.tile_offset_per_gaussian = allocator.uint_buffer(max_splats)
+    buffers.sort_keys_lo_a = allocator.uint_buffer(max_sort_pairs)
+    buffers.sort_keys_hi_a = allocator.uint_buffer(max_sort_pairs)
+    buffers.sort_values_a = allocator.uint_buffer(max_sort_pairs)
+    buffers.sort_keys_lo_b = allocator.uint_buffer(max_sort_pairs)
+    buffers.sort_keys_hi_b = allocator.uint_buffer(max_sort_pairs)
+    buffers.sort_values_b = allocator.uint_buffer(max_sort_pairs)
+    buffers.radix_global_hist = allocator.uint_buffer(RADIX_GLOBAL_HIST_SIZE)
+    buffers.radix_pass_hist = allocator.uint_buffer(256 * max_blocks)
+    buffers.radix_dispatch_args = allocator.indirect_buffer()
+    buffers.tile_start = allocator.uint_buffer(num_tiles)
+    buffers.tile_end = allocator.uint_buffer(num_tiles)
+
+    buffers.bucket_count = allocator.uint_buffer(num_tiles)
+    buffers.bucket_offsets = allocator.uint_buffer(num_tiles)
+    buffers.bucket_offset_total = allocator.uint_buffer(1)
+    buffers.raster_checkpoints = allocator.typed_buffer("uint2", max_buckets * 256)
+
+    buffers.output_image = allocator.tex(spy.Format.rgba32_float, "output_image")
+    buffers.output_transmittance = allocator.tex(spy.Format.r32_float, "output_transmittance")
+    buffers.gaussian_count_per_pixel = allocator.tex(spy.Format.r32_uint, "gaussian_count_per_pixel")
+
+    # --- v1 training resources ---
+    buffers.target_image = allocator.tex(spy.Format.rgba32_float, "target_image")
+    buffers.dL_dC_texture = allocator.tex(spy.Format.rgba32_float, "dL_dC")
+    buffers.ssim_m1 = allocator.tex(spy.Format.rgba32_float, "ssim_m1")
+    buffers.ssim_m2 = allocator.tex(spy.Format.rgba32_float, "ssim_m2")
+    buffers.ssim_m3 = allocator.tex(spy.Format.rgba32_float, "ssim_m3")
+
+    buffers.grad_buffers = {name: allocator.i64_buffer(max_splats) for name in GRAD_SCALAR_COMPONENTS}
+    buffers.grad_2d_seed_buffers = {name: allocator.i64_buffer(max_splats) for name in GRAD_2D_SEED_COMPONENTS}
+
+    buffers.adam_state = allocator.typed_buffer(types.adam, max_splats)
+    buffers.saturation_flag = allocator.uint_buffer(1)
+    buffers.training_step = allocator.uint_buffer(1)
+
+    # --- v2 densification tracking ---
+    buffers.grad_mean_2d_mag_accum = allocator.i64_buffer(max_splats)
+    buffers.visibility_count_accum = allocator.uint_buffer(max_splats)
+    buffers.grad_2d_x_iter = allocator.i64_buffer(max_splats)
+    buffers.grad_2d_y_iter = allocator.i64_buffer(max_splats)
+
+    # --- FastGS importance scoring ---
+    buffers.importance_score_accum = allocator.uint_buffer(max_splats)
+    buffers.growth_budget = allocator.typed_buffer("int", 1)
+    buffers.prune_budget = allocator.typed_buffer("int", 1)
+    buffers.error_mask = allocator.tex(spy.Format.r32_uint, "error_mask")
+    buffers.l1_map = allocator.tex(spy.Format.r32_float, "l1_map")
+    buffers.l1_minmax = allocator.uint_buffer(2)
+
+    # --- v2 densification scratch + pipeline state ---
+    buffers.densify_score = allocator.typed_buffer("float", max_splats)
+    buffers.gaussians_scratch = allocator.typed_buffer(types.gaussian, max_splats)
+    buffers.adam_state_scratch = allocator.typed_buffer(types.adam, max_splats)
+    buffers.action_buffer = allocator.uint_buffer(max_splats)
+    buffers.valid_mask_buffer = allocator.uint_buffer(max_splats)
+    buffers.scan_buffer = allocator.uint_buffer(max_splats)
+    buffers.scan_block_sums = allocator.uint_buffer(num_l1_blocks)
+    buffers.scan_block_sums_l2 = allocator.uint_buffer(num_l2_blocks)
+    buffers.scan_total = allocator.uint_buffer(1)
+
+    # --- densify_simple wait-free dispatch state ---
+    buffers.densify_pre_count = allocator.uint_buffer(1)
+    buffers.densify_post_count = allocator.uint_buffer(1)
+    buffers.densify_dispatch_args = allocator.indirect_buffer()
+
+    buffers.num_gaussians_counter.copy_from_numpy(np.zeros(1, dtype=np.uint_buffer32))
+    buffers.saturation_flag.copy_from_numpy(np.zeros(1, dtype=np.uint_buffer32))
+    buffers.training_step.copy_from_numpy(np.zeros(1, dtype=np.uint_buffer32))
+
+    return buffers
 
 
-def write_gaussians(
-    buffers: GaussianBuffers,
-    means: np.ndarray,
-    log_scales: np.ndarray,
-    rot_quats: np.ndarray,
-    opacities: np.ndarray,
-    color_logits: np.ndarray,
-) -> None:
-    """``opacities`` is a probability in (0, 1); we convert to the
-    pre-sigmoid logit the shader expects."""
-    n = means.shape[0]
-    assert means.shape == (n, 3), f"means shape {means.shape}"
-    assert log_scales.shape == (n, 3), f"log_scales shape {log_scales.shape}"
-    assert rot_quats.shape == (n, 4), f"rot_quats shape {rot_quats.shape}"
-    assert opacities.shape == (n,), f"opacities shape {opacities.shape}"
-    assert color_logits.shape == (n, 3), f"color_logits shape {color_logits.shape}"
-    assert n <= buffers.max_splats, f"{n} gaussians exceeds max_splats {buffers.max_splats}"
+# CPU-side data marshalling lives in buffer_io.py (a different axis of change
+# from GPU resource allocation). Re-exported here so existing callers can keep
+# using ``buffers.write_gaussians(...)`` etc. The import is at the bottom to
+# avoid a circular import — buffer_io imports GaussianBuffers from this module.
+from trainer.buffer_io import (  # noqa: E402
+    set_num_gaussians,
+    write_gaussians,
+    write_gaussians_raw,
+    zero_adam_state,
+)
 
-    # Convert probability → logit once on CPU. 1e-5 floor keeps log finite
-    # when a caller passes exactly 0 or 1.
-    p = np.clip(opacities, 1e-5, 1.0 - 1e-5).astype(np.float32)
-    opacity_logits = np.log(p / (1.0 - p))
-
-    # Gaussian3D is 14 contiguous float32s with no padding:
-    #   mean(3), log_scale(3), rot_quat(4), opacity(1), color_logit(3).
-    # Build the whole block with vectorized numpy and upload in one
-    # copy_from_numpy — the per-element cursor loop below built ~5*n
-    # temporary spy.float3/float4 objects (≈90ms per 5k gaussians, seconds
-    # after densification grows the count into the hundreds of thousands).
-    block = np.empty((n, 14), dtype=np.float32)
-    block[:, 0:3] = means
-    block[:, 3:6] = log_scales
-    block[:, 6:10] = rot_quats
-    block[:, 10] = opacity_logits
-    block[:, 11:14] = color_logits
-    buffers.gaussians.copy_from_numpy(np.ascontiguousarray(block.reshape(-1)))
-
-    set_num_gaussians(buffers, n)
-
-
-def write_gaussians_raw(buffers: GaussianBuffers, floats: np.ndarray, n: int) -> None:
-    """Upload a snapshot already in the packed 14-float Gaussian3D layout
-    (mean3, log_scale3, rot_quat4, opacity1, sh0_3) straight into the GPU
-    buffer. Used by the live viewer, which receives snapshots from the
-    trainer via the shared-memory splat stream — no per-field unpacking.
-
-    ``floats`` must hold at least ``n * 14`` float32 values."""
-    assert n <= buffers.max_splats, f"{n} gaussians exceeds max_splats {buffers.max_splats}"
-    n_floats = n * 14
-    block = np.ascontiguousarray(floats[:n_floats].astype(np.float32, copy=False))
-    if n > 0:
-        buffers.gaussians.copy_from_numpy(block)
-    set_num_gaussians(buffers, n)
-
-
-def zero_adam_state(buffers: GaussianBuffers) -> None:
-    """Reset all Adam first/second-moment state to zero.
-
-    The whole AdamState buffer is contiguous POD, so a single zero-filled
-    copy_from_numpy clears it regardless of the internal field layout. The
-    old per-element cursor loop ran over all max_splats (~820ms per 50k,
-    i.e. ~80s at a 5M cap) on every set_gaussians_from_numpy call.
-    """
-    assert buffers.adam_state is not None
-    n_floats = buffers.adam_state.to_numpy().view(np.float32).size
-    buffers.adam_state.copy_from_numpy(np.zeros(n_floats, dtype=np.float32))
+__all__ = [
+    "TILE_SIZE",
+    "RADIX_PART_SIZE",
+    "RADIX_GLOBAL_HIST_SIZE",
+    "SCAN_BLOCK_SIZE",
+    "RASTER_BUCKET_SIZE",
+    "GAUSSIAN_FLOAT_COUNT",
+    "DEFAULT_MAX_SORT_PAIRS",
+    "GRAD_SCALAR_COMPONENTS",
+    "GRAD_2D_SEED_COMPONENTS",
+    "GaussianBuffers",
+    "allocate",
+    "set_num_gaussians",
+    "write_gaussians",
+    "write_gaussians_raw",
+    "zero_adam_state",
+]
