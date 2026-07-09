@@ -35,7 +35,7 @@ KERNEL_SPECS: tuple[tuple[str, str, str], ...] = (
     ("backward_persplat",    "rasterize/tile_binned/backward_persplat.slang",  "backwardRasterizePerSplat"),
     ("projection_backward",  "rasterize/tile_binned/projection_backward.slang", "projectionBackward"),
     # losses
-    ("loss",                 "losses/l2_linear.slang",                         "computeLossGrad"),
+    ("loss",                 "losses/l1_l2_loss.slang",                        "computeLossGrad"),
     ("ssim_maps",            "losses/ssim_loss.slang",                         "ssimComputeMaps"),
     ("ssim_grad",            "losses/ssim_loss.slang",                         "ssimGradient"),
     ("regularization",       "losses/regularization.slang",                    "addRegularization"),
@@ -63,6 +63,10 @@ KERNEL_SPECS: tuple[tuple[str, str, str], ...] = (
     ("score_forward",        "densify/score_forward.slang",                    "scoreForward"),
     ("densify_snapshot",     "densify/densify_dispatch.slang",                 "snapshotCount"),
     ("densify_prepare_args", "densify/densify_dispatch.slang",                 "prepareDensifyArgs"),
+    # structure-aware densification (SAD-GS)
+    ("score_structure_aware", "densify/score_structure_aware.slang",           "scoreStructureAware"),
+    ("clear_structure_scores", "densify/score_structure_aware.slang",          "clearStructureScores"),
+    ("split_anisotropic",    "densify/split_anisotropic.slang",                "splitAnisotropic"),
     # common
     ("scan_block",           "common/scan.slang",                              "scanBlock"),
     ("scan_block_sums",      "common/scan.slang",                              "scanBlockSums"),

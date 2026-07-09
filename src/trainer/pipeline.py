@@ -601,9 +601,10 @@ class Pipeline:
                     frame_dim=spy.uint2(self.width, self.height),
                     lambda_ssim=self.cfg.lambda_ssim,
                     w_alpha=self.cfg.w_alpha,
+                    lambda_l2=self.cfg.lambda_l2,
                 )
         else:
-            with self._marker_group("l2_loss"):
+            with self._marker_group("l1_l2_loss"):
                 self._dispatch(self.k_loss, "loss",
                     thread_count=[self.width, self.height, 1],
                     output_image=b.output_image,
@@ -611,6 +612,7 @@ class Pipeline:
                     dL_dC=b.dL_dC_texture,
                     frame_dim=spy.uint2(self.width, self.height),
                     w_alpha=self.cfg.w_alpha,
+                    lambda_l2=self.cfg.lambda_l2,
                 )
 
     def _run_backward(self) -> None:
@@ -773,11 +775,19 @@ class Pipeline:
             pixels_per_step=float(self.width * self.height),
         )
 
-    def train_step(self, camera: Camera, lrs: AdamLRs | None = None) -> None:
+    def train_step(self, camera: Camera, lrs: AdamLRs | None = None,
+                   structure_tensor=None) -> None:
         """Run one training step: forward → loss → backward → regularization → adam.
 
         The target image must have been uploaded via
         :meth:`set_target_image` before calling.
+
+        ``structure_tensor`` (SAD-GS online accumulation): when provided (the
+        current view's structure-tensor field), a per-gaussian eta sample is
+        accumulated into the eta buffers right after the forward pass, reusing
+        the freshly-uploaded camera. Over a densify window this builds the
+        multiview N_high/N_low/eta_max statistics the paper accumulates once
+        per training iteration (Section 3.6). None (default) = no SAD overhead.
 
         NO CPU/GPU sync here — training submits kernels and returns
         immediately. This keeps the GPU saturated; the queue drains
@@ -792,6 +802,9 @@ class Pipeline:
             self._clear_grads()
         with self._marker_group("forward"):
             self._run_forward(camera)
+        if structure_tensor is not None:
+            with self._marker_group("structure_accum"):
+                _densify.accumulate_structure_scores(self, structure_tensor)
         with self._marker_group("loss"):
             self._run_loss()
         with self._marker_group("backward"):
@@ -824,6 +837,15 @@ class Pipeline:
 
     def reset_opacity(self, cfg) -> None:
         return _densify.reset_opacity(self, cfg)
+
+    def compute_structure_scores(self, cameras, structure_textures, cfg) -> None:
+        return _densify.compute_structure_scores(self, cameras, structure_textures, cfg)
+
+    def clear_structure_scores(self) -> None:
+        return _densify.clear_structure_scores(self)
+
+    def densify_structure_aware(self, cfg) -> dict:
+        return _densify.densify_structure_aware(self, cfg)
 
     def _scan(self, n: int,
               in_buf: spy.NDBuffer | None = None,

@@ -25,8 +25,11 @@ class RenderConfig:
     scale_reg: float = 0.0
     # Alpha loss weight. Set > 0 when target images have meaningful alpha.
     w_alpha: float = 0.0
-    # SSIM loss mixing. 0 = pure L2, >0 = L1+SSIM blend (3DGS default 0.2).
+    # SSIM loss mixing. 0 = pure L1, >0 = L1+SSIM blend (3DGS default 0.2).
     lambda_ssim: float = 0.2
+    # Additive L2 term weight (SADGS lambda_l2). 0 = pure L1(+SSIM); SADGS
+    # trains with 2.0. Applied on BOTH loss paths (l1_l2_loss + ssim_loss).
+    lambda_l2: float = 0.0
 
 
 @dataclass

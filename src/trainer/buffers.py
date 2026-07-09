@@ -72,6 +72,16 @@ GRAD_2D_SEED_COMPONENTS = (
     "cov2d_a", "cov2d_b", "cov2d_c",
 )
 
+# Structure-aware densification multiview accumulators (SoA uint), matching
+# SADGS. n_high/n_low are SCALAR per-gaussian view counts (classified on the
+# max-over-axes eta), so high_ratio = n_high/n_total drives the split GATE.
+# max_x/y/z are per-axis max eta (fixed-point) driving the split FACTOR
+# n_k = ceil(sqrt(eta_max_k)). Names match score_structure_aware.slang.
+ETA_ACCUM_COMPONENTS = (
+    "n_high", "n_low",
+    "max_x", "max_y", "max_z",
+)
+
 
 @dataclass
 class GaussianBuffers:
@@ -203,6 +213,17 @@ class GaussianBuffers:
     # splitAndClone dispatch. Also requires BufferUsage.indirect_argument.
     densify_dispatch_args: spy.NDBuffer = field(init=False)  # uint[3]
 
+    # --- structure-aware densification (SAD-GS, arXiv 2604.28016) ---
+    # Per-axis multiview frequency-violation accumulators, name -> uint[max_splats].
+    # Keys are ETA_ACCUM_COMPONENTS. Only allocated/used on the structure path.
+    eta_buffers: dict[str, spy.NDBuffer] = field(init=False)
+    eta_n_total: spy.NDBuffer = field(init=False)  # uint[max_splats], views observed
+    # Per-axis grid split factor n_k (uint[max_splats]) written by the CPU
+    # decision and consumed by split_anisotropic.slang.
+    split_factor_x: spy.NDBuffer = field(init=False)
+    split_factor_y: spy.NDBuffer = field(init=False)
+    split_factor_z: spy.NDBuffer = field(init=False)
+
     @property
     def num_tiles(self) -> int:
         return self.num_tiles_x * self.num_tiles_y
@@ -223,6 +244,12 @@ class GaussianBuffers:
         backward_persplat.slang and projection_backward.slang. Same
         ``"grad_" + component`` naming rule as :meth:`grad_kwargs`."""
         return {f"grad_{name}": buf.storage for name, buf in self.grad_2d_seed_buffers.items()}
+
+    def eta_kwargs(self) -> dict[str, spy.NDBuffer]:
+        """Dispatch bindings for the 9 per-axis eta accumulators:
+        ``{"eta_<component>": buf.storage}`` (eta_n_high_x ... eta_max_z),
+        matching score_structure_aware.slang's entry-point parameters."""
+        return {f"eta_{name}": buf.storage for name, buf in self.eta_buffers.items()}
 
 
 @dataclass
@@ -418,6 +445,13 @@ def allocate(
     buffers.densify_pre_count = allocator.uint_buffer(1)
     buffers.densify_post_count = allocator.uint_buffer(1)
     buffers.densify_dispatch_args = allocator.indirect_buffer()
+
+    # --- structure-aware densification (SAD-GS) ---
+    buffers.eta_buffers = {name: allocator.uint_buffer(max_splats) for name in ETA_ACCUM_COMPONENTS}
+    buffers.eta_n_total = allocator.uint_buffer(max_splats)
+    buffers.split_factor_x = allocator.uint_buffer(max_splats)
+    buffers.split_factor_y = allocator.uint_buffer(max_splats)
+    buffers.split_factor_z = allocator.uint_buffer(max_splats)
 
     buffers.num_gaussians_counter.copy_from_numpy(np.zeros(1, dtype=np.uint32))
     buffers.training_step.copy_from_numpy(np.zeros(1, dtype=np.uint32))

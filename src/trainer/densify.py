@@ -58,6 +58,28 @@ class DensifyConfig:
     t_opacity_reset_value: float = 0.01  # reset opacity to this value
 
 
+@dataclass
+class StructureConfig:
+    """Structure-aware densification config (SAD-GS, arXiv 2604.28016).
+
+    Matches SADGS train.py gates:
+      split_mask = (high_ratio > split_ratio_threshold) & is_grad_high
+      prune_mask = (low_ratio  > prune_ratio_threshold) & valid
+    where high_ratio/low_ratio are the SCALAR (max-over-axes eta) view
+    fractions, and the split factor n_k = ceil(eta_max_k ** split_power)."""
+    n_scoring_views: int = 10        # views sampled per OFFLINE scoring step (tests/fallback)
+    tau_split: float = 0.8           # split_ratio_threshold: high_ratio must exceed this
+    tau_prune: float = 0.8           # prune_ratio_threshold: low_ratio must exceed this
+    grad_threshold: float = 1e-5     # is_grad_high: avg 2D-grad magnitude floor (SADGS 1e-5)
+    split_power: float = 0.5         # n_k = ceil(eta_max_k ** split_power); 0.5 = sqrt (paper)
+    max_split_factor: int = 8        # per-axis cap on n_k (SADGS max_clones_per_axis=8)
+    t_opacity: float = 0.005         # low-opacity prune floor (always active)
+    # Scale threshold separating clone (small) from split (large), = SADGS
+    # args.dense * scene_extent. A triggered gaussian with max world-space scale
+    # <= this is CLONED (exact duplicate); larger ones are anisotropically split.
+    dense_scale: float = 0.0         # dense * extent, in world units; set by the caller
+
+
 def compute_importance_scores(
     pipeline: Pipeline,
     cameras: list,
@@ -468,3 +490,305 @@ def reset_opacity(pipeline: Pipeline, cfg: DensifyConfig) -> None:
         num_gaussians_counter=b.num_gaussians_counter.storage,
         reset_value=cfg.t_opacity_reset_value,
     )
+
+
+# ----------------------------------------------------------------------
+# Structure-aware densification (SAD-GS, arXiv 2604.28016)
+# ----------------------------------------------------------------------
+
+def clear_structure_scores(pipeline: Pipeline) -> None:
+    """Zero the per-axis eta accumulators. Call at the start of each
+    accumulation window (right after a densify reorders gaussian slots), so
+    the multiview statistics are gathered over a stable gaussian set."""
+    b = pipeline.buffers
+    pipeline._dispatch(pipeline.k_clear_structure_scores, "clear_structure_scores",
+        thread_count=[pipeline.max_splats, 1, 1],
+        **b.eta_kwargs(),
+        eta_n_total=b.eta_n_total.storage,
+        max_splats=pipeline.max_splats,
+    )
+
+
+def accumulate_structure_scores(pipeline: Pipeline, structure_tensor,
+                                pass_idx: int | None = None,
+                                opacity_threshold: float = 0.05) -> None:
+    """Fold ONE per-gaussian eta sample into the accumulators for the current
+    camera (already uploaded to ``pipeline._camera_buffer`` by the forward
+    pass). Called once per training iteration from train_step to build the
+    N_high/N_low/eta_max multiview statistics online (paper Section 3.6),
+    which is what makes the N_high/N_total fraction gate meaningful — a handful
+    of snapshot views can't resolve it. Runs inside the active encoder; no sync.
+
+    VISIBILITY GATE (SADGS is_active_vis): eta is only accumulated for
+    gaussians that rasterized this view (tile_count_per_gaussian > 0, from the
+    forward pass that just ran) and whose opacity exceeds ``opacity_threshold``.
+    This is essential — without it ~96% of raw-init gaussians trigger a split
+    and densification explodes (54k -> 10M in one step).
+
+    ``pass_idx`` decorrelates the jitter sample per call; defaults to the
+    training iteration so successive samples of the same gaussian differ."""
+    b = pipeline.buffers
+    if pass_idx is None:
+        pass_idx = pipeline.iteration
+    pipeline._dispatch(pipeline.k_score_structure_aware, "score_structure_aware",
+        thread_count=[pipeline.max_splats, 1, 1],
+        gaussians=b.gaussians.storage,
+        num_gaussians_counter=b.num_gaussians_counter.storage,
+        camera=pipeline._camera_buffer,
+        structure_tensor=structure_tensor,
+        tile_count_per_gaussian=b.tile_count_per_gaussian.storage,
+        **b.eta_kwargs(),
+        eta_n_total=b.eta_n_total.storage,
+        opacity_threshold=opacity_threshold,
+        pass_idx=int(pass_idx) & 0xFFFF,
+        max_splats=pipeline.max_splats,
+    )
+
+
+def compute_structure_scores(
+    pipeline: Pipeline,
+    cameras: list,
+    structure_textures: list,
+    cfg: StructureConfig,
+) -> None:
+    """Offline multi-view eta accumulation: clear, then sample each of N views
+    once. Used by tests and as a fallback; the production path accumulates
+    online per training iteration (see accumulate_structure_scores) so the
+    fraction gate has enough samples to converge."""
+    clear_structure_scores(pipeline)
+    for view_idx, (cam, structure_tex) in enumerate(zip(cameras, structure_textures)):
+        # Run the forward pass so tile_count_per_gaussian reflects THIS view's
+        # visibility (the eta kernel gates on it). Also uploads the camera.
+        pipeline._run_forward(cam)
+        accumulate_structure_scores(pipeline, structure_tex, pass_idx=view_idx)
+
+
+def densify_structure_aware(pipeline: Pipeline, cfg: StructureConfig) -> dict:
+    """One structure-aware densification pass.
+
+    Assumes compute_structure_scores() has populated the eta accumulators for
+    this window. Phases:
+      A  (CPU) read eta stats → per-axis split factors n_k (multiview-consistent,
+         capacity-bounded) + prune mask; upload action + split_factor buffers.
+      B  splitAnisotropic — grid-split SPLIT gaussians into n_x*n_y*n_z children.
+      C  build_prune_mask + scan + scatter_compact — same compaction as densify().
+
+    Returns a stats dict for logging. Uses CPU readback (like densify()), so it
+    is NOT wait-free; it runs on the densify cadence, not every iter.
+    """
+    ACTION_KEEP = 0
+    ACTION_SPLIT = 1
+    ACTION_CLONE = 2
+    ACTION_PRUNE = 3
+
+    b = pipeline.buffers
+
+    pipeline.device.wait_for_idle()
+    pre_count = int(b.num_gaussians_counter.to_numpy().view(np.uint32)[0])
+    if pre_count == 0:
+        return {"pre_count": 0, "post_split_count": 0, "final_count": 0,
+                "n_split": 0, "n_clone": 0, "n_prune": 0, "n_keep": 0}
+
+    # --- Phase A (CPU): multiview-consistent decision + per-axis split factor. ---
+    def _read_uint(buf):
+        return np.frombuffer(buf.to_numpy().tobytes(), dtype=np.uint32)[:pre_count]
+
+    n_total = _read_uint(b.eta_n_total).astype(np.float64)
+    seen = n_total > 0
+    inv_total = np.where(seen, 1.0 / np.maximum(n_total, 1.0), 0.0)
+
+    # SADGS: n_high/n_low are SCALAR per-gaussian view counts (classified on
+    # the max-over-axes eta), so the split/prune GATES use scalar ratios.
+    eta = b.eta_buffers
+    high_ratio = _read_uint(eta["n_high"]).astype(np.float64) * inv_total
+    low_ratio = _read_uint(eta["n_low"]).astype(np.float64) * inv_total
+    # Per-axis max eta drives only the split FACTOR.
+    eta_max = np.stack([_read_uint(eta["max_x"]),
+                        _read_uint(eta["max_y"]),
+                        _read_uint(eta["max_z"])], axis=1).astype(np.float64) / 65536.0
+
+    # is_grad_high: per-gaussian avg 2D-gradient magnitude over the window,
+    # thresholded — SADGS's `torch.norm(xyz_gradient_accum/denom) >= 1e-5`.
+    # Our analog is the same signal densify_simple thresholds: the fixed-point
+    # grad_mean_2d_mag_accum divided by the visibility count.
+    vis = _read_uint(b.visibility_count_accum).astype(np.float64)
+    raw_mag = np.frombuffer(b.grad_mean_2d_mag_accum.to_numpy().tobytes(), dtype=np.int64)[:pre_count]
+    avg_grad = np.where(vis > 0, raw_mag.astype(np.float64) / 65536.0 / np.maximum(vis, 1.0), 0.0)
+    # CONVENTION SCALING (mirrors densify_simple, see grad_thresh_internal
+    # ~line 344): grad_mean_2d_mag_accum holds a per-pixel SUM of a no-1/N loss
+    # — accumulate_iter.slang deliberately drops the loss-mean factor
+    # 1/(H*W*channels) to avoid underflowing the fixed-point accumulator — so
+    # avg_grad is ~H*W*channels LARGER than SADGS's per-view MEAN-loss gradient.
+    # SADGS thresholds its mean-loss gradient at 1e-5 (train.py: "[CRITICAL] We
+    # MUST use this to prevent 7M points"). Comparing our sum-convention avg_grad
+    # to a bare 1e-5 is a unit mismatch that makes is_grad_high ALWAYS TRUE,
+    # collapsing the split trigger to (high_ratio>0.8 & seen) and exploding
+    # densification. Rescale the threshold into our accumulator's convention.
+    grad_thresh_internal = cfg.grad_threshold * (pipeline.width * pipeline.height * 3.0)
+    is_grad_high = avg_grad >= grad_thresh_internal
+
+    # Opacity for the prune gate.
+    gauss_floats = np.frombuffer(
+        b.gaussians.to_numpy().tobytes(), dtype=np.float32
+    ).reshape(-1, GAUSSIAN_FLOAT_COUNT)[:pre_count]
+    opacity = 1.0 / (1.0 + np.exp(-gauss_floats[:, 10]))  # sigmoid(logit)
+
+    # Densification trigger — matching SADGS train.py:
+    #   split_mask = (high_ratio > split_ratio_threshold) & is_grad_high
+    # high_ratio (scalar max-over-axes eta fraction) reaches 0.8 for genuine
+    # violators; the gradient AND-gate keeps well-placed (low-gradient) large
+    # gaussians from densifying. SADGS then routes the SAME triggered set to
+    # CLONE (small) vs SPLIT (large) by the dense*extent scale qualifier.
+    triggered = (high_ratio > cfg.tau_split) & is_grad_high & seen
+    is_prune = (low_ratio > cfg.tau_prune) & seen
+    # Always prune very-low-opacity gaussians (matches the other strategies).
+    is_prune |= opacity < cfg.t_opacity
+    triggered &= ~is_prune
+
+    # Clone vs split by world-space max scale (SADGS clone_qualifiers /
+    # split_qualifiers around args.dense*extent): small -> CLONE (exact
+    # duplicate), large -> anisotropic SPLIT.
+    max_scale = np.exp(gauss_floats[:, 3:6]).max(axis=1)  # world-space per-axis scale
+    is_clone = triggered & (max_scale <= cfg.dense_scale)
+    is_split = triggered & (max_scale > cfg.dense_scale)
+
+    # Per-axis split factor n_k = ceil(eta_max_k ** split_power), clamped.
+    nk = np.ceil(np.power(np.maximum(eta_max, 0.0), cfg.split_power)).astype(np.int64)
+    nk = np.clip(nk, 1, cfg.max_split_factor)
+    # Non-splitting gaussians keep n_k = 1 on all axes (no children).
+    nk = np.where(is_split[:, None], nk, 1)
+    prod = nk[:, 0] * nk[:, 1] * nk[:, 2]
+    # A split gaussian only splits if its product factor actually exceeds 1;
+    # those that would produce a single child fall back to a clone instead
+    # (so a triggered gaussian always densifies, matching SADGS).
+    degenerate_split = is_split & (prod <= 1)
+    is_clone |= degenerate_split
+    is_split &= prod > 1
+
+    # --- DIAGNOSTIC (temporary): show exactly where the population comes from. ---
+    # densify runs only every ~100 iters, so this print is cheap. Remove once the
+    # growth curve is understood.
+    if bool(getattr(cfg, "debug_decision", True)):
+        import sys as _sys
+        seen_n = int(seen.sum())
+        hi_n = int(((high_ratio > cfg.tau_split) & seen).sum())
+        grad_n = int((is_grad_high & seen).sum())
+        vis_seen = avg_grad[seen]
+        # Threshold-response: how many seen gaussians survive is_grad_high at a
+        # sweep of candidate floors (so we can pick the constant from data).
+        # Reported as (grad_threshold_value -> count still passing).
+        sweep_vals = [1e-5, 1e-4, 1e-3, 0.0008, 0.002, 0.01, 0.05, 0.2]
+        sweep = {
+            f"{gt:.0e}x": int((vis_seen >= gt * pipeline.width * pipeline.height * 3.0).sum())
+            for gt in sweep_vals
+        }
+        added_by_split = int((prod[is_split] - 1).sum()) if is_split.any() else 0
+        pct = (np.percentile(vis_seen, [50, 90, 99, 100]) if vis_seen.size else [0, 0, 0, 0])
+        print(
+            f"[SAD-DBG] iter={getattr(pipeline, 'iteration', -1)} pre={pre_count} "
+            f"seen={seen_n} high_ratio>{cfg.tau_split}:{hi_n} is_grad_high:{grad_n} "
+            f"(floor={grad_thresh_internal:.3g}) triggered={int(triggered.sum())} "
+            f"split={int(is_split.sum())} clone={int(is_clone.sum())} prune={int(is_prune.sum())} "
+            f"children_from_split={added_by_split}\n"
+            f"[SAD-DBG]   avg_grad(seen) p50/p90/p99/max = "
+            f"{pct[0]:.3g}/{pct[1]:.3g}/{pct[2]:.3g}/{pct[3]:.3g}\n"
+            f"[SAD-DBG]   is_grad_high survivors by grad_threshold: {sweep}\n"
+            f"[SAD-DBG]   nk per-axis max = {tuple(int(nk[:, a].max()) for a in range(3))} "
+            f"prod p50/p90/max (split only) = "
+            f"{tuple(np.percentile(prod[is_split], [50, 90, 100]).astype(int)) if is_split.any() else (0,0,0)}",
+            flush=True, file=_sys.stderr,
+        )
+
+    # Capacity bound: clones add 1 child each, splits add (prod-1). Clones are
+    # cheap and are reserved first; if splits then overflow max_splats, drop the
+    # highest-fan-out splits until we fit. Keeps the pass within capacity without
+    # a GPU-side reservation protocol.
+    headroom = pipeline.max_splats - pre_count
+    n_clone = int(is_clone.sum())
+    if n_clone > headroom:
+        # Extremely unlikely, but bound clones too: drop the excess arbitrarily.
+        clone_idx = np.where(is_clone)[0][headroom:]
+        is_clone[clone_idx] = False
+        n_clone = int(is_clone.sum())
+    headroom -= n_clone
+    split_idx = np.where(is_split)[0]
+    if split_idx.size > 0:
+        added = prod[split_idx] - 1
+        order = np.argsort(-added)          # largest fan-out first
+        cum = np.cumsum(added[order])
+        keep = cum <= headroom
+        dropped = split_idx[order[~keep]]
+        is_split[dropped] = False
+
+    actions = np.full(pre_count, ACTION_KEEP, dtype=np.uint32)
+    actions[is_split] = ACTION_SPLIT
+    actions[is_clone] = ACTION_CLONE
+    actions[is_prune] = ACTION_PRUNE
+
+    # Upload action + per-axis split factors (padded to max_splats).
+    def _upload(buf, arr_pre):
+        full = np.zeros(pipeline.max_splats, dtype=np.uint32)
+        full[:pre_count] = arr_pre.astype(np.uint32)
+        buf.copy_from_numpy(full)
+
+    _upload(b.action_buffer, actions)
+    _upload(b.split_factor_x, np.where(is_split, nk[:, 0], 1))
+    _upload(b.split_factor_y, np.where(is_split, nk[:, 1], 1))
+    _upload(b.split_factor_z, np.where(is_split, nk[:, 2], 1))
+
+    # --- Phase B: anisotropic grid split. ---
+    b.densify_pre_count.copy_from_numpy(np.array([pre_count], dtype=np.uint32))
+    pipeline._dispatch(pipeline.k_split_anisotropic, "split_anisotropic",
+        thread_count=[pre_count, 1, 1],
+        gaussians=b.gaussians.storage,
+        adam_state=b.adam_state.storage,
+        num_gaussians_counter=b.num_gaussians_counter.storage,
+        action=b.action_buffer.storage,
+        split_factor_x=b.split_factor_x.storage,
+        split_factor_y=b.split_factor_y.storage,
+        split_factor_z=b.split_factor_z.storage,
+        pre_count_buf=b.densify_pre_count.storage,
+        max_splats=pipeline.max_splats,
+    )
+    pipeline.device.wait_for_idle()
+    post_split_count = min(
+        int(b.num_gaussians_counter.to_numpy().view(np.uint32)[0]), pipeline.max_splats
+    )
+
+    # --- Phase C: build prune mask + scan + scatter-compact (as in densify()). ---
+    b.densify_post_count.copy_from_numpy(np.array([post_split_count], dtype=np.uint32))
+    pipeline._dispatch(pipeline.k_build_prune_mask, "build_prune_mask",
+        thread_count=[pipeline.max_splats, 1, 1],
+        action=b.action_buffer.storage,
+        valid_mask=b.valid_mask_buffer.storage,
+        pre_count_buf=b.densify_pre_count.storage,
+        post_count_buf=b.densify_post_count.storage,
+        max_splats=pipeline.max_splats,
+    )
+    pipeline._scan(pipeline.max_splats)
+    pipeline._dispatch(pipeline.k_scatter_compact, "scatter_compact",
+        thread_count=[pipeline.max_splats, 1, 1],
+        gaussians_in=b.gaussians.storage,
+        adam_state_in=b.adam_state.storage,
+        valid_mask=b.valid_mask_buffer.storage,
+        scan=b.scan_buffer.storage,
+        gaussians_out=b.gaussians_scratch.storage,
+        adam_state_out=b.adam_state_scratch.storage,
+        max_splats=pipeline.max_splats,
+    )
+    b.gaussians, b.gaussians_scratch = b.gaussians_scratch, b.gaussians
+    b.adam_state, b.adam_state_scratch = b.adam_state_scratch, b.adam_state
+
+    pipeline.device.wait_for_idle()
+    final_count = int(b.scan_total.to_numpy().view(np.uint32)[0])
+    b.num_gaussians_counter.copy_from_numpy(np.array([final_count], dtype=np.uint32))
+
+    return {
+        "pre_count": pre_count,
+        "post_split_count": post_split_count,
+        "final_count": final_count,
+        "n_keep": int((actions == ACTION_KEEP).sum()),
+        "n_split": int(is_split.sum()),
+        "n_clone": int(is_clone.sum()),
+        "n_prune": int(is_prune.sum()),
+    }

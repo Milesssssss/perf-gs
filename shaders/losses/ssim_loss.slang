@@ -141,7 +141,8 @@ void ssimGradient(
     RWTexture2D<float4> dL_dC,
     uniform uint2 frame_dim,
     uniform float lambda_ssim,
-    uniform float w_alpha)
+    uniform float w_alpha,
+    uniform float lambda_l2)
 {
     uint2 p = dtid.xy;
     if (p.x >= frame_dim.x || p.y >= frame_dim.y) return;
@@ -169,10 +170,14 @@ void ssimGradient(
     // dSSIM_total/dx(p); loss uses (1 - SSIM) so negate. Sum convention.
     float3 grad_ssim = -(cm1 + x * cm2 + y * cm3);
 
-    // L1 gradient (matches l2_linear.slang): d|x-y|/dx = sign(x-y).
+    // L1 gradient (matches l1_l2_loss.slang): d|x-y|/dx = sign(x-y).
     float3 grad_l1 = sign(x - y);
 
     float3 grad_rgb = (1.0 - lambda_ssim) * grad_l1 + lambda_ssim * grad_ssim;
+    // Optional additive L2 term (SADGS lambda_l2 * mean((C-T)^2)); sum
+    // convention, so per-pixel gradient is lambda_l2 * 2*(x-y).
+    if (lambda_l2 > 0.0)
+        grad_rgb += lambda_l2 * 2.0 * (x - y);
 
     float grad_alpha = 0.0;
     if (w_alpha > 0.0)

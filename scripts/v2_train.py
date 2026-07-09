@@ -35,6 +35,7 @@ from trainer.device import create_device
 from trainer.export import render_to_png, save_ply
 from trainer.color import linear_to_srgb, srgb_to_linear
 from trainer.config import AdamLRs, RenderConfig
+from trainer.densify import StructureConfig
 from trainer.pipeline import DensifyConfig, Pipeline
 
 
@@ -71,6 +72,12 @@ def main() -> None:
     #ap.add_argument("--scene", type=str, default="datasets/synthetic/suzanne_blender")
 
     ap.add_argument("--iters", type=int, default=30000)
+    ap.add_argument("--position-lr-max-steps", type=int, default=30000,
+                    help="horizon for the exponential mean-LR decay (3DGS "
+                         "position_lr_max_steps). FIXED, independent of --iters: "
+                         "the LR reaches lr_final at this step and holds. Set it "
+                         "to roughly your intended --iters for a full decay; do "
+                         "NOT let it track a short --iters or the means freeze early.")
     ap.add_argument("--downsample", type=int, default=4,
                     help="downsample factor (1=full res, 2=half, 4=quarter). "
                          "Uses images_N dir if it exists, otherwise resizes on load.")
@@ -78,7 +85,7 @@ def main() -> None:
                     help="force render width (overrides --downsample)")
     ap.add_argument("--height", type=int, default=None,
                     help="force render height (overrides --downsample)")
-    ap.add_argument("--preview-every", type=int, default=0)
+    ap.add_argument("--preview-every", type=int, default=800)
     ap.add_argument("--log-every", type=int, default=0)
     ap.add_argument("--render-all-every", type=int, default=0,
                     help="dump PNGs for ALL cameras every N iters. 0 (default) "
@@ -111,7 +118,7 @@ def main() -> None:
                     help="alpha loss weight; set > 0 for RGBA targets (e.g. 1.0)")
     ap.add_argument("--lambda-ssim", type=float, default=0.2,
                     help="SSIM loss weight (3DGS default 0.2); 0 = pure L2")
-    ap.add_argument("--max-splats", type=int, default=6_500_000)
+    ap.add_argument("--max-splats", type=int, default=10_000_000)
     ap.add_argument("--z-near-cull", type=float, default=0.01,
                     help="view-space depth floor for bin cull; raise for scenes "
                          "where points can land near a camera pose (e.g. 0.2)")
@@ -119,7 +126,35 @@ def main() -> None:
                     help="profile one full step every N iters (0 to disable)")
     ap.add_argument("--simple-densify", action="store_true",
                     help="use reference 3DGS threshold-based densification instead of score-ranked")
-    ap.add_argument("--grad-thresh", type=float, default=0.00065,
+    ap.add_argument("--importance-score-densify", action="store_true",
+                   help="use score-ranked densification instead of reference 3DGS threshold-based (FastGS)")
+    ap.add_argument("--structure-densify", action="store_true",
+                    help="use structure-aware anisotropic densification (SAD-GS, arXiv 2604.28016): "
+                         "precomputes a multi-scale structure-tensor field per view and grid-splits "
+                         "Gaussians that under-resolve local texture frequency. Overrides --simple-densify.")
+    ap.add_argument("--sad-tau-split", type=float, default=0.8,
+                    help="SAD split_ratio_threshold: split if high_ratio (fraction of views "
+                         "with scalar eta>1) exceeds this AND the gradient is high (SADGS 0.8)")
+    ap.add_argument("--sad-tau-prune", type=float, default=0.8,
+                    help="SAD prune_ratio_threshold: prune if low_ratio (fraction of views "
+                         "with eta<0.1) exceeds this (SADGS 0.8)")
+    ap.add_argument("--sad-grad-threshold", type=float, default=0.0008,
+                    help="SAD is_grad_high floor: avg 2D-grad magnitude a gaussian must exceed "
+                         "to be split-eligible (SADGS hardcodes 1e-5)")
+    ap.add_argument("--sad-split-power", type=float, default=0.5,
+                    help="SAD: per-axis split factor n_k = ceil(eta_max ** power); 0.5 = sqrt (paper)")
+    ap.add_argument("--sad-max-split-factor", type=int, default=8,
+                    help="SAD: per-axis cap on the grid split factor n_k (SADGS max_clones_per_axis=8)")
+    ap.add_argument("--sad-match-loss-lrs", type=int, default=1,
+                    help="when --structure-densify: 1 (default) = use SADGS's loss (lambda_l2) "
+                         "and per-parameter LRs so we train exactly as they do; 0 = keep our "
+                         "own loss/LR defaults and only swap the densification strategy.")
+    ap.add_argument("--sad-lambda-l2", type=float, default=2.0,
+                    help="SADGS additive L2 loss weight (their opt.lambda_l2). Applied when "
+                         "--structure-densify and --sad-match-loss-lrs (else --lambda-l2 is used).")
+    ap.add_argument("--lambda-l2", type=float, default=0.0,
+                    help="additive L2 loss weight for non-SAD runs (0 = pure L1(+SSIM))")
+    ap.add_argument("--grad-thresh", type=float, default=0.0008,
                     help="2D-gradient densification threshold. gsplat uses 0.0002 for "
                          "vanilla grad and ~0.0008 for absgrad; our accumulator is an "
                          "abs-sum (absgrad-like), so 0.0008 matches. Lower = more growth.")
@@ -228,6 +263,18 @@ def main() -> None:
         t_opacity_reset_value=args.opacity_reset_value
     )
 
+    structure_cfg = StructureConfig(
+        n_scoring_views=args.n_scoring_views,
+        tau_split=args.sad_tau_split,
+        tau_prune=args.sad_tau_prune,
+        grad_threshold=args.sad_grad_threshold,
+        split_power=args.sad_split_power,
+        max_split_factor=args.sad_max_split_factor,
+        t_opacity=args.t_opacity,
+        # clone (small) vs split (large) threshold = SADGS args.dense * extent.
+        dense_scale=args.grow_scale3d * extent,
+    )
+
     (run_dir / "config.json").write_text(json.dumps({
         "scene": args.scene,
         "iters": args.iters,
@@ -306,6 +353,27 @@ def main() -> None:
     # the same thread re-enter while still blocking the viewer thread.
     gpu_lock = _threading.RLock() if not args.no_viewer else None
 
+    # When running structure-aware densification, optionally train with the
+    # EXACT loss + learning rates SADGS uses, so the only variable vs. their
+    # setup is our renderer — not the optimization recipe. Controlled by
+    # --sad-match-loss-lrs (on by default). See arguments/__init__.py in the
+    # SADGS repo for these values (lambda_l2=2.0, lambda_dssim=0.2, and the
+    # per-parameter LRs opacity/scaling/rotation/feature).
+    sad_match = bool(args.structure_densify and args.sad_match_loss_lrs)
+    if sad_match:
+        eff_lambda_l2 = args.sad_lambda_l2      # SADGS opt.lambda_l2 = 2.0
+        eff_lambda_ssim = 0.2                   # SADGS opt.lambda_dssim
+        # SADGS per-parameter LRs (their opt.*_lr). mean/position is scheduled
+        # separately below (position_lr_init already matches at 1.6e-4*extent).
+        base_lrs = AdamLRs(scale=0.01, rot=0.002, opacity=0.05, color=0.0025)
+        print(f"[SAD] matching SADGS loss + LRs: lambda_l2={eff_lambda_l2}, "
+              f"lambda_ssim={eff_lambda_ssim}, scale_lr=0.01, rot_lr=0.002, "
+              f"opacity_lr=0.05, sh0_lr=0.0025")
+    else:
+        eff_lambda_l2 = args.lambda_l2
+        eff_lambda_ssim = args.lambda_ssim
+        base_lrs = AdamLRs()                    # our defaults
+
     pipeline = Pipeline(
         device=device, width=IMAGES_WIDTH, height=IMAGES_HEIGHT,
         max_splats=args.max_splats,
@@ -315,11 +383,16 @@ def main() -> None:
             opacity_reg=args.opacity_reg,
             scale_reg=args.scale_reg,
             w_alpha=args.w_alpha,
-            lambda_ssim=args.lambda_ssim,
+            lambda_ssim=eff_lambda_ssim,
+            lambda_l2=eff_lambda_l2,
         ),
     )
     pipeline.set_gaussians_from_numpy(**scene.initial_points)
     pipeline.clear_tracking()
+    if args.structure_densify:
+        # Zero the eta accumulators before the first online-accumulation window
+        # (NDBuffer contents are not guaranteed zeroed on allocation).
+        pipeline.clear_structure_scores()
 
     # Live viewing is IN-PROCESS: a background-thread Viewer shares this
     # device (serialized by gpu_lock). Streaming a snapshot is a zero-copy
@@ -343,6 +416,56 @@ def main() -> None:
     # Pre-upload every target image as its own GPU texture. Per-iter we
     # just swap the active reference — no CPU→GPU upload in the hot loop.
     target_textures = [pipeline.create_target_texture(t) for t in targets_srgb]
+
+    # Structure-aware densification: get the multi-scale structure-tensor field
+    # S̄ per view and upload each as an rgba32_float texture packing
+    # (Sxx, Sxy, Syy, 0). Prefer the on-disk cache built by
+    # scripts/preprocess_structure.py (fields take seconds/image to compute);
+    # fall back to computing on the fly (with a warning) if none is present.
+    structure_textures = []
+    if args.structure_densify:
+        import slangpy as spy
+        from trainer.structure_analysis import cache_path, compute_structure_tensor_field
+
+        def _make_structure_tex(sbar: np.ndarray, label: str):
+            packed = np.zeros((IMAGES_HEIGHT, IMAGES_WIDTH, 4), dtype=np.float32)
+            packed[..., :3] = sbar
+            tex = device.create_texture(
+                type=spy.TextureType.texture_2d, format=spy.Format.rgba32_float,
+                width=IMAGES_WIDTH, height=IMAGES_HEIGHT,
+                usage=spy.TextureUsage.shader_resource | spy.TextureUsage.unordered_access,
+                label=label)
+            tex.copy_from_numpy(np.ascontiguousarray(packed))
+            return tex
+
+        cpath = cache_path(args.scene, IMAGES_WIDTH, IMAGES_HEIGHT)
+        cached_fields = None
+        if cpath.exists():
+            data = np.load(cpath)
+            # Guard against a stale cache (resolution/count drift). The cache
+            # key already encodes resolution+params, but verify count too.
+            if int(data["n_cams"]) == n_cams and tuple(data["fields"].shape[1:3]) == (IMAGES_HEIGHT, IMAGES_WIDTH):
+                cached_fields = data["fields"]
+                print(f"[SAD] loaded {n_cams} cached structure-tensor fields from {cpath}")
+            else:
+                print(f"[SAD] cache at {cpath} mismatches scene "
+                      f"(cached n_cams={int(data['n_cams'])}, shape={data['fields'].shape[1:3]}); recomputing")
+
+        t_sad = time.time()
+        for cam_i in range(n_cams):
+            if cached_fields is not None:
+                sbar = cached_fields[cam_i]
+            else:
+                # SADGS computes the structure tensor on the RAW sRGB image
+                # (train.py:184 feeds cam.original_image straight in), NOT on
+                # linearized RGB. Match that so lambda1 orientation/band response
+                # (and thus eta) agree with the reference.
+                sbar = compute_structure_tensor_field(targets_srgb[cam_i][..., :3])
+            structure_textures.append(_make_structure_tex(sbar, f"structure_tensor_{cam_i}"))
+        if cached_fields is None:
+            print(f"[SAD] WARNING: no cache found — computed {n_cams} fields on the fly "
+                  f"in {time.time() - t_sad:.1f}s. Run scripts/preprocess_structure.py "
+                  f"--scene {args.scene} --downsample {args.downsample} to cache them.")
 
     # ------------------------------------------------------------------
     # Nsight Graphics profiling: window + present hook.
@@ -414,7 +537,19 @@ def main() -> None:
     # cannot migrate to the surface, leaving elongated/stuck splats.
     lr_mean_init = 1.6e-4 * extent
     lr_mean_final = 1.6e-6 * extent
-    decay = (lr_mean_final / lr_mean_init) ** (1.0 / max(args.iters, 1))
+
+    # Exponential (log-linear) mean-LR schedule, matching 3DGS/SADGS
+    # get_expon_lr_func. CRITICAL: the decay horizon is a FIXED max_steps
+    # (position_lr_max_steps), NOT args.iters — otherwise a short --iters run
+    # compresses the full 1000x decay into a few hundred steps and freezes the
+    # means before any geometry forms (PSNR collapses). t is clamped to [0,1]
+    # so the LR saturates at lr_final instead of overshooting toward zero.
+    lr_max_steps = args.position_lr_max_steps
+
+    def _mean_lr(step: int) -> float:
+        t = min(max(step / max(lr_max_steps, 1), 0.0), 1.0)
+        return float(np.exp(np.log(lr_mean_init) * (1.0 - t)
+                            + np.log(lr_mean_final) * t))
 
     # Optionally hold before training so the viewer can inspect the initialized
     # gaussians. We push the initial snapshot (iter 0) so the viewer has data,
@@ -511,7 +646,8 @@ def main() -> None:
         # Backpressure before submitting more work.
         _bound_queue()
 
-        lrs = AdamLRs(mean=lr_mean_init * (decay ** (it - 1)))
+        lrs = AdamLRs(mean=_mean_lr(it - 1), scale=base_lrs.scale,
+                      rot=base_lrs.rot, opacity=base_lrs.opacity, color=base_lrs.color)
 
         # ---- Deterministic capture protocol for GPU Trace ----
         #
@@ -602,7 +738,10 @@ def main() -> None:
             print("[capture] window closed, exiting.")
             sys.exit(0)
 
-        pipeline.train_step(entry.camera, lrs=lrs)
+        # SAD-GS: accumulate this view's eta sample online (paper Sec 3.6) so
+        # the multiview fraction gate has ~window-many samples by densify time.
+        struct_tex = structure_textures[cam_idx] if args.structure_densify else None
+        pipeline.train_step(entry.camera, lrs=lrs, structure_tensor=struct_tex)
         submit_id_ring.append(pipeline.last_submit_id)
 
         # Profile hook: Present() the just-rendered frame so Nsight has a
@@ -621,9 +760,9 @@ def main() -> None:
             viewer.update_gaussians(pipeline)
 
         # Densification schedule.
-        do_densify = (args.densify_from <= it <= args.densify_to
+        do_densify = (args.densify_from < it <= args.densify_to
                       and (it - args.densify_from) % args.densify_every == 0)
-        do_opacity_reset = (it % args.reset_every == 0 and it >= args.densify_from and it <= args.densify_to)
+        do_opacity_reset = (args.reset_every > 0 and it % args.reset_every == 0 and it >= args.densify_from and it <= args.densify_to)
         do_log = args.log_every > 0 and ((it % args.log_every == 0) or (it == 1) or (it == args.iters))
         do_preview = args.preview_every > 0 and ((it % args.preview_every == 0) or (it == args.iters))
 
@@ -636,7 +775,9 @@ def main() -> None:
 
             stats = {}
 
-            if args.simple_densify:
+            if args.structure_densify:
+                stats = pipeline.densify_structure_aware(structure_cfg)
+            elif args.simple_densify:
                 # we gate the too-big prune on step > reset_every: don't delete large kNN-init blobs before densification can split them
                 #And normalize the prune threshold by scene extent
                 allow_scale_prune = it > args.reset_every
@@ -647,7 +788,7 @@ def main() -> None:
                     prune_big_scale=extent * args.prune_scale3d,
                     allow_scale_prune=allow_scale_prune,
                 )
-            else:
+            elif args.importance_score_densify:
                 # Score-ranked densification with importance scoring.
                 n_score = min(densify_cfg.n_scoring_views, n_cams)
                 score_indices = rng.choice(n_cams, size=n_score, replace=False)
@@ -669,6 +810,11 @@ def main() -> None:
             if pipeline.last_submit_id:
                 submit_id_ring.append(pipeline.last_submit_id)
             pipeline.clear_tracking()
+            # SAD-GS: any densify (simple or structure) reorders/changes
+            # gaussian slots, so reset the online eta accumulators to start a
+            # fresh window on the new, stable slot set.
+            if args.structure_densify:
+                pipeline.clear_structure_scores()
             # densify_simple runs wait-free and returns None for counts
             # (they live GPU-side); the log-every branch below reads the
             # counter on its own cadence. densify()'s stats are still
