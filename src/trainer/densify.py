@@ -575,7 +575,7 @@ def compute_structure_scores(
         pipeline._run_forward(cam)
         accumulate_structure_scores(pipeline, structure_tex, pass_idx=view_idx)
 
-
+#TODO: could consider moving to slang kernels
 def densify_structure_aware(pipeline: Pipeline, cfg: StructureConfig) -> dict:
     """One structure-aware densification pass.
 
@@ -681,7 +681,7 @@ def densify_structure_aware(pipeline: Pipeline, cfg: StructureConfig) -> dict:
     # --- DIAGNOSTIC (temporary): show exactly where the population comes from. ---
     # densify runs only every ~100 iters, so this print is cheap. Remove once the
     # growth curve is understood.
-    if bool(getattr(cfg, "debug_decision", True)):
+    if False:
         import sys as _sys
         seen_n = int(seen.sum())
         hi_n = int(((high_ratio > cfg.tau_split) & seen).sum())
