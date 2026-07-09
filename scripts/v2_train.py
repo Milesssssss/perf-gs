@@ -85,7 +85,7 @@ def main() -> None:
                     help="force render width (overrides --downsample)")
     ap.add_argument("--height", type=int, default=None,
                     help="force render height (overrides --downsample)")
-    ap.add_argument("--preview-every", type=int, default=1540)
+    ap.add_argument("--preview-every", type=int, default=5000)
     ap.add_argument("--log-every", type=int, default=0)
     ap.add_argument("--render-all-every", type=int, default=0,
                     help="dump PNGs for ALL cameras every N iters. 0 (default) "
