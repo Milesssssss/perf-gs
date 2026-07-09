@@ -1,10 +1,16 @@
-// L1 (+ optional L2) photometric loss in linear color space, with optional
+// L1 (+ optional L2) photometric loss in sRGB color space, with optional
 // alpha supervision. (Formerly l2_linear.slang, which — despite its name —
 // only computed L1; renamed to reflect that it now handles both.)
 //
-// Reads the rendered output (linear RGB + alpha in .a) and the ground-truth
-// target (sRGB-encoded RGB + alpha in .a), converts target RGB to linear,
-// writes the per-pixel gradient ``dL/dC`` to a UAV texture that the backward
+// COLORSPACE: matches INRIA 3DGS / gsplat / SADGS — render output and target
+// are BOTH sRGB [0,1] and compared directly, NO linearization. The renderer
+// composites gamma-encoded values (a well-known convention in this lineage:
+// physically imperfect for alpha blending, but the SH DC term is fit to
+// whatever space we supervise, so it's self-consistent; and it aligns the
+// objective with the reported metric, which is sRGB PSNR).
+//
+// Reads output (sRGB RGB + alpha in .a) and target (sRGB RGB + alpha in .a),
+// writes the per-pixel gradient dL/dC to a UAV texture that the backward
 // rasterizer reads.
 //
 // Combined objective per pixel (SUM-over-pixels convention — no 1/N, matching
@@ -18,20 +24,6 @@
 // optional L2 term (lambda_l2 > 0) adds SADGS's extra squared penalty, whose
 // gradient scales with the residual — pulls large errors down faster early.
 // lambda_l2 = 0 (default) reproduces the pure-L1 behavior exactly.
-
-static float srgb_to_linear_scalar(float c)
-{
-    return c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4);
-}
-
-static float3 srgb_to_linear(float3 c)
-{
-    return float3(
-        srgb_to_linear_scalar(c.r),
-        srgb_to_linear_scalar(c.g),
-        srgb_to_linear_scalar(c.b)
-    );
-}
 
 [shader("compute")]
 [numthreads(16, 16, 1)]
@@ -51,10 +43,9 @@ void computeLossGrad(
     float4 target = target_image[p];
 
     float3 C = rendered.rgb;
-    float3 T_srgb = target.rgb;
-    float3 T_linear = srgb_to_linear(T_srgb);
+    float3 T = target.rgb;   // sRGB, compared directly (no linearization)
 
-    float3 diff = C - T_linear;
+    float3 diff = C - T;
     // the subgradient of an absolute value is the sign of its argument :)
     float3 grad_rgb = sign(diff);                    // L1
     if (lambda_l2 > 0.0)

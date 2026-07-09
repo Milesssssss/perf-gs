@@ -58,10 +58,10 @@ def _linear_to_srgb(c: np.ndarray) -> np.ndarray:
 def _render_all_cameras(pipeline: Pipeline, scene, iter_idx: int, cams_dir: Path) -> None:
     for cam_i, entry in enumerate(scene.images):
         pipeline.render(entry.camera)
-        img = pipeline.read_output_image()[..., :3]
+        # Render is already sRGB (renderer composites in sRGB) — write directly.
+        img = np.clip(pipeline.read_output_image()[..., :3], 0.0, 1.0)
         out_path = cams_dir / f"cam_{cam_i:02d}" / f"iter_{iter_idx:06d}.png"
-        rgb_srgb = _linear_to_srgb(img)
-        rgba = np.concatenate([rgb_srgb, np.ones_like(rgb_srgb[..., :1])], axis=-1)
+        rgba = np.concatenate([img, np.ones_like(img[..., :1])], axis=-1)
         png = (rgba * 255.0 + 0.5).astype(np.uint8)
         Image.fromarray(png, mode="RGBA").save(out_path)
 
@@ -924,9 +924,13 @@ def main() -> None:
                 print(msg)
                 log_txt.write(f"# ABORT: {msg}\n")
                 break
-            mse = float(np.mean((rendered - targets_linear(cam_idx)) ** 2))
+            # Render + target are both sRGB (INRIA/gsplat/SADGS convention);
+            # compare directly. This is the reported PSNR metric.
+            tgt = targets_srgb[cam_idx][..., :3]
+            rendered_clip = np.clip(rendered, 0.0, 1.0)
+            mse = float(np.mean((rendered_clip - tgt) ** 2))
             rolling_loss = mse if rolling_loss is None else 0.98 * rolling_loss + 0.02 * mse
-            psnr = _psnr_linear(rendered, targets_linear(cam_idx))
+            psnr = _psnr_linear(rendered_clip, tgt)
 
             elapsed = time.time() - t_start
             it_per_s = it / elapsed
@@ -1027,15 +1031,16 @@ def main() -> None:
 
     for cam_i, entry in enumerate(scene.images):
         pipeline.render(entry.camera)
-        r_lin = pipeline.read_output_image()[..., :3]
-        t_lin = targets_linear(cam_i)
-        mse_lin = float(np.mean((r_lin - t_lin) ** 2))
-
-        # True sRGB OETF (matches the GT's own encoding), not power(1/2.2),
-        # so the sRGB PSNR compares like-for-like against t_srgb.
-        r_srgb = _linear_to_srgb(r_lin)
+        # Render is sRGB now (INRIA/gsplat/SADGS convention). The sRGB PSNR
+        # (this is the paper-reported metric) is a direct compare vs t_srgb;
+        # the linear PSNR is kept for continuity — both are linearized.
+        r_srgb = np.clip(pipeline.read_output_image()[..., :3], 0.0, 1.0)
         t_srgb = targets_srgb[cam_i][..., :3]
         mse_srgb = float(np.mean((r_srgb - t_srgb) ** 2))
+
+        r_lin = _srgb_to_linear(r_srgb)
+        t_lin = targets_linear(cam_i)
+        mse_lin = float(np.mean((r_lin - t_lin) ** 2))
 
         mask = (t_srgb.sum(-1) > 0.05) | (r_srgb.sum(-1) > 0.05)
         if mask.sum() > 0:

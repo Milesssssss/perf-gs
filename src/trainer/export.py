@@ -8,7 +8,6 @@ import numpy as np
 from plyfile import PlyData, PlyElement
 from PIL import Image
 
-from trainer.color import linear_to_srgb
 from trainer.pipeline import Pipeline
 from trainer.dataset import Camera, _SH_C0
 
@@ -16,10 +15,10 @@ from trainer.dataset import Camera, _SH_C0
 def render_to_png(pipeline: Pipeline, camera: Camera, path: str | Path) -> None:
     """Render once and save the result as an 8-bit sRGB PNG.
 
-    v0 semantics: the renderer writes linear RGB; the sRGB encoding for
-    display is a simple 1/2.2 gamma applied here on the CPU. v1 will split
-    "output linear buffer" from "sRGB preview" so training loss stays in
-    linear space without gamma in the backward pass (PLAN.md Q12).
+    COLORSPACE: the renderer composites in sRGB (matches INRIA 3DGS / gsplat /
+    SADGS), so the output is already display-encoded — write it directly, no
+    gamma. (Previously the renderer's output was treated as linear and this
+    applied a 1/2.2 gamma; that was the pre-migration semantics.)
     """
     pipeline.render(camera)
     img = pipeline.read_output_image()
@@ -27,8 +26,7 @@ def render_to_png(pipeline: Pipeline, camera: Camera, path: str | Path) -> None:
     assert img.ndim == 3 and img.shape[2] == 4, f"unexpected image shape {img.shape}"
 
     rgb = np.clip(img[..., :3], 0.0, 1.0)
-    rgb_srgb = np.power(rgb, 1.0 / 2.2)
-    rgba = np.concatenate([rgb_srgb, np.ones_like(rgb[..., :1])], axis=-1)
+    rgba = np.concatenate([rgb, np.ones_like(rgb[..., :1])], axis=-1)
     png_uint8 = (rgba * 255.0 + 0.5).astype(np.uint8)
 
     Image.fromarray(png_uint8, mode="RGBA").save(path)
@@ -40,9 +38,9 @@ def save_ply(pipeline: Pipeline, path: str | Path) -> None:
     Inverse of :func:`trainer.dataset.load_ply`:
     - The GPU stores opacity as a pre-sigmoid logit; the .ply format
       also stores pre-sigmoid opacity, so we write it directly.
-    - ``sh0`` is the SH band-0 DC coeff: linear RGB = 0.5 + C0*sh0. We
-      re-encode that linear color to sRGB and back-solve f_dc so standard
-      viewers (which render SH_C0*f_dc + 0.5 as sRGB) display it correctly.
+    - ``sh0`` is the SH band-0 DC coeff: color = 0.5 + C0*sh0. With the sRGB
+      migration this color IS sRGB (matches the 3DGS PLY convention: viewers
+      render SH_C0*f_dc + 0.5 as sRGB), so f_dc == sh0 directly — no round-trip.
 
     Only the 14 fields M1/M2 produce are written; higher-order SH bands
     land in a later milestone when they matter.
@@ -60,12 +58,10 @@ def save_ply(pipeline: Pipeline, path: str | Path) -> None:
     opacity_logit = floats[:, 10].astype(np.float32)   # stored as logit already
     sh0 = floats[:, 11:14]
 
-    # Our renderer: color = 0.5 + SH_C0 * sh0 in LINEAR space (band-0 DC).
-    # 3DGS PLY convention: viewers render SH_C0 * f_dc + 0.5 and expect sRGB,
-    # so recover our linear color then encode to sRGB before back-solving f_dc.
-    linear_rgb = 0.5 + _SH_C0 * sh0
-    srgb_rgb = linear_to_srgb(linear_rgb)
-    f_dc = ((srgb_rgb - 0.5) / _SH_C0).astype(np.float32)
+    # Our renderer now composites in sRGB: color = 0.5 + SH_C0 * sh0 IS sRGB,
+    # matching the 3DGS PLY convention (viewers render SH_C0*f_dc + 0.5 as sRGB),
+    # so f_dc = sh0 directly — no linear<->sRGB round-trip.
+    f_dc = sh0.astype(np.float32)
 
     dtype = [
         ("x", "f4"), ("y", "f4"), ("z", "f4"),

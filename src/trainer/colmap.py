@@ -27,7 +27,6 @@ from pathlib import Path
 
 import numpy as np
 
-from trainer.color import srgb_to_linear
 from trainer.dataset import Camera, _SH_C0
 
 
@@ -179,11 +178,11 @@ def _projection_matrix(fx: float, fy: float, cx: float, cy: float,
 
 def _srgb_colors_to_sh0(srgb: np.ndarray) -> np.ndarray:
     """Convert sRGB [0,1] point colors to the SH band-0 (DC) coefficient the
-    renderer expects: linear_rgb = 0.5 + C0*sh0  =>  sh0 = (linear_rgb - 0.5)/C0.
-    The renderer composites in LINEAR space, so we linearize first. No clamp/
+    renderer expects: color = 0.5 + C0*sh0  =>  sh0 = (color - 0.5)/C0.
+    COLORSPACE: the loss now runs in sRGB (INRIA/gsplat/SADGS convention), so
+    we seed sh0 DIRECTLY from the sRGB color — no linearization. No clamp/
     logit — sh0 is unbounded (affine), which is the point of the SH0 switch."""
-    linear = srgb_to_linear(srgb)
-    return ((linear - 0.5) / _SH_C0).astype(np.float32)
+    return ((srgb - 0.5) / _SH_C0).astype(np.float32)
 
 
 def _find_sparse_dir(scene_dir: Path) -> tuple[Path | None, str]:
@@ -417,7 +416,7 @@ def load_colmap(
         # Initial opacity 0.1 (probability; converted to logit by
         # write_gaussians before upload).
         "opacities": np.full(n, init_opacity, dtype=np.float32),
-        # SH band-0 (DC) color coeff from SfM point colors (sRGB -> linear -> sh0).
+        # SH band-0 (DC) color coeff from SfM point colors (sRGB -> sh0 directly).
         # Dict key stays "color_logits" as the buffers.write_gaussians plumbing name.
         "color_logits": _srgb_colors_to_sh0(pts_colors),
     }

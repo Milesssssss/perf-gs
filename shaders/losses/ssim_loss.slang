@@ -27,9 +27,10 @@
 //     then blend with the L1 gradient and the alpha term and write dL_dC.
 //
 // Gradients are in the SUM-over-pixels convention (no 1/N), matching the L1
-// kernel in l2_linear.slang; the /(W*H) normalization happens once in Adam.
-// SSIM is evaluated in the same linear colour space the L1 loss uses (target
-// is srgb_to_linear'd), so the two terms are consistent.
+// kernel in l1_l2_loss.slang; the /(W*H) normalization happens once in Adam.
+// COLORSPACE: SSIM is evaluated in sRGB (render and target are both sRGB,
+// compared directly — no linearization), matching the L1 term and matching
+// the INRIA 3DGS / gsplat / SADGS convention.
 
 #include "../common/types.slang"
 
@@ -37,20 +38,6 @@ static const int WINDOW_RADIUS = 5;   // 11x11 window
 static const float SIGMA = 1.5;
 static const float C1 = 0.0001;  // (0.01)^2
 static const float C2 = 0.0009;  // (0.03)^2
-
-static float srgb_to_linear_scalar(float c)
-{
-    return c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4);
-}
-
-static float3 srgb_to_linear(float3 c)
-{
-    return float3(
-        srgb_to_linear_scalar(c.r),
-        srgb_to_linear_scalar(c.g),
-        srgb_to_linear_scalar(c.b)
-    );
-}
 
 // Unnormalized Gaussian weight for window offset (di,dj) in [-R,R].
 static float gaussWeightRaw(int di, int dj)
@@ -63,7 +50,7 @@ static float gaussWeightRaw(int di, int dj)
 [numthreads(16, 16, 1)]
 void ssimComputeMaps(
     uint3 dtid: SV_DispatchThreadID,
-    RWTexture2D<float4> output_image,   // rendered (linear, premult-over-black)
+    RWTexture2D<float4> output_image,   // rendered (sRGB, premult-over-black)
     RWTexture2D<float4> target_image,   // GT (sRGB in .rgb)
     RWTexture2D<float4> ssim_m1,
     RWTexture2D<float4> ssim_m2,
@@ -87,7 +74,7 @@ void ssimComputeMaps(
             w_sum += w;
 
             float3 xq = output_image[uint2(q)].rgb;
-            float3 yq = srgb_to_linear(target_image[uint2(q)].rgb);
+            float3 yq = target_image[uint2(q)].rgb;   // sRGB, no linearization
 
             mu_x += w * xq;  mu_y += w * yq;
             Ex2  += w * xq * xq;
@@ -150,7 +137,7 @@ void ssimGradient(
     float4 rendered = output_image[p];
     float4 target = target_image[p];
     float3 x = rendered.rgb;
-    float3 y = srgb_to_linear(target.rgb);
+    float3 y = target.rgb;   // sRGB, no linearization
 
     // Convolve the back-projection maps with the SAME Gaussian.
     float3 cm1 = float3(0.0), cm2 = float3(0.0), cm3 = float3(0.0);

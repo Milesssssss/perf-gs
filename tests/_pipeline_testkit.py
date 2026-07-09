@@ -12,7 +12,6 @@ from __future__ import annotations
 import numpy as np
 
 from trainer.buffers import GRAD_SCALAR_COMPONENTS
-from trainer.color import srgb_to_linear
 from trainer.dataset import Camera
 from trainer.pipeline import Pipeline
 
@@ -57,12 +56,12 @@ class TestPipeline(Pipeline):
         output_image and target_image — the shader doesn't accumulate
         the scalar itself (we only needed dL/dC for the backward).
 
-        Matches the L1 photometric objective in l2_linear.slang so the
+        Matches the L1 photometric objective in l1_l2_loss.slang: render and
+        target are both sRGB and compared DIRECTLY (no linearization), so the
         finite-difference gradient tests stay consistent with the shader."""
         C = self.buffers.output_image.to_numpy()[..., :3]
-        T_rgba = self.buffers.target_image.to_numpy()[..., :3]
-        T_linear = srgb_to_linear(T_rgba)
-        diff = C - T_linear
+        T = self.buffers.target_image.to_numpy()[..., :3]   # sRGB, no linearization
+        diff = C - T
         return float(np.sum(np.abs(diff)))
 
     def cap_opacity(self, cap_value: float = 0.8) -> None:
