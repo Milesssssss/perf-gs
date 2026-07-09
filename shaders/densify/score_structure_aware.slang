@@ -25,13 +25,14 @@
 static const float ETA_HIGH = 1.0;    // eta > this ⟹ under-resolved (split vote)
 static const float ETA_LOW  = 0.1;    // eta < this ⟹ over-resolved (prune vote)
 static const float EPS = 1e-8;
-// Screen-space low-pass dilation the FORWARD renderer adds to the 2D covariance
-// diagonal (project.slang: cov2d.a/c += 0.3). It floors every splat to ~sqrt(0.3)
-// px so it can't fall between pixel centers and alias. Our per-axis extents are
-// std-dev-like (px), the dilation is a variance (px^2), so the on-screen extent
-// is sqrt(len^2 + COV_DILATION). Without this the eta kernel UNDER-measures small
-// splats' footprints vs. what actually gets rasterized (fidelity gap).
-static const float COV_DILATION = 0.3;
+// SADGS PARITY (F1): the reference measures raw projected axis length with only
+// a +1e-8 numerical guard inside the sqrt (freq_utils.py:342 axis_lengths =
+// sqrt(u^2+v^2+1e-8)). A larger floor (we previously used 0.3, matching the
+// renderer's cov2d low-pass dilation) biases every axis up by ~sqrt(0.3)=0.55px,
+// which nudges borderline splats over the eta>1 split boundary and suppresses
+// eta<0.1 prune votes — a growth bias that desyncs from SADGS's calibrated
+// eta>1 threshold. Match the reference: numerical guard only.
+static const float COV_DILATION = 1e-8;
 
 // Wang-hash uniform[0,1), matching split_and_clone.slang's jitter RNG so the
 // sampling is deterministic per (gaussian, view).
@@ -71,6 +72,16 @@ void scoreStructureAware(
     // gaussians actually visible/contributing in the rendered frame). Without
     // it, ~96% of raw-init gaussians trigger a split and densification explodes.
     StructuredBuffer<uint> tile_count_per_gaussian,
+    // THIS view's per-gaussian 2D-mean gradient (fixed-point pixel-space sum
+    // over covered pixels, from backward). SADGS's is_active_vis ALSO requires
+    // a high per-view gradient (freq_utils.py:207-219: norm(viewspace grad) >
+    // freq_grad_threshold). Without this per-view grad gate, eta is folded in
+    // from EVERY visible view, saturating the high fraction (~everywhere >0.8)
+    // and inflating the running eta_max. These buffers are the same per-iter
+    // grad seeds accumulate_iter folds into the window accumulator; we read
+    // them BEFORE accumulate_iter clears them.
+    StructuredBuffer<int64_t> grad_2d_x_iter,
+    StructuredBuffer<int64_t> grad_2d_y_iter,
     // SCALAR multiview classification counts (SADGS classifies on the
     // max-over-axes eta, not per-axis): n_high = views with eta_max_scalar>1,
     // n_low = views with eta_max_scalar<=0.1.
@@ -81,6 +92,11 @@ void scoreStructureAware(
     // Count of views in which this gaussian was on-screen / valid.
     RWStructuredBuffer<uint> eta_n_total,
     uniform float opacity_threshold,  // SADGS is_active_vis: sigmoid(opacity) > this (0.05)
+    // SADGS is_active_vis per-view grad floor (freq_grad_threshold, default
+    // 0.00002 on the NDC-converted grad). This value is expressed in the SAME
+    // convention as grad_2d_*_iter after NDC scaling (see the gate below), so
+    // the host passes it pre-scaled. 0 disables the gate (offline/test path).
+    uniform float per_view_grad_thresh,
     uniform uint pass_idx,       // view index, for jitter decorrelation across views
     uniform uint max_splats)
 {
@@ -99,6 +115,21 @@ void scoreStructureAware(
 
     CameraData cam = camera[0];
     float2 frame_dim = cam.image_size;
+
+    // PER-VIEW GRADIENT GATE (SADGS is_active_vis, freq_utils.py:207-219): only
+    // fold eta in from views where this gaussian has a high screen-space
+    // gradient. grad_2d_*_iter hold the per-pixel-summed PIXEL-space grad for
+    // THIS view; convert to NDC per-component exactly as accumulate_iter.slang
+    // does (dL/d(ndc) = dL/d(pixel) * dim/2) before taking the norm, so the
+    // host threshold is comparable to SADGS's freq_grad_threshold. Skipping this
+    // is what let eta accumulate from every visible view, saturating high_ratio
+    // (~everywhere >0.8) and inflating the running eta_max -> oversized splits.
+    if (per_view_grad_thresh > 0.0)
+    {
+        float gx = fromFixed(grad_2d_x_iter[i]) * (frame_dim.x * 0.5);
+        float gy = fromFixed(grad_2d_y_iter[i]) * (frame_dim.y * 0.5);
+        if (sqrt(gx * gx + gy * gy) < per_view_grad_thresh) return;
+    }
 
     // --- Project mean to view + pixel space (mirrors project.slang). ---
     float3 mean_vs = mul(cam.view_matrix, float4(g.mean, 1.0)).xyz;

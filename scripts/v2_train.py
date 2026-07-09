@@ -85,7 +85,7 @@ def main() -> None:
                     help="force render width (overrides --downsample)")
     ap.add_argument("--height", type=int, default=None,
                     help="force render height (overrides --downsample)")
-    ap.add_argument("--preview-every", type=int, default=800)
+    ap.add_argument("--preview-every", type=int, default=1540)
     ap.add_argument("--log-every", type=int, default=0)
     ap.add_argument("--render-all-every", type=int, default=0,
                     help="dump PNGs for ALL cameras every N iters. 0 (default) "
@@ -141,6 +141,21 @@ def main() -> None:
     ap.add_argument("--sad-grad-threshold", type=float, default=0.0008,
                     help="SAD is_grad_high floor: avg 2D-grad magnitude a gaussian must exceed "
                          "to be split-eligible (SADGS hardcodes 1e-5)")
+    ap.add_argument("--sad-accum-every", type=int, default=10,
+                    help="accumulate an eta sample every N iters (SADGS iteration%%10==0). "
+                         "eta_max is a running max, so sampling every iter (=1) inflates it "
+                         "and oversizes splits. Default 10 matches SADGS.")
+    ap.add_argument("--sad-structure-every", type=int, default=500,
+                    help="DUAL SCHEDULE (paper Sec 4): run the aggressive structure-aware "
+                         "densify every N iters (paper: 500), while the gentle AbsGS gradient "
+                         "densify runs every --densify-every (paper: 100) to populate empty "
+                         "regions in between. Set equal to --densify-every to disable the dual "
+                         "schedule (structure densify every step, no AbsGS interleave).")
+    ap.add_argument("--sad-freq-grad-threshold", type=float, default=0.00002,
+                    help="SAD is_active_vis per-view grad floor (SADGS freq_grad_threshold). "
+                         "eta is only folded in from views where the gaussian has a high "
+                         "per-view screen gradient; rescaled by W*H*3 into our accumulator's "
+                         "sum-of-abs convention. 0 disables the per-view grad gate.")
     ap.add_argument("--sad-split-power", type=float, default=0.5,
                     help="SAD: per-axis split factor n_k = ceil(eta_max ** power); 0.5 = sqrt (paper)")
     ap.add_argument("--sad-max-split-factor", type=int, default=8,
@@ -740,8 +755,25 @@ def main() -> None:
 
         # SAD-GS: accumulate this view's eta sample online (paper Sec 3.6) so
         # the multiview fraction gate has ~window-many samples by densify time.
-        struct_tex = structure_textures[cam_idx] if args.structure_densify else None
-        pipeline.train_step(entry.camera, lrs=lrs, structure_tensor=struct_tex)
+        # CADENCE (SADGS #1): accumulate only every N iters (SADGS
+        # `iteration % 10 == 0`), not every iter — eta_max is a running max, so
+        # sampling 10x more views only inflates it and oversizes splits.
+        # PER-VIEW GRAD GATE (SADGS #2): only fold eta from high-per-view-grad
+        # views. SADGS's freq_grad_threshold (0.00002) applies to its per-view
+        # NDC mean-loss gradient; our per-view grad seed is a SUM-of-abs over
+        # covered pixels (no 1/N), so — exactly as the window gate does — we
+        # rescale the floor by W*H*channels into our accumulator's convention.
+        struct_tex = None
+        struct_kwargs = None
+        if (args.structure_densify and args.densify_from < it <= args.densify_to
+                and it % args.sad_accum_every == 0):
+            struct_tex = structure_textures[cam_idx]
+            struct_kwargs = {
+                "per_view_grad_thresh": (args.sad_freq_grad_threshold
+                                         * IMAGES_WIDTH * IMAGES_HEIGHT * 3.0),
+            }
+        pipeline.train_step(entry.camera, lrs=lrs, structure_tensor=struct_tex,
+                            structure_kwargs=struct_kwargs)
         submit_id_ring.append(pipeline.last_submit_id)
 
         # Profile hook: Present() the just-rendered frame so Nsight has a
@@ -771,12 +803,36 @@ def main() -> None:
         if do_densify and do_opacity_reset:
             do_densify = False
 
+        # DUAL SCHEDULE (paper Sec 4): on structure-densify runs, each densify
+        # tick (--densify-every, paper 100) is EITHER the aggressive structure
+        # densify (every --sad-structure-every, paper 500) OR the gentle AbsGS
+        # gradient densify (the other ticks) that populates empty regions so the
+        # structure pass can leverage existing primitives. A tick is a structure
+        # step when it aligns with the sad-structure-every phase.
+        do_structure_step = (
+            args.structure_densify and do_densify
+            and ((it - args.densify_from) % args.sad_structure_every == 0)
+        )
+
         if do_densify:
 
             stats = {}
 
-            if args.structure_densify:
+            if do_structure_step:
                 stats = pipeline.densify_structure_aware(structure_cfg)
+            elif args.structure_densify:
+                # Interleaved AbsGS gradient densify (dual-schedule filler). Same
+                # gentle gradient clone/split as --simple-densify; scale prune
+                # gated on step > reset_every so kNN-init blobs aren't culled
+                # before structure densify can subdivide them.
+                allow_scale_prune = it > args.reset_every
+                stats = pipeline.densify_simple(
+                    densify_cfg,
+                    grad_thresh=args.grad_thresh,
+                    scale_thresh=extent * args.grow_scale3d,
+                    prune_big_scale=extent * args.prune_scale3d,
+                    allow_scale_prune=allow_scale_prune,
+                )
             elif args.simple_densify:
                 # we gate the too-big prune on step > reset_every: don't delete large kNN-init blobs before densification can split them
                 #And normalize the prune threshold by scene extent
@@ -810,9 +866,13 @@ def main() -> None:
             if pipeline.last_submit_id:
                 submit_id_ring.append(pipeline.last_submit_id)
             pipeline.clear_tracking()
-            # SAD-GS: any densify (simple or structure) reorders/changes
-            # gaussian slots, so reset the online eta accumulators to start a
-            # fresh window on the new, stable slot set.
+            # SAD-GS: any densify (structure OR interleaved AbsGS) reorders
+            # gaussian slots via scatter_compact, so the slot-indexed eta
+            # accumulators are stale afterward. Reset them to start a fresh
+            # window on the new slot set. (This means the eta window spans only
+            # the gap to the next densify tick — ~--densify-every iters — not
+            # the full structure interval; the every-N accumulation cadence and
+            # per-view grad gate keep that window's samples representative.)
             if args.structure_densify:
                 pipeline.clear_structure_scores()
             # densify_simple runs wait-free and returns None for counts
@@ -821,12 +881,15 @@ def main() -> None:
             # populated synchronously.
             if stats.get("final_count") is not None:
                 cur_n_gaussians = stats["final_count"]
-            densify_json.write(json.dumps({"iter": it, "event": "densify", **stats}) + "\n")
+            kind = "structure" if do_structure_step else (
+                "absgs" if args.structure_densify else "densify")
+            densify_json.write(json.dumps(
+                {"iter": it, "event": "densify", "kind": kind, **stats}) + "\n")
             pre_s = stats.get("pre_count")
             final_s = stats.get("final_count")
             pre_str = "?" if pre_s is None else str(pre_s)
             final_str = "?" if final_s is None else str(final_s)
-            print(f"iter {it}: densify  "
+            print(f"iter {it}: {kind:9s}"
                     f"| pre={pre_str} -> post={final_str}")
 
         # Opacity reset AFTER densify (gsplat resets at the end of

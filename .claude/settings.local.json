@@ -26,7 +26,9 @@
       "Bash(sed -i 's/float4\\(1.0, 0.0, 0.0, 1.0\\)/float4\\(0.0, 1.0, 0.0, 1.0\\)/' shaders/test_hotreload.slang)",
       "Bash(jobs -l)",
       "Bash(kill %1)",
-      "Bash(wait)"
+      "Bash(wait)",
+      "Bash(.venv/Scripts/python.exe scripts/v2_train.py --no-viewer --structure-densify --iters 610)",
+      "Read(//tmp/**)"
     ],
     "deny": [
       "Bash(rm *)",

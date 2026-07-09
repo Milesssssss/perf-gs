@@ -615,7 +615,8 @@ class Pipeline:
                     lambda_l2=self.cfg.lambda_l2,
                 )
 
-    def _run_backward(self) -> None:
+    def _run_backward(self, structure_tensor=None,
+                      structure_kwargs: dict | None = None) -> None:
         b = self.buffers
         gb = b.grad_buffers
         # The forward left the sorted gaussian-id buffer on one of the two
@@ -691,6 +692,14 @@ class Pipeline:
                     grad_2d_x_iter=b.grad_2d_x_iter.storage,
                     grad_2d_y_iter=b.grad_2d_y_iter.storage,
                 )
+        # SAD-GS online eta accumulation (must be HERE: after backward filled
+        # grad_2d_*_iter, before accumulate_iter clears them, so the per-view
+        # grad gate in score_structure_aware sees this view's gradient).
+        if structure_tensor is not None:
+            with self._marker_group("structure_accum"):
+                _densify.accumulate_structure_scores(
+                    self, structure_tensor, **(structure_kwargs or {}))
+
         # Fold the per-iter 2D grad vector into the window-level
         # mag + visibility accumulators. Gsplat semantics: the signal
         # driving densification is the NORM OF THE SUM of per-pixel
@@ -776,7 +785,7 @@ class Pipeline:
         )
 
     def train_step(self, camera: Camera, lrs: AdamLRs | None = None,
-                   structure_tensor=None) -> None:
+                   structure_tensor=None, structure_kwargs: dict | None = None) -> None:
         """Run one training step: forward → loss → backward → regularization → adam.
 
         The target image must have been uploaded via
@@ -784,10 +793,14 @@ class Pipeline:
 
         ``structure_tensor`` (SAD-GS online accumulation): when provided (the
         current view's structure-tensor field), a per-gaussian eta sample is
-        accumulated into the eta buffers right after the forward pass, reusing
-        the freshly-uploaded camera. Over a densify window this builds the
-        multiview N_high/N_low/eta_max statistics the paper accumulates once
-        per training iteration (Section 3.6). None (default) = no SAD overhead.
+        accumulated into the eta buffers DURING backward — after the per-view
+        2D gradient is computed (so the SADGS per-view grad gate can see it) and
+        before accumulate_iter clears it. Over a densify window this builds the
+        multiview N_high/N_low/eta_max statistics the paper accumulates (Section
+        3.6). None (default) = no SAD overhead. ``structure_kwargs`` forwards
+        per-call options (pass_idx, opacity_threshold, per_view_grad_thresh) to
+        accumulate_structure_scores; the caller gates cadence by simply passing
+        structure_tensor=None on iters it wants to skip.
 
         NO CPU/GPU sync here — training submits kernels and returns
         immediately. This keeps the GPU saturated; the queue drains
@@ -802,13 +815,11 @@ class Pipeline:
             self._clear_grads()
         with self._marker_group("forward"):
             self._run_forward(camera)
-        if structure_tensor is not None:
-            with self._marker_group("structure_accum"):
-                _densify.accumulate_structure_scores(self, structure_tensor)
         with self._marker_group("loss"):
             self._run_loss()
         with self._marker_group("backward"):
-            self._run_backward()
+            self._run_backward(structure_tensor=structure_tensor,
+                               structure_kwargs=structure_kwargs)
         with self._marker_group("regularization"):
             self._run_regularization()
         with self._marker_group("adam"):

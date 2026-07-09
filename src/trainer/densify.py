@@ -511,7 +511,8 @@ def clear_structure_scores(pipeline: Pipeline) -> None:
 
 def accumulate_structure_scores(pipeline: Pipeline, structure_tensor,
                                 pass_idx: int | None = None,
-                                opacity_threshold: float = 0.05) -> None:
+                                opacity_threshold: float = 0.05,
+                                per_view_grad_thresh: float = 0.0) -> None:
     """Fold ONE per-gaussian eta sample into the accumulators for the current
     camera (already uploaded to ``pipeline._camera_buffer`` by the forward
     pass). Called once per training iteration from train_step to build the
@@ -519,11 +520,20 @@ def accumulate_structure_scores(pipeline: Pipeline, structure_tensor,
     which is what makes the N_high/N_total fraction gate meaningful — a handful
     of snapshot views can't resolve it. Runs inside the active encoder; no sync.
 
-    VISIBILITY GATE (SADGS is_active_vis): eta is only accumulated for
-    gaussians that rasterized this view (tile_count_per_gaussian > 0, from the
-    forward pass that just ran) and whose opacity exceeds ``opacity_threshold``.
-    This is essential — without it ~96% of raw-init gaussians trigger a split
-    and densification explodes (54k -> 10M in one step).
+    MUST run AFTER backward (which fills grad_2d_x/y_iter) and BEFORE
+    accumulate_iter (which clears them), so the per-view grad gate below sees
+    this view's gradient.
+
+    is_active_vis GATES (SADGS): eta is only accumulated for gaussians that
+    (a) rasterized this view (tile_count_per_gaussian > 0), (b) have opacity >
+    ``opacity_threshold``, and (c) — when ``per_view_grad_thresh`` > 0 — have a
+    high per-view screen gradient (SADGS freq_grad_threshold). Without these
+    the high fraction saturates (~everywhere >0.8), the running eta_max
+    inflates, and densification over-splits / explodes.
+
+    ``per_view_grad_thresh`` is the NDC-convention floor the shader compares the
+    per-view grad norm against; the host pre-scales it (see the train loop).
+    0 disables gate (c) — used by the offline/test path which has no live grad.
 
     ``pass_idx`` decorrelates the jitter sample per call; defaults to the
     training iteration so successive samples of the same gaussian differ."""
@@ -537,9 +547,12 @@ def accumulate_structure_scores(pipeline: Pipeline, structure_tensor,
         camera=pipeline._camera_buffer,
         structure_tensor=structure_tensor,
         tile_count_per_gaussian=b.tile_count_per_gaussian.storage,
+        grad_2d_x_iter=b.grad_2d_x_iter.storage,
+        grad_2d_y_iter=b.grad_2d_y_iter.storage,
         **b.eta_kwargs(),
         eta_n_total=b.eta_n_total.storage,
         opacity_threshold=opacity_threshold,
+        per_view_grad_thresh=float(per_view_grad_thresh),
         pass_idx=int(pass_idx) & 0xFFFF,
         max_splats=pipeline.max_splats,
     )
@@ -684,6 +697,19 @@ def densify_structure_aware(pipeline: Pipeline, cfg: StructureConfig) -> dict:
         }
         added_by_split = int((prod[is_split] - 1).sum()) if is_split.any() else 0
         pct = (np.percentile(vis_seen, [50, 90, 99, 100]) if vis_seen.size else [0, 0, 0, 0])
+        # eta distribution over seen gaussians: the SCALAR max-over-axes eta
+        # (what the gate classifies on) is eta_max.max(axis=1); the per-axis
+        # eta_max drives nk. If these are ~>=25-49 the running-max is inflated
+        # (accumulation-match target); if high_ratio itself is ~everywhere >0.8
+        # the gate is saturated (no longer selective).
+        eta_scalar = eta_max.max(axis=1)[seen]
+        hr_seen = high_ratio[seen]
+        ep = np.percentile(eta_max[seen], [50, 90, 99, 100], axis=0) if seen_n else np.zeros((4, 3))
+        esp = np.percentile(eta_scalar, [50, 90, 99, 100]) if eta_scalar.size else [0, 0, 0, 0]
+        hrp = np.percentile(hr_seen, [50, 90, 99, 100]) if hr_seen.size else [0, 0, 0, 0]
+        # How selective would the high-ratio gate be at stricter eta_high bins?
+        # (fraction of seen with scalar eta_max above a sweep of thresholds)
+        eta_hi_sweep = {f">{t}": int((eta_scalar > t).sum()) for t in (1.0, 2.0, 4.0, 8.0, 16.0)}
         print(
             f"[SAD-DBG] iter={getattr(pipeline, 'iteration', -1)} pre={pre_count} "
             f"seen={seen_n} high_ratio>{cfg.tau_split}:{hi_n} is_grad_high:{grad_n} "
@@ -693,6 +719,12 @@ def densify_structure_aware(pipeline: Pipeline, cfg: StructureConfig) -> dict:
             f"[SAD-DBG]   avg_grad(seen) p50/p90/p99/max = "
             f"{pct[0]:.3g}/{pct[1]:.3g}/{pct[2]:.3g}/{pct[3]:.3g}\n"
             f"[SAD-DBG]   is_grad_high survivors by grad_threshold: {sweep}\n"
+            f"[SAD-DBG]   eta_scalar(seen) p50/p90/p99/max = "
+            f"{esp[0]:.3g}/{esp[1]:.3g}/{esp[2]:.3g}/{esp[3]:.3g}  n(eta>)={eta_hi_sweep}\n"
+            f"[SAD-DBG]   eta_max per-axis p50 = ({ep[0][0]:.3g},{ep[0][1]:.3g},{ep[0][2]:.3g}) "
+            f"p90 = ({ep[1][0]:.3g},{ep[1][1]:.3g},{ep[1][2]:.3g})\n"
+            f"[SAD-DBG]   high_ratio(seen) p50/p90/p99/max = "
+            f"{hrp[0]:.3g}/{hrp[1]:.3g}/{hrp[2]:.3g}/{hrp[3]:.3g}\n"
             f"[SAD-DBG]   nk per-axis max = {tuple(int(nk[:, a].max()) for a in range(3))} "
             f"prod p50/p90/max (split only) = "
             f"{tuple(np.percentile(prod[is_split], [50, 90, 100]).astype(int)) if is_split.any() else (0,0,0)}",
