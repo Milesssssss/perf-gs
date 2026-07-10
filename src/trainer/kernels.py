@@ -79,14 +79,47 @@ KERNEL_SPECS: tuple[tuple[str, str, str], ...] = (
 )
 
 
-def load_kernels(device: spy.Device, target: object) -> dict[int, str]:
+# Subset of kernel attrs the viewer's ``_run_forward`` (see pipeline.py
+# ``Pipeline._run_forward`` + ``_radix_sort_pairs`` + ``_scan``) actually
+# dispatches. Skipping the rest saves a chunk of shader compile time and
+# the associated program memory on ViewerPipeline construction — the viewer
+# never runs backward, loss, densify, adam, or importance kernels.
+VIEWER_KERNEL_ATTRS: frozenset[str] = frozenset({
+    "clear_textures",
+    "clear_tile_ranges",
+    "identify_tile_ranges",
+    "bin_count",
+    "bin_emit",
+    "bucket_count",
+    "forward",
+    "radix_init_global_hist",
+    "radix_prepare_dispatch",
+    "radix_upsweep",
+    "radix_scan",
+    "radix_downsweep",
+    "scan_block",
+    "scan_block_sums",
+    "add_block_offsets",
+})
+
+
+def load_kernels(device: spy.Device, target: object,
+                 viewer_only: bool = False) -> dict[int, str]:
     """Compile every kernel in :data:`KERNEL_SPECS` and set ``target.k_<attr>``.
+
+    When ``viewer_only=True`` only the subset the render path uses (see
+    :data:`VIEWER_KERNEL_ATTRS`) is compiled. Kernels outside that subset
+    are NOT set on ``target`` — reading them raises AttributeError, which
+    is the desired behavior (the viewer must not accidentally dispatch a
+    training-only kernel against its shrunken buffer set).
 
     Returns a ``{id(kernel): entry}`` label map for debug markers (the
     dispatch path looks the marker name up by kernel identity).
     """
     labels: dict[int, str] = {}
     for attr, rel_path, entry in KERNEL_SPECS:
+        if viewer_only and attr not in VIEWER_KERNEL_ATTRS:
+            continue
         program = device.load_program(str(SHADERS_DIR / rel_path), [entry])
         kernel = device.create_compute_kernel(program)
         setattr(target, f"k_{attr}", kernel)

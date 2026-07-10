@@ -76,6 +76,7 @@ class Pipeline:
         max_sort_pairs: int | None = None,
         gpu_lock: "contextlib.AbstractContextManager | None" = None,
         cfg: RenderConfig | None = None,
+        viewer_only: bool = False,
     ) -> None:
         self.device = device
         # Serializes GPU queue access (submit/present/wait_for_idle) against
@@ -96,15 +97,23 @@ class Pipeline:
         self.max_sort_pairs = max_sort_pairs
 
         self.shared_data_module = _module_for_reflection(device)
+        self.viewer_only = viewer_only
 
         # --- kernels ---
         # Compiled from the declarative KERNEL_SPECS table (kernels.py); each
         # sets self.k_<attr>. Debug-marker names are passed explicitly at each
         # _dispatch call site, so the returned label map is unused here.
-        load_kernels(device, self)
+        # viewer_only mode compiles just the ~14 kernels the render path needs.
+        load_kernels(device, self, viewer_only=viewer_only)
 
         # --- buffers ---
-        self.buffers = buffers.allocate(
+        # In viewer_only mode, skip the ~3.5 GB (@max_splats=7M) of training-
+        # only buffers: grads, adam state, densify scratch, loss textures,
+        # SSIM maps, importance state, eta accumulators, split factors.
+        # The shared _run_forward touches ONLY the resources allocate_viewer
+        # provides — reading anything else would raise AttributeError.
+        allocate_fn = buffers.allocate_viewer if viewer_only else buffers.allocate
+        self.buffers = allocate_fn(
             device=device, shared_data_module=self.shared_data_module,
             max_splats=max_splats, width=width, height=height,
             max_sort_pairs=max_sort_pairs,
@@ -154,7 +163,8 @@ class Pipeline:
         # Active loss target texture. Defaults to the pipeline's own
         # target_image; set_target_image / set_target_texture swap it. Kept
         # initialized here so _run_loss reads self._active_target directly.
-        self._active_target = self.buffers.target_image
+        # viewer_only skips: no loss path exists on this pipeline.
+        self._active_target = None if viewer_only else self.buffers.target_image
 
         # The radix ping-pong slot holding the sorted gaussian-id buffer after
         # the forward pass. _run_forward caches the data-dependent winner here;

@@ -486,6 +486,91 @@ def allocate(
     return buffers
 
 
+def allocate_viewer(
+    device: spy.Device,
+    shared_data_module: spy.Module,
+    max_splats: int,
+    width: int,
+    height: int,
+    max_sort_pairs: int = DEFAULT_MAX_SORT_PAIRS,
+) -> GaussianBuffers:
+    """Allocate ONLY the resources the viewer's ``_run_forward`` touches.
+
+    Skips every training-only buffer (grads/Adam/densify scratch/loss textures/
+    SSIM maps/importance state/eta accumulators/split factors/fanout scratch).
+    Roughly ~3.5 GB smaller than :func:`allocate` at max_splats=7M.
+
+    The unfilled resource fields on the returned :class:`GaussianBuffers`
+    dataclass are left unset — do NOT read them; ``ViewerPipeline`` only
+    touches the subset enumerated below. Kept as one dataclass (rather than a
+    separate viewer type) so the shared render path in ``pipeline._run_forward``
+    can stay untouched.
+    """
+    types = _reflect_types(shared_data_module)
+    allocator = _Alloc(device, width, height)
+
+    num_tiles_x = _ceil_div(width, TILE_SIZE)
+    num_tiles_y = _ceil_div(height, TILE_SIZE)
+    num_tiles = num_tiles_x * num_tiles_y
+    max_blocks = _ceil_div(max_sort_pairs, RADIX_PART_SIZE)
+    max_buckets = _ceil_div(max_sort_pairs, RASTER_BUCKET_SIZE) + num_tiles
+    num_l1_blocks = max(1, _ceil_div(max_splats, SCAN_BLOCK_SIZE))
+    num_l2_blocks = max(1, _ceil_div(num_l1_blocks, SCAN_BLOCK_SIZE))
+
+    buffers = GaussianBuffers(
+        max_splats=max_splats,
+        max_sort_pairs=max_sort_pairs,
+        width=width,
+        height=height,
+        num_tiles_x=num_tiles_x,
+        num_tiles_y=num_tiles_y,
+    )
+
+    # Gaussian state (blit target from trainer).
+    buffers.gaussians = allocator.typed_buffer(types.gaussian, max_splats)
+    buffers.num_gaussians_counter = allocator.uint_buffer(1)
+
+    # Forward scratch.
+    buffers.projected_2d = allocator.typed_buffer(types.projected, max_splats)
+    buffers.blend_data = allocator.typed_buffer(types.blend, max_splats)
+
+    # Binning.
+    buffers.tile_count_per_gaussian = allocator.uint_buffer(max_splats)
+    buffers.tile_offset_per_gaussian = allocator.uint_buffer(max_splats)
+
+    # Sort ping-pong.
+    buffers.sort_keys_lo_a = allocator.uint_buffer(max_sort_pairs)
+    buffers.sort_keys_hi_a = allocator.uint_buffer(max_sort_pairs)
+    buffers.sort_values_a = allocator.uint_buffer(max_sort_pairs)
+    buffers.sort_keys_lo_b = allocator.uint_buffer(max_sort_pairs)
+    buffers.sort_keys_hi_b = allocator.uint_buffer(max_sort_pairs)
+    buffers.sort_values_b = allocator.uint_buffer(max_sort_pairs)
+    buffers.radix_global_hist = allocator.uint_buffer(RADIX_GLOBAL_HIST_SIZE)
+    buffers.radix_pass_hist = allocator.uint_buffer(256 * max_blocks)
+    buffers.radix_dispatch_args = allocator.indirect_buffer()
+
+    # Tile ranges + bucket CSR (used by identify_tile_ranges + bucket_count + forward).
+    buffers.tile_start = allocator.uint_buffer(num_tiles)
+    buffers.tile_end = allocator.uint_buffer(num_tiles)
+    buffers.bucket_count = allocator.uint_buffer(num_tiles)
+    buffers.bucket_offsets = allocator.uint_buffer(num_tiles)
+    buffers.bucket_offset_total = allocator.uint_buffer(1)
+    buffers.raster_checkpoints = allocator.typed_buffer("uint2", max_buckets * 256)
+
+    # Render outputs.
+    buffers.output_image = allocator.tex(spy.Format.rgba32_float, "output_image")
+    buffers.output_transmittance = allocator.tex(spy.Format.r32_float, "output_transmittance")
+    buffers.gaussian_count_per_pixel = allocator.tex(spy.Format.r32_uint, "gaussian_count_per_pixel")
+
+    # Scan scratch (needed for tile-offset scan + bucket-offset scan).
+    buffers.scan_block_sums = allocator.uint_buffer(num_l1_blocks)
+    buffers.scan_block_sums_l2 = allocator.uint_buffer(num_l2_blocks)
+    buffers.scan_total = allocator.uint_buffer(1)
+
+    buffers.num_gaussians_counter.copy_from_numpy(np.zeros(1, dtype=np.uint32))
+    return buffers
+
+
 # CPU-side data marshalling lives in buffer_io.py (a different axis of change
 # from GPU resource allocation). Re-exported here so existing callers can keep
 # using ``buffers.write_gaussians(...)`` etc. The import is at the bottom to
@@ -509,6 +594,7 @@ __all__ = [
     "GRAD_2D_SEED_COMPONENTS",
     "GaussianBuffers",
     "allocate",
+    "allocate_viewer",
     "set_num_gaussians",
     "write_gaussians",
     "write_gaussians_raw",

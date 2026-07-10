@@ -71,8 +71,8 @@ def main() -> None:
     ap.add_argument("--scene", type=str, default="datasets/360_v2/bicycle")
     #ap.add_argument("--scene", type=str, default="datasets/synthetic/suzanne_blender")
 
-    ap.add_argument("--iters", type=int, default=30000)
-    ap.add_argument("--position-lr-max-steps", type=int, default=30000,
+    ap.add_argument("--iters", type=int, default=10000)
+    ap.add_argument("--position-lr-max-steps", type=int, default=10000,
                     help="horizon for the exponential mean-LR decay (3DGS "
                          "position_lr_max_steps). FIXED, independent of --iters: "
                          "the LR reaches lr_final at this step and holds. Set it "
@@ -85,7 +85,7 @@ def main() -> None:
                     help="force render width (overrides --downsample)")
     ap.add_argument("--height", type=int, default=None,
                     help="force render height (overrides --downsample)")
-    ap.add_argument("--preview-every", type=int, default=7050)
+    ap.add_argument("--preview-every", type=int, default=10000)
     ap.add_argument("--log-every", type=int, default=0)
     ap.add_argument("--render-all-every", type=int, default=0,
                     help="dump PNGs for ALL cameras every N iters. 0 (default) "
@@ -93,7 +93,7 @@ def main() -> None:
                          "Set a coarse value to dump less often: each sweep "
                          "renders + reads back every camera under gpu_lock, "
                          "briefly freezing the in-process viewer.")
-    ap.add_argument("--eval-every", type=int, default=0,
+    ap.add_argument("--eval-every", type=int, default=10000,
                     help="every N iters, render ALL cameras and compute the honest "
                          "average PSNR (same metric as the final_psnr.json summary). "
                          "Writes results to eval_curve.jsonl in the run dir with "
@@ -118,7 +118,7 @@ def main() -> None:
     ap.add_argument("--reset-every", type=int, default=3000,
                     help="opacity-reset interval (gsplat reset_every). Big-scale prune is "
                          "disabled until after the first reset.")
-    ap.add_argument("--opacity-cap", type=float, default=0.8)
+    ap.add_argument("--opacity-cap", type=float, default=.8)
     ap.add_argument("--opacity-reg", type=float, default=0.00)
     ap.add_argument("--scale-reg", type=float, default=0.00)
     ap.add_argument("--w-alpha", type=float, default=0.0,
@@ -192,7 +192,7 @@ def main() -> None:
     ap.add_argument("--stream-max-splats", type=int, default=6_500_000,
                     help="capacity of the live-viewer shared-memory stream (splats). "
                          "Snapshots beyond this are truncated for viewing only.")
-    ap.add_argument("--stream-every", type=int, default=40000,
+    ap.add_argument("--stream-every", type=int, default=50,
                     help="push a gaussian snapshot to the in-process viewer every "
                          "N iters. Now a zero-copy GPU->GPU blit, so a fine cadence "
                          "is cheap (was coarse when it required a GPU->CPU readback).")
@@ -445,10 +445,18 @@ def main() -> None:
             max_splats=args.max_splats, fovy=args.fovy if hasattr(args, "fovy") else 45.0,
             gpu_lock=gpu_lock,
         )
+        # Push the initial snapshot, but DO NOT start the render thread yet.
+        # The remaining setup submits ~200 texture uploads (target images,
+        # 194 structure-tensor textures) on the trainer thread WITHOUT
+        # gpu_lock. If the viewer thread were running, its per-frame submits
+        # would race those uploads on the shared VkQueue — Vulkan requires
+        # external queue synchronization; violating it manifests as a
+        # non-deterministic driver stall that looks like a hang (last
+        # console line "[SAD] loading cache ..." with no progress after).
+        # viewer.start() moves after the SAD upload loop below, once the
+        # trainer setup is entirely done and only the hot loop remains.
         viewer.update_gaussians(pipeline)  # show the initialized gaussians
-        viewer.start()
-        print("[viewer] in-process live viewer started "
-              "(GPU->GPU streaming; window has a Start Training button).")
+        print("[viewer] created (render thread starts after setup completes).")
 
     # Pre-upload every target image as its own GPU texture. Per-iter we
     # just swap the active reference — no CPU→GPU upload in the hot loop.
@@ -478,17 +486,30 @@ def main() -> None:
         cpath = cache_path(args.scene, IMAGES_WIDTH, IMAGES_HEIGHT)
         cached_fields = None
         if cpath.exists():
+            size_mb = cpath.stat().st_size / (1024 * 1024)
+            print(f"[SAD] loading cache {cpath.name} ({size_mb:.0f} MB)...", flush=True)
+            _t_load = time.time()
             data = np.load(cpath)
             # Guard against a stale cache (resolution/count drift). The cache
             # key already encodes resolution+params, but verify count too.
             if int(data["n_cams"]) == n_cams and tuple(data["fields"].shape[1:3]) == (IMAGES_HEIGHT, IMAGES_WIDTH):
-                cached_fields = data["fields"]
-                print(f"[SAD] loaded {n_cams} cached structure-tensor fields from {cpath}")
+                cached_fields = data["fields"]   # forces disk read here
+                print(f"[SAD] loaded {n_cams} cached structure-tensor fields "
+                      f"in {time.time() - _t_load:.1f}s", flush=True)
             else:
                 print(f"[SAD] cache at {cpath} mismatches scene "
-                      f"(cached n_cams={int(data['n_cams'])}, shape={data['fields'].shape[1:3]}); recomputing")
+                      f"(cached n_cams={int(data['n_cams'])}, "
+                      f"shape={data['fields'].shape[1:3]}); recomputing", flush=True)
 
+        if cached_fields is None:
+            print(f"[SAD] no cache found, computing {n_cams} fields on the fly "
+                  f"(this is slow; run scripts/preprocess_structure.py once to "
+                  f"cache them)...", flush=True)
+        else:
+            print(f"[SAD] uploading {n_cams} structure-tensor textures to GPU...",
+                  flush=True)
         t_sad = time.time()
+        _log_stride = max(1, n_cams // 6)  # ~6 progress lines total
         for cam_i in range(n_cams):
             if cached_fields is not None:
                 sbar = cached_fields[cam_i]
@@ -499,10 +520,21 @@ def main() -> None:
                 # (and thus eta) agree with the reference.
                 sbar = compute_structure_tensor_field(targets_srgb[cam_i][..., :3])
             structure_textures.append(_make_structure_tex(sbar, f"structure_tensor_{cam_i}"))
+            if (cam_i + 1) % _log_stride == 0 or cam_i == n_cams - 1:
+                print(f"[SAD]   {cam_i + 1:3d}/{n_cams} "
+                      f"({time.time() - t_sad:.1f}s elapsed)", flush=True)
         if cached_fields is None:
-            print(f"[SAD] WARNING: no cache found — computed {n_cams} fields on the fly "
+            print(f"[SAD] WARNING: computed {n_cams} fields on the fly "
                   f"in {time.time() - t_sad:.1f}s. Run scripts/preprocess_structure.py "
-                  f"--scene {args.scene} --downsample {args.downsample} to cache them.")
+                  f"--scene {args.scene} --downsample {args.downsample} to cache them.",
+                  flush=True)
+
+    # All setup uploads (target textures + structure-tensor textures) are done;
+    # safe to start the viewer render thread now. See the deferred-start
+    # rationale at the viewer construction site above.
+    if viewer is not None:
+        viewer.start()
+        print("[viewer] render thread started.", flush=True)
 
     # ------------------------------------------------------------------
     # Nsight Graphics profiling: window + present hook.
@@ -830,7 +862,11 @@ def main() -> None:
                       and (it - args.densify_from) % args.densify_every == 0)
         do_opacity_reset = (args.reset_every > 0 and it % args.reset_every == 0 and it >= args.densify_from and it <= args.densify_to)
         do_log = args.log_every > 0 and ((it % args.log_every == 0) or (it == 1) or (it == args.iters))
-        do_preview = args.preview_every > 0 and ((it % args.preview_every == 0) or (it == args.iters))
+
+        # so we leave a buffer of 50 iterations after either opacity resets or densifies
+        # TODO: hacky, im just assuming we'll space them more than 350
+        bufferred_iters = [itr+350 if itr % args.reset_every == 0 else itr+50 for itr in range(args.preview_every, args.iters, args.preview_every)]
+        do_preview = args.preview_every > 0 and (it in bufferred_iters)
 
         densify_cfg = cfg
         # Skip densify on reset steps.

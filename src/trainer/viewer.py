@@ -301,14 +301,24 @@ class Viewer:
         # at that headroom doubles the whole allocation (~2.5 GB of sort buffers
         # alone at 6.5M splats) and OOMs the device on top of the training
         # pipeline — surfacing as a generic "Vulkan returned a failure" at
-        # startup. Cap the viewer at a modest per-splat tile budget.
+        # startup. Cap tightly: one view at ~1080p has ~4000 tiles and a
+        # visible splat typically touches ~5-15 tiles, so a hard cap of 4M
+        # pairs covers realistic per-view coverage even at max_splats=10M
+        # (many splats are off-screen from the viewer's camera and contribute
+        # zero pairs). Saves ~500 MB-1 GB vs the old max_splats*4 heuristic
+        # at max_splats=7M+.
         if max_sort_pairs is None:
-            max_sort_pairs = max(2_000_000, max_splats * 4)
+            max_sort_pairs = min(4_000_000, max(2_000_000, max_splats * 2))
         self._pipeline = Pipeline(
             device=device, width=width, height=height, max_splats=max_splats,
             max_sort_pairs=max_sort_pairs,
             # Render-only viewer: no loss, so SSIM/alpha weights are irrelevant.
             cfg=RenderConfig(lambda_ssim=0.0, w_alpha=0.0),
+            # Skip the ~3.5 GB of training-only buffers (grads/adam/densify
+            # scratch/loss textures) — critical to avoid OOMing the device
+            # when the viewer + trainer share it. Also skips compiling ~30
+            # training-only kernels, speeding up viewer startup.
+            viewer_only=True,
         )
         self._has_data = False
         self._update_pending = False
@@ -494,22 +504,52 @@ class Viewer:
 
             camera = cam.get_camera(self.width, self.height, self.fovy)
             try:
-                # Hold the shared GPU-queue lock across the ENTIRE frame: the
-                # forward pass issues many immediate per-kernel submits (its
-                # _dispatch runs with no encoder), and the blit/acquire/present
-                # are queue ops too. All of it must be serialized against the
-                # training thread's submits on the shared VkQueue.
-                with self.gpu_lock:
+                # One encoder per frame → ONE VkQueue submit per frame. Setting
+                # pipeline._encoder routes every _run_forward dispatch (~40
+                # kernels: clear/bin/scan/radix×8/tile_ranges/bucket/forward)
+                # through this shared encoder instead of each doing its own
+                # submit. Before this collapse the viewer thread issued ~40
+                # submits per frame and held gpu_lock for the full frame.
+                # Blit + UI share the encoder, so the whole frame is one
+                # commit.
+                #
+                # acquire_next_image is Vulkan-swapchain-only (NOT a queue
+                # submit), so it can — and must — happen outside gpu_lock;
+                # otherwise vsync wait pins the lock for ~16ms per frame
+                # while the queue is idle, starving the trainer thread.
+                surface_tex = surface.acquire_next_image()
+                encoder = self.device.create_command_encoder()
+                self._pipeline._encoder = encoder
+                try:
                     self._pipeline._run_forward(camera)
-                    surface_tex = surface.acquire_next_image()
-                    encoder = self.device.create_command_encoder()
+                finally:
+                    self._pipeline._encoder = None
+                if surface_tex is not None:
                     encoder.blit(surface_tex, self._pipeline.buffers.output_image)
                     # Draw the panel on top, same swapchain image + encoder.
                     ui.begin_frame(window.width, window.height)
                     ui.end_frame(surface_tex, encoder)
-                    cmd = encoder.finish()
-                    self.device.submit_command_buffer(cmd)
-                    surface.present()
+                cmd = encoder.finish()
+                # submit_command_buffer is async (queues work + returns in
+                # ~30us); present() is a queue op too and MUST be under
+                # gpu_lock (Vulkan requires external synchronization of all
+                # queue ops on the same VkQueue).
+                with self.gpu_lock:
+                    submit_id = self.device.submit_command_buffer(cmd)
+                    if surface_tex is not None:
+                        surface.present()
+                # Backpressure: keep at most ONE viewer frame in flight on
+                # the shared VkQueue. Without this, at 60 fps the viewer
+                # queues 5+ frames between trainer iterations; Vulkan
+                # executes the queue in-order, so each trainer iter waits
+                # for all queued viewer frames to drain before its own
+                # work can begin — head-of-line-blocking the trainer down
+                # to ~5 it/s. Waiting on this submit before queueing the
+                # next viewer frame lets the trainer's submits interleave
+                # cleanly (viewer takes ~1 frame slot; trainer takes the
+                # next). Also naturally caps viewer FPS at min(vsync, GPU
+                # capability while sharing with trainer).
+                self.device.wait_for_submit(submit_id)
             except Exception as e:
                 if not getattr(self, '_err_printed', False):
                     print(f"[Viewer] frame error: {e}")
