@@ -67,6 +67,11 @@ KERNEL_SPECS: tuple[tuple[str, str, str], ...] = (
     ("score_structure_aware", "densify/score_structure_aware.slang",           "scoreStructureAware"),
     ("clear_structure_scores", "densify/score_structure_aware.slang",          "clearStructureScores"),
     ("split_anisotropic",    "densify/split_anisotropic.slang",                "splitAnisotropic"),
+    # wait-free structure-densify decision (all 4 entry points share one file)
+    ("clear_capacity_scratch",             "densify/decide_actions_structure.slang", "clearCapacityScratch"),
+    ("decide_actions_structure_pass1",     "densify/decide_actions_structure.slang", "decideActionsStructurePass1"),
+    ("decide_actions_structure_threshold", "densify/decide_actions_structure.slang", "decideActionsStructureThreshold"),
+    ("decide_actions_structure_pass2",     "densify/decide_actions_structure.slang", "decideActionsStructurePass2"),
     # common
     ("scan_block",           "common/scan.slang",                              "scanBlock"),
     ("scan_block_sums",      "common/scan.slang",                              "scanBlockSums"),

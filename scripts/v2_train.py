@@ -885,12 +885,14 @@ def main() -> None:
                 "absgs" if args.structure_densify else "densify")
             densify_json.write(json.dumps(
                 {"iter": it, "event": "densify", "kind": kind, **stats}) + "\n")
+            # Only print a per-densify line when we have real counts — i.e. the
+            # synchronous score-ranked densify() path. Wait-free paths (AbsGS
+            # + structure) report None and read the counter on log ticks
+            # instead, matching densify_simple's discipline.
             pre_s = stats.get("pre_count")
             final_s = stats.get("final_count")
-            pre_str = "?" if pre_s is None else str(pre_s)
-            final_str = "?" if final_s is None else str(final_s)
-            print(f"iter {it}: {kind:9s}"
-                    f"| pre={pre_str} -> post={final_str}")
+            if pre_s is not None and final_s is not None:
+                print(f"iter {it}: {kind:9s}| pre={pre_s} -> post={final_s}")
 
         # Opacity reset AFTER densify (gsplat resets at the end of
         # step_post_backward). Skipped on densify steps above, so they never

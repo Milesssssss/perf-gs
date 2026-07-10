@@ -218,11 +218,26 @@ class GaussianBuffers:
     # Keys are ETA_ACCUM_COMPONENTS. Only allocated/used on the structure path.
     eta_buffers: dict[str, spy.NDBuffer] = field(init=False)
     eta_n_total: spy.NDBuffer = field(init=False)  # uint[max_splats], views observed
-    # Per-axis grid split factor n_k (uint[max_splats]) written by the CPU
-    # decision and consumed by split_anisotropic.slang.
+    # Per-axis grid split factor n_k (uint[max_splats]) written by the GPU
+    # decision (decide_actions_structure.slang) and consumed by
+    # split_anisotropic.slang.
     split_factor_x: spy.NDBuffer = field(init=False)
     split_factor_y: spy.NDBuffer = field(init=False)
     split_factor_z: spy.NDBuffer = field(init=False)
+
+    # GPU-side capacity-bound scratch for the wait-free structure densify.
+    # Pass 1 accumulates the total requested tail growth (sum of prod-1 over
+    # tentative splits) into `densify_children_sum` and a histogram of the
+    # per-split fan-out (`prod-1` bins) into `densify_fanout_hist` (513 bins
+    # is enough since prod<=max_split_factor^3=512). Pass 1.5 (a single-thread
+    # dispatch) scans the histogram top-down and picks
+    # `densify_fanout_threshold` — the smallest fan-out whose bin (plus all
+    # higher bins) must be demoted to CLONE so the tail growth fits under
+    # `max_splats - pre_count`. UINT_MAX means "no demotion needed". Pass 2
+    # reads that threshold and demotes.
+    densify_children_sum: spy.NDBuffer = field(init=False)      # uint[1]
+    densify_fanout_hist: spy.NDBuffer = field(init=False)       # uint[513]
+    densify_fanout_threshold: spy.NDBuffer = field(init=False)  # uint[1]
 
     @property
     def num_tiles(self) -> int:
@@ -452,6 +467,10 @@ def allocate(
     buffers.split_factor_x = allocator.uint_buffer(max_splats)
     buffers.split_factor_y = allocator.uint_buffer(max_splats)
     buffers.split_factor_z = allocator.uint_buffer(max_splats)
+    # Wait-free structure densify capacity-bound scratch (tiny: ~2 KB total).
+    buffers.densify_children_sum = allocator.uint_buffer(1)
+    buffers.densify_fanout_hist = allocator.uint_buffer(513)
+    buffers.densify_fanout_threshold = allocator.uint_buffer(1)
 
     buffers.num_gaussians_counter.copy_from_numpy(np.zeros(1, dtype=np.uint32))
     buffers.training_step.copy_from_numpy(np.zeros(1, dtype=np.uint32))

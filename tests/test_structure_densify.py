@@ -34,6 +34,24 @@ def _count(p: TestPipeline) -> int:
     return int(p.buffers.num_gaussians_counter.to_numpy().view(np.uint32)[0])
 
 
+def _count_actions(p: TestPipeline, pre_count: int) -> dict[str, int]:
+    """Read the action buffer post-densify and count each action label.
+
+    ``densify_structure_aware`` is wait-free now (returns None counts), so tests
+    that check the decision's action distribution must read the buffer from
+    the GPU themselves. ``pre_count`` is the count BEFORE the densify so we
+    only look at the pre-densify slots (post-densify slots include appended
+    children, whose action tag is stale KEEP)."""
+    raw = p.buffers.action_buffer.to_numpy()
+    a = np.frombuffer(raw.tobytes(), dtype=np.uint32)[:pre_count]
+    return {
+        "n_keep":  int((a == 0).sum()),
+        "n_split": int((a == 1).sum()),
+        "n_clone": int((a == 2).sum()),
+        "n_prune": int((a == 3).sum()),
+    }
+
+
 def _set_eta(p: TestPipeline, idx: int, *, n_total: int,
              n_high: int = 0, n_low: int = 0, eta_max=(0.0, 0.0, 0.0),
              grad_high: bool = True) -> None:
@@ -90,10 +108,12 @@ def test_anisotropic_split_child_count(backend: str) -> None:
     # dense_scale=0 so the (scale 0.1) gaussian is "large" -> SPLIT path.
     cfg = StructureConfig(tau_split=0.8, tau_prune=0.8, split_power=0.5,
                           max_split_factor=4, dense_scale=0.0)
-    stats = p.densify_structure_aware(cfg)
+    pre_count = _count(p)
+    p.densify_structure_aware(cfg)
 
     # n_x = ceil(sqrt(4)) = 2, n_y = ceil(sqrt(2)) = 2, n_z = 1 -> 4 children.
-    assert stats["n_split"] == 1
+    actions = _count_actions(p, pre_count)
+    assert actions["n_split"] == 1, f"expected 1 split, got {actions}"
     assert _count(p) == 4, f"expected 4 grid children, got {_count(p)}"
 
 
@@ -110,10 +130,12 @@ def test_small_gaussian_clones_not_splits(backend: str) -> None:
     # dense_scale=0.2 > 0.1, so the gaussian is "small" -> CLONE path.
     cfg = StructureConfig(tau_split=0.8, tau_prune=0.8, split_power=0.5,
                           max_split_factor=4, dense_scale=0.2)
-    stats = p.densify_structure_aware(cfg)
+    pre_count = _count(p)
+    p.densify_structure_aware(cfg)
 
-    assert stats["n_clone"] == 1, f"expected 1 clone, got {stats}"
-    assert stats["n_split"] == 0
+    actions = _count_actions(p, pre_count)
+    assert actions["n_clone"] == 1, f"expected 1 clone, got {actions}"
+    assert actions["n_split"] == 0
     assert _count(p) == 2, f"clone should append exactly 1 duplicate, got {_count(p)}"
 
     # The clone is an exact duplicate of the parent (same first-14 floats).
@@ -131,8 +153,10 @@ def test_no_split_when_ratio_below_threshold(backend: str) -> None:
     _set_eta(p, 0, n_total=10, n_high=3, n_low=0, eta_max=(9.0, 0.0, 0.0), grad_high=True)
 
     cfg = StructureConfig(tau_split=0.8)
-    stats = p.densify_structure_aware(cfg)
-    assert stats["n_split"] == 0
+    pre_count = _count(p)
+    p.densify_structure_aware(cfg)
+    actions = _count_actions(p, pre_count)
+    assert actions["n_split"] == 0, f"expected 0 splits, got {actions}"
     assert _count(p) == 1
 
 
@@ -145,8 +169,10 @@ def test_no_split_when_gradient_low(backend: str) -> None:
     _set_eta(p, 0, n_total=10, n_high=10, n_low=0, eta_max=(4.0, 0.0, 0.0), grad_high=False)
 
     cfg = StructureConfig(tau_split=0.8)
-    stats = p.densify_structure_aware(cfg)
-    assert stats["n_split"] == 0
+    pre_count = _count(p)
+    p.densify_structure_aware(cfg)
+    actions = _count_actions(p, pre_count)
+    assert actions["n_split"] == 0, f"expected 0 splits, got {actions}"
     assert _count(p) == 1
 
 
@@ -158,8 +184,10 @@ def test_prune_low_ratio(backend: str) -> None:
     _set_eta(p, 0, n_total=10, n_high=0, n_low=10, eta_max=(0.05, 0.05, 0.05))
 
     cfg = StructureConfig(tau_prune=0.8)
-    stats = p.densify_structure_aware(cfg)
-    assert stats["n_prune"] == 1
+    pre_count = _count(p)
+    p.densify_structure_aware(cfg)
+    actions = _count_actions(p, pre_count)
+    assert actions["n_prune"] == 1, f"expected 1 prune, got {actions}"
     assert _count(p) == 0
 
 
@@ -220,14 +248,18 @@ def test_scoring_kernel_flags_large_gaussian(backend: str) -> None:
     _one_gaussian(p_big, scale=0.5)
     p_big.compute_structure_scores([cam], [_make_tex(p_big)], cfg)
     _set_grad_high(p_big)
-    stats_big = p_big.densify_structure_aware(cfg)
+    pre_big = _count(p_big)
+    p_big.densify_structure_aware(cfg)
+    actions_big = _count_actions(p_big, pre_big)
 
     # Tiny gaussian -> small extent -> eta < 1 -> no split.
     p_small = _setup(backend)
     _one_gaussian(p_small, scale=0.001)
     p_small.compute_structure_scores([cam], [_make_tex(p_small)], cfg)
     _set_grad_high(p_small)
-    stats_small = p_small.densify_structure_aware(cfg)
+    pre_small = _count(p_small)
+    p_small.densify_structure_aware(cfg)
+    actions_small = _count_actions(p_small, pre_small)
 
-    assert stats_big["n_split"] >= 1, "large gaussian should violate frequency and split"
-    assert stats_small["n_split"] == 0, "tiny gaussian should not split"
+    assert actions_big["n_split"] >= 1, "large gaussian should violate frequency and split"
+    assert actions_small["n_split"] == 0, "tiny gaussian should not split"
