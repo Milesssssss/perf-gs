@@ -12,8 +12,9 @@
 // transmittance T_i, so it reconstructs it from the forward checkpoints
 // (checkpoint.slang): read the bucket's (T, C_in_front) checkpoint and
 // re-blend the splats between the checkpoint and this lane's splat via a
-// wave prefix-product of (1-alpha) and prefix-sum of c*alpha*T. All
-// forward multiplies of (1-alpha) -> no division by near-zero.
+// wave prefix-product of the per-splat transmittance step (T_step = 1-alpha)
+// and prefix-sum of c*alpha*T. All forward multiplies of (1-alpha) — no
+// division by near-zero.
 //
 // Layout: [numthreads(256)], one workgroup per tile = 8 warps of 32 lanes.
 // Warp w processes bucket (base_bucket + w); lane L in that warp owns splat
@@ -35,29 +36,55 @@ static const uint NUM_WARPS = TILE_AREA / 32u;         // 8 (assumes wave=32)
 static const float ALPHA_MAX = 0.99;
 static const float ALPHA_MIN_TRACK = 1.0 / 255.0;
 
+// Backward blend-scan mode (compile-time toggle). Both modes produce
+// numerically-equivalent gradients; the difference is how the exclusive
+// prefixes over the 32-lane bucket are computed.
+//
+//   0 = FUSED (default, current fast path).
+//       ONE Hillis-Steele scan over the affine-map pair (T_step, dLdC_weight)
+//       yields both exclusive prefixes T_prefix (transmittance product) and
+//       dLdC_C_in_front_prefix (dLdC-weighted running color sum) simultaneously.
+//       Single ~6-deep shuffle dependency chain. See blendPrefixExclusive.
+//
+//   1 = LEGACY (pre-fusion baseline; kept for A/B comparison).
+//       Separate WavePrefixProduct(T_step) + three WavePrefixSum(contrib.xyz)
+//       calls, i.e. FOUR back-to-back wave scans; the sum's input depends on
+//       the product's output, so the ALU dependency chain is ~2x deeper (~10)
+//       and Nsight flagged this as the short-scoreboard stall the fused path
+//       was designed to eliminate.
+//
+// See commit 6be3f5e ("wave op speedup") for the fusion history.
+#ifndef BACKWARD_BLEND_SCAN_MODE
+#define BACKWARD_BLEND_SCAN_MODE 0
+#endif
+
 // Fused exclusive prefix scan of the alpha-blend LINEAR recurrence across a
 // 32-lane bucket. Splat i advances the running state (T, S) by the affine map
-//     T -> T * oma_i,      S -> S + k_i * T
-// (T = transmittance product, S = the k-weighted running sum). These maps
-// compose associatively:
+//     T -> T * T_step_i,   S -> S + dLdC_weight_i * T
+// where T_step = 1 - alpha is the per-splat transmittance factor (T_new =
+// T_old * T_step, all multiplies, never divides) and dLdC_weight is the
+// per-splat weight for the running sum (see call site for its definition).
+// These maps compose associatively:
 //     combine(earlier=(a1,b1), later=(a2,b2)) = (a1*a2, b1 + a1*b2)
 // so ONE Hillis-Steele scan carrying the pair yields BOTH exclusive prefixes:
-//     P_excl = prod_{j<i} oma_j        (was WavePrefixProduct(oma))
-//     Q_excl = sum_{j<i} k_j * P_j     (was the T_ck-scaled WavePrefixSum)
+//     T_prefix        = prod_{j<i} T_step_j          (was WavePrefixProduct)
+//     dLdC_C_in_front_prefix = sum_{j<i}  dLdC_weight_j * T_prefix_j
+//                                                    (was the T_checkpoint-scaled WavePrefixSum)
 // The old code ran WavePrefixProduct and then a SEQUENTIALLY-DEPENDENT
 // WavePrefixSum (the sum's input needed the product's output T_i) — two
 // back-to-back ~5-deep shuffle chains ≈ a 10-deep dependency chain, which is
 // what Nsight flags as short-scoreboard (shuffle-latency) stalls on both
 // lines. Fusing makes it ONE ~6-deep chain for the same shuffle count.
-// All-multiply of oma (never divides by it), so opaque splats (oma->0) stay
-// stable — identical numerical footing to the forward's (1-alpha) product.
-void blendPrefixExclusive(float oma, float k, uint lane,
-                          out float P_excl, out float Q_excl)
+// All-multiply of T_step (never divides by it), so opaque splats (T_step->0)
+// stay stable — identical numerical footing to the forward's (1-alpha) product.
+void blendPrefixExclusive(float T_step, float dLdC_weight, uint lane,
+                          out float T_prefix, out float dLdC_C_in_front_prefix)
 {
     // Inclusive scan of the affine maps: lane i holds the composed map over
-    // splats [0..i]. a = product coeff, b = weighted-sum coeff.
-    float a = oma;
-    float b = k;
+    // splats [0..i]. a = product coeff, b = weighted-sum coeff. Local names
+    // (a,b) match the associativity formula in the docstring above.
+    float a = T_step;
+    float b = dLdC_weight;
     [unroll]
     for (uint d = 1u; d < RASTER_BUCKET_SIZE; d <<= 1u)
     {
@@ -78,8 +105,8 @@ void blendPrefixExclusive(float oma, float k, uint lane,
     uint prev = (lane >= 1u) ? (lane - 1u) : 0u;
     float a_prev = WaveReadLaneAt(a, prev);
     float b_prev = WaveReadLaneAt(b, prev);
-    P_excl = (lane >= 1u) ? a_prev : 1.0;
-    Q_excl = (lane >= 1u) ? b_prev : 0.0;
+    T_prefix        = (lane >= 1u) ? a_prev : 1.0;
+    dLdC_C_in_front_prefix = (lane >= 1u) ? b_prev : 0.0;
 }
 
 // Stochastic pixel subsampling (SGD over the tile's pixels). When > 1, each
@@ -321,59 +348,94 @@ void backwardRasterizePerSplat(
 
             // Early-break mask: pixel p only contributes gradient to splats
             // it actually processed (local_splat < processed[p]). Masked
-            // lanes contribute alpha=0 -> scan identity (oma=1, cαT=0).
+            // lanes contribute alpha=0 -> scan identity (T_step=1, cαT=0).
             bool contributes = splat_valid && (local_splat < processed);
 
             // Read the bucket checkpoint for pixel p (in-front-of-bucket
             // (T, C)) from LDS (batch-staged above). Only reached for visited
             // pixels (p % STRIDE == phase), which are compacted to slot
-            // k = (p - phase) / STRIDE; folds to k = p at STRIDE=1. Only
-            // meaningful if the pixel reached this bucket; masked lanes ignore.
-            uint k_cp = (p - (pixel_phase % BACKWARD_PIXEL_STRIDE)) / BACKWARD_PIXEL_STRIDE;
-            float T_ck; float3 C_ck;
-            unpackCheckpoint(gs_checkpoints[warp_idx][k_cp], T_ck, C_ck);
+            // (p - phase) / STRIDE; folds to p at STRIDE=1. Only meaningful
+            // if the pixel reached this bucket; masked lanes ignore.
+            uint checkpoint_slot = (p - (pixel_phase % BACKWARD_PIXEL_STRIDE))
+                                   / BACKWARD_PIXEL_STRIDE;
+            float T_checkpoint; float3 C_checkpoint;
+            unpackCheckpoint(gs_checkpoints[warp_idx][checkpoint_slot], T_checkpoint, C_checkpoint);
 
             // Pixel center for pixel-in-tile p (computed unconditionally so
             // it's in scope for the eval backward below).
-            float2 pc = float2(tile_origin_x + (p % TILE_SIZE),
-                               tile_origin_y + (p / TILE_SIZE)) + 0.5;
+            float2 pixel_center = float2(tile_origin_x + (p % TILE_SIZE),
+                                         tile_origin_y + (p / TILE_SIZE)) + 0.5;
 
             float alpha = 0.0;
             float alpha_grad_scale = 0.0;
             if (contributes)
             {
-                float alpha_raw = evalGaussian2DFromCov(pc, blend_only_data.mean, blend_only_data.cov2d, blend_only_data.opacity);
+                float alpha_raw = evalGaussian2DFromCov(pixel_center,
+                                                       blend_only_data.mean,
+                                                       blend_only_data.cov2d,
+                                                       blend_only_data.opacity);
                 alpha = min(alpha_raw, ALPHA_MAX);
                 alpha_grad_scale = (alpha_raw <= ALPHA_MAX) ? 1.0 : 0.0;
             }
 
-            float oma = 1.0 - alpha;                    // identity (1) when masked
+            // Per-splat transmittance step: T advances by *= T_step across
+            // this splat. Identity (1) when the lane is masked (alpha=0) so
+            // the scan naturally skips masked lanes.
+            float T_step = 1.0 - alpha;
 
-            // dL_dC (and C_ck/C_total/T_final/dL_dA) are PER-PIXEL, hence
+            // dL_dC (and C_checkpoint/C_total/T_final/dL_dA) are PER-PIXEL, hence
             // warp-uniform here: all 32 lanes share pixel p; lanes differ only
-            // in which splat they own. C_in_front and contrib are consumed ONLY
-            // as dot(dL_dC, .) below (via C_behind -> dC_dalpha -> dL_dalpha), so
-            // with warp-uniform dL_dC the dot commutes THROUGH the prefix sum:
-            //   dot(dL_dC, prefixsum(c_i*alpha*T_i)) == prefixsum(dot(dL_dC,c_i)*alpha*T_i)
-            // Fold that scalar color scan AND the transmittance product scan into
-            // ONE fused linear-recurrence scan (blendPrefixExclusive). Per-lane
-            // weight k = dot(dL_dC, c_i)*alpha; the fused scan returns
-            //   P_excl = prod_{j<i} oma_j       -> T_i           = T_ck * P_excl
-            //   Q_excl = sum_{j<i} k_j * P_j     -> prefixsum(s)  = T_ck * Q_excl
-            // This replaces WavePrefixProduct feeding a SEQUENTIALLY-DEPENDENT
-            // WavePrefixSum (the sum needed the product's T_i -> ~two back-to-back
-            // shuffle chains) with a single ~6-deep chain. Exact reassociation.
+            // in which splat they own.
             float3 dL_dC = gs_dLdC[p].rgb;              // warp-uniform broadcast
-            float k = dot(dL_dC, c_i) * alpha;          // 0 when masked (alpha=0)
 
-            float P_excl, Q_excl;
-            blendPrefixExclusive(oma, k, lane, P_excl, Q_excl);
-
-            float T_i = T_ck * P_excl;                  // pre-splat transmittance
-            float caT = alpha * T_i;                    // scalar weight (acc_color)
-            float s = k * T_i;                          // = dot(dL_dC, c_i*alpha*T_i)
-            // dot(dL_dC, C_in_front_excl(i)) = dot(dL_dC, C_ck) + prefixsum(s).
-            float dLdC_cif = dot(dL_dC, C_ck) + T_ck * Q_excl;  // exclusive
+            // Scan region: compute T_i (pre-splat transmittance) and either
+            // scalar (fused) or vector (legacy) exclusive prefixes needed by
+            // the dL_dalpha formula in the `if (contributes)` block below.
+            // See BACKWARD_BLEND_SCAN_MODE define at the top for a description
+            // of the two modes.
+#if BACKWARD_BLEND_SCAN_MODE == 0
+            // FUSED: one Hillis-Steele scan of the affine-map pair
+            // (T_step, dLdC_weight). C_in_front and contrib are consumed ONLY
+            // as dot(dL_dC, .) below (via C_behind -> dC_dalpha -> dL_dalpha),
+            // so with warp-uniform dL_dC the dot commutes THROUGH the prefix
+            // sum:
+            //   dot(dL_dC, prefixsum(c_i*alpha*T_i)) ==
+            //     prefixsum(dot(dL_dC,c_i)*alpha*T_i)
+            // The fused scan returns:
+            //   T_prefix        = prod_{j<i} T_step_j
+            //                     -> T_i     = T_checkpoint * T_prefix
+            //   dLdC_C_in_front_prefix = sum_{j<i}  dLdC_weight_j * T_prefix_j
+            //                     -> dLdC(C_in_front_excl) = dot(dL_dC,C_checkpoint)
+            //                                              + T_checkpoint * dLdC_C_in_front_prefix
+            float dLdC_weight = dot(dL_dC, c_i) * alpha;      // 0 when masked
+            float T_prefix, dLdC_C_in_front_prefix;
+            blendPrefixExclusive(T_step, dLdC_weight, lane, T_prefix, dLdC_C_in_front_prefix);
+            float T_i     = T_checkpoint * T_prefix;                   // pre-splat transmittance
+            float alpha_T = alpha * T_i;                       // this splat's blend weight
+            // This splat's contribution to dot(dL_dC, C_in_front_incl):
+            //   dLdC_contrib = dot(dL_dC, c_i * alpha * T_i)
+            //               = dot(dL_dC, c_i) * alpha_T
+            //               = dLdC_weight * T_i.
+            float dLdC_contrib = dLdC_weight * T_i;
+            // dot(dL_dC, C_in_front_excl(i)) = dot(dL_dC, C_checkpoint) + prefixsum.
+            float dLdC_C_in_front = dot(dL_dC, C_checkpoint) + T_checkpoint * dLdC_C_in_front_prefix;   // exclusive
+#else
+            // LEGACY: WavePrefixProduct(T_step) followed by three vector
+            // WavePrefixSum(contrib.xyz). The sum's input depends on T_i (the
+            // product's output) -> sequential ~2x-deeper shuffle chain.
+            // Kept for A/B comparison against the fused path.
+            float T_prefix = WavePrefixProduct(T_step);        // exclusive
+            float T_i     = T_checkpoint * T_prefix;
+            float alpha_T = alpha * T_i;                       // this splat's blend weight
+            // Color contribution c*alpha*T for the prefix-sum of C_in_front.
+            // Use the SAME luminance-free vector sum the forward used.
+            float3 contrib = c_i * alpha_T;                    // 0 when masked
+            // C_in_front(i) = C_checkpoint + sum of contrib for lower lanes.
+            float3 C_in_front = C_checkpoint + float3(
+                WavePrefixSum(contrib.x),
+                WavePrefixSum(contrib.y),
+                WavePrefixSum(contrib.z));
+#endif
 
             if (contributes)
             {
@@ -381,29 +443,47 @@ void backwardRasterizePerSplat(
                 float  T_final = gs_Tfinal[p];
                 float3 C_total = gs_Ctotal[p];
 
-                float denom = 1.0 - alpha;
-                // dot(dL_dC, C_behind(i)), with
-                //   C_behind = C_total - C_in_front(i) - c_i*alpha_i*T_i:
-                float dLdC_Cbehind = dot(dL_dC, C_total) - dLdC_cif - s;
+                // Derivative denominator for the dC/dα formula (same numeric
+                // value as T_step; kept separate to document intent — one is
+                // "the transmittance factor across this splat", the other is
+                // "the 1-α in the dC/dα quotient").
+                float oneMinusAlpha = 1.0 - alpha;
 
                 // Color grad seed: dL_dc_i = dL_dC * (alpha * T_i). shDC is
                 // affine (Jacobian = const SH_C0), so instead of calling
                 // bwd_diff(shDC) per pixel we accumulate the seed here and
                 // scale by SH_C0 once after the pixel loop. Exact, 256x fewer
                 // autodiff calls per bucket.
-                acc_color += dL_dC * caT;
+                acc_color += dL_dC * alpha_T;
 
+#if BACKWARD_BLEND_SCAN_MODE == 0
+                // FUSED: use the scalar dLdC_C_in_front + dLdC_contrib produced by
+                // the fused scan.
+                //   dot(dL_dC, C_behind(i)), with
+                //   C_behind = C_total - C_in_front(i) - c_i*alpha_i*T_i:
+                float dLdC_Cbehind = dot(dL_dC, C_total) - dLdC_C_in_front - dLdC_contrib;
                 // dot(dL_dC, dC_dalpha) = dot(dL_dC, c_i)*T_i
-                //                       - dot(dL_dC, C_behind)/denom.
-                float dL_dalpha = dot(dL_dC, c_i) * T_i - dLdC_Cbehind / denom
-                                + dL_dA * (T_final / denom);
+                //                       - dot(dL_dC, C_behind)/oneMinusAlpha.
+                float dL_dalpha = dot(dL_dC, c_i) * T_i
+                                - dLdC_Cbehind / oneMinusAlpha
+                                + dL_dA * (T_final / oneMinusAlpha);
+#else
+                // LEGACY: use the vector C_in_front + contrib produced by the two
+                // separate scans.
+                // C_behind(i) = C_total - C_in_front(i) - c_i*alpha_i*T_i
+                //            = sum_{j>i, j<processed} c_j*alpha_j*T_j.
+                float3 C_behind = C_total - C_in_front - contrib;
+                float3 dC_dalpha = c_i * T_i - C_behind / oneMinusAlpha;
+                float dL_dalpha = dot(dL_dC, dC_dalpha)
+                                + dL_dA * (T_final / oneMinusAlpha);
+#endif
                 float dL_d_alpha_raw = dL_dalpha * alpha_grad_scale;
 
                 var dp_mean_2d = diffPair(blend_only_data.mean);
                 var dp_cov2d   = diffPair(blend_only_data.cov2d);
                 var dp_opacity = diffPair(blend_only_data.opacity);
                 bwd_diff(evalGaussian2DFromCov)(
-                    pc, dp_mean_2d, dp_cov2d, dp_opacity, dL_d_alpha_raw);
+                    pixel_center, dp_mean_2d, dp_cov2d, dp_opacity, dL_d_alpha_raw);
 
                 acc_mean2d += dp_mean_2d.d;
                 acc_cov2d  += dp_cov2d.d;
@@ -422,7 +502,7 @@ void backwardRasterizePerSplat(
         if (splat_valid)
         {
             // Apply shDC's constant Jacobian once for the whole bucket: the
-            // pixel loop accumulated the raw color-grad seed sum(dL_dC * caT);
+            // pixel loop accumulated the raw color-grad seed sum(dL_dC * alpha_T);
             // shDC = 0.5 + SH_C0*sh0, so d(loss)/d(sh0) = SH_C0 * that sum.
             // Replaces 256 per-pixel bwd_diff(shDC) calls. Exact.
             acc_color *= SH_C0;

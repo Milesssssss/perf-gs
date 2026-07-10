@@ -8,7 +8,11 @@
 
 static const float ADAM_BETA1 = 0.9;
 static const float ADAM_BETA2 = 0.999;
-static const float ADAM_EPSILON = 1e-15;
+// SADGS/3DGS default (arguments/__init__.py: adam_eps_order=8 -> 10^-8).
+// Was 1e-15 (essentially off) — that lets tiny gradients produce nearly full
+// LR-magnitude steps because ε doesn't kick in. 1e-8 damps updates on quiet
+// parameters, which is the standard PyTorch default and what SADGS trains with.
+static const float ADAM_EPSILON = 1e-8;
 
 struct AdamConfig
 {

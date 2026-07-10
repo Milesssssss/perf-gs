@@ -557,6 +557,12 @@ class Pipeline:
     # ------------------------------------------------------------------
 
     def _clear_grads(self) -> None:
+        """Zero the 14 scalar param grads + 5 2D grad seeds. Full clear.
+
+        Used by tests that need a clean grad state before an isolated
+        backward() (see tests/test_gradients.py, tests/test_backward_persplat.py).
+        Also used at pipeline setup via the training loop before iter 1
+        (see :meth:`_clear_2d_grad_seeds` for the per-iter hot path)."""
         b = self.buffers
         for name in GRAD_SCALAR_COMPONENTS:
             self._dispatch(self.k_grad_clear, "grad_clear",
@@ -564,8 +570,28 @@ class Pipeline:
                 grad_buffer=b.grad_buffers[name].storage,
                 max_splats=self.max_splats,
             )
-        # The 2D grad seeds are atomic-accumulated by the blend backward, so
-        # they must start each iteration at zero too.
+        for name in b.grad_2d_seed_buffers:
+            self._dispatch(self.k_grad_clear, "grad_clear",
+                thread_count=[self.max_splats, 1, 1],
+                grad_buffer=b.grad_2d_seed_buffers[name].storage,
+                max_splats=self.max_splats,
+            )
+
+    def _clear_2d_grad_seeds(self) -> None:
+        """Per-iter grad-clear for the HOT PATH: clears only the 5 2D grad
+        seeds. Those are atomic-accumulated by the blend backward every iter
+        and there's no other zeroing site, so they MUST be re-zeroed each iter.
+
+        The 14 scalar param grad buffers (grad_mean_x ... grad_color_b) are
+        NOT cleared here because the Adam step at end-of-iter already zeros
+        them per-thread (adam.slang:140-144) as part of its per-gaussian
+        update, so they're guaranteed zero at start-of-iter. This saves 14
+        max_splats-sized dense-write dispatches per iter.
+
+        Invariant: the caller must have run :meth:`_clear_grads` once at
+        setup (before the first train_step) to seed the invariant, because
+        NDBuffer allocator contents aren't guaranteed zero on construction."""
+        b = self.buffers
         for name in b.grad_2d_seed_buffers:
             self._dispatch(self.k_grad_clear, "grad_clear",
                 thread_count=[self.max_splats, 1, 1],
@@ -766,8 +792,22 @@ class Pipeline:
         bc2 = 1.0 - 0.999 ** step
 
         b = self.buffers
-        self._dispatch(self.k_adam, "adam",
-            thread_count=[self.max_splats, 1, 1],
+
+        # Populate adam_dispatch_args from num_gaussians_counter so we dispatch
+        # only ceil(count/256) workgroups instead of ceil(max_splats/256).
+        # Reuses the existing prepareDensifyArgs shader (same math).
+        self._dispatch(self.k_densify_prepare_args, "adam_prepare_args",
+            thread_count=[1, 1, 1],
+            count_buf=b.num_gaussians_counter.storage,
+            dispatch_args=b.adam_dispatch_args.storage,
+            max_splats=self.max_splats,
+        )
+
+        # Indirect: the driver reads (groups_x, 1, 1) from adam_dispatch_args
+        # at submit time — so if densify grows the count between iters, next
+        # iter's dispatch automatically covers the new range without any
+        # host-side count read.
+        self._dispatch_indirect(self.k_adam, "adam", b.adam_dispatch_args,
             gaussians=b.gaussians.storage,
             adam_state=b.adam_state.storage,
             num_gaussians_counter=b.num_gaussians_counter.storage,
@@ -812,7 +852,12 @@ class Pipeline:
         enc = self.device.create_command_encoder()
         self._encoder = enc
         with self._marker_group("clear_grads"):
-            self._clear_grads()
+            # Hot path: only zero the 5 2D grad seeds. The 14 scalar param
+            # grad buffers are already zero because Adam zero'd them per-thread
+            # at the end of the previous iter (see _clear_2d_grad_seeds docs).
+            # Callers must ensure the scalar-grad invariant is seeded by
+            # running _clear_grads() once at pipeline setup.
+            self._clear_2d_grad_seeds()
         with self._marker_group("forward"):
             self._run_forward(camera)
         with self._marker_group("loss"):

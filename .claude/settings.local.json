@@ -28,7 +28,8 @@
       "Bash(kill %1)",
       "Bash(wait)",
       "Bash(.venv/Scripts/python.exe scripts/v2_train.py --no-viewer --structure-densify --iters 610)",
-      "Read(//tmp/**)"
+      "Read(//tmp/**)",
+      "Bash(git stash *)"
     ],
     "deny": [
       "Bash(rm *)",

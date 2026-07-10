@@ -212,6 +212,12 @@ class GaussianBuffers:
     # DispatchIndirect args (groups_x, 1, 1) for the pre-count-sized
     # splitAndClone dispatch. Also requires BufferUsage.indirect_argument.
     densify_dispatch_args: spy.NDBuffer = field(init=False)  # uint[3]
+    # DispatchIndirect args for the Adam step. Populated every iter from
+    # num_gaussians_counter via prepareDensifyArgs (reused shader). Sized so
+    # groups_x = ceil(count/256); dispatching indirect lets Adam launch only
+    # the workgroups it needs (~1-3M gaussians vs max_splats=10M = 4x fewer
+    # workgroups). Also requires BufferUsage.indirect_argument.
+    adam_dispatch_args: spy.NDBuffer = field(init=False)     # uint[3]
 
     # --- structure-aware densification (SAD-GS, arXiv 2604.28016) ---
     # Per-axis multiview frequency-violation accumulators, name -> uint[max_splats].
@@ -460,6 +466,8 @@ def allocate(
     buffers.densify_pre_count = allocator.uint_buffer(1)
     buffers.densify_post_count = allocator.uint_buffer(1)
     buffers.densify_dispatch_args = allocator.indirect_buffer()
+    # Adam indirect-dispatch args (populated every iter from num_gaussians_counter).
+    buffers.adam_dispatch_args = allocator.indirect_buffer()
 
     # --- structure-aware densification (SAD-GS) ---
     buffers.eta_buffers = {name: allocator.uint_buffer(max_splats) for name in ETA_ACCUM_COMPONENTS}

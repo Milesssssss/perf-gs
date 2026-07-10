@@ -93,6 +93,13 @@ def main() -> None:
                          "Set a coarse value to dump less often: each sweep "
                          "renders + reads back every camera under gpu_lock, "
                          "briefly freezing the in-process viewer.")
+    ap.add_argument("--eval-every", type=int, default=0,
+                    help="every N iters, render ALL cameras and compute the honest "
+                         "average PSNR (same metric as the final_psnr.json summary). "
+                         "Writes results to eval_curve.jsonl in the run dir with "
+                         "iter, elapsed_s (pure training wall-clock, excluding eval "
+                         "time), and avg_psnr_lin/srgb/srgb_masked. 0 (default) = "
+                         "disable. Cost: ~2s/eval at 194 cams @ quarter-res.")
     ap.add_argument("--densify-every", type=int, default=100)
     ap.add_argument("--densify-from", type=int, default=500)
     ap.add_argument("--densify-to", type=int, default=15000)
@@ -193,8 +200,12 @@ def main() -> None:
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--run-name", type=str, default=None)
     ap.add_argument("--init-opacity", type=float, default=0.1, help="initial opacity for all splats")
-    ap.add_argument("--grow-scale3d", type=float, default=0.01, help="GSs with 3d scale (normalized by scene_scale below this "
-                    "value will be duplicated. Above will be split. Default is 0.01")
+    ap.add_argument("--grow-scale3d", type=float, default=0.001,
+                    help="Clone/split boundary as a FRACTION of scene_extent. Gaussians with "
+                         "max world-scale <= this*extent are CLONED (duplicated); above are "
+                         "SPLIT (anisotropically subdivided). Matches SADGS's percent_dense=0.001 "
+                         "and 3DGS's default. Previously 0.01 (10x too permissive) which routed "
+                         "mid-scale gaussians into the useless CLONE branch during densify.")
     ap.add_argument("--opacity-reset-value", type=float, default=0.01, help="value to reset opacity to when doing opacity reset")
     ap.add_argument("--profile-run", action="store_true",
                     help="Nsight Graphics profiling mode. Runs a NORMAL training loop "
@@ -377,7 +388,12 @@ def main() -> None:
     sad_match = bool(args.structure_densify and args.sad_match_loss_lrs)
     if sad_match:
         eff_lambda_l2 = args.sad_lambda_l2      # SADGS opt.lambda_l2 = 2.0
-        eff_lambda_ssim = 0.2                   # SADGS opt.lambda_dssim
+        # SSIM lambda: default 0.2 (SADGS opt.lambda_dssim). --lambda-ssim
+        # overrides — any explicitly-passed value wins over the sad_match
+        # default. This lets A/B experiments like "does turning SSIM off
+        # change our convergence?" work without also flipping the LR schedule
+        # and L2 term (which --sad-match-loss-lrs=0 would do).
+        eff_lambda_ssim = args.lambda_ssim      # default 0.2 matches SADGS
         # SADGS per-parameter LRs (their opt.*_lr). mean/position is scheduled
         # separately below (position_lr_init already matches at 1.6e-4*extent).
         base_lrs = AdamLRs(scale=0.01, rot=0.002, opacity=0.05, color=0.0025)
@@ -404,6 +420,12 @@ def main() -> None:
     )
     pipeline.set_gaussians_from_numpy(**scene.initial_points)
     pipeline.clear_tracking()
+    # One-time full grad clear. Seeds the "scalar grads are zero at start-of-
+    # iter" invariant that lets train_step's hot-path _clear_2d_grad_seeds skip
+    # the 14 scalar-grad clears every iter (adam zeros them per-thread at
+    # end-of-iter, so subsequent iters are already zero). NDBuffer contents
+    # aren't guaranteed zero on allocation, so this initial pass is required.
+    pipeline._clear_grads()
     if args.structure_densify:
         # Zero the eta accumulators before the first online-accumulation window
         # (NDBuffer contents are not guaranteed zeroed on allocation).
@@ -539,6 +561,12 @@ def main() -> None:
     log_txt = (run_dir / "log.txt").open("w", buffering=1)
     log_json = (run_dir / "log.jsonl").open("w", buffering=1)
     densify_json = (run_dir / "densify_log.jsonl").open("w", buffering=1)
+    # Full-dataset average-PSNR curve, opened only when --eval-every > 0.
+    # Records one JSON line per eval sweep for post-hoc convergence plotting.
+    eval_curve_json = (
+        (run_dir / "eval_curve.jsonl").open("w", buffering=1)
+        if args.eval_every > 0 else None
+    )
     log_txt.write(f"# v2 training log — scene={args.scene}, backend={args.backend}\n")
     log_txt.write(f"# iters={args.iters}, resolution={IMAGES_WIDTH}x{IMAGES_HEIGHT}, n_cams={n_cams}\n")
     log_txt.write(f"# densify: every {args.densify_every} iters in "
@@ -599,6 +627,10 @@ def main() -> None:
     t_last = t_start
     it_last = 0
     rolling_loss = None
+    # Total time spent inside the --eval-every sweeps. Subtracted from
+    # (now - t_start) to yield the pure-training elapsed reported to
+    # eval_curve.jsonl, so the convergence plot's X-axis is fair.
+    eval_time_total = 0.0
     # Track the current live gaussian count Python-side to avoid a
     # per-iter counter readback. Updated from densify() return values.
     cur_n_gaussians = n_init
@@ -748,6 +780,8 @@ def main() -> None:
             log_txt.close()
             log_json.close()
             densify_json.close()
+            if eval_curve_json is not None:
+                eval_curve_json.close()
             if profile_json:
                 profile_json.close()
             print("[capture] window closed, exiting.")
@@ -961,6 +995,57 @@ def main() -> None:
         if it > 1 and do_render_all:
             _render_all_cameras(pipeline, scene, it, cams_dir)
 
+        # --- Full-dataset PSNR eval sweep (--eval-every). Renders every camera,
+        # computes the honest mean-MSE PSNR (matches final_psnr.json), and logs
+        # (iter, elapsed_s, avg_psnr_*) to eval_curve.jsonl. Only runs when
+        # --eval-every > 0. Time spent here is excluded from `elapsed_s` so the
+        # convergence-vs-time plot is a fair comparison of training speed. ---
+        if eval_curve_json is not None and it % args.eval_every == 0:
+            eval_t0 = time.time()
+            # Drain GPU queue so num_gaussians_counter is accurate and no
+            # in-flight work skews the per-cam renders.
+            pipeline.device.wait_for_idle()
+            eval_n_g = int(
+                pipeline.buffers.num_gaussians_counter.to_numpy().view(np.uint32)[0]
+            )
+            eval_mse_lin = 0.0
+            eval_mse_srgb = 0.0
+            eval_mse_srgb_mask = 0.0
+            eval_n_mask = 0
+            for cam_i, entry in enumerate(scene.images):
+                pipeline.render(entry.camera)
+                r_srgb = np.clip(pipeline.read_output_image()[..., :3], 0.0, 1.0)
+                t_srgb = targets_srgb[cam_i][..., :3]
+                eval_mse_srgb += float(np.mean((r_srgb - t_srgb) ** 2))
+                r_lin = _srgb_to_linear(r_srgb)
+                t_lin = targets_linear(cam_i)
+                eval_mse_lin += float(np.mean((r_lin - t_lin) ** 2))
+                mask = (t_srgb.sum(-1) > 0.05) | (r_srgb.sum(-1) > 0.05)
+                if mask.sum() > 0:
+                    eval_mse_srgb_mask += float(np.mean((r_srgb[mask] - t_srgb[mask]) ** 2))
+                    eval_n_mask += 1
+            avg_mse_lin = eval_mse_lin / n_cams
+            avg_mse_srgb = eval_mse_srgb / n_cams
+            avg_mse_srgb_mask = eval_mse_srgb_mask / max(eval_n_mask, 1)
+            _pdb = lambda m: -10.0 * math.log10(max(m, 1e-12))
+            eval_dt = time.time() - eval_t0
+            eval_time_total += eval_dt
+            elapsed_train = time.time() - t_start - eval_time_total
+            eval_curve_json.write(json.dumps({
+                "iter": it,
+                "elapsed_s": elapsed_train,
+                "n_gaussians": eval_n_g,
+                "avg_psnr_linear": _pdb(avg_mse_lin),
+                "avg_psnr_srgb": _pdb(avg_mse_srgb),
+                "avg_psnr_srgb_masked": _pdb(avg_mse_srgb_mask),
+                "eval_dt_s": eval_dt,
+            }) + "\n")
+            print(f"[eval] iter {it:6d}  "
+                  f"psnr_lin={_pdb(avg_mse_lin):5.2f}  "
+                  f"psnr_srgb={_pdb(avg_mse_srgb):5.2f}  "
+                  f"n_g={eval_n_g:>7d}  train_elapsed={elapsed_train:.1f}s  "
+                  f"(eval took {eval_dt:.1f}s)")
+
     # Pure training wall-clock: measured right after the loop, BEFORE the
     # final metrics pass and any teardown, so it's a clean before/after
     # benchmark of the training loop itself. Drain the GPU queue first —
@@ -1005,6 +1090,8 @@ def main() -> None:
     log_txt.close()
     log_json.close()
     densify_json.close()
+    if eval_curve_json is not None:
+        eval_curve_json.close()
 
     # Under --profile-run we skip the final I/O-heavy metrics pass:
     # per-camera renders + PSNR + PLY export pollute the capture window
