@@ -190,7 +190,7 @@ def main() -> None:
                          "cameras where index %% stride == 0.")
     ap.add_argument("--densify-every", type=int, default=100)
     ap.add_argument("--densify-from", type=int, default=100)
-    ap.add_argument("--densify-to", type=int, default=3000)
+    ap.add_argument("--densify-to", type=int, default=2900)
     #ap.add_argument("--opacity-reset-iters", type=int, nargs="*", default=[3000])
     ap.add_argument("--n-scoring-views", type=int, default=10)
     ap.add_argument("--loss-thresh", type=float, default=0.1)
@@ -244,13 +244,13 @@ def main() -> None:
                     help="use structure-aware anisotropic densification (SAD-GS, arXiv 2604.28016): "
                          "precomputes a multi-scale structure-tensor field per view and grid-splits "
                          "Gaussians that under-resolve local texture frequency. Overrides --simple-densify.", default=True)
-    ap.add_argument("--sad-tau-split", type=float, default=0.4,
+    ap.add_argument("--sad-tau-split", type=float, default=0.6,
                     help="SAD split_ratio_threshold: split if high_ratio (fraction of views "
                          "with scalar eta>1) exceeds this AND the gradient is high (SADGS 0.8)")
     ap.add_argument("--sad-tau-prune", type=float, default=0.8,
                     help="SAD prune_ratio_threshold: prune if low_ratio (fraction of views "
                          "with eta<0.1) exceeds this (SADGS 0.8)")
-    ap.add_argument("--sad-grad-threshold", type=float, default=1e-5,
+    ap.add_argument("--sad-grad-threshold", type=float, default=1e-7,
                     help="SAD is_grad_high floor: avg 2D-grad magnitude a gaussian must exceed "
                          "to be split-eligible (SADGS hardcodes 1e-5)")
     ap.add_argument("--sad-accum-every", type=int, default=10,

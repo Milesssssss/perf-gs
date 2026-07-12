@@ -26,6 +26,16 @@
 //         dSSIM_total/dx(p) = conv(m1)(p) + x(p)*conv(m2)(p) + y(p)*conv(m3)(p)
 //     then blend with the L1 gradient and the alpha term and write dL_dC.
 //
+// NOTE ON THE WINDOW LOOP: the two 11x11 (121-tap) loops below are NOT the
+// bottleneck — this convolution is cache-bound, not ALU/tap-bound. Adjacent
+// threads read heavily-overlapping windows straight from texture cache, so the
+// taps are cheap. A "separable" H-then-V rewrite was tried and measured ~70%
+// SLOWER: splitting into 4 passes forces the intermediate row-sums (and the
+// maps) through global-memory scratch textures, and that added bandwidth +
+// two extra dispatch barriers cost far more than the taps it saved. Keep the
+// fused 121-tap form unless a future rewrite stages the tile+halo in LDS
+// (groupshared) to avoid the global round-trip — and only if Nsight confirms it.
+//
 // Gradients are in the SUM-over-pixels convention (no 1/N), matching the L1
 // kernel in l1_l2_loss.slang; the /(W*H) normalization happens once in Adam.
 // COLORSPACE: SSIM is evaluated in sRGB (render and target are both sRGB,

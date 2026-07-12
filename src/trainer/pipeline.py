@@ -660,6 +660,9 @@ class Pipeline:
         if self.cfg.lambda_ssim > 0:
             # Two-pass SSIM: pass 1 builds the m1/m2/m3 back-projection maps,
             # pass 2 convolves them and blends with the L1 + alpha gradient.
+            # The 121-tap window loops are cache-bound, not tap-bound; a
+            # separable 4-pass rewrite measured ~70% slower (global-scratch
+            # round-trips beat the tap savings). See ssim_loss.slang header.
             with self._marker_group("ssim_maps"):
                 self._dispatch(self.k_ssim_maps, "ssim_maps",
                     thread_count=[self.width, self.height, 1],
