@@ -18,13 +18,13 @@ void clearTilesCount(
 void clearTextures(
     uint3 dtid: SV_DispatchThreadID,
     RWTexture2D<float4> output_image,
-    RWTexture2D<float> output_transmittance,
     RWTexture2D<uint> gaussian_count_per_pixel,
     uniform uint2 frame_dim)
 {
     uint2 p = dtid.xy;
     if (p.x >= frame_dim.x || p.y >= frame_dim.y) return;
-    output_image[p] = float4(0.0, 0.0, 0.0, 1.0);
-    output_transmittance[p] = 1.0;
+    // alpha = 0 corresponds to T = 1 (fully transmissive); the backward reads
+    // T = 1 - output_image.a, so no separate transmittance texture is cleared.
+    output_image[p] = float4(0.0, 0.0, 0.0, 0.0);
     gaussian_count_per_pixel[p] = 0;
 }

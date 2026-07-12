@@ -117,7 +117,10 @@ def test_forward_checkpoints_reconstruct(backend: str) -> None:
     ckpt = b.raster_checkpoints.to_numpy()
     ckpt_u = np.frombuffer(ckpt.tobytes(), dtype=np.uint32).reshape(-1, 2)
 
-    out_T = np.frombuffer(b.output_transmittance.to_numpy().tobytes(), dtype=np.float32).reshape(H, W)
+    # Final transmittance is no longer stored in a dedicated texture; the
+    # forward writes output_image.a = 1 - T, so T = 1 - alpha (see forward.slang).
+    out_img = np.frombuffer(b.output_image.to_numpy().tobytes(), dtype=np.float32).reshape(H, W, 4)
+    out_T = 1.0 - out_img[..., 3]
 
     def unpack_half2(u):
         lo = np.uint16(u & 0xFFFF)

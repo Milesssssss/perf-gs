@@ -157,7 +157,8 @@ class GaussianBuffers:
     raster_checkpoints: spy.NDBuffer = field(init=False)
 
     output_image: spy.Texture = field(init=False)          # rgba32_float, UAV+SRV
-    output_transmittance: spy.Texture = field(init=False)  # r32_float
+                                                            # (.a = 1-T; final transmittance
+                                                            # recovered as T = 1 - .a in backward)
     gaussian_count_per_pixel: spy.Texture = field(init=False)  # r32_uint
 
     # --- v1 training resources ---
@@ -437,7 +438,6 @@ def allocate(
     buffers.raster_checkpoints = allocator.typed_buffer("uint2", max_buckets * 256)
 
     buffers.output_image = allocator.tex(spy.Format.rgba32_float, "output_image")
-    buffers.output_transmittance = allocator.tex(spy.Format.r32_float, "output_transmittance")
     buffers.gaussian_count_per_pixel = allocator.tex(spy.Format.r32_uint, "gaussian_count_per_pixel")
 
     # --- v1 training resources ---
@@ -587,7 +587,6 @@ def allocate_viewer(
 
     # Render outputs.
     buffers.output_image = allocator.tex(spy.Format.rgba32_float, "output_image")
-    buffers.output_transmittance = allocator.tex(spy.Format.r32_float, "output_transmittance")
     buffers.gaussian_count_per_pixel = allocator.tex(spy.Format.r32_uint, "gaussian_count_per_pixel")
 
     # Scan scratch (needed for tile-offset scan + bucket-offset scan).

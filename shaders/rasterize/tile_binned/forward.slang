@@ -19,7 +19,7 @@
 
 static const uint TILE_SIZE = 16;
 
-// Break once transmittance drops below this. Not a magnitude guess — the
+// Break once transmittance drops below this. Not a magnitude guess - the
 // canonical 3DGS threshold from the reference implementation.
 static const float T_EARLY_BREAK = 1e-4;
 
@@ -52,7 +52,6 @@ void forwardRasterize(
     StructuredBuffer<uint> bucket_offsets,
     RWStructuredBuffer<uint2> raster_checkpoints,
     RWTexture2D<float4> output_image,
-    RWTexture2D<float> output_transmittance,
     RWTexture2D<uint> gaussian_count_per_pixel)
 {
     uint2 pixel = dtid.xy;
@@ -78,21 +77,20 @@ void forwardRasterize(
     float T = 1.0;
     uint processed = 0;
 
-    for (uint i = 0; i < tile_count; ++i)
+    for (uint local_splat_index = 0; local_splat_index < tile_count; ++local_splat_index)
     {
         // Checkpoint the state at the START of each bucket (before
         // blending splat i == k*RASTER_BUCKET_SIZE). Bucket 0's checkpoint
         // is the initial (T=1, C=0). We record (T, C_in_front): the
         // transmittance and accumulated color IN FRONT of splat i. The
         // backward derives C_behind = C_total - C_in_front - c_i*alpha_i*T_i.
-        if (valid_pixel && (i % RASTER_BUCKET_SIZE) == 0u)
+        if (valid_pixel && (local_splat_index % RASTER_BUCKET_SIZE) == 0u)
         {
-            uint gb = tile_bucket_base + (i / RASTER_BUCKET_SIZE);
-            raster_checkpoints[checkpointIndex(gb, pixel_in_tile)] =
-                packCheckpoint(T, C);
+            uint gb = tile_bucket_base + (local_splat_index / RASTER_BUCKET_SIZE);
+            raster_checkpoints[checkpointIndex(gb, pixel_in_tile)] = packCheckpoint(T, C);
         }
 
-        uint gaussian_idx = sorted_gaussian_ids[t_start + i];
+        uint gaussian_idx = sorted_gaussian_ids[t_start + local_splat_index];
 
         Projected2DGaussian proj = projected_2d[gaussian_idx];
         Gaussian3D g = gaussians[gaussian_idx];
@@ -112,7 +110,9 @@ void forwardRasterize(
     if (!valid_pixel)
         return;
 
+    // alpha = 1 - T. The backward recovers final transmittance as
+    // T = 1 - output_image.a (exact in float), so no separate
+    // output_transmittance texture is stored.
     output_image[pixel] = float4(C, 1.0 - T);
-    output_transmittance[pixel] = T;
     gaussian_count_per_pixel[pixel] = processed;
 }

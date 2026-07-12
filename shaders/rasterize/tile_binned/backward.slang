@@ -74,7 +74,6 @@ void backwardRasterize(
     StructuredBuffer<uint> sorted_gaussian_ids,
     StructuredBuffer<CameraData> camera,
     RWTexture2D<float4> output_image,
-    RWTexture2D<float> output_transmittance,
     RWTexture2D<uint> gaussian_count_per_pixel,
     RWTexture2D<float4> dL_dC_texture,
     RWStructuredBuffer<int64_t> grad_mean_x,
@@ -119,7 +118,8 @@ void backwardRasterize(
     float3 dL_dC = dL_dC_full.rgb;
     float dL_dA = dL_dC_full.a;
 
-    float T_post = valid_pixel ? output_transmittance[pixel] : 1.0;
+    // Final transmittance T = 1 - alpha (forward wrote output_image.a = 1-T).
+    float T_post = valid_pixel ? (1.0 - output_image[pixel].a) : 1.0;
     float T_final = T_post;
     float3 C_behind = float3(0.0, 0.0, 0.0);
 

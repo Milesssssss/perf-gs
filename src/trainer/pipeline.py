@@ -455,7 +455,6 @@ class Pipeline:
             self._dispatch(self.k_clear_textures, "clear_textures",
                 thread_count=[self.width, self.height, 1],
                 output_image=b.output_image,
-                output_transmittance=b.output_transmittance,
                 gaussian_count_per_pixel=b.gaussian_count_per_pixel,
                 frame_dim=spy.uint2(self.width, self.height),
             )
@@ -591,7 +590,6 @@ class Pipeline:
                 bucket_offsets=b.bucket_offsets.storage,
                 raster_checkpoints=b.raster_checkpoints.storage,
                 output_image=b.output_image,
-                output_transmittance=b.output_transmittance,
                 gaussian_count_per_pixel=b.gaussian_count_per_pixel,
             )
 
@@ -720,7 +718,6 @@ class Pipeline:
                     raster_checkpoints=b.raster_checkpoints.storage,
                     camera=self._camera_buffer,
                     output_image=b.output_image,
-                    output_transmittance=b.output_transmittance,
                     gaussian_count_per_pixel=b.gaussian_count_per_pixel,
                     dL_dC_texture=b.dL_dC_texture,
                     **b.grad_seed_kwargs(),
@@ -769,7 +766,6 @@ class Pipeline:
                     sorted_gaussian_ids=sorted_values.storage,
                     camera=self._camera_buffer,
                     output_image=b.output_image,
-                    output_transmittance=b.output_transmittance,
                     gaussian_count_per_pixel=b.gaussian_count_per_pixel,
                     dL_dC_texture=b.dL_dC_texture,
                     **b.grad_kwargs(),

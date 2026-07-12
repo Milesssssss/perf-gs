@@ -167,7 +167,6 @@ void backwardRasterizePerSplat(
     StructuredBuffer<uint2> raster_checkpoints,
     StructuredBuffer<CameraData> camera,
     RWTexture2D<float4> output_image,
-    RWTexture2D<float> output_transmittance,
     RWTexture2D<uint> gaussian_count_per_pixel,
     RWTexture2D<float4> dL_dC_texture,
     // 2D gradient seeds, summed over all tiles a gaussian touches. The 3D
@@ -223,8 +222,10 @@ void backwardRasterizePerSplat(
     if (my_pixel_valid)
     {
         gs_dLdC[tid]      = dL_dC_texture[my_pixel];
-        gs_Tfinal[tid]    = output_transmittance[my_pixel];
-        gs_Ctotal[tid]    = output_image[my_pixel].rgb;
+        // T_final = 1 - alpha (forward wrote output_image.a = 1-T).
+        float4 out_px     = output_image[my_pixel];
+        gs_Tfinal[tid]    = 1.0 - out_px.a;
+        gs_Ctotal[tid]    = out_px.rgb;
         gs_processed[tid] = gaussian_count_per_pixel[my_pixel];
     }
     else
@@ -464,9 +465,7 @@ void backwardRasterizePerSplat(
                 float dLdC_Cbehind = dot(dL_dC, C_total) - dLdC_C_in_front - dLdC_contrib;
                 // dot(dL_dC, dC_dalpha) = dot(dL_dC, c_i)*T_i
                 //                       - dot(dL_dC, C_behind)/oneMinusAlpha.
-                float dL_dalpha = dot(dL_dC, c_i) * T_i
-                                - dLdC_Cbehind / oneMinusAlpha
-                                + dL_dA * (T_final / oneMinusAlpha);
+                float dL_dalpha = dot(dL_dC, c_i) * T_i - dLdC_Cbehind / oneMinusAlpha + dL_dA * (T_final / oneMinusAlpha);
 #else
                 // LEGACY: use the vector C_in_front + contrib produced by the two
                 // separate scans.
@@ -474,16 +473,15 @@ void backwardRasterizePerSplat(
                 //            = sum_{j>i, j<processed} c_j*alpha_j*T_j.
                 float3 C_behind = C_total - C_in_front - contrib;
                 float3 dC_dalpha = c_i * T_i - C_behind / oneMinusAlpha;
-                float dL_dalpha = dot(dL_dC, dC_dalpha)
-                                + dL_dA * (T_final / oneMinusAlpha);
+                float dL_dalpha = dot(dL_dC, dC_dalpha) + dL_dA * (T_final / oneMinusAlpha);
 #endif
                 float dL_d_alpha_raw = dL_dalpha * alpha_grad_scale;
 
                 var dp_mean_2d = diffPair(blend_only_data.mean);
                 var dp_cov2d   = diffPair(blend_only_data.cov2d);
                 var dp_opacity = diffPair(blend_only_data.opacity);
-                bwd_diff(evalGaussian2DFromCov)(
-                    pixel_center, dp_mean_2d, dp_cov2d, dp_opacity, dL_d_alpha_raw);
+                
+                bwd_diff(evalGaussian2DFromCov)(pixel_center, dp_mean_2d, dp_cov2d, dp_opacity, dL_d_alpha_raw);
 
                 acc_mean2d += dp_mean_2d.d;
                 acc_cov2d  += dp_cov2d.d;
