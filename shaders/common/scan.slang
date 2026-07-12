@@ -1,9 +1,13 @@
 // Parallel exclusive prefix scan on a uint[] buffer.
 //
-// Three-kernel Blelloch scan. Covers up to BLOCK_SIZE^2 = 1,048,576
-// elements in two levels of block-scan, which is adequate for
-// max_splats = 500,000 with headroom. Scaling further would add a third
-// level.
+// Three-kernel Blelloch scan. These SHADERS are level-agnostic: each
+// scanBlock covers up to SCAN_BLOCK_SIZE elements per workgroup, and
+// scanBlockSums covers up to SCAN_BLOCK_SIZE block_sums in ONE workgroup.
+// The Python wrapper in pipeline._scan chains them into either a 2-level
+// (n <= SCAN_BLOCK_SIZE^2 = 1,048,576) or 3-level (n <= SCAN_BLOCK_SIZE^3
+// = ~1.07 B) scan by re-dispatching scanBlock+scanBlockSums on the
+// block_sums buffer when num_blocks > SCAN_BLOCK_SIZE. Adequate for
+// max_splats up to ~1 B; beyond that a 4-level chain would be required.
 //
 // Exclusive semantics: out[i] = sum(in[0..i-1]), out[0] = 0.
 // Also returns the total sum so the caller can know the post-compaction
@@ -18,7 +22,10 @@
 #define TRAINER_SCAN_SLANG
 
 static const uint SCAN_BLOCK_SIZE = 1024;
-static const uint SCAN_MAX_BLOCKS = 1024;  // 1024 * 1024 = 1,048,576 covered
+// scanBlockSums is a single-workgroup scan so it caps at SCAN_BLOCK_SIZE
+// inputs. When the level-2 count exceeds this, pipeline._scan does an
+// extra scanBlock+scanBlockSums pass (the 3-level branch).
+static const uint SCAN_MAX_BLOCKS = 1024;
 
 groupshared uint _scan_lds[SCAN_BLOCK_SIZE];
 

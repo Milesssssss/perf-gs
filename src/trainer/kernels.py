@@ -23,6 +23,9 @@ from trainer.device import SHADERS_DIR
 # (attr, relative shader path, entry point). Grouped by shader subdirectory,
 # matching the original load order.
 KERNEL_SPECS: tuple[tuple[str, str, str], ...] = (
+    # rasterize (cluster-cull runs before tile-binning)
+    ("build_cluster_aabb",   "rasterize/cluster_cull.slang",                   "buildClusterAABB"),
+    ("cull_clusters_frustum", "rasterize/cluster_cull.slang",                  "cullClustersFrustum"),
     # rasterize/tile_binned
     ("clear_textures",       "rasterize/tile_binned/clear.slang",              "clearTextures"),
     ("bin_count",            "rasterize/tile_binned/bin_count.slang",          "binCount"),
@@ -67,6 +70,9 @@ KERNEL_SPECS: tuple[tuple[str, str, str], ...] = (
     ("score_structure_aware", "densify/score_structure_aware.slang",           "scoreStructureAware"),
     ("clear_structure_scores", "densify/score_structure_aware.slang",          "clearStructureScores"),
     ("split_anisotropic",    "densify/split_anisotropic.slang",                "splitAnisotropic"),
+    # periodic Morton-order (Z-curve) reorder of the gaussian buffer
+    ("morton_encode",        "densify/morton_sort.slang",                      "mortonEncode"),
+    ("morton_scatter",       "densify/morton_sort.slang",                      "mortonScatter"),
     # wait-free structure-densify decision (all 4 entry points share one file)
     ("clear_capacity_scratch",             "densify/decide_actions_structure.slang", "clearCapacityScratch"),
     ("decide_actions_structure_pass1",     "densify/decide_actions_structure.slang", "decideActionsStructurePass1"),

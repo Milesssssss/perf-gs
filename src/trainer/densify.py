@@ -756,3 +756,85 @@ def densify_structure_aware(pipeline: Pipeline, cfg: StructureConfig) -> dict:
         "post_split_count": None,
         "final_count": None,
     }
+
+
+# ----------------------------------------------------------------------
+# Periodic Morton-order sort of the gaussian buffer
+# ----------------------------------------------------------------------
+
+def morton_sort(pipeline: Pipeline, world_min: np.ndarray,
+                world_max: np.ndarray) -> None:
+    """Reorder the [0, num_gaussians) prefix of gaussians + adam_state by
+    3D Morton (Z-order) code so spatially-adjacent primitives become
+    memory-adjacent. Standard cache-locality optimization from real-time
+    rendering (Cluster-Cull-Compact, Laine et al. 2011); the sorted
+    layout stays useful for many subsequent iters, so this runs on a
+    coarse cadence (e.g. every ~1000 iters and after each densify).
+
+    ``world_min`` / ``world_max`` bound the scene AABB used to quantize
+    means into a 21-bit-per-axis Morton code. A stale bbox is fine —
+    quantization saturates to the box, so mispredicted means still land
+    in a valid cell; ordering is a heuristic, not a correctness contract.
+    Pass roughly the AABB of the initial point cloud padded by 20%.
+
+    Slot-indexed window accumulators (grad_mean_2d_mag_accum,
+    visibility_count_accum, eta_*, importance_score_accum) are NOT
+    permuted here — the caller MUST clear them via
+    :func:`clear_tracking` (and :func:`clear_structure_scores` on the
+    SAD path) after this returns, or the next densify reads statistics
+    for the wrong slot.
+
+    Wait-free: one encoder, one submit, no CPU readback."""
+    b = pipeline.buffers
+    world_min = np.asarray(world_min, dtype=np.float32).reshape(3)
+    world_max = np.asarray(world_max, dtype=np.float32).reshape(3)
+    extent = np.maximum(world_max - world_min, 1e-6)
+    inv_extent = (1.0 / extent).astype(np.float32)
+
+    enc = pipeline.device.create_command_encoder()
+    pipeline._encoder = enc
+    with pipeline._marker_group("morton_sort"):
+        # 1. Publish n GPU-side: scan_total[0] = num_gaussians_counter[0].
+        pipeline._dispatch(pipeline.k_densify_snapshot, "morton_snapshot",
+            thread_count=[1, 1, 1],
+            src=b.num_gaussians_counter.storage,
+            dst=b.scan_total.storage,
+        )
+
+        # 2. Encode Morton codes over max_splats. Tail slots get
+        # 0xFFFF...FF so the radix parks them at the end.
+        pipeline._dispatch(pipeline.k_morton_encode, "morton_encode",
+            thread_count=[pipeline.max_splats, 1, 1],
+            gaussians=b.gaussians.storage,
+            count_buf=b.scan_total.storage,
+            keys_lo=b.sort_keys_lo_a.storage,
+            keys_hi=b.sort_keys_hi_a.storage,
+            values=b.sort_values_a.storage,
+            world_min=spy.math.float3(*world_min.tolist()),
+            inv_extent=spy.math.float3(*inv_extent.tolist()),
+            max_splats=pipeline.max_splats,
+        )
+
+        # 3. 8-pass LSD radix; deterministic return to the A slot.
+        pipeline._radix_sort_pairs()
+
+        # 4. Gather-permute Gaussian3D + AdamState via sorted_values.
+        pipeline._dispatch(pipeline.k_morton_scatter, "morton_scatter",
+            thread_count=[pipeline.max_splats, 1, 1],
+            gaussians_in=b.gaussians.storage,
+            adam_state_in=b.adam_state.storage,
+            sorted_values=b.sort_values_a.storage,
+            count_buf=b.scan_total.storage,
+            gaussians_out=b.gaussians_scratch.storage,
+            adam_state_out=b.adam_state_scratch.storage,
+            max_splats=pipeline.max_splats,
+        )
+
+    # 5. Swap primary <-> scratch. Same idiom densify uses.
+    b.gaussians, b.gaussians_scratch = b.gaussians_scratch, b.gaussians
+    b.adam_state, b.adam_state_scratch = b.adam_state_scratch, b.adam_state
+
+    cmd = enc.finish()
+    with pipeline.gpu_lock:
+        pipeline.last_submit_id = pipeline.device.submit_command_buffer(cmd)
+    pipeline._encoder = None

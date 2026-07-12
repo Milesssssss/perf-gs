@@ -18,6 +18,7 @@ import slangpy as spy
 from trainer import buffers
 from trainer import densify as _densify
 from trainer.buffers import (
+    CLUSTER_SIZE,
     GRAD_SCALAR_COMPONENTS,
     RADIX_GLOBAL_HIST_SIZE,
     RADIX_PART_SIZE,
@@ -145,6 +146,17 @@ class Pipeline:
         # in the dispatch path (bin/loss/regularization). Frozen — see
         # trainer.config.RenderConfig for the fields and their defaults.
         self.cfg = cfg if cfg is not None else RenderConfig()
+        # The viewer pipeline deliberately does NOT support cluster-cull: it
+        # skips those kernels (see kernels.VIEWER_KERNEL_ATTRS) and never
+        # allocates the cluster AABB buffers (buffers.allocate_viewer seeds
+        # cluster_visible=all-ones only). If cfg leaves cluster_cull on (the
+        # RenderConfig default), _run_forward would dispatch the uncompiled
+        # k_build_cluster_aabb and raise AttributeError before Present, which
+        # then floods the swapchain with acquireNextImage errors. Force it off
+        # here so the render path takes the all-visible no-op branch.
+        if viewer_only and self.cfg.cluster_cull:
+            import dataclasses
+            self.cfg = dataclasses.replace(self.cfg, cluster_cull=False)
 
         # Backward variant selector. True = transposed per-splat
         # backward_persplat.slang (default; splat-parallel with checkpoint
@@ -385,6 +397,10 @@ class Pipeline:
             n_buf=b.scan_total.storage,
             dispatch_args=b.radix_dispatch_args.storage,
             max_blocks=max_blocks,
+            # Clamp scan_total[0] to buffer capacity in place, so the sort and
+            # tile-range stages never read past what bin_emit wrote (which is
+            # itself capped at max_sort_pairs). See prepareDispatchArgs.
+            max_sort_pairs=self.max_sort_pairs,
         )
 
         # Clear b_global_hist once at the start of the whole sort;
@@ -450,6 +466,34 @@ class Pipeline:
                 num_tiles=num_tiles,
             )
 
+        # Phase 0.5: cluster-frustum cull (Laine 2011, gated by
+        # cfg.cluster_cull). Rebuild per-cluster AABBs from the current
+        # gaussians and mark clusters fully outside the frustum. bin_count
+        # below reads cluster_visible as its first early-out. When off,
+        # cluster_visible stays seeded to all-ones (see buffers.allocate)
+        # so bin_count's check is a no-op.
+        #TODO: This should ideally also be gpu driven by an indirect dispatch
+        if self.cfg.cluster_cull:
+            num_clusters = (self.max_splats + CLUSTER_SIZE - 1) // CLUSTER_SIZE
+            with self._marker_group("cluster_cull"):
+                self._dispatch(self.k_build_cluster_aabb, "build_cluster_aabb",
+                    thread_count=[num_clusters * CLUSTER_SIZE, 1, 1],
+                    gaussians=b.gaussians.storage,
+                    num_gaussians_counter=b.num_gaussians_counter.storage,
+                    cluster_aabb_min=b.cluster_aabb_min.storage,
+                    cluster_aabb_max=b.cluster_aabb_max.storage,
+                    max_splats=self.max_splats,
+                    num_clusters=num_clusters,
+                )
+                self._dispatch(self.k_cull_clusters_frustum, "cull_clusters_frustum",
+                    thread_count=[num_clusters, 1, 1],
+                    cluster_aabb_min=b.cluster_aabb_min.storage,
+                    cluster_aabb_max=b.cluster_aabb_max.storage,
+                    camera=self._camera_buffer,
+                    cluster_visible=b.cluster_visible.storage,
+                    num_clusters=num_clusters,
+                )
+
         # Phase 1: per-gaussian tile count.
         with self._marker_group("bin_count"):
             self._dispatch(self.k_bin_count, "bin_count",
@@ -460,6 +504,7 @@ class Pipeline:
                 projected_2d=b.projected_2d.storage,
                 blend_data=b.blend_data.storage,
                 tile_count_per_gaussian=b.tile_count_per_gaussian.storage,
+                cluster_visible=b.cluster_visible.storage,
                 z_near=self.cfg.z_near_cull,
                 max_splats=self.max_splats,
             )
@@ -489,7 +534,9 @@ class Pipeline:
                 keys_lo=b.sort_keys_lo_a.storage,
                 keys_hi=b.sort_keys_hi_a.storage,
                 values=b.sort_values_a.storage,
+                cluster_visible=b.cluster_visible.storage,
                 z_near=self.cfg.z_near_cull,
+                max_sort_pairs=self.max_sort_pairs,
             )
 
         # Phase 4: global radix sort. Reads n from scan_total[0].
@@ -709,6 +756,7 @@ class Pipeline:
                         grad_rot_x=gb["rot_x"].storage,
                         grad_rot_y=gb["rot_y"].storage,
                         grad_rot_z=gb["rot_z"].storage,
+                        cluster_visible=b.cluster_visible.storage,
                         max_splats=self.max_splats,
                     )
             else:
@@ -765,6 +813,7 @@ class Pipeline:
             grad_log_scale_x=gb["log_scale_x"].storage,
             grad_log_scale_y=gb["log_scale_y"].storage,
             grad_log_scale_z=gb["log_scale_z"].storage,
+            cluster_visible=b.cluster_visible.storage,
             w_opacity=self.cfg.opacity_reg,
             w_scale=self.cfg.scale_reg,
             inv_n=1.0,
@@ -822,6 +871,7 @@ class Pipeline:
             adam_state=b.adam_state.storage,
             num_gaussians_counter=b.num_gaussians_counter.storage,
             **b.grad_kwargs(),
+            cluster_visible=b.cluster_visible.storage,
             cfg={
                 "lr_mean": lrs.mean,
                 "lr_scale": lrs.scale,
@@ -903,6 +953,11 @@ class Pipeline:
 
     def reset_opacity(self, cfg) -> None:
         return _densify.reset_opacity(self, cfg)
+
+    def morton_sort(self, world_min, world_max) -> None:
+        """Reorder gaussians + adam_state by 3D Morton code (Z-order).
+        See :func:`trainer.densify.morton_sort`."""
+        return _densify.morton_sort(self, world_min, world_max)
 
     def compute_structure_scores(self, cameras, structure_textures, cfg) -> None:
         return _densify.compute_structure_scores(self, cameras, structure_textures, cfg)

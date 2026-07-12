@@ -6,6 +6,8 @@
 
 #include "../common/types.slang"
 
+static const uint CLUSTER_SIZE = 128;  // must match cluster_cull.slang
+
 static const float ADAM_BETA1 = 0.9;
 static const float ADAM_BETA2 = 0.999;
 // SADGS/3DGS default (arguments/__init__.py: adam_eps_order=8 -> 10^-8).
@@ -80,12 +82,23 @@ void adamStep(
     RWStructuredBuffer<int64_t> grad_color_r,
     RWStructuredBuffer<int64_t> grad_color_g,
     RWStructuredBuffer<int64_t> grad_color_b,
+    // Cluster-cull mask: seeded all-ones when disabled, so this early-out
+    // is a no-op unless the cluster_cull kernels wrote it.
+    StructuredBuffer<uint> cluster_visible,
     // Uniforms
     uniform AdamConfig cfg,
     uniform float pixels_per_step)
 {
     uint idx = dtid.x;
     if (idx >= num_gaussians_counter[0]) return;
+    // Culled clusters: their grads never got scattered by the backward pass
+    // (backward_persplat + projection_backward both mask on cluster_visible),
+    // so all 14 grads at this idx are zero. The Adam math would be a no-op
+    // (m/v decay by β toward zero) but the ~640 B of loads + stores at
+    // 32-byte-sector granularity still costs L2 bandwidth. Early-return
+    // eliminates that dead traffic. Wave-uniform read within the workgroup
+    // (Morton keeps 128-splat clusters aligned).
+    if (cluster_visible[idx / CLUSTER_SIZE] == 0u) return;
 
     float inv_pixels = 1.0 / max(pixels_per_step, 1.0);
 

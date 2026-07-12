@@ -3,6 +3,8 @@
 #include "../common/types.slang"
 #include "../common/math.slang"
 
+static const uint CLUSTER_SIZE = 128;  // must match cluster_cull.slang
+
 [shader("compute")]
 [numthreads(256, 1, 1)]
 void addRegularization(
@@ -13,12 +15,18 @@ void addRegularization(
     RWStructuredBuffer<int64_t> grad_log_scale_x,
     RWStructuredBuffer<int64_t> grad_log_scale_y,
     RWStructuredBuffer<int64_t> grad_log_scale_z,
+    // Cluster-cull mask: correctness fix. adam.slang skips Adam for culled
+    // clusters, so any grad added here would linger uncleared into the next
+    // iter and inject spurious drift when the cluster becomes visible again.
+    // Seeded all-ones when cluster-cull is disabled.
+    StructuredBuffer<uint> cluster_visible,
     uniform float w_opacity,
     uniform float w_scale,
     uniform float inv_n)
 {
     uint i = dtid.x;
     if (i >= num_gaussians_counter[0]) return;
+    if (cluster_visible[i / CLUSTER_SIZE] == 0u) return;
 
     Gaussian3D g = gaussians[i];
 

@@ -1,20 +1,6 @@
-"""Interactive viewer for live training inspection.
-
-Has its own Pipeline (separate buffers/scratch) and copies the gaussian
-buffer + count from the training pipeline every N iterations. Completely
-decoupled — no shared mutable state, no locks needed.
-
-Shader hot-reload: file changes are polled and device.reload_all_programs()
-is called to update kernels in-place.
-
-Usage:
-    from trainer.viewer import Viewer
-    viewer = Viewer(device, width, height, max_splats)
-    viewer.start()
-    # In training loop every N iters:
-    viewer.update_gaussians(train_pipeline)
-    # At end:
-    viewer.stop()
+"""
+Claude did a shitty job architecting the viewer.
+TODO: refactor from the ground up
 """
 from __future__ import annotations
 
@@ -301,14 +287,26 @@ class Viewer:
         # at that headroom doubles the whole allocation (~2.5 GB of sort buffers
         # alone at 6.5M splats) and OOMs the device on top of the training
         # pipeline — surfacing as a generic "Vulkan returned a failure" at
-        # startup. Cap tightly: one view at ~1080p has ~4000 tiles and a
-        # visible splat typically touches ~5-15 tiles, so a hard cap of 4M
-        # pairs covers realistic per-view coverage even at max_splats=10M
-        # (many splats are off-screen from the viewer's camera and contribute
-        # zero pairs). Saves ~500 MB-1 GB vs the old max_splats*4 heuristic
-        # at max_splats=7M+.
+        # startup. So we cap below max_splats*16.
+        #
+        # NOTE ON OVERFLOW SAFETY: bin_emit now hard-guards its writes against
+        # this cap and prepareDispatchArgs clamps scan_total to it, so a
+        # viewpoint that emits MORE pairs than this simply drops the excess
+        # (a few splats go missing from that one frame) instead of overrunning
+        # the sort buffers into tile_start/tile_end — which previously produced
+        # view-dependent alternating BLACK TILES from certain camera positions
+        # (close-ups where many large splats each cover many tiles). The cap is
+        # therefore a quality/VRAM knob, not a crash boundary.
+        #
+        # The old hard 4M ceiling was too tight for close-ups of multi-million
+        # splat scenes (a near view can put most splats on-screen, each
+        # covering many tiles). Scale generously with max_splats — ~6 pairs per
+        # splat, which comfortably covers realistic close-up coverage — with an
+        # 8M ceiling so a 6.5M-splat scene gets ~8M pairs (~192 MB of sort
+        # buffers) rather than being starved at 4M. Pass an explicit
+        # max_sort_pairs to override for tight-VRAM setups.
         if max_sort_pairs is None:
-            max_sort_pairs = min(4_000_000, max(2_000_000, max_splats * 2))
+            max_sort_pairs = min(5_000_000, max(2_000_000, max_splats * 6))
         self._pipeline = Pipeline(
             device=device, width=width, height=height, max_splats=max_splats,
             max_sort_pairs=max_sort_pairs,

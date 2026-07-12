@@ -30,6 +30,8 @@ import slangpy as spy
 # Consumers (pipeline.py) import these rather than redefining them, so the
 # value lives in exactly one place on the Python side.
 TILE_SIZE = 16                    # tile_binned/*.slang, densify/score_forward.slang
+CLUSTER_SIZE = 128                # rasterize/cluster_cull.slang CLUSTER_SIZE
+                                  # (also referenced by bin_count.slang via gid >> 7)
 RADIX_PART_SIZE = 2048            # sort/device_radix_sort.slang PART_SIZE (D_DIM * KEYS_PER_THREAD)
 RADIX_GLOBAL_HIST_SIZE = 256 * 8  # device_radix_sort.slang: one 256-region per pass, 8 passes
 SCAN_BLOCK_SIZE = 1024            # common/scan.slang SCAN_BLOCK_SIZE
@@ -244,6 +246,20 @@ class GaussianBuffers:
     densify_children_sum: spy.NDBuffer = field(init=False)      # uint[1]
     densify_fanout_hist: spy.NDBuffer = field(init=False)       # uint[513]
     densify_fanout_threshold: spy.NDBuffer = field(init=False)  # uint[1]
+
+    # --- Cluster-Cull-Compact (Laine-2011 pattern, applied to 3DGS) ---
+    # Gaussians are Morton-sorted every ~1000 iters (see morton_sort), so
+    # contiguous [128k, 128k+128) slots are spatially adjacent. Every
+    # train_step _run_forward rebuilds a per-cluster world-space AABB
+    # (mean +/- 3-sigma * |R| * exp(log_scale)) and tests it against the
+    # camera frustum; the resulting cluster_visible[] flag is read by
+    # bin_count to skip whole clusters at zero cost (they emit no tile
+    # pairs, so radix/rasterize/backward all naturally ignore them —
+    # slot indexing stays intact throughout, no compaction).
+    # max_clusters = ceil(max_splats / CLUSTER_SIZE).
+    cluster_aabb_min: spy.NDBuffer = field(init=False)  # float4[max_clusters] (.w unused)
+    cluster_aabb_max: spy.NDBuffer = field(init=False)  # float4[max_clusters]
+    cluster_visible: spy.NDBuffer = field(init=False)   # uint[max_clusters]
 
     @property
     def num_tiles(self) -> int:
@@ -480,6 +496,18 @@ def allocate(
     buffers.densify_fanout_hist = allocator.uint_buffer(513)
     buffers.densify_fanout_threshold = allocator.uint_buffer(1)
 
+    # --- Cluster-Cull-Compact scratch ---
+    max_clusters = _ceil_div(max_splats, CLUSTER_SIZE)
+    buffers.cluster_aabb_min = allocator.typed_buffer("float4", max_clusters)
+    buffers.cluster_aabb_max = allocator.typed_buffer("float4", max_clusters)
+    buffers.cluster_visible = allocator.uint_buffer(max_clusters)
+    # Seed cluster_visible = all-ones so bin_count's early-out is a no-op
+    # until (and unless) the cluster-cull kernel writes real flags. Lets
+    # runs without --cluster-cull skip the two cull dispatches entirely
+    # and keeps the pre-cluster-cull first forward correct.
+    buffers.cluster_visible.copy_from_numpy(
+        np.ones(max_clusters, dtype=np.uint32))
+
     buffers.num_gaussians_counter.copy_from_numpy(np.zeros(1, dtype=np.uint32))
     buffers.training_step.copy_from_numpy(np.zeros(1, dtype=np.uint32))
 
@@ -567,6 +595,15 @@ def allocate_viewer(
     buffers.scan_block_sums_l2 = allocator.uint_buffer(num_l2_blocks)
     buffers.scan_total = allocator.uint_buffer(1)
 
+    # bin_count reads cluster_visible unconditionally. The viewer never
+    # runs the cluster-cull kernels (they mutate this buffer per-frame from
+    # the trainer's forward), so seed all-ones so the viewer's bin_count
+    # skip check is a no-op.
+    max_clusters_v = _ceil_div(max_splats, CLUSTER_SIZE)
+    buffers.cluster_visible = allocator.uint_buffer(max_clusters_v)
+    buffers.cluster_visible.copy_from_numpy(
+        np.ones(max_clusters_v, dtype=np.uint32))
+
     buffers.num_gaussians_counter.copy_from_numpy(np.zeros(1, dtype=np.uint32))
     return buffers
 
@@ -584,6 +621,7 @@ from trainer.buffer_io import (  # noqa: E402
 
 __all__ = [
     "TILE_SIZE",
+    "CLUSTER_SIZE",
     "RADIX_PART_SIZE",
     "RADIX_GLOBAL_HIST_SIZE",
     "SCAN_BLOCK_SIZE",

@@ -19,6 +19,7 @@
 //TODO: I believe this and bin_emit.slang could be merged into a single kernel, mot likely
 
 static const uint TILE_SIZE = 16;
+static const uint CLUSTER_SIZE = 128;  // must match cluster_cull.slang
 
 [shader("compute")]
 [numthreads(256, 1, 1)]
@@ -30,6 +31,7 @@ void binCount(
     RWStructuredBuffer<Projected2DGaussian> projected_2d,
     RWStructuredBuffer<BlendData> blend_data,          // [max_splats], compact blend gather record
     RWStructuredBuffer<uint> tile_count_per_gaussian,  // [max_splats]
+    StructuredBuffer<uint> cluster_visible,            // [ceil(max_splats/128)]
     uniform float z_near,
     uniform uint max_splats)
 {
@@ -41,6 +43,23 @@ void binCount(
     tile_count_per_gaussian[gid] = 0;
 
     if (gid >= num_gaussians_counter[0]) return;
+
+    // Cluster-frustum cull: if the entire 128-splat cluster's AABB is
+    // outside the view frustum, its members contribute no tile pairs.
+    // cluster_visible is seeded to all-ones when cluster-cull is off, so
+    // this check is a no-op unless the cluster-cull kernels wrote it.
+    // Wave-uniform read: Morton keeps 128-splat clusters aligned to two
+    // consecutive 256-thread workgroups, so a workgroup sees at most two
+    // cluster_visible values and every warp reads a single uniform value —
+    // zero branch divergence cost.
+    //
+    // Placed BEFORE projection + blend pack so culled clusters skip the
+    // ~15 ALU ops of projectGaussian3DTo2D AND the two 60 B sector writes
+    // (projected_2d + blend_data). bin_emit also reads cluster_visible and
+    // skips those slots, so projected_2d[gid] / blend_data[gid] for culled
+    // slots are never read by any downstream kernel — stale contents are
+    // fine.
+    if (cluster_visible[gid / CLUSTER_SIZE] == 0u) return;
 
     Gaussian3D g = gaussians[gid];
 

@@ -23,6 +23,8 @@
 #include "../../common/math.slang"
 #include "../../primitives/gaussian/project.slang"
 
+static const uint CLUSTER_SIZE = 128;  // must match cluster_cull.slang
+
 [shader("compute")]
 [numthreads(256, 1, 1)]
 void projectionBackward(
@@ -47,6 +49,8 @@ void projectionBackward(
     RWStructuredBuffer<int64_t> grad_rot_x,
     RWStructuredBuffer<int64_t> grad_rot_y,
     RWStructuredBuffer<int64_t> grad_rot_z,
+    // Cluster-cull mask: seeded all-ones when disabled.
+    StructuredBuffer<uint> cluster_visible,
     uniform uint max_splats)
 {
     uint gid = dtid.x;
@@ -54,6 +58,14 @@ void projectionBackward(
     // Culled tail / dead slots: leave the (cleared) 3D grads at zero, exactly
     // as the old fused kernel did by never contributing. Matches adam.slang.
     if (gid >= num_gaussians_counter[0]) return;
+    // Culled cluster: the blend backward never scattered 2D seed grads to
+    // this slot (its splat has 0 tile pairs), so grad_mean2d_* / grad_cov2d_*
+    // are all zero and the projection backward would produce zero output.
+    // Skipping saves the AD-generated projection chain and 10 store-sectors
+    // of zero writes per culled slot. Same freeze-state contract as Adam:
+    // 3D grads stay at zero (Adam zeroed them last iter, no writer touches
+    // them until the cluster becomes visible again).
+    if (cluster_visible[gid / CLUSTER_SIZE] == 0u) return;
 
     // Seed = accumulated 2D gradients. Depth/det seeds are 0 (the blend
     // backward produces no gradient w.r.t. depth_vs or cov2d_det).

@@ -30,6 +30,15 @@ class RenderConfig:
     # Additive L2 term weight (SADGS lambda_l2). 0 = pure L1(+SSIM); SADGS
     # trains with 2.0. Applied on BOTH loss paths (l1_l2_loss + ssim_loss).
     lambda_l2: float = 0.0
+    # Cluster-Cull-Compact (Laine 2011, adapted for 3DGS). When True, each
+    # _run_forward rebuilds a per-cluster AABB (128 splats per cluster,
+    # Morton-adjacent) and skips clusters whose AABB is fully outside the
+    # view frustum. Mask-in-bin_count design: no compaction, no slot remap;
+    # backward and Adam are entirely unaware. Requires --morton-every > 0
+    # for the clusters to be spatially coherent; without Morton sort a
+    # cluster's 128 splats are random across the scene, so the AABB
+    # covers the whole scene and never culls anything.
+    cluster_cull: bool = True
 
 
 @dataclass

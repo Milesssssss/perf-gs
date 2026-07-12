@@ -17,8 +17,9 @@
 #include "../../primitives/gaussian/accutile.slang"
 
 static const uint TILE_SIZE = 16;
+static const uint CLUSTER_SIZE = 128;  // must match cluster_cull.slang
 
-// IEEE float32 → sortable uint32. For positive finite floats, flipping
+// IEEE float32 -> sortable uint32. For positive finite floats, flipping
 // the sign bit makes the uint32 bit-pattern ascend with the float value.
 // All our inputs have depth_vs > z_near > 0 by construction (bin cull).
 uint depthToSortable(float depth)
@@ -40,10 +41,29 @@ void binEmit(
     RWStructuredBuffer<uint> keys_lo,
     RWStructuredBuffer<uint> keys_hi,
     RWStructuredBuffer<uint> values,
-    uniform float z_near)
+    // Cluster-cull mask: seeded all-ones when disabled.
+    StructuredBuffer<uint> cluster_visible,
+    uniform float z_near,
+    // Capacity of the sort-pair buffers (keys_lo/hi/values). The exclusive
+    // scan that produced tile_offset_per_gaussian is UNBOUNDED — for a
+    // viewpoint whose total (tile,depth,gaussian) pairs exceed this capacity,
+    // write_slot runs past the buffers and scribbles into whatever is
+    // allocated next (tile_start/tile_end), producing corrupted per-tile
+    // ranges → alternating black tiles for that view. Guarding each write by
+    // this cap turns overflow into graceful degradation (excess pairs are
+    // dropped: some splats go missing from that frame) instead of memory
+    // corruption. The pipeline also clamps scan_total to this same capacity so
+    // the sort/tile-range stages never READ past the written region.
+    uniform uint max_sort_pairs)
 {
     uint gid = dtid.x;
     if (gid >= num_gaussians_counter[0]) return;
+    // Cluster-frustum cull: skip culled clusters BEFORE loading gaussians[gid]
+    // and projected_2d[gid]. bin_count assigned tile_count=0 for these slots
+    // so tile_offset_per_gaussian[gid] would reserve 0 write space anyway; the
+    // benefit here is eliminating the two 32-byte-sector reads (56 B + 24 B)
+    // per culled slot. Wave-uniform under Morton clustering.
+    if (cluster_visible[gid / CLUSTER_SIZE] == 0u) return;
 
     Gaussian3D g = gaussians[gid];
     Projected2DGaussian proj = projected_2d[gid];
@@ -80,7 +100,7 @@ void binEmit(
     float x_d_args, y_d_args;
     computeExtremumOffsets(e, x_d_args, y_d_args);
 
-    if (accuTileIterateRows(tile_min, tile_max))
+    if (accuTileIterateRows(tile_min, tile_max)) //We iterate: for each row, for each col
     {
         for (uint ty = tile_min.y; ty <= tile_max.y; ++ty)
         {
@@ -90,6 +110,7 @@ void binEmit(
                 continue;
             for (uint tx = tx_lo; tx <= tx_hi; ++tx)
             {
+                if (write_slot >= max_sort_pairs) return;  // overflow: drop, don't corrupt
                 keys_hi[write_slot] = ty * num_tiles.x + tx;
                 keys_lo[write_slot] = key_lo;
                 values[write_slot] = gid;
@@ -97,7 +118,7 @@ void binEmit(
             }
         }
     }
-    else
+    else //her instead we iterate: for each col, for each row
     {
         for (uint tx = tile_min.x; tx <= tile_max.x; ++tx)
         {
@@ -107,6 +128,7 @@ void binEmit(
                 continue;
             for (uint ty = ty_lo; ty <= ty_hi; ++ty)
             {
+                if (write_slot >= max_sort_pairs) return;  // overflow: drop, don't corrupt
                 keys_hi[write_slot] = ty * num_tiles.x + tx;
                 keys_lo[write_slot] = key_lo;
                 values[write_slot] = gid;

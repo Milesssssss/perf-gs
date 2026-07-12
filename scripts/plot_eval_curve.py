@@ -36,8 +36,11 @@ def plot(runs: list[tuple[list[dict], str]], out_path: Path, x_field: str, x_lab
     fig, ax = plt.subplots(figsize=(10, 6), dpi=120)
     for entries, label in runs:
         xs = [e[x_field] for e in entries]
-        y_lin = [e["avg_psnr_linear"] for e in entries]
-        y_srgb = [e["avg_psnr_srgb"] for e in entries]
+        # Current schema: psnr_srgb / psnr_linear (mean of per-image PSNR on the
+        # test split, paper metric). Old runs used avg_psnr_srgb / avg_psnr_linear
+        # (dB-of-mean-MSE over all cams) — fall back so old curves still plot.
+        y_lin = [e.get("psnr_linear", e.get("avg_psnr_linear")) for e in entries]
+        y_srgb = [e.get("psnr_srgb", e.get("avg_psnr_srgb")) for e in entries]
         # Solid line = sRGB (paper-reported metric); dashed = linear for context.
         ax.plot(xs, y_srgb, "-", label=f"{label} (sRGB)", linewidth=1.8)
         ax.plot(xs, y_lin, "--", label=f"{label} (linear)", linewidth=1.0, alpha=0.7)

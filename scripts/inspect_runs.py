@@ -151,7 +151,9 @@ class Run:
 
     @property
     def avg_psnr(self):
-        return self.final.get("avg_psnr_srgb")
+        # Current schema: psnr_srgb (mean of per-image PSNR on the test split,
+        # paper metric). Old runs used avg_psnr_srgb (dB-of-mean-MSE, all cams).
+        return self.final.get("psnr_srgb", self.final.get("avg_psnr_srgb"))
 
 
 # --------------------------------------------------------------------------- #

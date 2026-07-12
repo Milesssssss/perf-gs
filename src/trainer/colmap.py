@@ -330,6 +330,15 @@ def load_colmap(
         imgs = _parse_images_bin(sparse_dir / "images.bin")
         pts3d, pts_colors = _parse_points3d_bin(sparse_dir / "points3D.bin")
 
+    # Sort views by image name. COLMAP writes images in registration order,
+    # NOT filename order; 3DGS/SAD-GS sort by name (readColmapSceneInfo:
+    # `sorted(..., key=lambda x: x.image_name)`) BEFORE applying the every-8th
+    # eval holdout. Matching that sort here makes `scene.images[i]` index the
+    # same frame the paper's split does, so the holdout (i % 8 == 0) selects
+    # the identical test cameras on any scene — not just ones whose record
+    # order happens to already be sequential.
+    imgs = sorted(imgs, key=lambda r: r["name"])
+
     # Sanity: all cameras same native resolution.
     native_sizes = {(c["width"], c["height"]) for c in cams.values()}
     if len(native_sizes) != 1:

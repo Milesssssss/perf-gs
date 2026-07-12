@@ -131,11 +131,22 @@ void initGlobalHist(
 [shader("compute")]
 [numthreads(1, 1, 1)]
 void prepareDispatchArgs(
-    StructuredBuffer<uint> n_buf,
+    RWStructuredBuffer<uint> n_buf,
     RWStructuredBuffer<uint> dispatch_args,
-    uniform uint max_blocks)   // defensive cap: never launch more groups than we have scratch for
+    uniform uint max_blocks,     // defensive cap: never launch more groups than we have scratch for
+    uniform uint max_sort_pairs) // capacity of the sort-pair buffers
 {
-    uint n = n_buf[0];
+    // Clamp the pair count to the sort-buffer capacity, IN PLACE, so every
+    // downstream reader (upsweep/downsweep/identifyTileRanges) sees a value
+    // that never exceeds what bin_emit actually wrote. bin_emit drops pairs
+    // past max_sort_pairs (graceful overflow), so the valid written region is
+    // min(N, max_sort_pairs); without this clamp the downsweep's last active
+    // block would set partition_end = N > capacity and READ past the buffer.
+    // This is the single choke point: prepareDispatchArgs runs once, before
+    // any n_buf consumer in the sort and before tile-range identification.
+    uint n = min(n_buf[0], max_sort_pairs);
+    n_buf[0] = n;
+
     uint active_blocks = (n + PART_SIZE - 1u) / PART_SIZE;
     // Vulkan/D3D12 require at least (1,1,1) even for zero-work dispatches
     // (else the driver may error). If active_blocks==0, launch 1 group; the

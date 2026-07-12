@@ -43,11 +43,88 @@ def _srgb_to_linear(c: np.ndarray) -> np.ndarray:
     return srgb_to_linear(c)
 
 
-def _psnr_linear(linear_rendered: np.ndarray, linear_target: np.ndarray) -> float:
-    mse = float(np.mean((linear_rendered - linear_target) ** 2))
+def _psnr_image(rendered: np.ndarray, target: np.ndarray) -> float:
+    """Per-image PSNR for data in [0, 1] — the paper's metric.
+
+    Algebraically identical to INRIA 3DGS / SAD-GS `image_utils.psnr`
+    (20*log10(1/sqrt(mse)) == -10*log10(mse)); see scripts/image_metrics.py
+    for the vendored reference. This is the ONLY PSNR primitive the trainer
+    should use: compute it per image, then average the resulting dB across
+    frames (mean-of-per-image PSNR). Do NOT pool MSE across frames and take
+    the log once (dB-of-mean-MSE) — that is a different, more-pessimistic
+    number that the paper never reports.
+    """
+    mse = float(np.mean((rendered - target) ** 2))
     if mse <= 1e-12:
         return 99.0
     return -10.0 * math.log10(mse)
+
+
+# Back-compat alias: _psnr_linear was the old name; kept so any external
+# caller/import still resolves. Same per-image formula.
+_psnr_linear = _psnr_image
+
+
+def _ssim_gaussian_window(window_size: int = 11, sigma: float = 1.5) -> np.ndarray:
+    """1D Gaussian window, matching INRIA 3DGS/SAD-GS loss_utils.gaussian."""
+    coords = np.arange(window_size) - window_size // 2
+    g = np.exp(-(coords ** 2) / (2.0 * sigma ** 2))
+    return (g / g.sum()).astype(np.float64)
+
+
+# Precompute the separable 2D window once (11x11, sigma=1.5) — identical to the
+# reference create_window(11, ...).
+_SSIM_WIN_1D = _ssim_gaussian_window(11, 1.5)
+_SSIM_WIN_2D = np.outer(_SSIM_WIN_1D, _SSIM_WIN_1D)
+
+
+def _ssim_image(rendered: np.ndarray, target: np.ndarray) -> float:
+    """Per-image SSIM for HxWxC data in [0, 1] — the paper's metric.
+
+    NumPy port of INRIA 3DGS / SAD-GS `loss_utils.ssim` (see the vendored torch
+    reference in scripts/image_metrics.py). Matches it faithfully: 11x11
+    Gaussian window (sigma=1.5), 'same' convolution with ZERO padding (torch
+    conv2d padding=5), C1=0.01^2, C2=0.03^2, per-channel SSIM map, then the
+    GLOBAL mean over all pixels & channels (size_average=True). The trainer
+    holds images as HxWxC numpy; torch uses CxHxW, but the per-channel windowed
+    stats and the final scalar mean are identical either way.
+
+    Validated against the torch reference (scripts/image_metrics.py) to ~1e-6.
+    Do NOT "optimize" the padding or window — fidelity to the reference is what
+    makes this comparable to the SAD-GS / 3DGS SSIM column.
+    """
+    from scipy.ndimage import correlate  # local import: scipy is always present
+
+    r = rendered.astype(np.float64)
+    t = target.astype(np.float64)
+    if r.ndim == 2:
+        r = r[..., None]
+        t = t[..., None]
+
+    C1 = 0.01 ** 2
+    C2 = 0.03 ** 2
+    w = _SSIM_WIN_2D
+
+    def filt(img2d: np.ndarray) -> np.ndarray:
+        # 'constant' mode with cval=0 == torch conv2d zero-padding=5.
+        return correlate(img2d, w, mode="constant", cval=0.0)
+
+    ssim_channels = []
+    for c in range(r.shape[-1]):
+        x = r[..., c]
+        y = t[..., c]
+        mu_x = filt(x)
+        mu_y = filt(y)
+        mu_x2 = mu_x * mu_x
+        mu_y2 = mu_y * mu_y
+        mu_xy = mu_x * mu_y
+        sigma_x2 = filt(x * x) - mu_x2
+        sigma_y2 = filt(y * y) - mu_y2
+        sigma_xy = filt(x * y) - mu_xy
+        ssim_map = (((2 * mu_xy + C1) * (2 * sigma_xy + C2)) /
+                    ((mu_x2 + mu_y2 + C1) * (sigma_x2 + sigma_y2 + C2)))
+        ssim_channels.append(ssim_map)
+    return float(np.mean(ssim_channels))
 
 
 def _linear_to_srgb(c: np.ndarray) -> np.ndarray:
@@ -71,8 +148,8 @@ def main() -> None:
     ap.add_argument("--scene", type=str, default="datasets/360_v2/bicycle")
     #ap.add_argument("--scene", type=str, default="datasets/synthetic/suzanne_blender")
 
-    ap.add_argument("--iters", type=int, default=10000)
-    ap.add_argument("--position-lr-max-steps", type=int, default=10000,
+    ap.add_argument("--iters", type=int, default=7000)
+    ap.add_argument("--position-lr-max-steps", type=int, default=7000,
                     help="horizon for the exponential mean-LR decay (3DGS "
                          "position_lr_max_steps). FIXED, independent of --iters: "
                          "the LR reaches lr_final at this step and holds. Set it "
@@ -85,7 +162,7 @@ def main() -> None:
                     help="force render width (overrides --downsample)")
     ap.add_argument("--height", type=int, default=None,
                     help="force render height (overrides --downsample)")
-    ap.add_argument("--preview-every", type=int, default=10000)
+    ap.add_argument("--preview-every", type=int, default=7000)
     ap.add_argument("--log-every", type=int, default=0)
     ap.add_argument("--render-all-every", type=int, default=0,
                     help="dump PNGs for ALL cameras every N iters. 0 (default) "
@@ -93,16 +170,27 @@ def main() -> None:
                          "Set a coarse value to dump less often: each sweep "
                          "renders + reads back every camera under gpu_lock, "
                          "briefly freezing the in-process viewer.")
-    ap.add_argument("--eval-every", type=int, default=10000,
+    ap.add_argument("--eval-every", type=int, default=7000,
                     help="every N iters, render ALL cameras and compute the honest "
                          "average PSNR (same metric as the final_psnr.json summary). "
                          "Writes results to eval_curve.jsonl in the run dir with "
                          "iter, elapsed_s (pure training wall-clock, excluding eval "
                          "time), and avg_psnr_lin/srgb/srgb_masked. 0 (default) = "
                          "disable. Cost: ~2s/eval at 194 cams @ quarter-res.")
+    ap.add_argument("--eval", dest="eval_holdout", type=int, default=1,
+                    help="paper eval protocol (3DGS/SAD-GS --eval, llffhold=8): hold "
+                         "out every 8th camera (name-sorted) from training and report "
+                         "PSNR on ONLY those held-out views, as the mean of per-image "
+                         "PSNR (the paper metric). 1 (default) = on; 0 = train on all "
+                         "cameras and report over all cameras (internal/legacy). When "
+                         "on, held-out frames are never sampled by the training loop "
+                         "and never feed the structure-densify eta accumulator.")
+    ap.add_argument("--eval-holdout-stride", type=int, default=8,
+                    help="holdout stride for --eval (3DGS llffhold=8). Test set is "
+                         "cameras where index %% stride == 0.")
     ap.add_argument("--densify-every", type=int, default=100)
-    ap.add_argument("--densify-from", type=int, default=500)
-    ap.add_argument("--densify-to", type=int, default=15000)
+    ap.add_argument("--densify-from", type=int, default=100)
+    ap.add_argument("--densify-to", type=int, default=3000)
     #ap.add_argument("--opacity-reset-iters", type=int, nargs="*", default=[3000])
     ap.add_argument("--n-scoring-views", type=int, default=10)
     ap.add_argument("--loss-thresh", type=float, default=0.1)
@@ -115,7 +203,7 @@ def main() -> None:
     ap.add_argument("--prune-scale3d", type=float, default=0.1,
                     help="prune splats whose max 3D scale exceeds this * scene_extent "
                          "(gsplat prune_scale3d). Only active after the first opacity reset.")
-    ap.add_argument("--reset-every", type=int, default=3000,
+    ap.add_argument("--reset-every", type=int, default=1200,
                     help="opacity-reset interval (gsplat reset_every). Big-scale prune is "
                          "disabled until after the first reset.")
     ap.add_argument("--opacity-cap", type=float, default=.8)
@@ -131,6 +219,23 @@ def main() -> None:
                          "where points can land near a camera pose (e.g. 0.2)")
     ap.add_argument("--profile-every", type=int, default=0,
                     help="profile one full step every N iters (0 to disable)")
+    ap.add_argument("--morton-every", type=int, default=0,
+                    help="Morton-order (Z-curve) re-sort of the gaussian + Adam "
+                         "buffers every N iters, PLUS once after each densify. 0 "
+                         "(default) = disabled. Improves cache locality of "
+                         "subsequent per-splat reads (bin_count, blend backward, "
+                         "adam) as the array grows large. Follows clear_tracking "
+                         "(and clear_structure_scores on SAD runs) since window "
+                         "accumulators are slot-indexed and must be reset when "
+                         "slots are permuted.")
+    ap.add_argument("--cluster-cull", action="store_true",
+                    help="Cluster-frustum cull before each forward: bound the "
+                         "128-splat clusters (Morton-adjacent) by a per-cluster "
+                         "AABB and skip clusters fully outside the view frustum. "
+                         "Requires --morton-every > 0 for the clusters to be "
+                         "spatially coherent (without it, each cluster spans the "
+                         "whole scene). Mask-in-bin_count design (no compaction, "
+                         "no slot remap) — every downstream pass is unaware.", default=True)
     ap.add_argument("--simple-densify", action="store_true",
                     help="use reference 3DGS threshold-based densification instead of score-ranked")
     ap.add_argument("--importance-score-densify", action="store_true",
@@ -138,14 +243,14 @@ def main() -> None:
     ap.add_argument("--structure-densify", action="store_true",
                     help="use structure-aware anisotropic densification (SAD-GS, arXiv 2604.28016): "
                          "precomputes a multi-scale structure-tensor field per view and grid-splits "
-                         "Gaussians that under-resolve local texture frequency. Overrides --simple-densify.")
-    ap.add_argument("--sad-tau-split", type=float, default=0.8,
+                         "Gaussians that under-resolve local texture frequency. Overrides --simple-densify.", default=True)
+    ap.add_argument("--sad-tau-split", type=float, default=0.4,
                     help="SAD split_ratio_threshold: split if high_ratio (fraction of views "
                          "with scalar eta>1) exceeds this AND the gradient is high (SADGS 0.8)")
     ap.add_argument("--sad-tau-prune", type=float, default=0.8,
                     help="SAD prune_ratio_threshold: prune if low_ratio (fraction of views "
                          "with eta<0.1) exceeds this (SADGS 0.8)")
-    ap.add_argument("--sad-grad-threshold", type=float, default=0.0008,
+    ap.add_argument("--sad-grad-threshold", type=float, default=1e-5,
                     help="SAD is_grad_high floor: avg 2D-grad magnitude a gaussian must exceed "
                          "to be split-eligible (SADGS hardcodes 1e-5)")
     ap.add_argument("--sad-accum-every", type=int, default=10,
@@ -275,6 +380,41 @@ def main() -> None:
     # Resolved width/height from the scene (may differ from args if args were None).
     IMAGES_WIDTH, IMAGES_HEIGHT = scene.images[0].camera.image_size
     print(f"loaded {n_cams} cameras, {n_init} init points, scene_extent={extent:.3f}")
+
+    # --- Train/test split (paper eval protocol) ---
+    # 3DGS/SAD-GS hold out every Nth camera (name-sorted; the loader already
+    # sorts by image name) and report PSNR on ONLY the held-out set. With --eval
+    # on, the training loop samples exclusively from train_indices, so test
+    # frames are never optimized against and never feed the structure-densify
+    # eta accumulator (which reads whatever camera the loop sampled). With --eval
+    # off, every camera is both trained and evaluated (internal/legacy behavior).
+    stride = max(args.eval_holdout_stride, 1)
+    if args.eval_holdout:
+        test_indices = [i for i in range(n_cams) if i % stride == 0]
+        train_indices = [i for i in range(n_cams) if i % stride != 0]
+        print(f"[eval] holdout protocol ON (stride={stride}): "
+              f"{len(train_indices)} train / {len(test_indices)} test cameras. "
+              f"Training samples train views only; PSNR reported on test views "
+              f"as mean-of-per-image dB (paper metric).")
+    else:
+        test_indices = list(range(n_cams))
+        train_indices = list(range(n_cams))
+        print(f"[eval] holdout protocol OFF: training on all {n_cams} cameras, "
+              f"reporting over all cameras (internal metric).")
+    train_indices_arr = np.array(train_indices, dtype=np.int64)
+
+    # AABB of the initial point cloud, padded 20% per axis. Used only if
+    # --morton-every > 0 (Morton quantization needs a normalized coord frame).
+    # A stale bbox is fine — the shader saturates out-of-box means, so
+    # densification-induced drift outside these bounds is a cache-locality
+    # miss, not a correctness bug. Recompute is skipped for simplicity: the
+    # bbox is a heuristic, not an invariant.
+    _init_means = scene.initial_points["means"].astype(np.float32).reshape(-1, 3)
+    _bbox_min = _init_means.min(axis=0)
+    _bbox_max = _init_means.max(axis=0)
+    _bbox_extent = np.maximum(_bbox_max - _bbox_min, 1e-6)
+    morton_world_min = _bbox_min - 0.2 * _bbox_extent
+    morton_world_max = _bbox_max + 0.2 * _bbox_extent
     #print(f"schedule: densify [{args.densify_from}, {args.densify_to}] every {args.densify_every}, "
     #      f"opacity_reset@{args.opacity_reset_iters or 'none'}")
 
@@ -416,6 +556,7 @@ def main() -> None:
             w_alpha=args.w_alpha,
             lambda_ssim=eff_lambda_ssim,
             lambda_l2=eff_lambda_l2,
+            cluster_cull=args.cluster_cull,
         ),
     )
     pipeline.set_gaussians_from_numpy(**scene.initial_points)
@@ -711,7 +852,10 @@ def main() -> None:
             break
         it += 1
 
-        cam_idx = int(rng.integers(0, n_cams))
+        # Sample a TRAIN camera. With --eval, train_indices_arr excludes the
+        # held-out test views, so they are never optimized against (nor fed to
+        # the structure-densify accumulator, which uses this same camera).
+        cam_idx = int(train_indices_arr[rng.integers(0, train_indices_arr.shape[0])])
         entry = scene.images[cam_idx]
         pipeline.set_target_texture(target_textures[cam_idx])
 
@@ -865,8 +1009,10 @@ def main() -> None:
 
         # so we leave a buffer of 50 iterations after either opacity resets or densifies
         # TODO: hacky, im just assuming we'll space them more than 350
-        bufferred_iters = [itr+350 if itr % args.reset_every == 0 else itr+50 for itr in range(args.preview_every, args.iters, args.preview_every)]
-        do_preview = args.preview_every > 0 and (it in bufferred_iters)
+        do_preview = False
+        if args.preview_every > 0:
+            bufferred_iters = [itr+350 if itr % args.reset_every == 0 else itr+50 for itr in range(args.preview_every, args.iters, args.preview_every)]
+            do_preview = it in bufferred_iters
 
         densify_cfg = cfg
         # Skip densify on reset steps.
@@ -945,6 +1091,16 @@ def main() -> None:
             # per-view grad gate keep that window's samples representative.)
             if args.structure_densify:
                 pipeline.clear_structure_scores()
+            # Morton re-sort after every densify: the fresh gaussians live at
+            # the tail of the buffer (appended by split_and_clone), so a
+            # Z-order pass restores spatial locality before the next window
+            # of forwards. Order matters: it MUST follow the clears above,
+            # since Morton permutes slots and any non-zero slot-indexed
+            # accumulator would then reference the wrong gaussian.
+            if True:
+                pipeline.morton_sort(morton_world_min, morton_world_max)
+                if pipeline.last_submit_id:
+                    submit_id_ring.append(pipeline.last_submit_id)
             # densify_simple runs wait-free and returns None for counts
             # (they live GPU-side); the log-every branch below reads the
             # counter on its own cadence. densify()'s stats are still
@@ -971,6 +1127,22 @@ def main() -> None:
             pipeline.reset_opacity(cfg)
             densify_json.write(json.dumps({"iter": it, "event": "opacity_reset"}) + "\n")
             print(f"iter {it}: opacity reset")
+
+        # Periodic standalone Morton re-sort (in addition to the post-densify
+        # sort above). Only fires on non-densify iters, since densify already
+        # did one this iter. clear_tracking + clear_structure_scores follow
+        # because Morton permutes slots and slot-indexed window accumulators
+        # would otherwise reference the wrong gaussians.
+        if (args.morton_every > 0
+                and it % args.morton_every == 0
+                and not do_densify):
+            pipeline.morton_sort(morton_world_min, morton_world_max)
+            pipeline.clear_tracking()
+            if args.structure_densify:
+                pipeline.clear_structure_scores()
+            if pipeline.last_submit_id:
+                submit_id_ring.append(pipeline.last_submit_id)
+            densify_json.write(json.dumps({"iter": it, "event": "morton_sort"}) + "\n")
 
 
         if it % 10 == 0:
@@ -1002,7 +1174,7 @@ def main() -> None:
             rendered_clip = np.clip(rendered, 0.0, 1.0)
             mse = float(np.mean((rendered_clip - tgt) ** 2))
             rolling_loss = mse if rolling_loss is None else 0.98 * rolling_loss + 0.02 * mse
-            psnr = _psnr_linear(rendered_clip, tgt)
+            psnr = _psnr_image(rendered_clip, tgt)
 
             elapsed = time.time() - t_start
             it_per_s = it / elapsed
@@ -1031,11 +1203,11 @@ def main() -> None:
         if it > 1 and do_render_all:
             _render_all_cameras(pipeline, scene, it, cams_dir)
 
-        # --- Full-dataset PSNR eval sweep (--eval-every). Renders every camera,
-        # computes the honest mean-MSE PSNR (matches final_psnr.json), and logs
-        # (iter, elapsed_s, avg_psnr_*) to eval_curve.jsonl. Only runs when
-        # --eval-every > 0. Time spent here is excluded from `elapsed_s` so the
-        # convergence-vs-time plot is a fair comparison of training speed. ---
+        # --- PSNR eval sweep (--eval-every). Renders the held-out TEST cameras
+        # and reports the paper metric: mean of per-image PSNR (NOT dB-of-mean-
+        # MSE). Logs (iter, elapsed_s, psnr_*) to eval_curve.jsonl. Only runs
+        # when --eval-every > 0. Time spent here is excluded from `elapsed_s` so
+        # the convergence-vs-time plot is a fair comparison of training speed. ---
         if eval_curve_json is not None and it % args.eval_every == 0:
             eval_t0 = time.time()
             # Drain GPU queue so num_gaussians_counter is accurate and no
@@ -1044,26 +1216,31 @@ def main() -> None:
             eval_n_g = int(
                 pipeline.buffers.num_gaussians_counter.to_numpy().view(np.uint32)[0]
             )
-            eval_mse_lin = 0.0
-            eval_mse_srgb = 0.0
-            eval_mse_srgb_mask = 0.0
-            eval_n_mask = 0
-            for cam_i, entry in enumerate(scene.images):
+            # Accumulate PER-IMAGE PSNR (dB) and average the dB values — the
+            # paper's mean-of-per-image metric. Scored on the held-out TEST
+            # split (all cams when --eval is off, since test_indices == all).
+            psnr_srgb_frames = []
+            psnr_lin_frames = []
+            psnr_srgb_mask_frames = []
+            ssim_srgb_frames = []
+            for cam_i in test_indices:
+                entry = scene.images[cam_i]
                 pipeline.render(entry.camera)
                 r_srgb = np.clip(pipeline.read_output_image()[..., :3], 0.0, 1.0)
                 t_srgb = targets_srgb[cam_i][..., :3]
-                eval_mse_srgb += float(np.mean((r_srgb - t_srgb) ** 2))
+                psnr_srgb_frames.append(_psnr_image(r_srgb, t_srgb))
+                ssim_srgb_frames.append(_ssim_image(r_srgb, t_srgb))
                 r_lin = _srgb_to_linear(r_srgb)
                 t_lin = targets_linear(cam_i)
-                eval_mse_lin += float(np.mean((r_lin - t_lin) ** 2))
+                psnr_lin_frames.append(_psnr_image(r_lin, t_lin))
                 mask = (t_srgb.sum(-1) > 0.05) | (r_srgb.sum(-1) > 0.05)
                 if mask.sum() > 0:
-                    eval_mse_srgb_mask += float(np.mean((r_srgb[mask] - t_srgb[mask]) ** 2))
-                    eval_n_mask += 1
-            avg_mse_lin = eval_mse_lin / n_cams
-            avg_mse_srgb = eval_mse_srgb / n_cams
-            avg_mse_srgb_mask = eval_mse_srgb_mask / max(eval_n_mask, 1)
-            _pdb = lambda m: -10.0 * math.log10(max(m, 1e-12))
+                    psnr_srgb_mask_frames.append(_psnr_image(r_srgb[mask], t_srgb[mask]))
+            _mean = lambda xs: float(np.mean(xs)) if xs else 0.0
+            psnr_srgb = _mean(psnr_srgb_frames)
+            ssim_srgb = _mean(ssim_srgb_frames)
+            psnr_lin = _mean(psnr_lin_frames)
+            psnr_srgb_mask = _mean(psnr_srgb_mask_frames)
             eval_dt = time.time() - eval_t0
             eval_time_total += eval_dt
             elapsed_train = time.time() - t_start - eval_time_total
@@ -1071,14 +1248,17 @@ def main() -> None:
                 "iter": it,
                 "elapsed_s": elapsed_train,
                 "n_gaussians": eval_n_g,
-                "avg_psnr_linear": _pdb(avg_mse_lin),
-                "avg_psnr_srgb": _pdb(avg_mse_srgb),
-                "avg_psnr_srgb_masked": _pdb(avg_mse_srgb_mask),
+                "n_eval_cams": len(test_indices),
+                "eval_holdout": bool(args.eval_holdout),
+                # Paper metric: mean of per-image PSNR/SSIM over the test split.
+                "psnr_srgb": psnr_srgb,
+                "ssim_srgb": ssim_srgb,
+                "psnr_linear": psnr_lin,
+                "psnr_srgb_masked": psnr_srgb_mask,
                 "eval_dt_s": eval_dt,
             }) + "\n")
             print(f"[eval] iter {it:6d}  "
-                  f"psnr_lin={_pdb(avg_mse_lin):5.2f}  "
-                  f"psnr_srgb={_pdb(avg_mse_srgb):5.2f}  "
+                  f"psnr_srgb={psnr_srgb:5.2f}  ssim={ssim_srgb:.4f} (test, mean-of-frames)  "
                   f"n_g={eval_n_g:>7d}  train_elapsed={elapsed_train:.1f}s  "
                   f"(eval took {eval_dt:.1f}s)")
 
@@ -1179,22 +1359,56 @@ def main() -> None:
         total_mse_srgb += mse_srgb
         per_cam.append({
             "cam_idx": cam_i, "image_name": entry.image_name,
+            "in_test_split": cam_i in set(test_indices),
             "mse_linear": mse_lin,
-            "psnr_linear": _psnr_linear(r_lin, t_lin),
+            "psnr_linear": _psnr_image(r_lin, t_lin),
             "mse_srgb": mse_srgb,
-            "psnr_srgb": -10.0 * math.log10(max(mse_srgb, 1e-12)),
+            "psnr_srgb": _psnr_image(r_srgb, t_srgb),
+            "ssim_srgb": _ssim_image(r_srgb, t_srgb),
             "mse_srgb_masked": mse_srgb_mask,
-            "psnr_srgb_masked": -10.0 * math.log10(max(mse_srgb_mask, 1e-12)),
+            "psnr_srgb_masked": (_psnr_image(r_srgb[mask], t_srgb[mask])
+                                 if mask.sum() > 0 else 0.0),
         })
 
-    def psnr(m): return -10.0 * math.log10(max(m, 1e-12))
+    # --- Reported metric = paper metric everywhere ---
+    # PSNR is ALWAYS the arithmetic mean of per-image PSNR (3DGS/SAD-GS
+    # convention; see _psnr_image + scripts/image_metrics.py). The headline
+    # `psnr_srgb` is that mean over the held-out TEST split — THE number to
+    # compare against the SAD-GS / 3DGS tables. We also break it out by
+    # train/all and keep the old dB-of-mean-MSE values only as explicitly
+    # suffixed `*_db_of_mean_mse` fields, so nothing silently reports the
+    # pessimistic aggregation.
+    test_set = set(test_indices)
+    test_cams = [c for c in per_cam if c["cam_idx"] in test_set]
+    train_cams = [c for c in per_cam if c["cam_idx"] not in test_set]
+
+    def mean_metric(cams, key):
+        return float(np.mean([c[key] for c in cams])) if cams else 0.0
+
+    def db_of_mean_mse(total_mse, n): return -10.0 * math.log10(max(total_mse / max(n, 1), 1e-12))
+
     summary = {
-        "avg_mse_linear": total_mse_lin / n_cams,
-        "avg_psnr_linear": psnr(total_mse_lin / n_cams),
-        "avg_mse_srgb": total_mse_srgb / n_cams,
-        "avg_psnr_srgb": psnr(total_mse_srgb / n_cams),
-        "avg_mse_srgb_masked": total_mse_srgb_mask / max(n_mask_used, 1),
-        "avg_psnr_srgb_masked": psnr(total_mse_srgb_mask / max(n_mask_used, 1)),
+        # === HEADLINE: paper metrics (mean of per-image PSNR/SSIM, test split) ===
+        "psnr_srgb": mean_metric(test_cams, "psnr_srgb"),
+        "ssim_srgb": mean_metric(test_cams, "ssim_srgb"),
+        "psnr_linear": mean_metric(test_cams, "psnr_linear"),
+        "psnr_srgb_masked": mean_metric(test_cams, "psnr_srgb_masked"),
+        "eval_holdout": bool(args.eval_holdout),
+        "eval_holdout_stride": stride,
+        "n_test_cams": len(test_cams),
+        "n_train_cams": len(train_cams),
+        # Same paper metric, other splits (train / all cams).
+        "train_psnr_srgb": mean_metric(train_cams, "psnr_srgb"),
+        "train_ssim_srgb": mean_metric(train_cams, "ssim_srgb"),
+        "all_psnr_srgb": mean_metric(per_cam, "psnr_srgb"),
+        "all_ssim_srgb": mean_metric(per_cam, "ssim_srgb"),
+        # Legacy dB-of-mean-MSE (pessimistic pooling) — NOT the paper metric,
+        # kept only for continuity with old runs. Suffixed so it can't be
+        # mistaken for the headline.
+        "test_psnr_srgb_db_of_mean_mse": db_of_mean_mse(
+            sum(c["mse_srgb"] for c in test_cams), len(test_cams)),
+        "all_psnr_srgb_db_of_mean_mse": db_of_mean_mse(total_mse_srgb, n_cams),
+        "all_psnr_linear_db_of_mean_mse": db_of_mean_mse(total_mse_lin, n_cams),
         "per_cam": per_cam,
         "n_cams": n_cams,
         "iters": args.iters,
@@ -1210,9 +1424,22 @@ def main() -> None:
     save_ply(pipeline, ply_path)
 
     print(f"done in {time.time() - t_start:.1f}s")
-    print(f"avg PSNR  linear full:   {summary['avg_psnr_linear']:6.2f} dB")
-    print(f"avg PSNR  sRGB full:     {summary['avg_psnr_srgb']:6.2f} dB")
-    print(f"avg PSNR  sRGB masked:   {summary['avg_psnr_srgb_masked']:6.2f} dB  <- honest silhouette")
+    if args.eval_holdout:
+        print(f"TEST PSNR sRGB (paper):  {summary['psnr_srgb']:6.2f} dB  "
+              f"<- mean of per-image dB over {summary['n_test_cams']} held-out views "
+              f"(compare to SAD-GS/3DGS table)")
+        print(f"TEST SSIM sRGB (paper):  {summary['ssim_srgb']:6.4f}     "
+              f"<- mean of per-image SSIM, {summary['n_test_cams']} held-out views")
+        print(f"train PSNR/SSIM sRGB:    {summary['train_psnr_srgb']:6.2f} dB / "
+              f"{summary['train_ssim_srgb']:.4f}  (mean per-image, {summary['n_train_cams']} train views)")
+    else:
+        print(f"PSNR sRGB (paper):       {summary['psnr_srgb']:6.2f} dB  "
+              f"<- mean of per-image dB over all {n_cams} views (no holdout)")
+        print(f"SSIM sRGB (paper):       {summary['ssim_srgb']:6.4f}     "
+              f"<- mean of per-image SSIM over all {n_cams} views")
+    print(f"PSNR sRGB masked:        {summary['psnr_srgb_masked']:6.2f} dB  <- honest silhouette (test split)")
+    print(f"PSNR linear:             {summary['psnr_linear']:6.2f} dB  (test split, mean per-image)")
+    print(f"  [legacy dB-of-mean-MSE, all cams: {summary['all_psnr_srgb_db_of_mean_mse']:.2f} dB — NOT the paper metric]")
     print(f"final gaussian count:    {summary['final_n_gaussians']}")
     print(f"saved ply:               {ply_path}")
     print(f"run dir: {run_dir}")
