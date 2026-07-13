@@ -205,6 +205,98 @@ def test_split_factor_capped(backend: str) -> None:
     assert _count(p) == 3
 
 
+def _quat_to_matrix(q: np.ndarray) -> np.ndarray:
+    """Replicate shaders/common/math.slang::matrixFromQuaternion EXACTLY
+    (q = (w, x, y, z), normalized, row-major). Must match bit-for-bit in
+    convention so the Python oracle and the GPU split agree on R."""
+    q = q / np.linalg.norm(q)
+    w, x, y, z = float(q[0]), float(q[1]), float(q[2]), float(q[3])
+    return np.array([
+        [1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y - w * z),       2.0 * (x * z + w * y)],
+        [2.0 * (x * y + w * z),       1.0 - 2.0 * (x * x + z * z), 2.0 * (y * z - w * x)],
+        [2.0 * (x * z - w * y),       2.0 * (y * z + w * x),       1.0 - 2.0 * (x * x + y * y)],
+    ], dtype=np.float64)
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_anisotropic_split_preserves_covariance(backend: str) -> None:
+    """SADGS split geometry invariant: for ks_scale_power == 1, the equal-weight
+    mixture of the grid children must reproduce the PARENT's 3D covariance
+    exactly (SADGS gaussian_model.py Eq. 8-9; the sqrt(12) child spacing is
+    precisely the factor that makes this hold).
+
+    This is the regression guard for the sqrt(12) fix: the previous code spaced
+    children at coord/n with NO sqrt(12), which contracts the mixture to ~31% of
+    the parent variance at n=2 (and worse for larger n) — that version fails
+    this test dramatically; the sqrt(12) version passes to fp32 precision.
+
+    Uses a non-trivial rotation, anisotropic scale, and UNEQUAL per-axis split
+    factors n = (3, 2, 1) so the test exercises multi-factor grids and the
+    n_k == 1 no-op axis, not just the isotropic k=2 case."""
+    p = _setup(backend)
+
+    # Anisotropic parent scale + a real (non-identity) rotation.
+    scale = np.array([0.30, 0.20, 0.12], dtype=np.float64)
+    quat = np.array([0.9, 0.1, 0.2, 0.3], dtype=np.float32)   # (w, x, y, z), unnormalized
+    p.set_gaussians_from_numpy(
+        means=np.array([[0.1, -0.2, 3.0]], dtype=np.float32),
+        log_scales=np.log(scale.astype(np.float32))[None, :],
+        rot_quats=quat[None, :],
+        opacities=np.array([0.9], dtype=np.float32),
+        color_logits=np.zeros((1, 3), dtype=np.float32),
+    )
+
+    # eta_max=(9,4,0.05), split_power=0.5 -> n=(ceil(sqrt 9), ceil(sqrt 4),
+    # ceil(sqrt 0.05)) = (3, 2, 1) -> 6 children. high_ratio=1.0, grad high.
+    _set_eta(p, 0, n_total=10, n_high=10, n_low=0,
+             eta_max=(9.0, 4.0, 0.05), grad_high=True)
+
+    # dense_scale=0 so the (large) gaussian takes the SPLIT path; ks_scale_power
+    # = 1.0 is the variance-preserving choice paired with the sqrt(12) spacing.
+    cfg = StructureConfig(tau_split=0.8, tau_prune=0.8, split_power=0.5,
+                          max_split_factor=8, dense_scale=0.0, ks_scale_power=1.0)
+    p.densify_structure_aware(cfg)
+
+    m = _count(p)
+    assert m == 6, f"expected 3*2*1 = 6 grid children, got {m}"
+
+    # Read back the 6 children: packed 14 floats each (mean[0:3], log_scale[3:6],
+    # rot_quat[6:10], opacity[10], sh0[11:14]).
+    g = np.frombuffer(p.buffers.gaussians.to_numpy().tobytes(),
+                      dtype=np.float32).reshape(-1, 14)[:m].astype(np.float64)
+    child_means = g[:, 0:3]
+    child_scales = np.exp(g[:, 3:6])
+
+    R = _quat_to_matrix(quat)
+    # Parent covariance Sigma = R diag(scale^2) R^T.
+    parent_cov = R @ np.diag(scale ** 2) @ R.T
+
+    # Equal-weight Gaussian-mixture covariance:
+    #   Sigma_mix = mean_i(Sigma_i) + mean_i((mu_i - mu_bar)(mu_i - mu_bar)^T)
+    # where Sigma_i = R diag(child_scale_i^2) R^T (children share the parent R).
+    within = np.zeros((3, 3))
+    for s_i in child_scales:
+        within += R @ np.diag(s_i ** 2) @ R.T
+    within /= m
+
+    mu_bar = child_means.mean(axis=0)
+    d = child_means - mu_bar
+    between = (d[:, :, None] * d[:, None, :]).mean(axis=0)
+
+    mixture_cov = within + between
+
+    # fp32 GPU math on cov entries ~1e-2..1e-1: atol 2e-4 is comfortable.
+    assert np.allclose(mixture_cov, parent_cov, atol=2e-4, rtol=1e-3), (
+        f"grid-child mixture covariance does not preserve the parent's.\n"
+        f"parent=\n{parent_cov}\nmixture=\n{mixture_cov}\n"
+        f"diag ratio (mixture/parent) = "
+        f"{np.diag(mixture_cov) / np.diag(parent_cov)}")
+
+    # The mixture mean must also match the parent mean (grid is centered).
+    assert np.allclose(mu_bar, np.array([0.1, -0.2, 3.0]), atol=2e-4), (
+        f"grid is not centered on the parent: mean-of-means = {mu_bar}")
+
+
 @pytest.mark.parametrize("backend", BACKENDS)
 def test_scoring_kernel_flags_large_gaussian(backend: str) -> None:
     """The scoring kernel itself: a LARGE gaussian against a high-frequency

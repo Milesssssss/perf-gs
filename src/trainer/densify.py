@@ -73,6 +73,11 @@ class StructureConfig:
     grad_threshold: float = 1e-5     # is_grad_high: avg 2D-grad magnitude floor (SADGS 1e-5)
     split_power: float = 0.5         # n_k = ceil(eta_max_k ** split_power); 0.5 = sqrt (paper)
     max_split_factor: int = 8        # per-axis cap on n_k (SADGS max_clones_per_axis=8)
+    # Child scale along axis k = sigma_k / n_k**ks_scale_power (SADGS
+    # scaling / ks**scale_power). 1.0 for Mip-NeRF 360 (the variance-preserving
+    # choice paired with the sqrt(12) child spacing in split_anisotropic.slang);
+    # 1.2 for Tanks & Temples / Deep Blending (SADGS ks_scale_power=1.2).
+    ks_scale_power: float = 1.0
     t_opacity: float = 0.005         # low-opacity prune floor (always active)
     # Scale threshold separating clone (small) from split (large), = SADGS
     # args.dense * scene_extent. A triggered gaussian with max world-space scale
@@ -576,34 +581,7 @@ def compute_structure_scores(
         accumulate_structure_scores(pipeline, structure_tex, pass_idx=view_idx)
 
 def densify_structure_aware(pipeline: Pipeline, cfg: StructureConfig) -> dict:
-    """One structure-aware densification pass — wait-free, GPU-driven.
 
-    Mirrors ``densify_simple``'s single-encoder discipline: no CPU readbacks,
-    no host numpy, no ``wait_for_idle``. Assumes ``compute_structure_scores``
-    (offline) or the online per-iter ``accumulate_structure_scores`` has
-    populated the eta accumulators for this window. Phases (all in one
-    command encoder):
-
-      P0  clear_capacity_scratch  — zero the tiny capacity-bound scratch.
-      P1  decide_actions_structure_pass1  — tentative decide + fan-out sum +
-          histogram (max_splats threads).
-      P2  snapshot pre_count.
-      P3  decide_actions_structure_threshold  — single-thread top-down
-          histogram scan picks the fan-out demote threshold (UINT_MAX = none).
-      P4  decide_actions_structure_pass2  — demote highest-fan-out splits to
-          CLONE (max_splats threads; no-op if threshold == UINT_MAX).
-      P5  prepare indirect-dispatch args from pre_count.
-      P6  split_anisotropic (indirect)  — grid-split SPLITs into n_x*n_y*n_z
-          children; append CLONE duplicates; parent slot handling per the
-          shader.
-      P7  snapshot post_count.
-      P8  build_prune_mask, scan, scatter_compact  — same compaction as
-          densify_simple; swap in the compacted scratch.
-      P9  final counter snapshot (num_gaussians_counter = scan_total).
-
-    Returns ``None`` for the count stats (matches ``densify_simple``); the
-    training loop reads the counter on log/preview ticks.
-    """
     b = pipeline.buffers
 
     # Convention scaling for the grad gate — identical to densify_simple.
@@ -704,6 +682,7 @@ def densify_structure_aware(pipeline: Pipeline, cfg: StructureConfig) -> dict:
             split_factor_y=b.split_factor_y.storage,
             split_factor_z=b.split_factor_z.storage,
             pre_count_buf=b.densify_pre_count.storage,
+            ks_scale_power=float(cfg.ks_scale_power),
             max_splats=pipeline.max_splats,
         )
 

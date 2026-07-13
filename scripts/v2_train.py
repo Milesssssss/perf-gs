@@ -151,8 +151,8 @@ def main() -> None:
     ap.add_argument("--scene", type=str, default="datasets/360_v2/bicycle")
     #ap.add_argument("--scene", type=str, default="datasets/synthetic/suzanne_blender")
 
-    ap.add_argument("--iters", type=int, default=7000)
-    ap.add_argument("--position-lr-max-steps", type=int, default=7000,
+    ap.add_argument("--iters", type=int, default=3000)
+    ap.add_argument("--position-lr-max-steps", type=int, default=3000,
                     help="horizon for the exponential mean-LR decay (3DGS "
                          "position_lr_max_steps). FIXED, independent of --iters: "
                          "the LR reaches lr_final at this step and holds. Set it "
@@ -165,7 +165,7 @@ def main() -> None:
                     help="force render width (overrides --downsample)")
     ap.add_argument("--height", type=int, default=None,
                     help="force render height (overrides --downsample)")
-    ap.add_argument("--preview-every", type=int, default=7000)
+    ap.add_argument("--preview-every", type=int, default=3000)
     ap.add_argument("--log-every", type=int, default=0)
     ap.add_argument("--render-all-every", type=int, default=0,
                     help="dump PNGs for ALL cameras every N iters. 0 (default) "
@@ -173,7 +173,7 @@ def main() -> None:
                          "Set a coarse value to dump less often: each sweep "
                          "renders + reads back every camera under gpu_lock, "
                          "briefly freezing the in-process viewer.")
-    ap.add_argument("--eval-every", type=int, default=7000,
+    ap.add_argument("--eval-every", type=int, default=3000,
                     help="every N iters, render ALL cameras and compute the honest "
                          "average PSNR (same metric as the final_psnr.json summary). "
                          "Writes results to eval_curve.jsonl in the run dir with "
@@ -201,7 +201,7 @@ def main() -> None:
                          "default. Requires --eval-every > 0.", default=True)
     ap.add_argument("--densify-every", type=int, default=100)
     ap.add_argument("--densify-from", type=int, default=100)
-    ap.add_argument("--densify-to", type=int, default=1400)
+    ap.add_argument("--densify-to", type=int, default=1900)
     #ap.add_argument("--opacity-reset-iters", type=int, nargs="*", default=[3000])
     ap.add_argument("--n-scoring-views", type=int, default=10)
     ap.add_argument("--loss-thresh", type=float, default=0.1)
@@ -214,17 +214,17 @@ def main() -> None:
     ap.add_argument("--prune-scale3d", type=float, default=0.1,
                     help="prune splats whose max 3D scale exceeds this * scene_extent "
                          "(gsplat prune_scale3d). Only active after the first opacity reset.")
-    ap.add_argument("--reset-every", type=int, default=1500,
+    ap.add_argument("--reset-every", type=int, default=1200,
                     help="opacity-reset interval (gsplat reset_every). Big-scale prune is "
                          "disabled until after the first reset.")
-    ap.add_argument("--opacity-cap", type=float, default=.8)
-    ap.add_argument("--opacity-reg", type=float, default=0.01)
+    ap.add_argument("--opacity-cap", type=float, default=1.0)
+    ap.add_argument("--opacity-reg", type=float, default=0.00)
     ap.add_argument("--scale-reg", type=float, default=0.00)
     ap.add_argument("--w-alpha", type=float, default=0.0,
                     help="alpha loss weight; set > 0 for RGBA targets (e.g. 1.0)")
     ap.add_argument("--lambda-ssim", type=float, default=0.2,
                     help="SSIM loss weight (3DGS default 0.2); 0 = pure L2")
-    ap.add_argument("--max-splats", type=int, default=6_000_000)
+    ap.add_argument("--max-splats", type=int, default=6_500_000)
     ap.add_argument("--z-near-cull", type=float, default=0.01,
                     help="view-space depth floor for bin cull; raise for scenes "
                          "where points can land near a camera pose (e.g. 0.2)")
@@ -255,7 +255,7 @@ def main() -> None:
                     help="use structure-aware anisotropic densification (SAD-GS, arXiv 2604.28016): "
                          "precomputes a multi-scale structure-tensor field per view and grid-splits "
                          "Gaussians that under-resolve local texture frequency. Overrides --simple-densify.", default=True)
-    ap.add_argument("--sad-tau-split", type=float, default=0.5,
+    ap.add_argument("--sad-tau-split", type=float, default=0.4,
                     help="SAD split_ratio_threshold: split if high_ratio (fraction of views "
                          "with scalar eta>1) exceeds this AND the gradient is high (SADGS 0.8)")
     ap.add_argument("--sad-tau-prune", type=float, default=0.8,
@@ -283,6 +283,10 @@ def main() -> None:
                     help="SAD: per-axis split factor n_k = ceil(eta_max ** power); 0.5 = sqrt (paper)")
     ap.add_argument("--sad-max-split-factor", type=int, default=8,
                     help="SAD: per-axis cap on the grid split factor n_k (SADGS max_clones_per_axis=8)")
+    ap.add_argument("--sad-ks-scale-power", type=float, default=1.0,
+                    help="SAD: child scale along axis k = sigma_k / n_k**power (SADGS "
+                         "ks_scale_power). 1.0 for Mip-NeRF 360 (variance-preserving with the "
+                         "sqrt(12) child spacing); 1.2 for Tanks & Temples / Deep Blending.")
     ap.add_argument("--sad-match-loss-lrs", type=int, default=1,
                     help="when --structure-densify: 1 (default) = use SADGS's loss (lambda_l2) "
                          "and per-parameter LRs so we train exactly as they do; 0 = keep our "
@@ -319,9 +323,10 @@ def main() -> None:
     ap.add_argument("--grow-scale3d", type=float, default=0.001,
                     help="Clone/split boundary as a FRACTION of scene_extent. Gaussians with "
                          "max world-scale <= this*extent are CLONED (duplicated); above are "
-                         "SPLIT (anisotropically subdivided). Matches SADGS's percent_dense=0.001 "
-                         "and 3DGS's default. Previously 0.01 (10x too permissive) which routed "
-                         "mid-scale gaussians into the useless CLONE branch during densify.")
+                         "SPLIT (anisotropically subdivided). Matches SADGS's dense=percent_dense="
+                         "0.001. Was 0.01 (10x too permissive), which classified the whole "
+                         "0.001*E..0.01*E band as 'small' and routed those mid-scale gaussians "
+                         "into the CLONE branch (exact duplicate) instead of anisotropic SPLIT.")
     ap.add_argument("--opacity-reset-value", type=float, default=0.01, help="value to reset opacity to when doing opacity reset")
     ap.add_argument("--profile-run", action="store_true",
                     help="Nsight Graphics profiling mode. Runs a NORMAL training loop "
@@ -447,6 +452,7 @@ def main() -> None:
         grad_threshold=args.sad_grad_threshold,
         split_power=args.sad_split_power,
         max_split_factor=args.sad_max_split_factor,
+        ks_scale_power=args.sad_ks_scale_power,
         t_opacity=args.t_opacity,
         # clone (small) vs split (large) threshold = SADGS args.dense * extent.
         dense_scale=args.grow_scale3d * extent,
