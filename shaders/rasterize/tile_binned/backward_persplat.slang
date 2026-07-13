@@ -377,6 +377,18 @@ void backwardRasterizePerSplat(
                                                        blend_only_data.opacity);
                 alpha = min(alpha_raw, ALPHA_MAX);
                 alpha_grad_scale = (alpha_raw <= ALPHA_MAX) ? 1.0 : 0.0;
+                // Alpha-min skip — MUST be bit-identical to the forward
+                // (forward.slang ALPHA_MIN = 1/255 == ALPHA_MIN_TRACK). A splat
+                // the forward skipped (alpha < 1/255) did NOT blend or advance
+                // T there, so here it must be a full no-op too: alpha=0 makes
+                // T_step=1 and alpha*T=0 (scan identity) and zeroes its
+                // gradient. Without this, the backward would blend a splat the
+                // forward skipped -> T reconstruction diverges -> wrong grads.
+                if (alpha < ALPHA_MIN_TRACK)
+                {
+                    alpha = 0.0;
+                    alpha_grad_scale = 0.0;
+                }
             }
 
             // Per-splat transmittance step: T advances by *= T_step across

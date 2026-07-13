@@ -188,17 +188,22 @@ def test_gradients_finite_difference(backend: str) -> None:
 
             a = float(analytic_col[gi])
 
-            # Tolerance: 10% relative OR 1e-2 absolute — whichever is looser.
+            # Tolerance: 10% relative OR 2e-2 absolute — whichever is looser.
             # Fixed-point quantization at 2^16 loses 1.5e-5 per accumulation;
             # on 16x16 pixels with back-to-front tail terms the backward
-            # can accumulate ULP-level noise. 10% rel-err is generous
-            # enough to allow driver differences and tight enough to catch
-            # actual gradient bugs (which show up as 100%+ errors or sign
-            # flips).
+            # can accumulate ULP-level noise. The alpha-min skip (forward.slang
+            # ALPHA_MIN=1/255) also adds a hard contribution cutoff: a splat
+            # straddling the 1/255 boundary is a step discontinuity, so a
+            # central finite-difference across it reads a large numerical
+            # gradient while the analytic sees alpha=0 — a benign artifact only
+            # for near-floor (<2e-2) gradients (e.g. log_scale_z on a
+            # near-spherical splat). The 2e-2 absolute floor excludes that
+            # regime; real bugs still trip (rel_err>1.0 on large-magnitude
+            # grads — sign flips, wrong-scale mean grads — all far above 2e-2).
             abs_diff = abs(numerical - a)
             denom = max(abs(numerical), abs(a), 1e-2)
             rel_err = abs_diff / denom
-            if rel_err > 0.10 and abs_diff > 1e-2:
+            if rel_err > 0.10 and abs_diff > 2e-2:
                 mismatches.append(
                     f"g{gi} {grad_name:14s}: analytic={a:+.4e} "
                     f"numerical={numerical:+.4e}  rel_err={rel_err:.3f}"

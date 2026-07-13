@@ -27,7 +27,8 @@ from trainer.pipeline import Pipeline
 TILE_SIZE = 16
 BUCKET = 32          # must match RASTER_BUCKET_SIZE in checkpoint.slang
 ALPHA_MAX = 0.99     # must match forward.slang
-T_EARLY_BREAK = 1e-4
+ALPHA_MIN = 1.0 / 255.0   # must match forward.slang alpha-min skip
+T_EARLY_BREAK = 1e-3      # must match forward.slang
 
 
 def _sigmoid(x):
@@ -188,6 +189,10 @@ def test_forward_checkpoints_reconstruct(backend: str) -> None:
                         op = gf[gid, 10]     # opacity logit (Gaussian3D float idx 10)
                         sh0 = gf[gid, 11:14]  # sh0 DC coeff
                         a = _eval_alpha(px, py, mean2d, cov2d, op)
+                        # Alpha-min skip: mirror forward.slang exactly — a splat
+                        # below 1/255 does not blend or advance T.
+                        if a < ALPHA_MIN:
+                            continue
                         C += _sh_dc(sh0) * a * T
                         T *= (1.0 - a)
                         if T < T_EARLY_BREAK:

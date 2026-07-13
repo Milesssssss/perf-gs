@@ -40,6 +40,11 @@ class TestPipeline(Pipeline):
         """Run the backward rasterizer. Assumes forward + loss have run."""
         self._run_backward()
 
+    def regularize(self) -> None:
+        """Run ONLY the opacity/scale regularization pass (adds its gradient
+        onto the grad buffers). Used to isolate the reg gradient in tests."""
+        self._run_regularization()
+
     def read_gradients(self) -> dict[str, np.ndarray]:
         """Read back the 14 SoA int64 fixed-point grad buffers."""
         n = int(self.buffers.num_gaussians_counter.to_numpy().view(np.uint32)[0])

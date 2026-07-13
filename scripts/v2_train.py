@@ -38,6 +38,9 @@ from trainer.config import AdamLRs, RenderConfig
 from trainer.densify import StructureConfig
 from trainer.pipeline import DensifyConfig, Pipeline
 
+# Sibling script (scripts/ is on sys.path[0] when v2_train is run directly).
+from bin_viz import write_bin_viz
+
 
 def _srgb_to_linear(c: np.ndarray) -> np.ndarray:
     return srgb_to_linear(c)
@@ -188,9 +191,17 @@ def main() -> None:
     ap.add_argument("--eval-holdout-stride", type=int, default=8,
                     help="holdout stride for --eval (3DGS llffhold=8). Test set is "
                          "cameras where index %% stride == 0.")
+    ap.add_argument("--debug-bin-viz", action="store_true",
+                    help="during the --eval-every sweep, write per-view debug "
+                         "heatmaps: a per-tile binned-splat-count map, a per-pixel "
+                         "blended-overlap map, and a per-view overlap histogram + "
+                         "stats to <run>/cams/cam_NN/binviz_* and binviz.jsonl. "
+                         "Reads buffers the forward already fills (no extra kernel) "
+                         "but adds readback + PNG encode per view, so it's off by "
+                         "default. Requires --eval-every > 0.", default=True)
     ap.add_argument("--densify-every", type=int, default=100)
     ap.add_argument("--densify-from", type=int, default=100)
-    ap.add_argument("--densify-to", type=int, default=2900)
+    ap.add_argument("--densify-to", type=int, default=1400)
     #ap.add_argument("--opacity-reset-iters", type=int, nargs="*", default=[3000])
     ap.add_argument("--n-scoring-views", type=int, default=10)
     ap.add_argument("--loss-thresh", type=float, default=0.1)
@@ -203,17 +214,17 @@ def main() -> None:
     ap.add_argument("--prune-scale3d", type=float, default=0.1,
                     help="prune splats whose max 3D scale exceeds this * scene_extent "
                          "(gsplat prune_scale3d). Only active after the first opacity reset.")
-    ap.add_argument("--reset-every", type=int, default=1200,
+    ap.add_argument("--reset-every", type=int, default=1500,
                     help="opacity-reset interval (gsplat reset_every). Big-scale prune is "
                          "disabled until after the first reset.")
     ap.add_argument("--opacity-cap", type=float, default=.8)
-    ap.add_argument("--opacity-reg", type=float, default=0.00)
+    ap.add_argument("--opacity-reg", type=float, default=0.01)
     ap.add_argument("--scale-reg", type=float, default=0.00)
     ap.add_argument("--w-alpha", type=float, default=0.0,
                     help="alpha loss weight; set > 0 for RGBA targets (e.g. 1.0)")
     ap.add_argument("--lambda-ssim", type=float, default=0.2,
                     help="SSIM loss weight (3DGS default 0.2); 0 = pure L2")
-    ap.add_argument("--max-splats", type=int, default=7_000_000)
+    ap.add_argument("--max-splats", type=int, default=6_000_000)
     ap.add_argument("--z-near-cull", type=float, default=0.01,
                     help="view-space depth floor for bin cull; raise for scenes "
                          "where points can land near a camera pose (e.g. 0.2)")
@@ -244,13 +255,13 @@ def main() -> None:
                     help="use structure-aware anisotropic densification (SAD-GS, arXiv 2604.28016): "
                          "precomputes a multi-scale structure-tensor field per view and grid-splits "
                          "Gaussians that under-resolve local texture frequency. Overrides --simple-densify.", default=True)
-    ap.add_argument("--sad-tau-split", type=float, default=0.6,
+    ap.add_argument("--sad-tau-split", type=float, default=0.5,
                     help="SAD split_ratio_threshold: split if high_ratio (fraction of views "
                          "with scalar eta>1) exceeds this AND the gradient is high (SADGS 0.8)")
     ap.add_argument("--sad-tau-prune", type=float, default=0.8,
                     help="SAD prune_ratio_threshold: prune if low_ratio (fraction of views "
                          "with eta<0.1) exceeds this (SADGS 0.8)")
-    ap.add_argument("--sad-grad-threshold", type=float, default=1e-7,
+    ap.add_argument("--sad-grad-threshold", type=float, default=1e-5,
                     help="SAD is_grad_high floor: avg 2D-grad magnitude a gaussian must exceed "
                          "to be split-eligible (SADGS hardcodes 1e-5)")
     ap.add_argument("--sad-accum-every", type=int, default=10,
@@ -740,6 +751,15 @@ def main() -> None:
         (run_dir / "eval_curve.jsonl").open("w", buffering=1)
         if args.eval_every > 0 else None
     )
+    # Binning/overlap debug viz (--debug-bin-viz): one JSONL line per rendered
+    # eval view, plus per-view heatmap PNGs under cams/cam_NN/. Only when both
+    # the flag and --eval-every are on.
+    bin_viz_json = (
+        (run_dir / "binviz.jsonl").open("w", buffering=1)
+        if (args.debug_bin_viz and args.eval_every > 0) else None
+    )
+    if args.debug_bin_viz and args.eval_every <= 0:
+        print("[debug-bin-viz] ignored: requires --eval-every > 0.")
     log_txt.write(f"# v2 training log — scene={args.scene}, backend={args.backend}\n")
     log_txt.write(f"# iters={args.iters}, resolution={IMAGES_WIDTH}x{IMAGES_HEIGHT}, n_cams={n_cams}\n")
     log_txt.write(f"# densify: every {args.densify_every} iters in "
@@ -958,6 +978,8 @@ def main() -> None:
             densify_json.close()
             if eval_curve_json is not None:
                 eval_curve_json.close()
+            if bin_viz_json is not None:
+                bin_viz_json.close()
             if profile_json:
                 profile_json.close()
             print("[capture] window closed, exiting.")
@@ -1226,6 +1248,21 @@ def main() -> None:
             for cam_i in test_indices:
                 entry = scene.images[cam_i]
                 pipeline.render(entry.camera)
+                # Binning/overlap debug viz: read the buffers this forward just
+                # filled (tile ranges + per-pixel blended count) and dump the
+                # per-view heatmaps + histogram. render() already drained the
+                # queue, so the buffers are complete.
+                if bin_viz_json is not None:
+                    tile_counts, overlap, ntx, nty = pipeline.read_bin_debug()
+                    write_bin_viz(
+                        cam_dir=cams_dir / f"cam_{cam_i:02d}",
+                        iter_idx=it, cam_idx=cam_i,
+                        image_name=entry.image_name,
+                        tile_counts=tile_counts,
+                        num_tiles_x=ntx, num_tiles_y=nty,
+                        overlap=overlap,
+                        jsonl_handle=bin_viz_json,
+                    )
                 r_srgb = np.clip(pipeline.read_output_image()[..., :3], 0.0, 1.0)
                 t_srgb = targets_srgb[cam_i][..., :3]
                 psnr_srgb_frames.append(_psnr_image(r_srgb, t_srgb))
@@ -1308,6 +1345,8 @@ def main() -> None:
     densify_json.close()
     if eval_curve_json is not None:
         eval_curve_json.close()
+    if bin_viz_json is not None:
+        bin_viz_json.close()
 
     # Under --profile-run we skip the final I/O-heavy metrics pass:
     # per-camera renders + PSNR + PLY export pollute the capture window

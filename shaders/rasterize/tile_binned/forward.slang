@@ -34,6 +34,14 @@ static const float T_EARLY_BREAK = 1e-4;
 // (probability ≤ 1), not a magnitude guess.
 static const float ALPHA_MAX = 0.99;
 
+// Alpha-min contribution threshold (canonical 3DGS / LiteGS 1/255). A splat
+// whose per-pixel alpha is below this is skipped: it contributes < 1 LSB of
+// 8-bit color and a negligible transmittance step, so blending it is wasted
+// work and inflates the per-pixel iteration depth. MUST match the backward's
+// threshold exactly (backward_persplat.slang) so both agree on which splats
+// contribute — otherwise the T reconstruction desyncs and gradients corrupt.
+static const float ALPHA_MIN = 1.0 / 255.0;
+
 [shader("compute")]
 [numthreads(TILE_SIZE, TILE_SIZE, 1)]
 void forwardRasterize(
@@ -97,11 +105,15 @@ void forwardRasterize(
 
         float alpha_raw = evalGaussian2DFromCov(pixel_center, proj.mean, proj.cov2d, g.opacity);
         float alpha = min(alpha_raw, ALPHA_MAX);
+
+        if (alpha < ALPHA_MIN)
+            continue;
+
         float3 color_rgb = shDC(g.sh0);
 
         C += color_rgb * alpha * T;
         T *= (1.0 - alpha);
-        ++processed;
+        processed = local_splat_index + 1u;   // absolute stop-index of last contributor
 
         if (T < T_EARLY_BREAK)
             break;

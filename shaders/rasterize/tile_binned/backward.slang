@@ -159,6 +159,17 @@ void backwardRasterize(
             float alpha = min(alpha_raw, ALPHA_MAX);
             float alpha_grad_scale = (alpha_raw <= ALPHA_MAX) ? 1.0 : 0.0;
 
+            // Alpha-min skip — bit-identical to forward.slang (ALPHA_MIN =
+            // 1/255 == ALPHA_MIN_TRACK). The forward did not blend this splat,
+            // so here it's a full no-op: alpha=0 -> denom=1 -> T_i=T_post
+            // (unchanged) and zero gradient. Keeps the T_post/denom back-to-
+            // front reconstruction in lockstep with the forward.
+            if (alpha < ALPHA_MIN_TRACK)
+            {
+                alpha = 0.0;
+                alpha_grad_scale = 0.0;
+            }
+
             float denom = 1.0 - alpha;
             float T_i = T_post / denom;
 

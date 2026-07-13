@@ -607,6 +607,25 @@ class Pipeline:
         with self.gpu_lock:
             return self.buffers.output_image.to_numpy()
 
+    def read_bin_debug(self) -> tuple[np.ndarray, np.ndarray, int, int]:
+        """Read the binning-debug buffers the LAST forward produced, for the
+        --debug-bin-viz visualization. Returns:
+          (tile_counts[num_tiles], overlap[H, W], num_tiles_x, num_tiles_y)
+        where tile_counts[t] = tile_end[t] - tile_start[t] (splats binned into
+        tile t) and overlap = gaussian_count_per_pixel (splats blended per pixel
+        before early-break). Both are already filled every frame — no extra
+        kernel. Call after render()/wait_for_idle()."""
+        b = self.buffers
+        with self.gpu_lock:
+            starts = b.tile_start.to_numpy().view(np.uint32)
+            ends = b.tile_end.to_numpy().view(np.uint32)
+            overlap = b.gaussian_count_per_pixel.to_numpy().view(np.uint32)
+        n = b.num_tiles_x * b.num_tiles_y
+        tile_counts = (ends[:n].astype(np.int64) - starts[:n].astype(np.int64))
+        tile_counts = np.clip(tile_counts, 0, None).astype(np.uint32)
+        overlap = overlap.reshape(self.height, self.width)
+        return tile_counts, overlap, b.num_tiles_x, b.num_tiles_y
+
     # ------------------------------------------------------------------
     # Training
     # ------------------------------------------------------------------
@@ -815,7 +834,6 @@ class Pipeline:
             cluster_visible=b.cluster_visible.storage,
             w_opacity=self.cfg.opacity_reg,
             w_scale=self.cfg.scale_reg,
-            inv_n=1.0,
         )
 
     def clear_tracking(self) -> None:
