@@ -136,3 +136,46 @@ void mortonScatter(
     gaussians_out[i]  = gaussians_in[src];
     adam_state_out[i] = adam_state_in[src];
 }
+
+// Permute the slot-indexed SAD-GS eta accumulators by the SAME sorted_values
+// permutation mortonScatter applies to the gaussians, so the eta window
+// survives a Morton re-sort instead of being reset. Pure permutation (Morton
+// neither creates nor destroys primitives): dst[i] = src[perm[i]], no zeroing.
+//
+// Separate entry point (not folded into mortonScatter) so the gaussian re-sort
+// and the render-only viewer path stay untouched; this is dispatched only on
+// the structure-densify path, reading the identical sorted_values slot so the
+// two permutations are guaranteed consistent. eta_n_total travels with the 5
+// eta_buffers components (n_high, n_low, max_x, max_y, max_z).
+[shader("compute")]
+[numthreads(256, 1, 1)]
+void mortonScatterEta(
+    uint3 dtid: SV_DispatchThreadID,
+    StructuredBuffer<uint> eta_n_total_in,
+    StructuredBuffer<uint> eta_n_high_in,
+    StructuredBuffer<uint> eta_n_low_in,
+    StructuredBuffer<uint> eta_max_x_in,
+    StructuredBuffer<uint> eta_max_y_in,
+    StructuredBuffer<uint> eta_max_z_in,
+    StructuredBuffer<uint> sorted_values,
+    StructuredBuffer<uint> count_buf,
+    RWStructuredBuffer<uint> eta_n_total_out,
+    RWStructuredBuffer<uint> eta_n_high_out,
+    RWStructuredBuffer<uint> eta_n_low_out,
+    RWStructuredBuffer<uint> eta_max_x_out,
+    RWStructuredBuffer<uint> eta_max_y_out,
+    RWStructuredBuffer<uint> eta_max_z_out,
+    uniform uint max_splats)
+{
+    uint i = dtid.x;
+    if (i >= max_splats) return;
+    uint n = count_buf[0];
+    if (i >= n) return;
+    uint src = sorted_values[i];
+    eta_n_total_out[i] = eta_n_total_in[src];
+    eta_n_high_out[i]  = eta_n_high_in[src];
+    eta_n_low_out[i]   = eta_n_low_in[src];
+    eta_max_x_out[i]   = eta_max_x_in[src];
+    eta_max_y_out[i]   = eta_max_y_in[src];
+    eta_max_z_out[i]   = eta_max_z_in[src];
+}

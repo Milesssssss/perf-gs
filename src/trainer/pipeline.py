@@ -964,17 +964,19 @@ class Pipeline:
         return _densify.densify(self, cfg, densify_step, n_densify_steps, init_count)
 
     def densify_simple(self, cfg, grad_thresh=0.0002, scale_thresh=None,
-                       prune_big_scale=None, allow_scale_prune=True) -> dict:
+                       prune_big_scale=None, allow_scale_prune=True,
+                       carry_eta=False) -> dict:
         return _densify.densify_simple(self, cfg, grad_thresh, scale_thresh,
-                                       prune_big_scale, allow_scale_prune)
+                                       prune_big_scale, allow_scale_prune,
+                                       carry_eta)
 
     def reset_opacity(self, cfg) -> None:
         return _densify.reset_opacity(self, cfg)
 
-    def morton_sort(self, world_min, world_max) -> None:
+    def morton_sort(self, world_min, world_max, carry_eta=False) -> None:
         """Reorder gaussians + adam_state by 3D Morton code (Z-order).
         See :func:`trainer.densify.morton_sort`."""
-        return _densify.morton_sort(self, world_min, world_max)
+        return _densify.morton_sort(self, world_min, world_max, carry_eta)
 
     def compute_structure_scores(self, cameras, structure_textures, cfg) -> None:
         return _densify.compute_structure_scores(self, cameras, structure_textures, cfg)

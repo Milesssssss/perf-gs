@@ -318,7 +318,8 @@ def densify_simple(pipeline: Pipeline, cfg: DensifyConfig,
                    grad_thresh: float = 0.0002,
                    scale_thresh: float | None = None,
                    prune_big_scale: float | None = None,
-                   allow_scale_prune: bool = True) -> dict:
+                   allow_scale_prune: bool = True,
+                   carry_eta: bool = False) -> dict:
     """Reference 3DGS densification: threshold on avg_grad, split/clone by scale.
 
     No rank-selection, no importance scoring, no growth budget. Every gaussian
@@ -329,6 +330,13 @@ def densify_simple(pipeline: Pipeline, cfg: DensifyConfig,
     caller can disable big-scale pruning until after the first opacity reset,
     matching gsplat's ``step > reset_every`` guard. Low-opacity pruning is
     always active.
+
+    ``carry_eta`` (SAD-GS dual schedule): when True, the compaction pass ALSO
+    permutes the slot-indexed eta accumulators through the same valid_mask/scan
+    (via scatterCompactEta), carrying the multiview frequency statistics of
+    surviving gaussians and zeroing them for new children — so a filler densify
+    no longer resets the eta window. When False (non-SAD callers), the plain
+    scatterCompact runs and eta is left untouched (the SAD caller clears it).
     """
 
     b = pipeline.buffers
@@ -449,19 +457,40 @@ def densify_simple(pipeline: Pipeline, cfg: DensifyConfig,
 
         # Phase E: scatter live gaussians into scratch. Dispatched over
         # [max_splats]; skips slots where valid_mask=0 (includes the tail).
-        pipeline._dispatch(pipeline.k_scatter_compact, "scatter_compact",
-            thread_count=[pipeline.max_splats, 1, 1],
-            gaussians_in=b.gaussians.storage,
-            adam_state_in=b.adam_state.storage,
-            valid_mask=b.valid_mask_buffer.storage,
-            scan=b.scan_buffer.storage,
-            gaussians_out=b.gaussians_scratch.storage,
-            adam_state_out=b.adam_state_scratch.storage,
-            max_splats=pipeline.max_splats,
-        )
+        # On the SAD dual-schedule path (carry_eta), the eta-carrying variant
+        # ALSO permutes the 6 eta accumulators through the same valid_mask/scan
+        # so the multiview window survives this filler pass (see
+        # scatterCompactEta); otherwise the plain scatter runs.
+        if carry_eta:
+            pipeline._dispatch(pipeline.k_scatter_compact_eta, "scatter_compact_eta",
+                thread_count=[pipeline.max_splats, 1, 1],
+                gaussians_in=b.gaussians.storage,
+                adam_state_in=b.adam_state.storage,
+                valid_mask=b.valid_mask_buffer.storage,
+                scan=b.scan_buffer.storage,
+                action=b.action_buffer.storage,
+                pre_count_buf=b.densify_pre_count.storage,
+                **b.eta_scatter_kwargs(),
+                gaussians_out=b.gaussians_scratch.storage,
+                adam_state_out=b.adam_state_scratch.storage,
+                max_splats=pipeline.max_splats,
+            )
+        else:
+            pipeline._dispatch(pipeline.k_scatter_compact, "scatter_compact",
+                thread_count=[pipeline.max_splats, 1, 1],
+                gaussians_in=b.gaussians.storage,
+                adam_state_in=b.adam_state.storage,
+                valid_mask=b.valid_mask_buffer.storage,
+                scan=b.scan_buffer.storage,
+                gaussians_out=b.gaussians_scratch.storage,
+                adam_state_out=b.adam_state_scratch.storage,
+                max_splats=pipeline.max_splats,
+            )
 
         b.gaussians, b.gaussians_scratch = b.gaussians_scratch, b.gaussians
         b.adam_state, b.adam_state_scratch = b.adam_state_scratch, b.adam_state
+        if carry_eta:
+            b.swap_eta()
 
         # Final: num_gaussians_counter[0] = scan_total[0]. GPU copy — no
         # readback, no upload.
@@ -742,7 +771,7 @@ def densify_structure_aware(pipeline: Pipeline, cfg: StructureConfig) -> dict:
 # ----------------------------------------------------------------------
 
 def morton_sort(pipeline: Pipeline, world_min: np.ndarray,
-                world_max: np.ndarray) -> None:
+                world_max: np.ndarray, carry_eta: bool = False) -> None:
     """Reorder the [0, num_gaussians) prefix of gaussians + adam_state by
     3D Morton (Z-order) code so spatially-adjacent primitives become
     memory-adjacent. Standard cache-locality optimization from real-time
@@ -757,11 +786,16 @@ def morton_sort(pipeline: Pipeline, world_min: np.ndarray,
     Pass roughly the AABB of the initial point cloud padded by 20%.
 
     Slot-indexed window accumulators (grad_mean_2d_mag_accum,
-    visibility_count_accum, eta_*, importance_score_accum) are NOT
-    permuted here — the caller MUST clear them via
-    :func:`clear_tracking` (and :func:`clear_structure_scores` on the
-    SAD path) after this returns, or the next densify reads statistics
-    for the wrong slot.
+    visibility_count_accum, importance_score_accum) are NOT permuted
+    here — the caller MUST clear them via :func:`clear_tracking` after
+    this returns, or the next densify reads statistics for the wrong slot.
+
+    ``carry_eta`` (SAD-GS): when True, the 6 eta accumulators ARE permuted
+    through the same Morton ``sorted_values`` (via mortonScatterEta), so the
+    multiview frequency window survives the re-sort instead of being reset —
+    the caller then does NOT clear_structure_scores. When False, eta is left
+    as-is (caller clears it), preserving the historical behavior for non-SAD
+    and periodic-standalone-sort callers.
 
     Wait-free: one encoder, one submit, no CPU readback."""
     b = pipeline.buffers
@@ -809,9 +843,24 @@ def morton_sort(pipeline: Pipeline, world_min: np.ndarray,
             max_splats=pipeline.max_splats,
         )
 
+        # 4b. (SAD-GS) Permute the eta accumulators by the SAME sorted_values,
+        # so the multiview frequency window survives the re-sort. Pure
+        # permutation (no create/destroy), reading the identical sorted_values
+        # slot as step 4 — the two permutations are consistent by construction.
+        if carry_eta:
+            pipeline._dispatch(pipeline.k_morton_scatter_eta, "morton_scatter_eta",
+                thread_count=[pipeline.max_splats, 1, 1],
+                sorted_values=b.sort_values_a.storage,
+                count_buf=b.scan_total.storage,
+                **b.eta_scatter_kwargs(),
+                max_splats=pipeline.max_splats,
+            )
+
     # 5. Swap primary <-> scratch. Same idiom densify uses.
     b.gaussians, b.gaussians_scratch = b.gaussians_scratch, b.gaussians
     b.adam_state, b.adam_state_scratch = b.adam_state_scratch, b.adam_state
+    if carry_eta:
+        b.swap_eta()
 
     cmd = enc.finish()
     with pipeline.gpu_lock:

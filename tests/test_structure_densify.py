@@ -15,7 +15,7 @@ import numpy as np
 import pytest
 
 from _pipeline_testkit import TestPipeline
-from trainer.densify import StructureConfig
+from trainer.densify import DensifyConfig, StructureConfig
 from trainer.dataset import simple_camera
 from trainer.device import create_device
 
@@ -355,3 +355,198 @@ def test_scoring_kernel_flags_large_gaussian(backend: str) -> None:
 
     assert actions_big["n_split"] >= 1, "large gaussian should violate frequency and split"
     assert actions_small["n_split"] == 0, "tiny gaussian should not split"
+
+
+def _read_gaussians(p: TestPipeline, n: int) -> np.ndarray:
+    """Read back the first n gaussians as an (n, 14) float array (mean[0:3],
+    log_scale[3:6], rot_quat[6:10], opacity[10], sh0[11:14])."""
+    g = np.frombuffer(p.buffers.gaussians.to_numpy().tobytes(),
+                      dtype=np.float32).reshape(-1, 14)
+    return g[:n]
+
+
+def _read_eta(p: TestPipeline, n: int) -> dict[str, np.ndarray]:
+    """Read back the first n slots of every eta accumulator."""
+    def r(buf):
+        return np.frombuffer(buf.to_numpy().tobytes(), dtype=np.uint32)[:n]
+    return {
+        "n_total": r(p.buffers.eta_n_total),
+        "n_high":  r(p.buffers.eta_buffers["n_high"]),
+        "n_low":   r(p.buffers.eta_buffers["n_low"]),
+        "max_x":   r(p.buffers.eta_buffers["max_x"]),
+        "max_y":   r(p.buffers.eta_buffers["max_y"]),
+        "max_z":   r(p.buffers.eta_buffers["max_z"]),
+    }
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_eta_carried_through_filler_densify(backend: str) -> None:
+    """SAD-GS eta persistence (#2): a FILLER (AbsGS) densify with carry_eta=True
+    must permute the slot-indexed eta accumulators through the same
+    valid_mask/scan as the gaussians, carrying the multiview window of surviving
+    gaussians and zeroing it for brand-new primitives.
+
+    Carry rule under test (matches SADGS):
+      - KEEP survivor        -> eta carried
+      - CLONE parent (kept)  -> eta carried; the appended clone -> zero
+      - SPLIT parent slot    -> overwritten with a NEW child-1 -> eta zeroed;
+                                the appended child-2 -> zero
+      - PRUNE                -> dropped
+
+    We drive the four actions deterministically via decide_actions_simple's
+    gates (opacity<t_opacity -> PRUNE; grad>thresh & scale>scale_thresh ->
+    SPLIT; grad>thresh & small -> CLONE; grad<=thresh -> KEEP), tag each parent
+    with a UNIQUE eta signature, and after the densify match each surviving
+    gaussian back to its parent by POSITION (the gaussian scatter is co-indexed
+    with the eta scatter, so a correct implementation keeps them aligned)."""
+    p = _setup(backend, max_splats=64)
+
+    # 4 parents at distinct x-positions. Scale: 3 small (0.01) so KEEP/CLONE/
+    # PRUNE stay in the clone-size band; 1 large (0.30) so the SPLIT candidate
+    # takes the split path. Opacity: parent 3 near-zero so it PRUNES.
+    #   idx 0: KEEP   (grad low)                          -> carry
+    #   idx 1: CLONE  (grad high, small scale)            -> carry (+appended 0)
+    #   idx 2: SPLIT  (grad high, large scale)            -> zero  (+appended 0)
+    #   idx 3: PRUNE  (opacity below floor)               -> dropped
+    xs = np.array([-3.0, -1.0, 1.0, 3.0], dtype=np.float32)
+    scales = np.array([0.01, 0.01, 0.30, 0.01], dtype=np.float32)
+    opac = np.array([0.9, 0.9, 0.9, 1e-4], dtype=np.float32)
+    means = np.stack([xs, np.zeros(4, np.float32), np.full(4, 5.0, np.float32)], axis=1)
+    p.set_gaussians_from_numpy(
+        means=means,
+        log_scales=np.log(np.repeat(scales[:, None], 3, axis=1)),
+        rot_quats=np.tile(np.array([1.0, 0, 0, 0], np.float32), (4, 1)),
+        opacities=opac,
+        color_logits=np.zeros((4, 3), dtype=np.float32),
+    )
+    p.buffers.num_gaussians_counter.copy_from_numpy(np.array([4], dtype=np.uint32))
+
+    # Unique eta signature per parent so we can identify who landed where.
+    # (values are arbitrary but distinct; max_* stored as fixed-point uint.)
+    N = p.max_splats
+    def wbuf(buf, vals, dtype=np.uint32):
+        a = np.zeros(N, dtype=dtype)
+        a[:4] = vals
+        buf.copy_from_numpy(a)
+    wbuf(p.buffers.eta_n_total, [11, 22, 33, 44])
+    wbuf(p.buffers.eta_buffers["n_high"], [1, 2, 3, 4])
+    wbuf(p.buffers.eta_buffers["n_low"], [5, 6, 7, 8])
+    wbuf(p.buffers.eta_buffers["max_x"], [100, 200, 300, 400])
+    wbuf(p.buffers.eta_buffers["max_y"], [110, 210, 310, 410])
+    wbuf(p.buffers.eta_buffers["max_z"], [120, 220, 320, 420])
+
+    # Grad/visibility signal driving the KEEP/CLONE/SPLIT decision. avg_grad =
+    # (mag/65536)/vis; the internal floor is grad_thresh * W*H*3 = 0.0002 *
+    # 64*64*3 = ~2.46. Give idx 1,2 avg_grad = 5.0 (>> floor) and idx 0 zero
+    # grad (-> KEEP). vis=1 for all live slots.
+    vis = np.zeros(N, dtype=np.uint32); vis[:4] = 1
+    p.buffers.visibility_count_accum.copy_from_numpy(vis)
+    mag = np.zeros(N, dtype=np.int64)
+    mag[1] = mag[2] = int(5.0 * 65536.0)   # avg_grad = 5.0 >> ~2.46 floor
+    mag[0] = mag[3] = 0                     # KEEP / (PRUNE decided by opacity)
+    p.buffers.grad_mean_2d_mag_accum.copy_from_numpy(mag)
+
+    cfg = DensifyConfig(t_opacity=0.005, t_big_scale=1e9)
+    # scale_thresh between the small (0.01) and large (0.30) scales so idx 2
+    # splits and idx 1 clones. grad_thresh at gsplat's 0.0002. Disable big-scale
+    # prune (t_big_scale huge + allow_scale_prune False) so only opacity prunes.
+    p.densify_simple(cfg, grad_thresh=0.0002, scale_thresh=0.1,
+                     prune_big_scale=1e9, allow_scale_prune=False,
+                     carry_eta=True)
+
+    n = _count(p)
+    # 4 parents - 1 prune (idx3) + 1 clone-append (idx1) + 1 split-append (idx2)
+    # = 5 live gaussians.
+    assert n == 5, f"expected 5 gaussians after densify, got {n}"
+
+    g = _read_gaussians(p, n)
+    eta = _read_eta(p, n)
+    xpos = g[:, 0]
+
+    # Locate the KEEP survivor (x=-3) and the CLONE parent (x=-1) by position.
+    keep_slots = np.where(np.isclose(xpos, -3.0, atol=1e-3))[0]
+    clone_parent_slots = np.where(np.isclose(xpos, -1.0, atol=1e-3))[0]
+    assert len(keep_slots) == 1, f"KEEP survivor not found uniquely: x={xpos}"
+    # CLONE produces two gaussians at x=-1 (parent + exact duplicate).
+    assert len(clone_parent_slots) == 2, f"expected 2 gaussians at clone x=-1: x={xpos}"
+
+    ks = int(keep_slots[0])
+    # KEEP survivor keeps its full eta signature (parent 0).
+    assert eta["n_total"][ks] == 11, f"KEEP eta_n_total not carried: {eta['n_total'][ks]}"
+    assert eta["n_high"][ks] == 1 and eta["n_low"][ks] == 5
+    assert eta["max_x"][ks] == 100 and eta["max_y"][ks] == 110 and eta["max_z"][ks] == 120
+
+    # Exactly ONE of the two x=-1 gaussians carries parent-1's eta (the surviving
+    # parent slot); the other (the appended clone) is zeroed.
+    c_ntotal = eta["n_total"][clone_parent_slots]
+    assert sorted(c_ntotal.tolist()) == [0, 22], (
+        f"clone eta: exactly one slot should carry n_total=22, other 0; got {c_ntotal}")
+    carrier = clone_parent_slots[np.argmax(c_ntotal)]
+    assert eta["n_high"][carrier] == 2 and eta["max_x"][carrier] == 200
+
+    # The SPLIT children must ALL be zeroed — a split replaces the parent with
+    # brand-new children. split_and_clone jitters child positions within the
+    # parent covariance (parent scale 0.30), so they land NEAR x=+1 but not
+    # exactly; identify them as the slots that are neither the KEEP survivor
+    # nor either clone-x=-1 gaussian (and there must be exactly 2).
+    identified = set(keep_slots.tolist()) | set(clone_parent_slots.tolist())
+    split_slots = [s for s in range(n) if s not in identified]
+    assert len(split_slots) == 2, f"expected 2 split children, got {split_slots}: x={xpos}"
+    # Sanity: they really are the split children (positioned near the split
+    # parent's x=+1, within a few sigma of the 0.30-scale jitter).
+    for s in split_slots:
+        assert abs(xpos[s] - 1.0) < 2.0, f"unexpected split-child position x={xpos[s]}"
+        assert eta["n_total"][s] == 0, f"SPLIT child eta not zeroed: slot {s} = {eta['n_total'][s]}"
+        assert eta["max_x"][s] == 0 and eta["n_high"][s] == 0
+
+    # Parent 3 (x=+3) was PRUNED — it must not appear at all (no gaussian near x=+3).
+    assert not np.any(np.abs(xpos - 3.0) < 0.5), "pruned gaussian survived"
+
+    # Global sanity: total carried n_total across all slots = 11 (keep) + 22
+    # (clone parent) = 33; everything else zero. This catches any stray carry.
+    assert int(eta["n_total"].sum()) == 33, (
+        f"total carried eta_n_total should be 11+22=33, got {int(eta['n_total'].sum())}")
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_eta_carried_through_morton_sort(backend: str) -> None:
+    """mortonScatterEta: a Morton re-sort with carry_eta=True permutes the eta
+    accumulators by the SAME sorted_values as the gaussians (pure permutation,
+    no zeroing). After the sort, each gaussian must still be paired with its
+    original eta signature — verified by matching on position."""
+    p = _setup(backend, max_splats=64)
+
+    # Place 5 gaussians deliberately OUT of Morton order (descending x) so the
+    # sort actually permutes them; tag each with a position-keyed eta.
+    k = 5
+    xs = np.array([4.0, 3.0, 2.0, 1.0, 0.0], dtype=np.float32)
+    means = np.stack([xs, np.zeros(k, np.float32), np.zeros(k, np.float32)], axis=1)
+    p.set_gaussians_from_numpy(
+        means=means,
+        log_scales=np.log(np.full((k, 3), 0.05, dtype=np.float32)),
+        rot_quats=np.tile(np.array([1.0, 0, 0, 0], np.float32), (k, 1)),
+        opacities=np.full(k, 0.9, dtype=np.float32),
+        color_logits=np.zeros((k, 3), dtype=np.float32),
+    )
+    p.buffers.num_gaussians_counter.copy_from_numpy(np.array([k], dtype=np.uint32))
+
+    # eta signature = round(10 * (x + 1)) so it's uniquely tied to position.
+    N = p.max_splats
+    sig = np.zeros(N, dtype=np.uint32)
+    sig[:k] = (10 * (xs + 1)).astype(np.uint32)   # [50,40,30,20,10]
+    p.buffers.eta_n_total.copy_from_numpy(sig)
+    for key in ("n_high", "n_low", "max_x", "max_y", "max_z"):
+        p.buffers.eta_buffers[key].copy_from_numpy(sig)
+
+    p.morton_sort(np.array([-1, -1, -1], np.float32),
+                  np.array([5, 5, 5], np.float32), carry_eta=True)
+
+    g = _read_gaussians(p, k)
+    eta = _read_eta(p, k)
+    # For every surviving gaussian, its eta must equal its position signature.
+    for i in range(k):
+        expected = int(round(10 * (g[i, 0] + 1)))
+        assert eta["n_total"][i] == expected, (
+            f"slot {i} (x={g[i,0]:.2f}) expected eta {expected}, got {eta['n_total'][i]}")
+        for key in ("n_high", "n_low", "max_x", "max_y", "max_z"):
+            assert eta[key][i] == expected, f"slot {i} {key} misaligned after sort"

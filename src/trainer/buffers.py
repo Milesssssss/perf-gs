@@ -227,6 +227,12 @@ class GaussianBuffers:
     # Keys are ETA_ACCUM_COMPONENTS. Only allocated/used on the structure path.
     eta_buffers: dict[str, spy.NDBuffer] = field(init=False)
     eta_n_total: spy.NDBuffer = field(init=False)  # uint[max_splats], views observed
+    # Scratch doubles for the eta accumulators, so the SAD-GS window statistics
+    # can be carried through the slot permutations of a filler densify
+    # (scatterCompactEta) and a Morton re-sort (mortonScatterEta) instead of
+    # being zeroed. Same swap idiom as gaussians_scratch / adam_state_scratch.
+    eta_buffers_scratch: dict[str, spy.NDBuffer] = field(init=False)
+    eta_n_total_scratch: spy.NDBuffer = field(init=False)
     # Per-axis grid split factor n_k (uint[max_splats]) written by the GPU
     # decision (decide_actions_structure.slang) and consumed by
     # split_anisotropic.slang.
@@ -288,6 +294,28 @@ class GaussianBuffers:
         ``{"eta_<component>": buf.storage}`` (eta_n_high_x ... eta_max_z),
         matching score_structure_aware.slang's entry-point parameters."""
         return {f"eta_{name}": buf.storage for name, buf in self.eta_buffers.items()}
+
+    def eta_scatter_kwargs(self) -> dict[str, spy.NDBuffer]:
+        """Dispatch bindings for the eta-carrying scatter kernels
+        (scatterCompactEta / mortonScatterEta): the 6 eta accumulators as
+        ``eta_<name>_in`` (primary, read) + ``eta_<name>_out`` (scratch, write),
+        where ``<name>`` in {n_total, n_high, n_low, max_x, max_y, max_z}.
+        eta_n_total is bundled with the 5 eta_buffers components. The caller
+        swaps primary<->scratch after the dispatch via :meth:`swap_eta`."""
+        prim = {"n_total": self.eta_n_total, **self.eta_buffers}
+        scratch = {"n_total": self.eta_n_total_scratch, **self.eta_buffers_scratch}
+        kw = {f"eta_{name}_in": buf.storage for name, buf in prim.items()}
+        kw.update({f"eta_{name}_out": buf.storage for name, buf in scratch.items()})
+        return kw
+
+    def swap_eta(self) -> None:
+        """Swap the eta primary<->scratch references after an eta-carrying
+        scatter, mirroring the gaussians/adam_state swap. The just-written
+        scratch becomes the live buffer set."""
+        self.eta_n_total, self.eta_n_total_scratch = \
+            self.eta_n_total_scratch, self.eta_n_total
+        self.eta_buffers, self.eta_buffers_scratch = \
+            self.eta_buffers_scratch, self.eta_buffers
 
 
 @dataclass
@@ -488,6 +516,8 @@ def allocate(
     # --- structure-aware densification (SAD-GS) ---
     buffers.eta_buffers = {name: allocator.uint_buffer(max_splats) for name in ETA_ACCUM_COMPONENTS}
     buffers.eta_n_total = allocator.uint_buffer(max_splats)
+    buffers.eta_buffers_scratch = {name: allocator.uint_buffer(max_splats) for name in ETA_ACCUM_COMPONENTS}
+    buffers.eta_n_total_scratch = allocator.uint_buffer(max_splats)
     buffers.split_factor_x = allocator.uint_buffer(max_splats)
     buffers.split_factor_y = allocator.uint_buffer(max_splats)
     buffers.split_factor_z = allocator.uint_buffer(max_splats)

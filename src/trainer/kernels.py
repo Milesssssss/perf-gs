@@ -59,6 +59,7 @@ KERNEL_SPECS: tuple[tuple[str, str, str], ...] = (
     ("split_and_clone",      "densify/split_and_clone.slang",                  "splitAndClone"),
     ("build_prune_mask",     "densify/build_prune_mask.slang",                 "buildPruneMask"),
     ("scatter_compact",      "densify/scatter_compact.slang",                  "scatterCompact"),
+    ("scatter_compact_eta",  "densify/scatter_compact.slang",                  "scatterCompactEta"),
     ("opacity_reset",        "densify/opacity_reset.slang",                    "resetOpacity"),
     ("clear_importance",     "densify/clear_importance.slang",                 "clearImportance"),
     ("compute_l1_minmax",    "densify/compute_error_mask.slang",               "computeL1MinMax"),
@@ -73,6 +74,7 @@ KERNEL_SPECS: tuple[tuple[str, str, str], ...] = (
     # periodic Morton-order (Z-curve) reorder of the gaussian buffer
     ("morton_encode",        "densify/morton_sort.slang",                      "mortonEncode"),
     ("morton_scatter",       "densify/morton_sort.slang",                      "mortonScatter"),
+    ("morton_scatter_eta",   "densify/morton_sort.slang",                      "mortonScatterEta"),
     # wait-free structure-densify decision (all 4 entry points share one file)
     ("clear_capacity_scratch",             "densify/decide_actions_structure.slang", "clearCapacityScratch"),
     ("decide_actions_structure_pass1",     "densify/decide_actions_structure.slang", "decideActionsStructurePass1"),

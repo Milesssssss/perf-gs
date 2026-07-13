@@ -1062,6 +1062,15 @@ def main() -> None:
 
             stats = {}
 
+            # SAD-GS eta window: a FILLER (AbsGS) tick carries the eta
+            # accumulators through its slot permutations (scatterCompactEta +
+            # mortonScatterEta) so the multiview frequency window accumulates
+            # over the whole structure interval (~50 samples) instead of being
+            # reset every filler tick (~10). A STRUCTURE tick instead clears eta
+            # afterward to start a fresh window (SADGS zeroes eta right after a
+            # normal/structure densification). Non-SAD paths never touch eta.
+            sad_carry_eta = args.structure_densify and not do_structure_step
+
             if do_structure_step:
                 stats = pipeline.densify_structure_aware(structure_cfg)
             elif args.structure_densify:
@@ -1076,6 +1085,7 @@ def main() -> None:
                     scale_thresh=extent * args.grow_scale3d,
                     prune_big_scale=extent * args.prune_scale3d,
                     allow_scale_prune=allow_scale_prune,
+                    carry_eta=True,
                 )
             elif args.simple_densify:
                 # we gate the too-big prune on step > reset_every: don't delete large kNN-init blobs before densification can split them
@@ -1110,23 +1120,30 @@ def main() -> None:
             if pipeline.last_submit_id:
                 submit_id_ring.append(pipeline.last_submit_id)
             pipeline.clear_tracking()
-            # SAD-GS: any densify (structure OR interleaved AbsGS) reorders
-            # gaussian slots via scatter_compact, so the slot-indexed eta
-            # accumulators are stale afterward. Reset them to start a fresh
-            # window on the new slot set. (This means the eta window spans only
-            # the gap to the next densify tick — ~--densify-every iters — not
-            # the full structure interval; the every-N accumulation cadence and
-            # per-view grad gate keep that window's samples representative.)
-            if args.structure_densify:
+            # SAD-GS eta window handling. clear_tracking above only zeros the
+            # grad/visibility window (never eta), so the eta buffers are intact
+            # here regardless of the branch.
+            #   STRUCTURE tick: densify_structure_aware used the plain scatter
+            #     (eta NOT carried), so eta is now stale on the new slot set.
+            #     Zero it to open a fresh window (SADGS zeroes eta right after a
+            #     normal densification).
+            #   FILLER tick (sad_carry_eta): densify_simple(carry_eta=True)
+            #     already permuted eta through the compaction, so DON'T clear —
+            #     the window keeps accumulating across the whole structure
+            #     interval. The Morton sort below must then also carry eta.
+            if args.structure_densify and not sad_carry_eta:
                 pipeline.clear_structure_scores()
             # Morton re-sort after every densify: the fresh gaussians live at
             # the tail of the buffer (appended by split_and_clone), so a
             # Z-order pass restores spatial locality before the next window
             # of forwards. Order matters: it MUST follow the clears above,
             # since Morton permutes slots and any non-zero slot-indexed
-            # accumulator would then reference the wrong gaussian.
+            # accumulator (grad/visibility) would then reference the wrong
+            # gaussian. On a filler tick we carry eta through the sort too so
+            # the just-preserved window isn't scrambled.
             if True:
-                pipeline.morton_sort(morton_world_min, morton_world_max)
+                pipeline.morton_sort(morton_world_min, morton_world_max,
+                                     carry_eta=sad_carry_eta)
                 if pipeline.last_submit_id:
                     submit_id_ring.append(pipeline.last_submit_id)
             # densify_simple runs wait-free and returns None for counts
@@ -1158,16 +1175,18 @@ def main() -> None:
 
         # Periodic standalone Morton re-sort (in addition to the post-densify
         # sort above). Only fires on non-densify iters, since densify already
-        # did one this iter. clear_tracking + clear_structure_scores follow
-        # because Morton permutes slots and slot-indexed window accumulators
-        # would otherwise reference the wrong gaussians.
+        # did one this iter. clear_tracking follows because Morton permutes
+        # slots and the grad/visibility window would otherwise reference the
+        # wrong gaussians. On the SAD path the eta window must SURVIVE this
+        # sort (it's only reset at a structure tick), so we carry eta through
+        # the permutation instead of clearing it — otherwise enabling
+        # --morton-every would silently wipe the multiview window mid-interval.
         if (args.morton_every > 0
                 and it % args.morton_every == 0
                 and not do_densify):
-            pipeline.morton_sort(morton_world_min, morton_world_max)
+            pipeline.morton_sort(morton_world_min, morton_world_max,
+                                 carry_eta=args.structure_densify)
             pipeline.clear_tracking()
-            if args.structure_densify:
-                pipeline.clear_structure_scores()
             if pipeline.last_submit_id:
                 submit_id_ring.append(pipeline.last_submit_id)
             densify_json.write(json.dumps({"iter": it, "event": "morton_sort"}) + "\n")
