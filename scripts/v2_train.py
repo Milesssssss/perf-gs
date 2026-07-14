@@ -224,7 +224,7 @@ def main() -> None:
                     help="alpha loss weight; set > 0 for RGBA targets (e.g. 1.0)")
     ap.add_argument("--lambda-ssim", type=float, default=0.2,
                     help="SSIM loss weight (3DGS default 0.2); 0 = pure L2")
-    ap.add_argument("--max-splats", type=int, default=6_500_000)
+    ap.add_argument("--max-splats", type=int, default=12_000_000)
     ap.add_argument("--z-near-cull", type=float, default=0.01,
                     help="view-space depth floor for bin cull; raise for scenes "
                          "where points can land near a camera pose (e.g. 0.2)")
@@ -309,7 +309,7 @@ def main() -> None:
                          "state and BLOCK until the viewer's 'Start Training' "
                          "button is pressed (or Enter here). Lets you inspect "
                          "the init before training begins. No-op with --no-viewer.")
-    ap.add_argument("--stream-max-splats", type=int, default=6_500_000,
+    ap.add_argument("--stream-max-splats", type=int, default=8_500_000,
                     help="capacity of the live-viewer shared-memory stream (splats). "
                          "Snapshots beyond this are truncated for viewing only.")
     ap.add_argument("--stream-every", type=int, default=50,

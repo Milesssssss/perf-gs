@@ -47,6 +47,52 @@ uint _wang_hash(uint x)
 }
 float _rand01(uint seed) { return float(_wang_hash(seed)) / 4294967295.0; }
 
+// Box-Muller: two uniforms -> a pair of independent standard-normal samples.
+// SADGS jitters the structure-field sample point with a Gaussian drawn from the
+// projected 2D covariance (freq_utils.py: eps1,eps2 = randn); the previous
+// uniform[-0.5,0.5] box jitter had std 1/sqrt(12) ~ 0.289 in axis units, so it
+// stayed far closer to the Gaussian center and under-observed the footprint.
+float2 _randn2(uint seed)
+{
+    float u1 = max(_rand01(seed), 1e-7);
+    float u2 = _rand01(seed + 1u);
+    float r = sqrt(-2.0 * log(u1));
+    float a = 6.28318530718 * u2;
+    return float2(r * cos(a), r * sin(a));
+}
+
+// Bilinear sample of the packed structure tensor at pixel coordinate `p`
+// (integer coords = texel centers), with ZERO-padding outside [0,dim-1] — this
+// matches SADGS's F.grid_sample(align_corners=True) default (bilinear interp,
+// zeros outside), replacing the previous nearest-neighbour + border-clamp fetch.
+// Border clamp biased samples that fell off-image toward the edge texel's
+// (often high) structure value; zero-padding treats out-of-frame as no signal.
+float3 _sample_structure_bilinear(Texture2D<float4> tex, float2 p, uint2 dim)
+{
+    float2 pf = floor(p);
+    int2 i0 = int2(pf);
+    float2 f = p - pf;                 // bilinear weights in [0,1)
+    int W = int(dim.x), H = int(dim.y);
+
+    float3 acc = float3(0.0, 0.0, 0.0);
+    // 4 taps; each out-of-bounds tap contributes 0 (zero padding).
+    [unroll]
+    for (int dy = 0; dy < 2; ++dy)
+    {
+        [unroll]
+        for (int dx = 0; dx < 2; ++dx)
+        {
+            int tx = i0.x + dx;
+            int ty = i0.y + dy;
+            if (tx < 0 || tx >= W || ty < 0 || ty >= H) continue;
+            float wx = (dx == 0) ? (1.0 - f.x) : f.x;
+            float wy = (dy == 0) ? (1.0 - f.y) : f.y;
+            acc += (wx * wy) * tex[int2(tx, ty)].xyz;
+        }
+    }
+    return acc;
+}
+
 // Top eigenvalue of the packed symmetric 2x2 tensor (Sxx, Sxy, Syy).
 float _principal_eigenvalue(float3 s)
 {
@@ -165,24 +211,43 @@ void scoreStructureAware(
         R[2][0] * scale.x, R[2][1] * scale.y, R[2][2] * scale.z
     );
     float3x3 A = mul(J, mul(W, RS));
-    // Projected 2D extent of each axis (the x,y rows of A; row 2 of J is 0),
-    // dilated to match the renderer's rasterized footprint (see COV_DILATION):
-    // effective_len = sqrt(len^2 + 0.3), floored just like project.slang.
+    // Projected 2D length of each axis (the x,y rows of A; row 2 of J is 0),
+    // with only the +1e-8 numerical guard (COV_DILATION) inside the sqrt — this
+    // is the RAW projected axis length the reference measures for eta
+    // (freq_utils.py:342 axis_lengths = sqrt(u²+v²+1e-8)), NOT the renderer's
+    // +0.3-dilated footprint. (The +0.3 low-pass dilation IS applied, but only
+    // to the covariance used for jitter sampling below, so the jitter covers the
+    // rasterized footprint while eta measures the ideal projected extent.)
     float len_vx = sqrt(A[0][0] * A[0][0] + A[1][0] * A[1][0] + COV_DILATION);
     float len_vy = sqrt(A[0][1] * A[0][1] + A[1][1] * A[1][1] + COV_DILATION);
     float len_vz = sqrt(A[0][2] * A[0][2] + A[1][2] * A[1][2] + COV_DILATION);
 
     // --- Sample S̄ at a jittered footprint point, get local min wavelength. ---
-    // Jitter within ~1 projected-axis extent of the center (Section 3.6's
-    // stochastic jitter sampling), decorrelated per view via pass_idx.
+    // SADGS (freq_utils.py) draws the sample offset from the full projected 2D
+    // covariance Σ₂ = A Aᵀ (its screen x,y block), not a per-axis box: it
+    // Cholesky-factors Σ₂ and offsets the center by L·eps, eps ~ N(0,I). This
+    // reaches the correlated, off-axis parts of the footprint a per-axis box
+    // jitter never sampled. Σ₂ from A's first two rows (row 2 of J is 0), with
+    // the same +0.3 low-pass dilation project.slang adds so the sampled extent
+    // matches the RASTERIZED footprint rather than the ideal projected one.
+    float cov_xx = A[0][0] * A[0][0] + A[0][1] * A[0][1] + A[0][2] * A[0][2] + 0.3;
+    float cov_xy = A[0][0] * A[1][0] + A[0][1] * A[1][1] + A[0][2] * A[1][2];
+    float cov_yy = A[1][0] * A[1][0] + A[1][1] * A[1][1] + A[1][2] * A[1][2] + 0.3;
+
+    // Cholesky of the 2D covariance (matches SADGS L11/L21/L22):
+    //   L11 = sqrt(cov_xx); L21 = cov_xy / L11; L22 = sqrt(cov_yy - L21²).
+    float L11 = sqrt(max(cov_xx, 1e-6));
+    float L21 = cov_xy / L11;
+    float L22 = sqrt(max(cov_yy - L21 * L21, 1e-6));
+
     uint seed = i * 2654435761u + pass_idx * 40503u;
-    float jx = (_rand01(seed) - 0.5);
-    float jy = (_rand01(seed + 1u) - 0.5);
-    float2 sample_px = mean_px + float2(jx * len_vx, jy * len_vy);
+    float2 eps = _randn2(seed);
+    float2 sample_px = mean_px + float2(L11 * eps.x, L21 * eps.x + L22 * eps.y);
 
     uint2 dim; structure_tensor.GetDimensions(dim.x, dim.y);
-    int2 tc = int2(clamp(sample_px, float2(0.0, 0.0), float2(dim) - 1.0));
-    float3 sbar = structure_tensor[tc].xyz;
+    // Bilinear fetch with zero-padding outside the image (SADGS grid_sample
+    // align_corners=True default), replacing nearest + border clamp.
+    float3 sbar = _sample_structure_bilinear(structure_tensor, sample_px, dim);
 
     float lambda1 = _principal_eigenvalue(sbar);
     float inv_lambda_min = sqrt(max(lambda1, 0.0)) + EPS;  // 1 / Lambda_min

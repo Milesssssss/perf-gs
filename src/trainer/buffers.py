@@ -46,7 +46,7 @@ GAUSSIAN_FLOAT_COUNT = 14
 # covering K tiles contributes K pairs. Computed as max_splats * 16
 # (average tile coverage with headroom) in allocate(); this constant
 # is only used when no explicit value is provided.
-DEFAULT_MAX_SORT_PAIRS = 8_000_000
+DEFAULT_MAX_SORT_PAIRS = 12_000_000
 
 
 def _ceil_div(a: int, b: int) -> int:

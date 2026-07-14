@@ -56,14 +56,14 @@ OMEGA_CALIBRATION = 1.0
 # in low-energy (flat) regions the tensor is driven toward zero -> tiny lambda1
 # -> huge Lambda_min -> eta ~ 0 -> no split, which is the desired fail-safe.
 # Named separately from EPS so "fixing" the numerical epsilon can't change it.
-MIN_ENERGY = 1e-8
+MIN_ENERGY = 1e-6
 
 # Bumped whenever the field math changes so stale caches are ignored.
 # v4: rewritten to match SADGS _v1 exactly (sqrt DoG band response, base tensor
 # re-blurred per level, Sobel, 4 bands) — field values changed.
 # v5: input is now RAW sRGB (matches SADGS train.py:184), was erroneously fed
 # linearized RGB in v4 — field values changed again.
-CACHE_VERSION = 5
+CACHE_VERSION = 6
 
 
 def cache_path(scene_dir, width: int, height: int,
