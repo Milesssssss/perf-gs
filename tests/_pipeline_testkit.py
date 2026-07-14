@@ -76,6 +76,8 @@ class TestPipeline(Pipeline):
         self._dispatch(self.k_opacity_reset, "opacity_reset",
             thread_count=[self.max_splats, 1, 1],
             gaussians=b.gaussians.storage,
+            adam_state=b.adam_state.storage,
             num_gaussians_counter=b.num_gaussians_counter.storage,
             reset_value=cap_value,
+            mode=0,   # CLAMP (downward clamp to logit(cap_value))
         )

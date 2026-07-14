@@ -224,7 +224,7 @@ def main() -> None:
                     help="alpha loss weight; set > 0 for RGBA targets (e.g. 1.0)")
     ap.add_argument("--lambda-ssim", type=float, default=0.2,
                     help="SSIM loss weight (3DGS default 0.2); 0 = pure L2")
-    ap.add_argument("--max-splats", type=int, default=12_000_000)
+    ap.add_argument("--max-splats", type=int, default=10_000_000)
     ap.add_argument("--z-near-cull", type=float, default=0.01,
                     help="view-space depth floor for bin cull; raise for scenes "
                          "where points can land near a camera pose (e.g. 0.2)")
@@ -287,6 +287,33 @@ def main() -> None:
                     help="SAD: child scale along axis k = sigma_k / n_k**power (SADGS "
                          "ks_scale_power). 1.0 for Mip-NeRF 360 (variance-preserving with the "
                          "sqrt(12) child spacing); 1.2 for Tanks & Temples / Deep Blending.")
+    # --- Opacity bundle (SADGS persistence control) + A/B/C ablation knobs ---
+    ap.add_argument("--sad-structure-min-opacity", type=float, default=0.005,
+                    help="structure-pass opacity prune floor. SADGS uses 0.1 (20x the "
+                         "warmup 0.005), pruning the post-split population hard so weak "
+                         "children don't survive to compound into the next structure pass. "
+                         "Default 0.005 = current behavior; set 0.1 to match the reference.")
+    ap.add_argument("--sad-opacity-cap", type=float, default=0.0,
+                    help="post-densify opacity cap applied to ALL survivors after the "
+                         "structure prune (SADGS inverse_sigmoid(min(opacity,0.8))). "
+                         "0 = off (current). Set 0.8 to match the reference (measured: "
+                         "ref it500-post opacity p90=p99=max=0.8).")
+    ap.add_argument("--sad-relative-reset", action="store_true",
+                    help="use SADGS RELATIVE opacity reset (opacity *= decay) instead of "
+                         "the gsplat CLAMP-to-0.01. Preserves strong/weak ordering through "
+                         "reset. REQUIRED when --sad-structure-min-opacity=0.1 so the floor "
+                         "doesn't wipe the scene at the first post-reset structure pass.")
+    ap.add_argument("--sad-reset-decay", type=float, default=0.1,
+                    help="RELATIVE-reset multiplier (SADGS opacity_reset_decay=0.1). "
+                         "Only used with --sad-relative-reset.")
+    ap.add_argument("--densify-diag", action="store_true",
+                    help="DIAGNOSTIC: read back GPU state around every densify "
+                         "tick and log growth trajectory, anisotropic fan-out "
+                         "distribution, eta-gate selectivity, and spatial-"
+                         "concentration (Gini) metrics to densify_diag.jsonl. "
+                         "Opt-in — adds a wait_for_idle + full buffer readback per "
+                         "densify tick (~17 ticks/run), off the hot path but not "
+                         "free. Use to debug runaway / untargeted densification.")
     ap.add_argument("--sad-match-loss-lrs", type=int, default=1,
                     help="when --structure-densify: 1 (default) = use SADGS's loss (lambda_l2) "
                          "and per-parameter LRs so we train exactly as they do; 0 = keep our "
@@ -442,7 +469,10 @@ def main() -> None:
         t_opacity=args.t_opacity,
         t_big_scale=args.t_big_scale * extent,
         opacity_cap=args.opacity_cap,
-        t_opacity_reset_value=args.opacity_reset_value
+        t_opacity_reset_value=args.opacity_reset_value,
+        # SADGS RELATIVE opacity reset (opacity bundle ablation).
+        reset_relative=args.sad_relative_reset,
+        reset_decay=args.sad_reset_decay,
     )
 
     structure_cfg = StructureConfig(
@@ -453,7 +483,10 @@ def main() -> None:
         split_power=args.sad_split_power,
         max_split_factor=args.sad_max_split_factor,
         ks_scale_power=args.sad_ks_scale_power,
-        t_opacity=args.t_opacity,
+        # Structure-pass opacity floor (0.005 baseline / 0.1 = SADGS reference).
+        t_opacity=args.sad_structure_min_opacity,
+        # Post-densify opacity cap (0 off / 0.8 = SADGS reference).
+        opacity_cap=args.sad_opacity_cap,
         # clone (small) vs split (large) threshold = SADGS args.dense * extent.
         dense_scale=args.grow_scale3d * extent,
     )
@@ -751,6 +784,15 @@ def main() -> None:
     log_txt = (run_dir / "log.txt").open("w", buffering=1)
     log_json = (run_dir / "log.jsonl").open("w", buffering=1)
     densify_json = (run_dir / "densify_log.jsonl").open("w", buffering=1)
+    densify_diag_json = (
+        (run_dir / "densify_diag.jsonl").open("w", buffering=1)
+        if args.densify_diag else None
+    )
+    if densify_diag_json is not None:
+        import densify_diag as _diag
+        # grad gate floor the structure decision uses internally (host pre-scales
+        # the SADGS mean-loss threshold by W*H*3 into our sum-of-abs convention).
+        _diag_grad_internal = args.sad_grad_threshold * (IMAGES_WIDTH * IMAGES_HEIGHT * 3.0)
     # Full-dataset average-PSNR curve, opened only when --eval-every > 0.
     # Records one JSON line per eval sweep for post-hoc convergence plotting.
     eval_curve_json = (
@@ -982,6 +1024,8 @@ def main() -> None:
             log_txt.close()
             log_json.close()
             densify_json.close()
+            if densify_diag_json is not None:
+                densify_diag_json.close()
             if eval_curve_json is not None:
                 eval_curve_json.close()
             if bin_viz_json is not None:
@@ -1061,6 +1105,18 @@ def main() -> None:
         if do_densify:
 
             stats = {}
+
+            # DIAGNOSTIC pre-capture: read back eta/grad/scale + spatial state
+            # BEFORE the densify mutates anything, so gate selectivity and
+            # fan-out reflect the decision this tick actually made.
+            _diag_rec = None
+            if densify_diag_json is not None:
+                _diag_rec = _diag.capture_pre(
+                    pipeline, structure=args.structure_densify,
+                    width=IMAGES_WIDTH, height=IMAGES_HEIGHT,
+                    structure_cfg=structure_cfg,
+                    grad_thresh_internal=_diag_grad_internal,
+                    dense_scale=structure_cfg.dense_scale)
 
             # SAD-GS eta window: a FILLER (AbsGS) tick carries the eta
             # accumulators through its slot permutations (scatterCompactEta +
@@ -1156,6 +1212,24 @@ def main() -> None:
                 "absgs" if args.structure_densify else "densify")
             densify_json.write(json.dumps(
                 {"iter": it, "event": "densify", "kind": kind, **stats}) + "\n")
+
+            # DIAGNOSTIC post-capture: realized growth + post-densify spatial
+            # concentration, after densify + morton have settled.
+            if _diag_rec is not None:
+                _diag_rec = _diag.capture_post(pipeline, _diag_rec,
+                                               structure=args.structure_densify)
+                _diag_rec["iter"] = it
+                _diag_rec["kind"] = kind
+                densify_diag_json.write(json.dumps(_diag_rec) + "\n")
+                fo = _diag_rec.get("fanout", {})
+                gate = _diag_rec.get("eta_gate", {})
+                sp = _diag_rec.get("spatial_post", {})
+                print(f"  [diag] {kind:9s} {_diag_rec['pre_count']}->{_diag_rec['post_count']} "
+                      f"(x{_diag_rec['growth_factor']}) | "
+                      f"trig={gate.get('frac_triggered_of_seen')} "
+                      f"prune={gate.get('frac_prune_of_seen')} "
+                      f"prod_p90={fo.get('prod_p90')} prod_max={fo.get('prod_max')} "
+                      f"| gini={sp.get('gini')} top1%={sp.get('top1pct_cell_share')}")
             # Only print a per-densify line when we have real counts — i.e. the
             # synchronous score-ranked densify() path. Wait-free paths (AbsGS
             # + structure) report None and read the counter on log ticks
@@ -1368,6 +1442,8 @@ def main() -> None:
     log_txt.close()
     log_json.close()
     densify_json.close()
+    if densify_diag_json is not None:
+        densify_diag_json.close()
     if eval_curve_json is not None:
         eval_curve_json.close()
     if bin_viz_json is not None:

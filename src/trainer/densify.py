@@ -55,7 +55,13 @@ class DensifyConfig:
                                     # genuinely-dead ones decaying below 0.005 get culled.
     t_big_scale: float = 0.1        # prune if max_scale > this (world-space floater removal)
     opacity_cap: float = 0.8        # post-densify opacity cap (softer than reset)
-    t_opacity_reset_value: float = 0.01  # reset opacity to this value
+    t_opacity_reset_value: float = 0.01  # reset opacity to this value (CLAMP mode)
+    # Opacity-reset mode. False (default): gsplat CLAMP — opacity <- min(opacity,
+    # logit(t_opacity_reset_value)). True: SADGS RELATIVE decay — opacity <-
+    # opacity * reset_decay (preserves strong/weak ordering; reset_decay is the
+    # multiplier, e.g. 0.1). SADGS reset_opacity(opacity_reset_decay=0.1).
+    reset_relative: bool = False
+    reset_decay: float = 0.1        # RELATIVE-mode multiplier (used iff reset_relative)
 
 
 @dataclass
@@ -78,7 +84,20 @@ class StructureConfig:
     # choice paired with the sqrt(12) child spacing in split_anisotropic.slang);
     # 1.2 for Tanks & Temples / Deep Blending (SADGS ks_scale_power=1.2).
     ks_scale_power: float = 1.0
-    t_opacity: float = 0.005         # low-opacity prune floor (always active)
+    # Structure-pass opacity prune floor. SADGS hardcodes min_opacity=0.1 at the
+    # structure densify (train.py:364) — 20x the warmup 0.005 — and prunes the
+    # whole post-split population below it. Our decision emits ACTION_PRUNE for
+    # opacity < t_opacity; split children/clones inherit parent opacity, so
+    # pruning low-opacity parents here is ~equivalent to the reference's
+    # prune-after-split. Measured (ref_popstat_bicycle.jsonl): the reference's
+    # it500-post opacity p10=0.134 (everything below 0.1 culled).
+    t_opacity: float = 0.005
+    # Post-densify opacity cap (SADGS gaussian_model.py:1046:
+    # inverse_sigmoid(min(get_opacity, 0.8)) applied to ALL survivors after the
+    # structure prune). Measured ref it500-post opacity p90=p99=max=0.8 — the cap
+    # is real and universal. 0 disables (no cap). Applied via resetOpacity's
+    # clamp-to-logit(cap), which is exactly min(logit, logit(0.8)).
+    opacity_cap: float = 0.8
     # Scale threshold separating clone (small) from split (large), = SADGS
     # args.dense * scene_extent. A triggered gaussian with max world-space scale
     # <= this is CLONED (exact duplicate); larger ones are anisotropically split.
@@ -515,14 +534,19 @@ def densify_simple(pipeline: Pipeline, cfg: DensifyConfig,
 
 
 def reset_opacity(pipeline: Pipeline, cfg: DensifyConfig) -> None:
-    """Per-gaussian opacity <- low value. Forces optimizer to re-earn
-    opacity on real geometry."""
+    """Per-gaussian opacity reset. CLAMP mode (default): opacity <-
+    min(opacity, logit(t_opacity_reset_value)). RELATIVE mode (SADGS): opacity
+    <- opacity * reset_decay. Forces the optimizer to re-earn opacity on real
+    geometry; RELATIVE preserves the strong/weak ranking through the reset."""
     b = pipeline.buffers
+    relative = getattr(cfg, "reset_relative", False)
     pipeline._dispatch(pipeline.k_opacity_reset, "opacity_reset",
         thread_count=[pipeline.max_splats, 1, 1],
         gaussians=b.gaussians.storage,
+        adam_state=b.adam_state.storage,
         num_gaussians_counter=b.num_gaussians_counter.storage,
-        reset_value=cfg.t_opacity_reset_value,
+        reset_value=(cfg.reset_decay if relative else cfg.t_opacity_reset_value),
+        mode=(1 if relative else 0),
     )
 
 
@@ -751,6 +775,21 @@ def densify_structure_aware(pipeline: Pipeline, cfg: StructureConfig) -> dict:
             src=b.scan_total.storage,
             dst=b.num_gaussians_counter.storage,
         )
+
+        # P10: post-densify opacity cap (SADGS gaussian_model.py:1046 applies
+        # inverse_sigmoid(min(get_opacity, 0.8)) to ALL survivors after the
+        # structure prune). resetOpacity does min(logit, logit(cap)) which is
+        # exactly that cap. Runs on the compacted buffer (now b.gaussians) over
+        # the final count. Skipped when opacity_cap <= 0 (ablation off).
+        if cfg.opacity_cap and cfg.opacity_cap > 0.0:
+            pipeline._dispatch(pipeline.k_opacity_reset, "opacity_cap",
+                thread_count=[pipeline.max_splats, 1, 1],
+                gaussians=b.gaussians.storage,
+                adam_state=b.adam_state.storage,
+                num_gaussians_counter=b.num_gaussians_counter.storage,
+                reset_value=float(cfg.opacity_cap),
+                mode=0,   # CLAMP: min(logit, logit(0.8)) == inverse_sigmoid(min(a,0.8))
+            )
 
     cmd = enc.finish()
     with pipeline.gpu_lock:
