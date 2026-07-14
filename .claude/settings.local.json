@@ -30,7 +30,10 @@
       "Bash(.venv/Scripts/python.exe scripts/v2_train.py --no-viewer --structure-densify --iters 610)",
       "Read(//tmp/**)",
       "Bash(git stash *)",
-      "Bash(../.venv/Scripts/python.exe -c \"import densify_diag; print\\('densify_diag import OK; fns:', [f for f in dir\\(densify_diag\\) if not f.startswith\\('__'\\)][:8]\\)\")"
+      "Bash(../.venv/Scripts/python.exe -c \"import densify_diag; print\\('densify_diag import OK; fns:', [f for f in dir\\(densify_diag\\) if not f.startswith\\('__'\\)][:8]\\)\")",
+      "Bash(wsl.exe -e nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv)",
+      "Bash(git -C SADGS/SADGS status --short)",
+      "Bash(git -C SADGS/SADGS diff --stat)"
     ],
     "deny": [
       "Bash(rm *)",
