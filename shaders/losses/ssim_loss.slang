@@ -1,47 +1,3 @@
-// Combined L1 + SSIM photometric loss with alpha supervision.
-//
-// 3DGS loss: L = (1 - lambda_ssim) * L1 + lambda_ssim * (1 - SSIM)
-//
-// The SSIM term is the MEAN over pixels of a per-pixel SSIM computed on an
-// 11x11 Gaussian-weighted window (sigma=1.5). Its gradient is NOT local: a
-// pixel x(p) enters the window of every neighbour q within the radius, so
-//   dL_ssim/dx(p) = sum_{q : |q-p|<=R} d(1-SSIM(q))/dx(p).
-// The exact gradient is therefore a TWO-PASS operation (this is what the
-// reference fused-SSIM / autograd implementations do):
-//
-//   Pass 1 (ssimComputeMaps): for each window centre q, compute the local
-//     statistics (mu_x, mu_y, sigma_x2, sigma_y2, sigma_xy), the partial
-//     derivatives of SSIM(q) w.r.t. mu_x/sigma_x2/sigma_xy, and reduce them
-//     into three "back-projection" maps:
-//         m1 = dS/dmu_x - 2*mu_x*dS/dsigma_x2 - mu_y*dS/dsigma_xy
-//         m2 = 2 * dS/dsigma_x2
-//         m3 = dS/dsigma_xy
-//     (derivation: mu_x, sigma_x2, sigma_xy are the only x-dependent stats;
-//      d(mu_x)/dx_q = w, d(sigma_x2)/dx_q = 2w(x_q-mu_x),
-//      d(sigma_xy)/dx_q = w(y_q-mu_y), and the w's are supplied by the
-//      pass-2 convolution, so the maps hold the per-window coefficients.)
-//
-//   Pass 2 (ssimGradient): convolve m1,m2,m3 with the SAME Gaussian and
-//     assemble the per-pixel SSIM gradient
-//         dSSIM_total/dx(p) = conv(m1)(p) + x(p)*conv(m2)(p) + y(p)*conv(m3)(p)
-//     then blend with the L1 gradient and the alpha term and write dL_dC.
-//
-// NOTE ON THE WINDOW LOOP: the two 11x11 (121-tap) loops below are NOT the
-// bottleneck — this convolution is cache-bound, not ALU/tap-bound. Adjacent
-// threads read heavily-overlapping windows straight from texture cache, so the
-// taps are cheap. A "separable" H-then-V rewrite was tried and measured ~70%
-// SLOWER: splitting into 4 passes forces the intermediate row-sums (and the
-// maps) through global-memory scratch textures, and that added bandwidth +
-// two extra dispatch barriers cost far more than the taps it saved. Keep the
-// fused 121-tap form unless a future rewrite stages the tile+halo in LDS
-// (groupshared) to avoid the global round-trip — and only if Nsight confirms it.
-//
-// Gradients are in the SUM-over-pixels convention (no 1/N), matching the L1
-// kernel in l1_l2_loss.slang; the /(W*H) normalization happens once in Adam.
-// COLORSPACE: SSIM is evaluated in sRGB (render and target are both sRGB,
-// compared directly — no linearization), matching the L1 term and matching
-// the INRIA 3DGS / gsplat / SADGS convention.
-
 #include "../common/types.slang"
 
 static const int WINDOW_RADIUS = 5;   // 11x11 window
@@ -78,15 +34,24 @@ void ssimComputeMaps(
     {
         for (int dj = -WINDOW_RADIUS; dj <= WINDOW_RADIUS; dj++)
         {
-            int2 q = int2(p) + int2(dj, di);
-            q = clamp(q, int2(0, 0), int2(frame_dim) - 1);
             float w = gaussWeightRaw(di, dj);
             w_sum += w;
 
-            float3 xq = output_image[uint2(q)].rgb;
-            float3 yq = target_image[uint2(q)].rgb;   // sRGB, no linearization
+            int2 q = int2(p) + int2(dj, di);
 
-            mu_x += w * xq;  mu_y += w * yq;
+            bool valid =
+                q.x >= 0 && q.y >= 0 &&
+                q.x < int(frame_dim.x) &&
+                q.y < int(frame_dim.y);
+
+            if (!valid)
+                continue; // zero padding
+
+            float3 xq = output_image[uint2(q)].rgb;
+            float3 yq = target_image[uint2(q)].rgb;
+
+            mu_x += w * xq;
+            mu_y += w * yq;
             Ex2  += w * xq * xq;
             Ey2  += w * yq * yq;
             Exy  += w * xq * yq;
@@ -156,23 +121,31 @@ void ssimGradient(
         for (int dj = -WINDOW_RADIUS; dj <= WINDOW_RADIUS; dj++)
         {
             int2 q = int2(p) + int2(dj, di);
-            q = clamp(q, int2(0, 0), int2(frame_dim) - 1);
+
+            bool valid =
+                q.x >= 0 && q.y >= 0 &&
+                q.x < int(frame_dim.x) &&
+                q.y < int(frame_dim.y);
+
+            if (!valid)
+                continue;
+
             float w = gaussWeightRaw(di, dj);
+
             cm1 += w * ssim_m1[uint2(q)].rgb;
             cm2 += w * ssim_m2[uint2(q)].rgb;
             cm3 += w * ssim_m3[uint2(q)].rgb;
         }
     }
 
-    // dSSIM_total/dx(p); loss uses (1 - SSIM) so negate. Sum convention.
+    //dSSIM_total/dx(p); rhe loss uses (1 - SSIM), so negate it!
     float3 grad_ssim = -(cm1 + x * cm2 + y * cm3);
 
     // L1 gradient (matches l1_l2_loss.slang): d|x-y|/dx = sign(x-y).
     float3 grad_l1 = sign(x - y);
 
     float3 grad_rgb = (1.0 - lambda_ssim) * grad_l1 + lambda_ssim * grad_ssim;
-    // Optional additive L2 term (SADGS lambda_l2 * mean((C-T)^2)); sum
-    // convention, so per-pixel gradient is lambda_l2 * 2*(x-y).
+
     if (lambda_l2 > 0.0)
         grad_rgb += lambda_l2 * 2.0 * (x - y);
 

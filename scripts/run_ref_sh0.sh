@@ -25,15 +25,45 @@ export LD_LIBRARY_PATH=$HOME/mm/envs/sadgs/lib/python3.11/site-packages/torch/li
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export REF_ST_BATCH=16
 export REF_PIN_SH0=1
-export REF_POP_OUT=$REPO/outputs/ref_popstat_sh0.jsonl
-export REF_EVAL_OUT=$REPO/outputs/ref_eval_sh0.json
 
+# Output into a dedicated per-run SADGS folder that mirrors our trainer's
+# outputs/train/<run-name>/ layout (final_psnr.json + logs), so the reference
+# result sits next to ours for a like-for-like PSNR@3k comparison.
+RUN_NAME="${RUN_NAME:-bicycle_sh0}"
+OUT="$REPO/outputs/sadgs/$RUN_NAME"
+mkdir -p "$OUT"
+export REF_POP_OUT=$OUT/ref_popstat.jsonl
+export REF_EVAL_OUT=$OUT/ref_eval.json
+
+PY="$HOME/mm/envs/sadgs/bin/python"
 cd "$REPO/SADGS/SADGS"
-exec "$HOME/mm/envs/sadgs/bin/python" train.py \
+"$PY" train.py \
   -s "$REPO/datasets/360_v2/bicycle" -i images_4 --eval \
   --optimizer_type hybrid --split_ratio_threshold 0.4 --sample_bbox_faces \
   --warmup_densification --mult 0.25 \
   --iterations "$ITERS" --position_lr_max_steps 3000 \
   --opacity_reset_interval 1200 --densification_interval 500 \
   --densify_until_iter 1900 --densify_from_iter 100 \
-  --save_iterations 3000 --model_path /tmp/ref_bike_sh0
+  --save_iterations 3000 --model_path "$OUT"
+
+# Re-emit the reference in-memory eval in our final_psnr.json schema so it can be
+# diffed directly against outputs/train/<run>/final_psnr.json (same field names).
+"$PY" - "$REF_EVAL_OUT" "$OUT/final_psnr.json" "$ITERS" <<'PYCONV'
+import json, sys
+src, dst, iters = sys.argv[1], sys.argv[2], int(sys.argv[3])
+d = json.load(open(src))
+json.dump({
+    "psnr_srgb": d.get("psnr_mean_per_image"),
+    "ssim_srgb": d.get("ssim_mean_per_image"),
+    "n_test_cams": d.get("n_test"),
+    "final_n_gaussians": d.get("n_gaussians"),
+    "iters": d.get("iteration", iters),
+    "eval_holdout": True,
+    "eval_holdout_stride": 8,
+    "source": "SADGS reference (REF_PIN_SH0=1)",
+}, open(dst, "w"), indent=2)
+print(f"[convert] wrote {dst}")
+PYCONV
+
+echo "SADGS reference output: $OUT"
+ls -1 "$OUT"

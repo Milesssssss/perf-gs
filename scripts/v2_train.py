@@ -345,15 +345,20 @@ def main() -> None:
                          "is cheap (was coarse when it required a GPU->CPU readback).")
     ap.add_argument("--backend", type=str, default="vulkan", choices=["vulkan", "d3d12"])
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--sample-mode", type=str, default="ours", choices=["ours", "sadgs"],
+                    help="per-iteration train-camera draw. 'ours' (default): "
+                         "np.random.default_rng(seed).integers over the name-sorted "
+                         "train indices (with replacement, 1/iter). 'sadgs': replicate "
+                         "the reference SADGS trainer's EXACT draw — Python random.seed(seed), "
+                         "a load-time random.shuffle of train then test cameras (INRIA "
+                         "Scene shuffle=True), first epoch consumed in that load-shuffled "
+                         "order, then random.shuffle on every refill (epoch cycling, "
+                         "without replacement), batch_size=1. Use for a like-for-like "
+                         "PSNR comparison that isolates the renderer from the data order.")
     ap.add_argument("--run-name", type=str, default=None)
     ap.add_argument("--init-opacity", type=float, default=0.1, help="initial opacity for all splats")
     ap.add_argument("--grow-scale3d", type=float, default=0.001,
-                    help="Clone/split boundary as a FRACTION of scene_extent. Gaussians with "
-                         "max world-scale <= this*extent are CLONED (duplicated); above are "
-                         "SPLIT (anisotropically subdivided). Matches SADGS's dense=percent_dense="
-                         "0.001. Was 0.01 (10x too permissive), which classified the whole "
-                         "0.001*E..0.01*E band as 'small' and routed those mid-scale gaussians "
-                         "into the CLONE branch (exact duplicate) instead of anisotropic SPLIT.")
+                    help="Scale factor for 3D growth of Gaussians (for split/clone routing).")
     ap.add_argument("--opacity-reset-value", type=float, default=0.01, help="value to reset opacity to when doing opacity reset")
     ap.add_argument("--profile-run", action="store_true",
                     help="Nsight Graphics profiling mode. Runs a NORMAL training loop "
@@ -446,6 +451,46 @@ def main() -> None:
               f"reporting over all cameras (internal metric).")
     train_indices_arr = np.array(train_indices, dtype=np.int64)
 
+    # --- SADGS-matching sampling mode (--sample-mode sadgs) ---
+    # Replicate the reference SADGS trainer's EXACT per-iteration camera draw so
+    # a like-for-like PSNR comparison isolates the renderer, not the data order.
+    # SADGS (INRIA lineage) consumes the Python `random` stream like so:
+    #   safe_state              -> random.seed(0)
+    #   Scene(shuffle=True)     -> random.shuffle(train_cams); random.shuffle(test_cams)
+    #   epoch cycling: viewpoint_stack = getTrainCameras().copy() (the load-shuffled
+    #     order, popped IN ORDER for the FIRST epoch — no reshuffle), then on each
+    #     refill (stack empty) random.shuffle(stack) before popping from the front.
+    # We mirror that here: same seed, same shuffle-call order over same-length
+    # train/test index lists, same first-epoch-no-reshuffle + refill-reshuffle
+    # cadence, batch_size=1 (the reference default). Our camera order already
+    # matches SADGS (both name-sort then drop every `stride`-th as holdout), so
+    # index i maps to the same image on both sides. NOTE: bit-exactness assumes
+    # SADGS makes no other `random.*` draws inside the loop (holds for the SH0
+    # bicycle config: random_background is off and densify uses torch RNG).
+    _sadgs_sampler = None
+    if args.sample_mode == "sadgs":
+        import random as _pyrandom
+        _pyrandom.seed(args.seed)
+        _sadgs_train = list(train_indices)   # name-sorted ascending, minus holdout
+        _sadgs_test = list(test_indices)
+        _pyrandom.shuffle(_sadgs_train)      # Scene load-time shuffle (train)
+        _pyrandom.shuffle(_sadgs_test)       # Scene load-time shuffle (test) — consumes stream
+        _sadgs_base = list(_sadgs_train)     # getTrainCameras() order
+        _sadgs_stack = list(_sadgs_base)     # initial viewpoint_stack = getTrainCameras().copy()
+
+        def _sadgs_next_cam() -> int:
+            # SADGS pops from the front; on an exhausted epoch it refills from
+            # getTrainCameras().copy() and reshuffles before the next pop.
+            if not _sadgs_stack:
+                _sadgs_stack.extend(_sadgs_base)
+                _pyrandom.shuffle(_sadgs_stack)
+            return _sadgs_stack.pop(0)
+
+        _sadgs_sampler = _sadgs_next_cam
+        print(f"[sample-mode=sadgs] replicating SADGS random-shuffle sampling "
+              f"(seed={args.seed}, {len(_sadgs_base)} train cams, batch_size=1, "
+              f"first epoch in load-shuffled order, reshuffle on refill)")
+
     # AABB of the initial point cloud, padded 20% per axis. Used only if
     # --morton-every > 0 (Morton quantization needs a normalized coord frame).
     # A stale bbox is fine — the shader saturates out-of-box means, so
@@ -510,6 +555,7 @@ def main() -> None:
         "max_splats": args.max_splats,
         "z_near_cull": args.z_near_cull,
         "backend": args.backend, "seed": args.seed,
+        "sample_mode": args.sample_mode,
         "run_name": run_name, "n_cams": n_cams, "n_init_points": n_init,
     }, indent=2))
 
@@ -920,10 +966,15 @@ def main() -> None:
             break
         it += 1
 
-        # Sample a TRAIN camera. With --eval, train_indices_arr excludes the
+        # Sample a TRAIN camera. With --eval, train_indices excludes the
         # held-out test views, so they are never optimized against (nor fed to
         # the structure-densify accumulator, which uses this same camera).
-        cam_idx = int(train_indices_arr[rng.integers(0, train_indices_arr.shape[0])])
+        # --sample-mode sadgs swaps our default_rng draw for a byte-for-byte
+        # replica of the reference SADGS shuffle/pop sequence (see setup above).
+        if _sadgs_sampler is not None:
+            cam_idx = _sadgs_sampler()
+        else:
+            cam_idx = int(train_indices_arr[rng.integers(0, train_indices_arr.shape[0])])
         entry = scene.images[cam_idx]
         pipeline.set_target_texture(target_textures[cam_idx])
 
