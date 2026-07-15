@@ -288,12 +288,12 @@ def main() -> None:
                          "ks_scale_power). 1.0 for Mip-NeRF 360 (variance-preserving with the "
                          "sqrt(12) child spacing); 1.2 for Tanks & Temples / Deep Blending.")
     # --- Opacity bundle (SADGS persistence control) + A/B/C ablation knobs ---
-    ap.add_argument("--sad-structure-min-opacity", type=float, default=0.005,
+    ap.add_argument("--sad-structure-min-opacity", type=float, default=0.1,
                     help="structure-pass opacity prune floor. SADGS uses 0.1 (20x the "
                          "warmup 0.005), pruning the post-split population hard so weak "
                          "children don't survive to compound into the next structure pass. "
                          "Default 0.005 = current behavior; set 0.1 to match the reference.")
-    ap.add_argument("--sad-opacity-cap", type=float, default=0.0,
+    ap.add_argument("--sad-opacity-cap", type=float, default=0.8,
                     help="post-densify opacity cap applied to ALL survivors after the "
                          "structure prune (SADGS inverse_sigmoid(min(opacity,0.8))). "
                          "0 = off (current). Set 0.8 to match the reference (measured: "
@@ -302,7 +302,7 @@ def main() -> None:
                     help="use SADGS RELATIVE opacity reset (opacity *= decay) instead of "
                          "the gsplat CLAMP-to-0.01. Preserves strong/weak ordering through "
                          "reset. REQUIRED when --sad-structure-min-opacity=0.1 so the floor "
-                         "doesn't wipe the scene at the first post-reset structure pass.")
+                         "doesn't wipe the scene at the first post-reset structure pass.", default=True)
     ap.add_argument("--sad-reset-decay", type=float, default=0.1,
                     help="RELATIVE-reset multiplier (SADGS opacity_reset_decay=0.1). "
                          "Only used with --sad-relative-reset.")
@@ -345,7 +345,7 @@ def main() -> None:
                          "is cheap (was coarse when it required a GPU->CPU readback).")
     ap.add_argument("--backend", type=str, default="vulkan", choices=["vulkan", "d3d12"])
     ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--sample-mode", type=str, default="ours", choices=["ours", "sadgs"],
+    ap.add_argument("--sample-mode", type=str, default="sadgs", choices=["ours", "sadgs"],
                     help="per-iteration train-camera draw. 'ours' (default): "
                          "np.random.default_rng(seed).integers over the name-sorted "
                          "train indices (with replacement, 1/iter). 'sadgs': replicate "
@@ -355,6 +355,15 @@ def main() -> None:
                          "order, then random.shuffle on every refill (epoch cycling, "
                          "without replacement), batch_size=1. Use for a like-for-like "
                          "PSNR comparison that isolates the renderer from the data order.")
+    ap.add_argument("--popstat", action="store_true",
+                    help="write outputs/train/<run>/ref_popstat.jsonl with a pre/post "
+                         "population snapshot around every densify tick, in the EXACT "
+                         "schema of the SADGS reference's ref_popstat.jsonl (count, "
+                         "world_max_scale + opacity percentiles, and for structure "
+                         "ticks the eta_max/high_ratio/fanout stats). Lets us diff our "
+                         "population trajectory line-for-line against "
+                         "outputs/sadgs/<run>/ref_popstat.jsonl to locate the gap. "
+                         "Reads back GPU buffers on each densify tick (opt-in).")
     ap.add_argument("--run-name", type=str, default=None)
     ap.add_argument("--init-opacity", type=float, default=0.1, help="initial opacity for all splats")
     ap.add_argument("--grow-scale3d", type=float, default=0.001,
@@ -535,6 +544,45 @@ def main() -> None:
         # clone (small) vs split (large) threshold = SADGS args.dense * extent.
         dense_scale=args.grow_scale3d * extent,
     )
+
+    # --- Resolved opacity-bundle settings (CLI -> config object) ---
+    # Printed at startup and at every structure pass so it is unambiguous whether
+    # the SADGS opacity bundle is actually active. The bundle is OFF by DEFAULT:
+    # structure_min_opacity=0.005 (not 0.1) and opacity_cap=0.0 (disabled), and
+    # relative_reset off. To match the reference structure pass, run with:
+    #   --sad-structure-min-opacity 0.1 --sad-opacity-cap 0.8
+    #   --sad-relative-reset --sad-reset-decay 0.1
+    def _opacity_bundle_settings() -> dict:
+        cap_on = bool(structure_cfg.opacity_cap and structure_cfg.opacity_cap > 0.0)
+        return {
+            "structure_min_opacity": structure_cfg.t_opacity,
+            "opacity_cap_enabled": cap_on,
+            "opacity_cap": structure_cfg.opacity_cap,
+            "relative_reset_enabled": bool(cfg.reset_relative),
+            "reset_decay": cfg.reset_decay,
+            "structure_grad_thresh": structure_cfg.grad_threshold,
+            "absgs_grad_thresh": args.grad_thresh,
+        }
+
+    def _print_opacity_bundle(where: str) -> None:
+        s = _opacity_bundle_settings()
+        print(f"[opacity-bundle] resolved @ {where}: "
+              f"structure_min_opacity={s['structure_min_opacity']} "
+              f"opacity_cap_enabled={s['opacity_cap_enabled']} "
+              f"opacity_cap={s['opacity_cap']} "
+              f"relative_reset_enabled={s['relative_reset_enabled']} "
+              f"reset_decay={s['reset_decay']} "
+              f"structure_grad_thresh={s['structure_grad_thresh']} "
+              f"absgs_grad_thresh={s['absgs_grad_thresh']}", flush=True)
+
+    if args.structure_densify:
+        _print_opacity_bundle("startup")
+        _s0 = _opacity_bundle_settings()
+        if (not _s0["opacity_cap_enabled"]) or _s0["structure_min_opacity"] < 0.1:
+            print("[opacity-bundle] WARNING: bundle is INACTIVE at reference "
+                  "strength — the 0.8 cap and/or 0.1 floor will NOT run. To match "
+                  "SADGS pass: --sad-structure-min-opacity 0.1 --sad-opacity-cap 0.8 "
+                  "--sad-relative-reset. Running as configured.", flush=True)
 
     (run_dir / "config.json").write_text(json.dumps({
         "scene": args.scene,
@@ -839,6 +887,15 @@ def main() -> None:
         # grad gate floor the structure decision uses internally (host pre-scales
         # the SADGS mean-loss threshold by W*H*3 into our sum-of-abs convention).
         _diag_grad_internal = args.sad_grad_threshold * (IMAGES_WIDTH * IMAGES_HEIGHT * 3.0)
+    # SADGS-schema population trajectory (--popstat): one pre/post snapshot per
+    # densify tick into ref_popstat.jsonl, directly diffable against the
+    # reference's outputs/sadgs/<run>/ref_popstat.jsonl.
+    popstat = None
+    if args.popstat:
+        from popstat import PopStat
+        popstat = PopStat(run_dir / "ref_popstat.jsonl")
+        print(f"[popstat] writing SADGS-schema population trajectory to "
+              f"{popstat.path}")
     # Full-dataset average-PSNR curve, opened only when --eval-every > 0.
     # Records one JSON line per eval sweep for post-hoc convergence plotting.
     eval_curve_json = (
@@ -1147,10 +1204,14 @@ def main() -> None:
         # densify (every --sad-structure-every, paper 500) OR the gentle AbsGS
         # gradient densify (the other ticks) that populates empty regions so the
         # structure pass can leverage existing primitives. A tick is a structure
-        # step when it aligns with the sad-structure-every phase.
+        # step on ABSOLUTE iteration multiples of --sad-structure-every (it %
+        # every == 0 -> 500/1000/1500), matching the SADGS reference's
+        # `iteration % densification_interval == 0` — NOT phase-offset by
+        # densify_from — so our structure ticks land on the same iters as the
+        # reference for a line-for-line popstat comparison.
         do_structure_step = (
             args.structure_densify and do_densify
-            and ((it - args.densify_from) % args.sad_structure_every == 0)
+            and (it % args.sad_structure_every == 0)
         )
 
         if do_densify:
@@ -1169,6 +1230,16 @@ def main() -> None:
                     grad_thresh_internal=_diag_grad_internal,
                     dense_scale=structure_cfg.dense_scale)
 
+            # POPSTAT pre-densify snapshot (SADGS schema). kind mirrors the
+            # reference: 'structure' on a SAD structure tick, 'warmup' on the
+            # gradient/AbsGS filler ticks. Taken BEFORE densify mutates the
+            # buffers, while the eta accumulators are still live.
+            _popstat_kind = "structure" if do_structure_step else "warmup"
+            if popstat is not None:
+                popstat.snapshot(pipeline, it, "pre", _popstat_kind,
+                                 extent=extent, structure_cfg=structure_cfg,
+                                 split_ratio_threshold=args.sad_tau_split)
+
             # SAD-GS eta window: a FILLER (AbsGS) tick carries the eta
             # accumulators through its slot permutations (scatterCompactEta +
             # mortonScatterEta) so the multiview frequency window accumulates
@@ -1179,6 +1250,10 @@ def main() -> None:
             sad_carry_eta = args.structure_densify and not do_structure_step
 
             if do_structure_step:
+                # Print the resolved bundle settings at every structure pass so
+                # it is provable, per-pass, whether the 0.1 floor / 0.8 cap are
+                # active (they are OFF unless the flags were passed).
+                _print_opacity_bundle(f"structure pass @ iter {it}")
                 stats = pipeline.densify_structure_aware(structure_cfg)
             elif args.structure_densify:
                 # Interleaved AbsGS gradient densify (dual-schedule filler). Same
@@ -1264,6 +1339,12 @@ def main() -> None:
             densify_json.write(json.dumps(
                 {"iter": it, "event": "densify", "kind": kind, **stats}) + "\n")
 
+            # POPSTAT post-densify snapshot (after densify + morton settled).
+            if popstat is not None:
+                popstat.snapshot(pipeline, it, "post", _popstat_kind,
+                                 extent=extent, structure_cfg=structure_cfg,
+                                 split_ratio_threshold=args.sad_tau_split)
+
             # DIAGNOSTIC post-capture: realized growth + post-densify spatial
             # concentration, after densify + morton have settled.
             if _diag_rec is not None:
@@ -1281,6 +1362,21 @@ def main() -> None:
                       f"prune={gate.get('frac_prune_of_seen')} "
                       f"prod_p90={fo.get('prod_p90')} prod_max={fo.get('prod_max')} "
                       f"| gini={sp.get('gini')} top1%={sp.get('top1pct_cell_share')}")
+                # Opacity-bundle assertions (diagnostic mode only): verify the
+                # shader actually honored the RESOLVED floor/cap on THIS pass.
+                # Asserted against the configured values (not the reference
+                # 0.1/0.8), so a default run (floor 0.005, cap off) never
+                # false-fails; the assert only bites if the bundle was
+                # configured but did not apply on the compacted (active) buffer.
+                if kind == "structure":
+                    _amin, _amax, _abmsgs = _diag.assert_opacity_bundle(
+                        pipeline,
+                        floor=structure_cfg.t_opacity,
+                        cap_enabled=bool(structure_cfg.opacity_cap
+                                         and structure_cfg.opacity_cap > 0.0),
+                        cap=structure_cfg.opacity_cap)
+                    print(f"  [opacity-bundle assert] iter {it}: min={_amin:.4f} "
+                          f"max={_amax:.4f} | " + " | ".join(_abmsgs))
             # Only print a per-densify line when we have real counts — i.e. the
             # synchronous score-ranked densify() path. Wait-free paths (AbsGS
             # + structure) report None and read the counter on log ticks
@@ -1495,6 +1591,8 @@ def main() -> None:
     densify_json.close()
     if densify_diag_json is not None:
         densify_diag_json.close()
+    if popstat is not None:
+        popstat.close()
     if eval_curve_json is not None:
         eval_curve_json.close()
     if bin_viz_json is not None:

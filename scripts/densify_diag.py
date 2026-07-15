@@ -209,6 +209,45 @@ def _opacity_pcts(pipeline, n: int) -> dict:
     return {f"p{p}": round(float(np.percentile(a, p)), 4) for p in ps} | {"max": round(float(a.max()), 4)}
 
 
+def assert_opacity_bundle(pipeline, *, floor, cap_enabled, cap, tol: float = 0.02):
+    """Diagnostic check that the structure pass HONORED the resolved opacity
+    floor/cap on the live (compacted) buffer. Reads back activated opacity and
+    asserts:
+
+        min live opacity >= floor - tol      # structure prune floor applied
+        max live opacity <= cap   + tol      # post-densify cap applied (if on)
+
+    Asserts against the CONFIGURED values (not the reference 0.1 / 0.8), so a
+    default run (floor 0.005, cap disabled) never false-fails — the assert only
+    fires if the bundle was configured but did not take effect (e.g. the cap
+    dispatch hit a stale buffer, or the floor constant never reached the shader).
+    Returns (min_opacity, max_opacity, messages)."""
+    pipeline.device.wait_for_idle()
+    n = _counter(pipeline)
+    g = np.frombuffer(pipeline.buffers.gaussians.to_numpy().tobytes(),
+                      dtype=np.float32).reshape(-1, 14)[:n]
+    a = 1.0 / (1.0 + np.exp(-g[:, 10].astype(np.float64)))  # sigmoid(logit)
+    amin, amax = float(a.min()), float(a.max())
+    msgs = []
+
+    ok_floor = amin >= floor - tol
+    msgs.append(f"floor>={floor}: min={amin:.4f} [{'OK' if ok_floor else 'FAIL'}]")
+    assert ok_floor, (f"structure opacity FLOOR not applied: min live opacity "
+                      f"{amin:.4f} < {floor} - {tol} (t_opacity did not reach the "
+                      f"decide shader, or prune ran on the wrong buffer)")
+
+    if cap_enabled:
+        ok_cap = amax <= cap + tol
+        msgs.append(f"cap<={cap}: max={amax:.4f} [{'OK' if ok_cap else 'FAIL'}]")
+        assert ok_cap, (f"opacity CAP not applied: max live opacity {amax:.4f} > "
+                        f"{cap} + {tol} (cap dispatch skipped or targeted the "
+                        f"stale source buffer before the ping-pong swap)")
+    else:
+        msgs.append(f"cap: disabled (max={amax:.4f})")
+
+    return amin, amax, msgs
+
+
 def capture_post(pipeline, pre: dict, *, structure: bool) -> dict:
     """Snapshot AFTER densify + morton. Completes the pre dict with the
     realized growth + post-densify spatial concentration + opacity dist
