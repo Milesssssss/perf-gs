@@ -148,7 +148,9 @@ def _render_all_cameras(pipeline: Pipeline, scene, iter_idx: int, cams_dir: Path
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--scene", type=str, default="datasets/360_v2/bicycle")
+    #ap.add_argument("--scene", type=str, default="datasets/360_v2/bicycle")
+    ap.add_argument("--scene", type=str, default="datasets/360_v2/counter")
+
     #ap.add_argument("--scene", type=str, default="datasets/synthetic/suzanne_blender")
 
     ap.add_argument("--iters", type=int, default=3000)
@@ -323,7 +325,7 @@ def main() -> None:
                          "--structure-densify and --sad-match-loss-lrs (else --lambda-l2 is used).")
     ap.add_argument("--lambda-l2", type=float, default=0.0,
                     help="additive L2 loss weight for non-SAD runs (0 = pure L1(+SSIM))")
-    ap.add_argument("--grad-thresh", type=float, default=0.0008,
+    ap.add_argument("--grad-thresh", type=float, default=0.0005,
                     help="2D-gradient densification threshold. gsplat uses 0.0002 for "
                          "vanilla grad and ~0.0008 for absgrad; our accumulator is an "
                          "abs-sum (absgrad-like), so 0.0008 matches. Lower = more growth.")
@@ -345,13 +347,14 @@ def main() -> None:
                          "is cheap (was coarse when it required a GPU->CPU readback).")
     ap.add_argument("--backend", type=str, default="vulkan", choices=["vulkan", "d3d12"])
     ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--mip-splatting", action="store_true",
+    ap.add_argument("--mip-splatting", action=argparse.BooleanOptionalAction,
+                    default=True,
                     help="Enable Mip-Splatting (Yu et al., CVPR 2024): a per-gaussian 3D "
                          "smoothing filter (from the TRAIN cameras) folded into the "
                          "projected covariance, plus the 2D Mip antialiasing filter with "
                          "differentiable opacity compensation. Targets the high-frequency "
-                         "detail gap vs SADGS (which uses the same 3D filter). Off = the "
-                         "bit-identical vanilla renderer.", default=True)
+                         "detail gap vs SADGS (which uses the same 3D filter). Default on; "
+                         "pass --no-mip-splatting for the bit-identical vanilla renderer.")
     ap.add_argument("--mip-kernel-size", type=float, default=0.1,
                     help="Mip-Splatting 2D low-pass dilation (mip canonical 0.1). Only used "
                          "with --mip-splatting; vanilla uses 0.3 with no compensation.")
@@ -730,6 +733,24 @@ def main() -> None:
         # (NDBuffer contents are not guaranteed zeroed on allocation).
         pipeline.clear_structure_scores()
 
+    # Mip-Splatting filter-3D logging: summarize buffers.filter_3D over the
+    # ACTIVE gaussians so it's verifiable that the filter actually changes
+    # across recomputes (init / post-densify / periodic / final). The `sum`
+    # checksum catches any change even when min/mean/max round-print the same.
+    def _log_filter3d(tag: str, it_val: int | None = None) -> None:
+        if not args.mip_splatting:
+            return
+        n = int(pipeline.buffers.num_gaussians_counter.to_numpy().view(np.uint32)[0])
+        if n == 0:
+            print(f"[filter3d] {tag}: no active gaussians", flush=True)
+            return
+        f = np.frombuffer(pipeline.buffers.filter_3D.to_numpy().tobytes(),
+                          dtype=np.float32)[:n].astype(np.float64)
+        it_str = f"it={it_val} " if it_val is not None else ""
+        print(f"[filter3d] {tag} {it_str}n={n} min={f.min():.6g} "
+              f"mean={f.mean():.6g} max={f.max():.6g} "
+              f"nonzero={np.count_nonzero(f) / n:.3f} sum={f.sum():.6g}", flush=True)
+
     # Mip-Splatting: upload the TRAIN cameras once and compute the initial
     # per-gaussian 3D smoothing filter (recomputed after each densify, since
     # the means move). Held-out test views are excluded to match mip-splatting
@@ -740,6 +761,7 @@ def main() -> None:
         pipeline.compute_3d_filter()
         print(f"[mip] enabled: kernel_size={args.mip_kernel_size}, 3D filter over "
               f"{len(train_cameras)} train cameras", flush=True)
+        _log_filter3d("init")
 
     # Live viewing is IN-PROCESS: a background-thread Viewer shares this
     # device (serialized by gpu_lock). Streaming a snapshot is a zero-copy
@@ -811,10 +833,19 @@ def main() -> None:
                       f"(cached n_cams={int(data['n_cams'])}, "
                       f"shape={data['fields'].shape[1:3]}); recomputing", flush=True)
 
+        # No cache: compute the fields on the GPU (default — fast enough that
+        # the preprocess/cache step is no longer required). Fall back to the CPU
+        # reference only if the GPU path can't be built.
+        st_gpu = None
         if cached_fields is None:
-            print(f"[SAD] no cache found, computing {n_cams} fields on the fly "
-                  f"(this is slow; run scripts/preprocess_structure.py once to "
-                  f"cache them)...", flush=True)
+            try:
+                from trainer.structure_analysis_gpu import StructureTensorGPU
+                st_gpu = StructureTensorGPU(device, IMAGES_WIDTH, IMAGES_HEIGHT)
+                print(f"[SAD] no cache; computing {n_cams} fields on GPU...",
+                      flush=True)
+            except Exception as e:  # noqa: BLE001 - any GPU failure -> CPU path
+                print(f"[SAD] GPU structure-tensor unavailable ({e}); computing "
+                      f"{n_cams} fields on CPU (slow)...", flush=True)
         else:
             print(f"[SAD] uploading {n_cams} structure-tensor textures to GPU...",
                   flush=True)
@@ -823,21 +854,21 @@ def main() -> None:
         for cam_i in range(n_cams):
             if cached_fields is not None:
                 sbar = cached_fields[cam_i]
-            else:
+            elif st_gpu is not None:
                 # SADGS computes the structure tensor on the RAW sRGB image
                 # (train.py:184 feeds cam.original_image straight in), NOT on
-                # linearized RGB. Match that so lambda1 orientation/band response
-                # (and thus eta) agree with the reference.
+                # linearized RGB. The GPU kernels match the CPU reference.
+                sbar = st_gpu.compute(targets_srgb[cam_i][..., :3])
+            else:
                 sbar = compute_structure_tensor_field(targets_srgb[cam_i][..., :3])
             structure_textures.append(_make_structure_tex(sbar, f"structure_tensor_{cam_i}"))
             if (cam_i + 1) % _log_stride == 0 or cam_i == n_cams - 1:
                 print(f"[SAD]   {cam_i + 1:3d}/{n_cams} "
                       f"({time.time() - t_sad:.1f}s elapsed)", flush=True)
         if cached_fields is None:
-            print(f"[SAD] WARNING: computed {n_cams} fields on the fly "
-                  f"in {time.time() - t_sad:.1f}s. Run scripts/preprocess_structure.py "
-                  f"--scene {args.scene} --downsample {args.downsample} to cache them.",
-                  flush=True)
+            _how = "GPU" if st_gpu is not None else "CPU"
+            print(f"[SAD] computed {n_cams} fields on {_how} in "
+                  f"{time.time() - t_sad:.1f}s", flush=True)
 
     # All setup uploads (target textures + structure-tensor textures) are done;
     # safe to start the viewer render thread now. See the deferred-start
@@ -1358,6 +1389,7 @@ def main() -> None:
             # children get a valid filter for the next window's forwards.
             if args.mip_splatting:
                 pipeline.compute_3d_filter()
+                _log_filter3d("post-densify", it)
             # densify_simple runs wait-free and returns None for counts
             # (they live GPU-side); the log-every branch below reads the
             # counter on its own cadence. densify()'s stats are still
@@ -1441,6 +1473,17 @@ def main() -> None:
             if pipeline.last_submit_id:
                 submit_id_ring.append(pipeline.last_submit_id)
             densify_json.write(json.dumps({"iter": it, "event": "morton_sort"}) + "\n")
+
+        # Mip-Splatting: keep the 3D filter fresh AFTER densification ends.
+        # While densifying (it <= densify_to) the post-densify recompute already
+        # covers it; once densify stops, the means keep drifting under the
+        # position LR, so the filter would freeze at its densify_to positions.
+        # Recompute every 100 iters past densify_to (matching mip-splatting's
+        # cadence; it skips the last ~100 iters where the filter barely moves).
+        if (args.mip_splatting and it > args.densify_to
+                and it % 100 == 0 and it < args.iters - 100):
+            pipeline.compute_3d_filter()
+            _log_filter3d("periodic", it)
 
 
         if it % 10 == 0:
@@ -1638,6 +1681,14 @@ def main() -> None:
 
     #TODO: Just make stuff under here into a cleaner post-training analysis routine
 
+    # Mip-Splatting: refresh the 3D filter one last time so the final metrics
+    # render reflects the FINAL gaussian positions. The periodic recompute above
+    # skips the last ~100 iters, so without this the reported PSNR would use a
+    # filter ~100-200 iters stale.
+    if args.mip_splatting:
+        pipeline.compute_3d_filter()
+        _log_filter3d("final")
+
     # Post-training per-camera metrics. Include BOTH the full-frame PSNR
     # (linear and sRGB) and the foreground-masked sRGB PSNR — the latter
     # is the honest silhouette metric (avoids the black-background inflation
@@ -1650,118 +1701,118 @@ def main() -> None:
     n_mask_used = 0
 
     #render all cameras in the scene and store them as PNGs in the run_dir/cams/cam_XX/ folder, and compute PSNR/MSE metrics
+    if args.compute_final_metrics:
+        _render_all_cameras(pipeline, scene, args.iters, cams_dir)
 
-    _render_all_cameras(pipeline, scene, args.iters, cams_dir)
+        for cam_i, entry in enumerate(scene.images):
+            pipeline.render(entry.camera)
+            # Render is sRGB now (INRIA/gsplat/SADGS convention). The sRGB PSNR
+            # (this is the paper-reported metric) is a direct compare vs t_srgb;
+            # the linear PSNR is kept for continuity — both are linearized.
+            r_srgb = np.clip(pipeline.read_output_image()[..., :3], 0.0, 1.0)
+            t_srgb = targets_srgb[cam_i][..., :3]
+            mse_srgb = float(np.mean((r_srgb - t_srgb) ** 2))
 
-    for cam_i, entry in enumerate(scene.images):
-        pipeline.render(entry.camera)
-        # Render is sRGB now (INRIA/gsplat/SADGS convention). The sRGB PSNR
-        # (this is the paper-reported metric) is a direct compare vs t_srgb;
-        # the linear PSNR is kept for continuity — both are linearized.
-        r_srgb = np.clip(pipeline.read_output_image()[..., :3], 0.0, 1.0)
-        t_srgb = targets_srgb[cam_i][..., :3]
-        mse_srgb = float(np.mean((r_srgb - t_srgb) ** 2))
+            r_lin = _srgb_to_linear(r_srgb)
+            t_lin = targets_linear(cam_i)
+            mse_lin = float(np.mean((r_lin - t_lin) ** 2))
 
-        r_lin = _srgb_to_linear(r_srgb)
-        t_lin = targets_linear(cam_i)
-        mse_lin = float(np.mean((r_lin - t_lin) ** 2))
+            mask = (t_srgb.sum(-1) > 0.05) | (r_srgb.sum(-1) > 0.05)
+            if mask.sum() > 0:
+                mse_srgb_mask = float(np.mean((r_srgb[mask] - t_srgb[mask]) ** 2))
+                total_mse_srgb_mask += mse_srgb_mask
+                n_mask_used += 1
+            else:
+                mse_srgb_mask = 0.0
 
-        mask = (t_srgb.sum(-1) > 0.05) | (r_srgb.sum(-1) > 0.05)
-        if mask.sum() > 0:
-            mse_srgb_mask = float(np.mean((r_srgb[mask] - t_srgb[mask]) ** 2))
-            total_mse_srgb_mask += mse_srgb_mask
-            n_mask_used += 1
+            total_mse_lin += mse_lin
+            total_mse_srgb += mse_srgb
+            per_cam.append({
+                "cam_idx": cam_i, "image_name": entry.image_name,
+                "in_test_split": cam_i in set(test_indices),
+                "mse_linear": mse_lin,
+                "psnr_linear": _psnr_image(r_lin, t_lin),
+                "mse_srgb": mse_srgb,
+                "psnr_srgb": _psnr_image(r_srgb, t_srgb),
+                "ssim_srgb": _ssim_image(r_srgb, t_srgb),
+                "mse_srgb_masked": mse_srgb_mask,
+                "psnr_srgb_masked": (_psnr_image(r_srgb[mask], t_srgb[mask])
+                                    if mask.sum() > 0 else 0.0),
+            })
+
+        # --- Reported metric = paper metric everywhere ---
+        # PSNR is ALWAYS the arithmetic mean of per-image PSNR (3DGS/SAD-GS
+        # convention; see _psnr_image + scripts/image_metrics.py). The headline
+        # `psnr_srgb` is that mean over the held-out TEST split — THE number to
+        # compare against the SAD-GS / 3DGS tables. We also break it out by
+        # train/all and keep the old dB-of-mean-MSE values only as explicitly
+        # suffixed `*_db_of_mean_mse` fields, so nothing silently reports the
+        # pessimistic aggregation.
+        test_set = set(test_indices)
+        test_cams = [c for c in per_cam if c["cam_idx"] in test_set]
+        train_cams = [c for c in per_cam if c["cam_idx"] not in test_set]
+
+        def mean_metric(cams, key):
+            return float(np.mean([c[key] for c in cams])) if cams else 0.0
+
+        def db_of_mean_mse(total_mse, n): return -10.0 * math.log10(max(total_mse / max(n, 1), 1e-12))
+
+        summary = {
+            # === HEADLINE: paper metrics (mean of per-image PSNR/SSIM, test split) ===
+            "psnr_srgb": mean_metric(test_cams, "psnr_srgb"),
+            "ssim_srgb": mean_metric(test_cams, "ssim_srgb"),
+            "psnr_linear": mean_metric(test_cams, "psnr_linear"),
+            "psnr_srgb_masked": mean_metric(test_cams, "psnr_srgb_masked"),
+            "eval_holdout": bool(args.eval_holdout),
+            "eval_holdout_stride": stride,
+            "n_test_cams": len(test_cams),
+            "n_train_cams": len(train_cams),
+            # Same paper metric, other splits (train / all cams).
+            "train_psnr_srgb": mean_metric(train_cams, "psnr_srgb"),
+            "train_ssim_srgb": mean_metric(train_cams, "ssim_srgb"),
+            "all_psnr_srgb": mean_metric(per_cam, "psnr_srgb"),
+            "all_ssim_srgb": mean_metric(per_cam, "ssim_srgb"),
+            # Legacy dB-of-mean-MSE (pessimistic pooling) — NOT the paper metric,
+            # kept only for continuity with old runs. Suffixed so it can't be
+            # mistaken for the headline.
+            "test_psnr_srgb_db_of_mean_mse": db_of_mean_mse(
+                sum(c["mse_srgb"] for c in test_cams), len(test_cams)),
+            "all_psnr_srgb_db_of_mean_mse": db_of_mean_mse(total_mse_srgb, n_cams),
+            "all_psnr_linear_db_of_mean_mse": db_of_mean_mse(total_mse_lin, n_cams),
+            "per_cam": per_cam,
+            "n_cams": n_cams,
+            "iters": args.iters,
+            # Pure training-loop wall-clock (excludes this final metrics pass),
+            # captured right after the loop with the GPU drained.
+            "train_wall_s": train_wall_s,
+            "train_it_per_s": completed_iters / max(train_wall_s, 1e-9),
+            "final_n_gaussians": int(pipeline.buffers.num_gaussians_counter.to_numpy().view(np.uint32)[0]),
+        }
+        (run_dir / "final_psnr.json").write_text(json.dumps(summary, indent=2))
+
+        ply_path = run_dir / "output.ply"
+        save_ply(pipeline, ply_path)
+
+        print(f"done in {time.time() - t_start:.1f}s")
+        if args.eval_holdout:
+            print(f"TEST PSNR sRGB (paper):  {summary['psnr_srgb']:6.2f} dB  "
+                f"<- mean of per-image dB over {summary['n_test_cams']} held-out views "
+                f"(compare to SAD-GS/3DGS table)")
+            print(f"TEST SSIM sRGB (paper):  {summary['ssim_srgb']:6.4f}     "
+                f"<- mean of per-image SSIM, {summary['n_test_cams']} held-out views")
+            print(f"train PSNR/SSIM sRGB:    {summary['train_psnr_srgb']:6.2f} dB / "
+                f"{summary['train_ssim_srgb']:.4f}  (mean per-image, {summary['n_train_cams']} train views)")
         else:
-            mse_srgb_mask = 0.0
-
-        total_mse_lin += mse_lin
-        total_mse_srgb += mse_srgb
-        per_cam.append({
-            "cam_idx": cam_i, "image_name": entry.image_name,
-            "in_test_split": cam_i in set(test_indices),
-            "mse_linear": mse_lin,
-            "psnr_linear": _psnr_image(r_lin, t_lin),
-            "mse_srgb": mse_srgb,
-            "psnr_srgb": _psnr_image(r_srgb, t_srgb),
-            "ssim_srgb": _ssim_image(r_srgb, t_srgb),
-            "mse_srgb_masked": mse_srgb_mask,
-            "psnr_srgb_masked": (_psnr_image(r_srgb[mask], t_srgb[mask])
-                                 if mask.sum() > 0 else 0.0),
-        })
-
-    # --- Reported metric = paper metric everywhere ---
-    # PSNR is ALWAYS the arithmetic mean of per-image PSNR (3DGS/SAD-GS
-    # convention; see _psnr_image + scripts/image_metrics.py). The headline
-    # `psnr_srgb` is that mean over the held-out TEST split — THE number to
-    # compare against the SAD-GS / 3DGS tables. We also break it out by
-    # train/all and keep the old dB-of-mean-MSE values only as explicitly
-    # suffixed `*_db_of_mean_mse` fields, so nothing silently reports the
-    # pessimistic aggregation.
-    test_set = set(test_indices)
-    test_cams = [c for c in per_cam if c["cam_idx"] in test_set]
-    train_cams = [c for c in per_cam if c["cam_idx"] not in test_set]
-
-    def mean_metric(cams, key):
-        return float(np.mean([c[key] for c in cams])) if cams else 0.0
-
-    def db_of_mean_mse(total_mse, n): return -10.0 * math.log10(max(total_mse / max(n, 1), 1e-12))
-
-    summary = {
-        # === HEADLINE: paper metrics (mean of per-image PSNR/SSIM, test split) ===
-        "psnr_srgb": mean_metric(test_cams, "psnr_srgb"),
-        "ssim_srgb": mean_metric(test_cams, "ssim_srgb"),
-        "psnr_linear": mean_metric(test_cams, "psnr_linear"),
-        "psnr_srgb_masked": mean_metric(test_cams, "psnr_srgb_masked"),
-        "eval_holdout": bool(args.eval_holdout),
-        "eval_holdout_stride": stride,
-        "n_test_cams": len(test_cams),
-        "n_train_cams": len(train_cams),
-        # Same paper metric, other splits (train / all cams).
-        "train_psnr_srgb": mean_metric(train_cams, "psnr_srgb"),
-        "train_ssim_srgb": mean_metric(train_cams, "ssim_srgb"),
-        "all_psnr_srgb": mean_metric(per_cam, "psnr_srgb"),
-        "all_ssim_srgb": mean_metric(per_cam, "ssim_srgb"),
-        # Legacy dB-of-mean-MSE (pessimistic pooling) — NOT the paper metric,
-        # kept only for continuity with old runs. Suffixed so it can't be
-        # mistaken for the headline.
-        "test_psnr_srgb_db_of_mean_mse": db_of_mean_mse(
-            sum(c["mse_srgb"] for c in test_cams), len(test_cams)),
-        "all_psnr_srgb_db_of_mean_mse": db_of_mean_mse(total_mse_srgb, n_cams),
-        "all_psnr_linear_db_of_mean_mse": db_of_mean_mse(total_mse_lin, n_cams),
-        "per_cam": per_cam,
-        "n_cams": n_cams,
-        "iters": args.iters,
-        # Pure training-loop wall-clock (excludes this final metrics pass),
-        # captured right after the loop with the GPU drained.
-        "train_wall_s": train_wall_s,
-        "train_it_per_s": completed_iters / max(train_wall_s, 1e-9),
-        "final_n_gaussians": int(pipeline.buffers.num_gaussians_counter.to_numpy().view(np.uint32)[0]),
-    }
-    (run_dir / "final_psnr.json").write_text(json.dumps(summary, indent=2))
-
-    ply_path = run_dir / "output.ply"
-    save_ply(pipeline, ply_path)
-
-    print(f"done in {time.time() - t_start:.1f}s")
-    if args.eval_holdout:
-        print(f"TEST PSNR sRGB (paper):  {summary['psnr_srgb']:6.2f} dB  "
-              f"<- mean of per-image dB over {summary['n_test_cams']} held-out views "
-              f"(compare to SAD-GS/3DGS table)")
-        print(f"TEST SSIM sRGB (paper):  {summary['ssim_srgb']:6.4f}     "
-              f"<- mean of per-image SSIM, {summary['n_test_cams']} held-out views")
-        print(f"train PSNR/SSIM sRGB:    {summary['train_psnr_srgb']:6.2f} dB / "
-              f"{summary['train_ssim_srgb']:.4f}  (mean per-image, {summary['n_train_cams']} train views)")
-    else:
-        print(f"PSNR sRGB (paper):       {summary['psnr_srgb']:6.2f} dB  "
-              f"<- mean of per-image dB over all {n_cams} views (no holdout)")
-        print(f"SSIM sRGB (paper):       {summary['ssim_srgb']:6.4f}     "
-              f"<- mean of per-image SSIM over all {n_cams} views")
-    print(f"PSNR sRGB masked:        {summary['psnr_srgb_masked']:6.2f} dB  <- honest silhouette (test split)")
-    print(f"PSNR linear:             {summary['psnr_linear']:6.2f} dB  (test split, mean per-image)")
-    print(f"  [legacy dB-of-mean-MSE, all cams: {summary['all_psnr_srgb_db_of_mean_mse']:.2f} dB — NOT the paper metric]")
-    print(f"final gaussian count:    {summary['final_n_gaussians']}")
-    print(f"saved ply:               {ply_path}")
-    print(f"run dir: {run_dir}")
+            print(f"PSNR sRGB (paper):       {summary['psnr_srgb']:6.2f} dB  "
+                f"<- mean of per-image dB over all {n_cams} views (no holdout)")
+            print(f"SSIM sRGB (paper):       {summary['ssim_srgb']:6.4f}     "
+                f"<- mean of per-image SSIM over all {n_cams} views")
+        print(f"PSNR sRGB masked:        {summary['psnr_srgb_masked']:6.2f} dB  <- honest silhouette (test split)")
+        print(f"PSNR linear:             {summary['psnr_linear']:6.2f} dB  (test split, mean per-image)")
+        print(f"  [legacy dB-of-mean-MSE, all cams: {summary['all_psnr_srgb_db_of_mean_mse']:.2f} dB — NOT the paper metric]")
+        print(f"final gaussian count:    {summary['final_n_gaussians']}")
+        print(f"saved ply:               {ply_path}")
+        print(f"run dir: {run_dir}")
 
 
 if __name__ == "__main__":

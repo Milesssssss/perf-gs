@@ -7,11 +7,13 @@ per-pixel aggregated structure tensor ``S̄`` that encodes the dominant local
 texture frequency (and orientation), used downstream to decide *how much* to
 subdivide each Gaussian.
 
-This runs ONCE per training image at load time (not in the hot loop), so it's
-implemented on the CPU with scipy/numpy for clarity and testability. The paper
-does it on the GPU (~0.7 s total); porting to Slang is a later optimization —
-the output layout (a per-pixel float3 ``(Sxx, Sxy, Syy)`` texture) is chosen so
-the GPU sampler in the eta kernel doesn't care how it was produced.
+This runs ONCE per training image at load time (not in the hot loop). This CPU
+scipy/numpy implementation is the reference oracle — kept for clarity, testing,
+and as an automatic fallback. The GPU port that training uses by default lives
+in ``structure_analysis_gpu.py`` (a chain of Slang compute passes) and is parity-
+checked against this function in ``tests/test_structure_analysis_gpu.py``. The
+output layout (a per-pixel float3 ``(Sxx, Sxy, Syy)`` texture) is identical, so
+the GPU sampler in the eta kernel doesn't care which path produced it.
 
 Pipeline (per image ``I`` in linear RGB, shape (H, W, 3)):
   1. Gaussian scale space: ``I_l = G_{sigma_l} * I`` for l in 0..L, full

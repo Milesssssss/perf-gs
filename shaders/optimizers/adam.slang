@@ -39,6 +39,7 @@ float adam_scalar(
     return param - lr * m_hat / (sqrt(v_hat) + ADAM_EPSILON);
 }
 
+
 float3 adam_vec3(float3 p, float3 g, inout float3 m, inout float3 v,
                  float lr, float bc1, float bc2)
 {
@@ -160,3 +161,4 @@ void adamStep(
     grad_opacity[idx] = int64_t(0);
     grad_color_r[idx] = int64_t(0); grad_color_g[idx] = int64_t(0); grad_color_b[idx] = int64_t(0);
 }
+

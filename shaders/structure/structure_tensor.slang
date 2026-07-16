@@ -1,0 +1,234 @@
+// GPU port of the multi-scale structure-tensor field (src/trainer/structure_analysis.py).
+//
+// Produces, per image, a per-pixel aggregated structure tensor S-bar packed as
+// float3 (Sxx, Sxy, Syy) — the exact same field the CPU reference
+// `compute_structure_tensor_field` builds with scipy, but computed as a chain
+// of separable-Gaussian / Sobel / DoG compute passes so a whole scene's fields
+// build in a fraction of the time. The CPU version stays the reference oracle
+// (see tests/test_structure_analysis_gpu.py for the parity check).
+//
+// The host (src/trainer/structure_analysis_gpu.py) drives the pass order; this
+// file only supplies the per-pixel math. Every pass clamps out-of-bounds
+// samples to the edge (mode="nearest"), matching scipy's default border mode.
+//
+// Gaussian weights are computed in-shader as exp(-0.5*(i/sigma)^2) normalized
+// to sum 1 over [-radius, radius] — identical to scipy's `_gaussian_kernel1d`
+// with truncate=4.0 (radius = int(4*sigma + 0.5), passed as a uniform).
+
+static const float ST_EPS = 1e-8;   // structure_analysis.EPS
+
+// ---------------------------------------------------------------------------
+// Separable Gaussian blur (all 4 channels). Two dispatches = one 2D blur:
+// blurH (horizontal) then blurV (vertical), ping-ponging through a scratch tex.
+// ---------------------------------------------------------------------------
+[shader("compute")]
+[numthreads(16, 16, 1)]
+void blurH(
+    uint3 dtid: SV_DispatchThreadID,
+    RWTexture2D<float4> src,
+    RWTexture2D<float4> dst,
+    uniform uint2 dim,
+    uniform float sigma,
+    uniform int radius)
+{
+    uint2 p = dtid.xy;
+    if (p.x >= dim.x || p.y >= dim.y) return;
+
+    float inv2s2 = 1.0 / (2.0 * sigma * sigma);
+    float4 acc = float4(0.0);
+    float wsum = 0.0;
+    int W = int(dim.x);
+    for (int i = -radius; i <= radius; ++i)
+    {
+        int x = clamp(int(p.x) + i, 0, W - 1);   // mode="nearest"
+        float w = exp(-float(i * i) * inv2s2);
+        acc += w * src[uint2(uint(x), p.y)];
+        wsum += w;
+    }
+    dst[p] = acc / wsum;
+}
+
+[shader("compute")]
+[numthreads(16, 16, 1)]
+void blurV(
+    uint3 dtid: SV_DispatchThreadID,
+    RWTexture2D<float4> src,
+    RWTexture2D<float4> dst,
+    uniform uint2 dim,
+    uniform float sigma,
+    uniform int radius)
+{
+    uint2 p = dtid.xy;
+    if (p.x >= dim.x || p.y >= dim.y) return;
+
+    float inv2s2 = 1.0 / (2.0 * sigma * sigma);
+    float4 acc = float4(0.0);
+    float wsum = 0.0;
+    int H = int(dim.y);
+    for (int i = -radius; i <= radius; ++i)
+    {
+        int y = clamp(int(p.y) + i, 0, H - 1);   // mode="nearest"
+        float w = exp(-float(i * i) * inv2s2);
+        acc += w * src[uint2(p.x, uint(y))];
+        wsum += w;
+    }
+    dst[p] = acc / wsum;
+}
+
+// ---------------------------------------------------------------------------
+// Di Zenzo multi-channel structure tensor from a pre-smoothed image.
+// Per channel: 3x3 Sobel (correlation, edge-clamped) -> (Ix, Iy); accumulate
+// Sxx += Ix^2, Sxy += Ix*Iy, Syy += Iy^2 over the 3 color channels. Matches
+// structure_analysis._sobel / _structure_tensor (pre-integration).
+// ---------------------------------------------------------------------------
+[shader("compute")]
+[numthreads(16, 16, 1)]
+void sobelTensor(
+    uint3 dtid: SV_DispatchThreadID,
+    RWTexture2D<float4> smoothed,
+    RWTexture2D<float4> tensorOut,   // (Sxx, Sxy, Syy, 0)
+    uniform uint2 dim)
+{
+    uint2 p = dtid.xy;
+    if (p.x >= dim.x || p.y >= dim.y) return;
+
+    int W = int(dim.x), H = int(dim.y);
+    int xm = clamp(int(p.x) - 1, 0, W - 1);
+    int xp = clamp(int(p.x) + 1, 0, W - 1);
+    int ym = clamp(int(p.y) - 1, 0, H - 1);
+    int yp = clamp(int(p.y) + 1, 0, H - 1);
+    int xc = int(p.x), yc = int(p.y);
+
+    // Load the 8 neighbors as RGB; do all 3 channels at once with float3, then
+    // sum over channels via dot() (Di Zenzo multi-channel form).
+    float3 tl = smoothed[uint2(uint(xm), uint(ym))].xyz;
+    float3 tm = smoothed[uint2(uint(xc), uint(ym))].xyz;
+    float3 tr = smoothed[uint2(uint(xp), uint(ym))].xyz;
+    float3 ml = smoothed[uint2(uint(xm), uint(yc))].xyz;
+    float3 mr = smoothed[uint2(uint(xp), uint(yc))].xyz;
+    float3 bl = smoothed[uint2(uint(xm), uint(yp))].xyz;
+    float3 bm = smoothed[uint2(uint(xc), uint(yp))].xyz;
+    float3 br = smoothed[uint2(uint(xp), uint(yp))].xyz;
+
+    // Sobel_x = [[-1,0,1],[-2,0,2],[-1,0,1]] (right - left).
+    float3 ix = (tr + 2.0 * mr + br) - (tl + 2.0 * ml + bl);
+    // Sobel_y = [[-1,-2,-1],[0,0,0],[1,2,1]] (bottom - top).
+    float3 iy = (bl + 2.0 * bm + br) - (tl + 2.0 * tm + tr);
+
+    tensorOut[p] = float4(dot(ix, ix), dot(ix, iy), dot(iy, iy), 0.0);
+}
+
+// ---------------------------------------------------------------------------
+// Max-of-trace reduction for the base-tensor batch normalization. trace >= 0,
+// so InterlockedMax on the IEEE bit pattern (asuint) gives the true max.
+// ---------------------------------------------------------------------------
+[shader("compute")]
+[numthreads(1, 1, 1)]
+void clearMaxTrace(uint3 dtid: SV_DispatchThreadID, RWStructuredBuffer<uint> maxTrace)
+{
+    if (dtid.x == 0u) maxTrace[0] = 0u;
+}
+
+[shader("compute")]
+[numthreads(16, 16, 1)]
+void reduceMaxTrace(
+    uint3 dtid: SV_DispatchThreadID,
+    RWTexture2D<float4> tensorIn,
+    RWStructuredBuffer<uint> maxTrace,
+    uniform uint2 dim)
+{
+    uint2 p = dtid.xy;
+    if (p.x >= dim.x || p.y >= dim.y) return;
+    float tr = max(tensorIn[p].x + tensorIn[p].z, 0.0);
+    uint prev;
+    InterlockedMax(maxTrace[0], asuint(tr), prev);
+}
+
+// Divide the base tensor in place by (max_trace + 1e-6). SADGS batch-max norm.
+[shader("compute")]
+[numthreads(16, 16, 1)]
+void normalizeBase(
+    uint3 dtid: SV_DispatchThreadID,
+    RWTexture2D<float4> tensor,
+    RWStructuredBuffer<uint> maxTrace,
+    uniform uint2 dim)
+{
+    uint2 p = dtid.xy;
+    if (p.x >= dim.x || p.y >= dim.y) return;
+    float maxt = asfloat(maxTrace[0]) + 1e-6;
+    float4 v = tensor[p];
+    tensor[p] = float4(v.xyz / maxt, 0.0);
+}
+
+// ---------------------------------------------------------------------------
+// DoG band response = L2 norm over channels of (current_smooth - next_smooth).
+// ---------------------------------------------------------------------------
+[shader("compute")]
+[numthreads(16, 16, 1)]
+void dogBand(
+    uint3 dtid: SV_DispatchThreadID,
+    RWTexture2D<float4> cur,
+    RWTexture2D<float4> nxt,
+    RWTexture2D<float4> bandOut,   // response in .x
+    uniform uint2 dim)
+{
+    uint2 p = dtid.xy;
+    if (p.x >= dim.x || p.y >= dim.y) return;
+    float3 d = cur[p].xyz - nxt[p].xyz;
+    bandOut[p] = float4(sqrt(dot(d, d)), 0.0, 0.0, 0.0);
+}
+
+// ---------------------------------------------------------------------------
+// Per-level accumulation into num (xyz) / den (w). intTensor is the base tensor
+// re-integrated by rho_l; trace-normalize to orientation-only, then add
+// band^gamma * freq_sq to num and band^gamma to den (SADGS Eq. 5).
+// ---------------------------------------------------------------------------
+[shader("compute")]
+[numthreads(16, 16, 1)]
+void clearAccum(uint3 dtid: SV_DispatchThreadID, RWTexture2D<float4> accum, uniform uint2 dim)
+{
+    uint2 p = dtid.xy;
+    if (p.x >= dim.x || p.y >= dim.y) return;
+    accum[p] = float4(0.0);
+}
+
+[shader("compute")]
+[numthreads(16, 16, 1)]
+void accumulateLevel(
+    uint3 dtid: SV_DispatchThreadID,
+    RWTexture2D<float4> band,
+    RWTexture2D<float4> intTensor,
+    RWTexture2D<float4> accum,     // (num.xyz, den.w)
+    uniform uint2 dim,
+    uniform float gamma,
+    uniform float freq_sq)
+{
+    uint2 p = dtid.xy;
+    if (p.x >= dim.x || p.y >= dim.y) return;
+
+    float3 t = intTensor[p].xyz;             // (Sxx_i, Sxy_i, Syy_i)
+    float tr = t.x + t.z + ST_EPS;
+    float3 n = t / tr;                        // trace-normalized orientation
+    float weight = pow(band[p].x, gamma);     // E_l^gamma
+
+    float4 a = accum[p];
+    a.xyz += n * (weight * freq_sq);
+    a.w += weight;                            // denominator: no freq factor
+    accum[p] = a;
+}
+
+// Final aggregation: S-bar = num / (den + MIN_ENERGY).
+[shader("compute")]
+[numthreads(16, 16, 1)]
+void finalize(
+    uint3 dtid: SV_DispatchThreadID,
+    RWTexture2D<float4> accum,
+    RWTexture2D<float4> fieldOut,
+    uniform uint2 dim,
+    uniform float min_energy)
+{
+    uint2 p = dtid.xy;
+    if (p.x >= dim.x || p.y >= dim.y) return;
+    float4 a = accum[p];
+    fieldOut[p] = float4(a.xyz / (a.w + min_energy), 0.0);
+}

@@ -165,6 +165,16 @@ class Pipeline:
         # per-pixel backward.slang, kept for side-by-side comparison / fallback.
         self.use_persplat_backward = True
 
+        # Mip-Splatting requires the per-splat backward: only backward_persplat
+        # threads grad_comp (the opacity-compensation seed) back through project,
+        # so the compensation term's gradient to scale/rot/mean is DROPPED on the
+        # per-pixel fallback. Fail loudly rather than train a silently-wrong
+        # gradient (the per-pixel backward.slang passes literal comp seed 0.0).
+        if self.cfg.mip_enabled and not self.use_persplat_backward:
+            raise RuntimeError(
+                "mip_enabled requires use_persplat_backward=True: the per-pixel "
+                "backward does not propagate opacity-compensation gradients.")
+
         # Rotating phase for the transposed backward's stochastic pixel
         # subsampling (BACKWARD_PIXEL_STRIDE in backward_persplat.slang).
         # Incremented each backward so the visited pixel subset alternates;

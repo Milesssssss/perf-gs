@@ -88,7 +88,8 @@ void projectGaussian3DTo2D(
         float3 s2 = scale0 * scale0;                 // pre-filter squared scale
         float3 s2f = s2 + filter_3D * filter_3D;
         float coef3d = sqrt((s2.x * s2.y * s2.z) / (s2f.x * s2f.y * s2f.z));
-        // 2D compensation, byte-for-byte SADGS/mip-splatting forward.cu:
+        // 2D compensation, matching SADGS forward.cu (the mip-splatting original
+        // differs slightly):
         //   det0 = max(1e-6, det(pre-dilation cov)); det1 = max(1e-6, det(dilated));
         //   coef2d = sqrt(det0 / (det1 + 1e-6)).
         float det1 = max(1e-6, cov2d_det);           // post-dilation det

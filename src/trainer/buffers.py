@@ -595,6 +595,12 @@ def allocate_viewer(
     # Gaussian state (blit target from trainer).
     buffers.gaussians = allocator.typed_buffer(types.gaussian, max_splats)
     buffers.num_gaussians_counter = allocator.uint_buffer(1)
+    # bin_count binds filter_3D unconditionally (see pipeline._run_forward). The
+    # viewer never computes the mip 3D filter and renders with mip_enabled=0, so
+    # the shader ignores the contents — but the buffer must still exist for the
+    # bind. Allocate it (zero cost vs. the sort/scan buffers) so the shared
+    # forward path doesn't AttributeError on b.filter_3D.
+    buffers.filter_3D = allocator.typed_buffer("float", max_splats)
 
     # Forward scratch.
     buffers.projected_2d = allocator.typed_buffer(types.projected, max_splats)

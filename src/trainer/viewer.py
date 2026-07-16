@@ -120,9 +120,9 @@ class FlyCamera:
         if "d" in keys:
             self.eye += self.right * vel
         if "q" in keys:
-            self.eye[1] += vel
+            self.eye += self.up * vel
         if "e" in keys:
-            self.eye[1] -= vel
+            self.eye -= self.up * vel
 
     def rotate(self, dx: float, dy: float):
         # +dx on yaw: in the right-handed basis, screen-right is view +x, and
@@ -382,7 +382,7 @@ class Viewer:
         ui = spy.ui.Context(self.device)
         ui_panel = spy.ui.Window(ui.screen, "Trainer", position=spy.float2(10, 10),
                                  size=spy.float2(240, 0))
-        spy.ui.Text(ui_panel, "WASD move | drag look | R/T roll")
+        spy.ui.Text(ui_panel, "WASD move | QE up/down | drag look | R/T roll")
         status_text = spy.ui.Text(ui_panel, "inspecting init")
 
         def _on_start():
@@ -395,6 +395,9 @@ class Viewer:
         last_mouse_x, last_mouse_y = 0.0, 0.0
         last_time = time.perf_counter()
 
+        # Q/E move along the camera's own up vector (roll-aware), so up/down
+        # follows whatever roll R/T has applied. R/T roll the view about the
+        # forward axis.
         key_map = {
             spy.KeyCode.w: "w", spy.KeyCode.a: "a",
             spy.KeyCode.s: "s", spy.KeyCode.d: "d",
