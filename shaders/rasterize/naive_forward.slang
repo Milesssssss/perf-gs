@@ -39,10 +39,12 @@ void naiveForward(
         float3 cov2d;
         float depth_vs;
         float cov2d_det;
+        float comp_unused;
         projectGaussian3DTo2D(
             gauss.mean, gauss.log_scale, gauss.rot_quat,
             camera[0].view_matrix, camera[0].proj_matrix, camera[0].image_size,
-            mean_2d, cov2d, depth_vs, cov2d_det);
+            0.0, 0.3, 0u,
+            mean_2d, cov2d, depth_vs, cov2d_det, comp_unused);
 
         // Behind-camera cull. Not a defensive clamp — points with
         // non-positive view-space depth do not project to meaningful
@@ -50,7 +52,7 @@ void naiveForward(
         if (depth_vs <= 0.0)
             continue;
 
-        float alpha = evalGaussian2DFromCov(pixel_center, mean_2d, cov2d, gauss.opacity);
+        float alpha = evalGaussian2DFromCov(pixel_center, mean_2d, cov2d, gauss.opacity, 1.0);
         float3 color_rgb = shDC(gauss.sh0);
 
         C += color_rgb * alpha * T;

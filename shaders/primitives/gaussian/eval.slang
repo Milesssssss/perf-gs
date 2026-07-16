@@ -22,7 +22,8 @@ float evalGaussian2DFromCov(
     no_diff float2 pixel,
     float2 mean_2d,
     float3 cov2d,
-    float opacity_logit)
+    float opacity_logit,
+    float opacity_compensation)   // Mip-Splatting alpha factor (differentiable; 1.0 = off)
 {
     float2 d = pixel - mean_2d;
 
@@ -42,7 +43,11 @@ float evalGaussian2DFromCov(
     if (power > 0.0)
         return 0.0;
 
-    return sigmoid(opacity_logit) * exp(power);
+    // Mip-Splatting: alpha = sigmoid(opacity) * (coef3d*coef2d) * exp(power).
+    // opacity_compensation is DIFFERENTIABLE: bwd_diff yields dL/dcomp (routed
+    // back to scale/cov by projection_backward) AND scales dL/dopacity,
+    // dL/dcov2d by comp — matching mip-splatting's backward. 1.0 when off.
+    return sigmoid(opacity_logit) * opacity_compensation * exp(power);
 }
 
 #endif // TRAINER_GAUSSIAN_EVAL_SLANG

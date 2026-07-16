@@ -23,6 +23,9 @@ struct Projected2DGaussian
     float2 mean;            // screen-space center (in pixels)
     float3 cov2d;           // 2x2 covariance packed as (cov_00, cov_01, cov_11)
     float depth_vs;         // view-space depth (positive-z is forward in our convention)
+    float opacity_compensation; // Mip-Splatting: coef3d*coef2d, multiplies alpha in
+                                // the blend (1.0 when --mip-splatting is off). Computed
+                                // once in bin_count, reused by forward + backward.
 };
 
 // Compact per-gaussian record for the blend backward's HOT random gather.
@@ -39,6 +42,7 @@ struct BlendData
     float3 cov2d;           // == Projected2DGaussian.cov2d
     float  opacity;         // == Gaussian3D.opacity (pre-sigmoid logit)
     float3 sh0;             // == Gaussian3D.sh0
+    float  opacity_compensation; // == Projected2DGaussian.opacity_compensation (mip)
 };
 
 struct CameraData

@@ -38,6 +38,7 @@ void projectionBackward(
     StructuredBuffer<int64_t> grad_cov2d_a,
     StructuredBuffer<int64_t> grad_cov2d_b,
     StructuredBuffer<int64_t> grad_cov2d_c,
+    StructuredBuffer<int64_t> grad_comp,   // Mip: dL/d(opacity_compensation)
     // 3D parameter gradients (this kernel is the sole writer per gaussian).
     RWStructuredBuffer<int64_t> grad_mean_x,
     RWStructuredBuffer<int64_t> grad_mean_y,
@@ -49,6 +50,12 @@ void projectionBackward(
     RWStructuredBuffer<int64_t> grad_rot_x,
     RWStructuredBuffer<int64_t> grad_rot_y,
     RWStructuredBuffer<int64_t> grad_rot_z,
+    // Mip-Splatting: per-gaussian 3D filter size + the 2D dilation, so the
+    // projection backward reconstructs the SAME cov2d the forward (bin_count)
+    // built. filter_3D gated by mip_enabled (buffer is garbage when off).
+    StructuredBuffer<float> filter_3D,
+    uniform uint mip_enabled,
+    uniform float kernel_size,
     // Cluster-cull mask: seeded all-ones when disabled.
     StructuredBuffer<uint> cluster_visible,
     uniform uint max_splats)
@@ -81,10 +88,13 @@ void projectionBackward(
     var dp_log_scale = diffPair(g.log_scale);
     var dp_rot_quat  = diffPair(g.rot_quat);
 
+    float f3d = (mip_enabled != 0u) ? filter_3D[gid] : 0.0;
+    float g_comp = fromFixed(grad_comp[gid]);   // Mip: dL/d(opacity_compensation) seed
     bwd_diff(projectGaussian3DTo2D)(
         dp_mean, dp_log_scale, dp_rot_quat,
         camera[0].view_matrix, camera[0].proj_matrix, camera[0].image_size,
-        grad_mean2d, grad_cov2d, 0.0, 0.0);
+        f3d, kernel_size, mip_enabled,
+        grad_mean2d, grad_cov2d, 0.0, 0.0, g_comp);
 
     // Sole writer per gaussian -> direct store. Regularization / adam run in
     // later dispatches and InterlockedAdd on top, so store-then-add is safe.

@@ -39,6 +39,15 @@ class RenderConfig:
     # cluster's 128 splats are random across the scene, so the AABB
     # covers the whole scene and never culls anything.
     cluster_cull: bool = True
+    # Mip-Splatting (Yu et al., CVPR 2024). When True, the forward folds the
+    # per-gaussian 3D smoothing filter (buffers.filter_3D, via set_cameras +
+    # compute_3d_filter) into the projected covariance and multiplies alpha by
+    # the coef3d*coef2d compensation. kernel_size is the 2D low-pass dilation:
+    # 0.3 (vanilla, no compensation) when off; 0.1 (mip canonical) when on.
+    # OFF is bit-identical to the pre-mip renderer (filter=0, kernel_size=0.3,
+    # compensation=1).
+    mip_enabled: bool = False
+    kernel_size: float = 0.3
 
 
 @dataclass

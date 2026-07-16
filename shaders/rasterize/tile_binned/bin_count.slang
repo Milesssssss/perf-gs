@@ -32,6 +32,9 @@ void binCount(
     RWStructuredBuffer<BlendData> blend_data,          // [max_splats], compact blend gather record
     RWStructuredBuffer<uint> tile_count_per_gaussian,  // [max_splats]
     StructuredBuffer<uint> cluster_visible,            // [ceil(max_splats/128)]
+    StructuredBuffer<float> filter_3D,                 // [max_splats], mip 3D size (0=off)
+    uniform uint mip_enabled,                          // Mip-Splatting on/off
+    uniform float kernel_size,                         // 2D dilation (0.3 vanilla / 0.1 mip)
     uniform float z_near,
     uniform uint max_splats)
 {
@@ -68,15 +71,24 @@ void binCount(
     float depth_vs;
     float cov2d_det;
 
+    // Mip-Splatting: 3D smoothing size folded into the projected covariance,
+    // plus the coef3d*coef2d opacity compensation (1.0 when off), computed
+    // DIFFERENTIABLY inside project so the backward can route dL/dcomp to
+    // scale/rot/mean. f3d==0 and kernel_size==0.3 reproduce vanilla exactly.
+    float f3d = (mip_enabled != 0u) ? filter_3D[gid] : 0.0;
+    float comp;
+
     projectGaussian3DTo2D(
         g.mean, g.log_scale, g.rot_quat,
         camera[0].view_matrix, camera[0].proj_matrix, camera[0].image_size,
-        mean_2d, cov2d, depth_vs, cov2d_det);
+        f3d, kernel_size, mip_enabled,
+        mean_2d, cov2d, depth_vs, cov2d_det, comp);
 
     Projected2DGaussian proj;
     proj.mean = mean_2d;
     proj.cov2d = cov2d;
     proj.depth_vs = depth_vs;
+    proj.opacity_compensation = comp;
     projected_2d[gid] = proj;
 
     // Pack the compact blend record here: all four fields are already in hand
@@ -90,6 +102,7 @@ void binCount(
     bd.cov2d = cov2d;
     bd.opacity = g.opacity;
     bd.sh0 = g.sh0;
+    bd.opacity_compensation = comp;
     blend_data[gid] = bd;
 
     if (depth_vs < z_near) return;

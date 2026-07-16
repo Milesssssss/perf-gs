@@ -345,6 +345,16 @@ def main() -> None:
                          "is cheap (was coarse when it required a GPU->CPU readback).")
     ap.add_argument("--backend", type=str, default="vulkan", choices=["vulkan", "d3d12"])
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--mip-splatting", action="store_true",
+                    help="Enable Mip-Splatting (Yu et al., CVPR 2024): a per-gaussian 3D "
+                         "smoothing filter (from the TRAIN cameras) folded into the "
+                         "projected covariance, plus the 2D Mip antialiasing filter with "
+                         "differentiable opacity compensation. Targets the high-frequency "
+                         "detail gap vs SADGS (which uses the same 3D filter). Off = the "
+                         "bit-identical vanilla renderer.", default=True)
+    ap.add_argument("--mip-kernel-size", type=float, default=0.1,
+                    help="Mip-Splatting 2D low-pass dilation (mip canonical 0.1). Only used "
+                         "with --mip-splatting; vanilla uses 0.3 with no compensation.")
     ap.add_argument("--sample-mode", type=str, default="sadgs", choices=["ours", "sadgs"],
                     help="per-iteration train-camera draw. 'ours' (default): "
                          "np.random.default_rng(seed).integers over the name-sorted "
@@ -604,6 +614,8 @@ def main() -> None:
         "z_near_cull": args.z_near_cull,
         "backend": args.backend, "seed": args.seed,
         "sample_mode": args.sample_mode,
+        "mip_enabled": bool(args.mip_splatting),
+        "mip_kernel_size": (args.mip_kernel_size if args.mip_splatting else 0.3),
         "run_name": run_name, "n_cams": n_cams, "n_init_points": n_init,
     }, indent=2))
 
@@ -701,6 +713,8 @@ def main() -> None:
             lambda_ssim=eff_lambda_ssim,
             lambda_l2=eff_lambda_l2,
             cluster_cull=args.cluster_cull,
+            mip_enabled=args.mip_splatting,
+            kernel_size=(args.mip_kernel_size if args.mip_splatting else 0.3),
         ),
     )
     pipeline.set_gaussians_from_numpy(**scene.initial_points)
@@ -715,6 +729,17 @@ def main() -> None:
         # Zero the eta accumulators before the first online-accumulation window
         # (NDBuffer contents are not guaranteed zeroed on allocation).
         pipeline.clear_structure_scores()
+
+    # Mip-Splatting: upload the TRAIN cameras once and compute the initial
+    # per-gaussian 3D smoothing filter (recomputed after each densify, since
+    # the means move). Held-out test views are excluded to match mip-splatting
+    # / SADGS. Off unless --mip-splatting.
+    if args.mip_splatting:
+        train_cameras = [scene.images[i].camera for i in train_indices]
+        pipeline.set_cameras(train_cameras)
+        pipeline.compute_3d_filter()
+        print(f"[mip] enabled: kernel_size={args.mip_kernel_size}, 3D filter over "
+              f"{len(train_cameras)} train cameras", flush=True)
 
     # Live viewing is IN-PROCESS: a background-thread Viewer shares this
     # device (serialized by gpu_lock). Streaming a snapshot is a zero-copy
@@ -1328,6 +1353,11 @@ def main() -> None:
                                      carry_eta=sad_carry_eta)
                 if pipeline.last_submit_id:
                     submit_id_ring.append(pipeline.last_submit_id)
+            # Mip-Splatting: recompute the 3D smoothing filter now that the means
+            # + count changed (mip-splatting recomputes ~every 100 iters). New
+            # children get a valid filter for the next window's forwards.
+            if args.mip_splatting:
+                pipeline.compute_3d_filter()
             # densify_simple runs wait-free and returns None for counts
             # (they live GPU-side); the log-every branch below reads the
             # counter on its own cadence. densify()'s stats are still

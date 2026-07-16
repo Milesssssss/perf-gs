@@ -46,7 +46,7 @@ float3x3 covFromScaleQuat(float3 scale, float4 quat)
 // opacity: probability in (0, 1) — converted to logit internally.
 float evalGaussian2D(float2 pixel, float2 mean_2d, float3 cov2d, float opacity)
 {
-    return evalGaussian2DFromCov(pixel, mean_2d, cov2d, _opacityToLogit(opacity));
+    return evalGaussian2DFromCov(pixel, mean_2d, cov2d, _opacityToLogit(opacity), 1.0);
 }
 
 // Returns (bbox_min.x, bbox_min.y, bbox_max.x, bbox_max.y).

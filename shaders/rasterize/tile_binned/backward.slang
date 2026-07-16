@@ -155,7 +155,7 @@ void backwardRasterize(
 
         if (contributes)
         {
-            float alpha_raw = evalGaussian2DFromCov(pixel_center, proj.mean, proj.cov2d, g.opacity);
+            float alpha_raw = evalGaussian2DFromCov(pixel_center, proj.mean, proj.cov2d, g.opacity, proj.opacity_compensation);
             float alpha = min(alpha_raw, ALPHA_MAX);
             float alpha_grad_scale = (alpha_raw <= ALPHA_MAX) ? 1.0 : 0.0;
 
@@ -188,8 +188,9 @@ void backwardRasterize(
             var dp_mean_2d = diffPair(proj.mean);
             var dp_cov2d   = diffPair(proj.cov2d);
             var dp_opacity = diffPair(g.opacity);
+            var dp_comp    = diffPair(proj.opacity_compensation);
             bwd_diff(evalGaussian2DFromCov)(
-                pixel_center, dp_mean_2d, dp_cov2d, dp_opacity, dL_d_alpha_raw);
+                pixel_center, dp_mean_2d, dp_cov2d, dp_opacity, dp_comp, dL_d_alpha_raw);
 
             local_dp_mean_2d = dp_mean_2d.d;
             local_dp_cov2d = dp_cov2d.d;
@@ -290,10 +291,17 @@ void backwardRasterize(
             var dp_mean      = diffPair(g.mean);
             var dp_log_scale = diffPair(g.log_scale);
             var dp_rot_quat  = diffPair(g.rot_quat);
+            // NOTE: this per-pixel fallback backward supports ONLY the vanilla
+            // projection (filter_3D=0, kernel_size=0.3). Mip-Splatting runs use
+            // the default per-splat path (backward_persplat + projection_backward),
+            // which threads the real filter_3D/kernel_size. Toggling
+            // use_persplat_backward=False with --mip-splatting on would give
+            // wrong scale gradients — don't.
             bwd_diff(projectGaussian3DTo2D)(
                 dp_mean, dp_log_scale, dp_rot_quat,
                 world_to_view, view_to_clip, frame_dim,
-                sum_dp_mean_2d, sum_dp_cov2d, 0.0, 0.0);
+                0.0, 0.3, 0u,
+                sum_dp_mean_2d, sum_dp_cov2d, 0.0, 0.0, 0.0);
 
             gs_atomic[6]  = dp_mean.d.x;
             gs_atomic[7]  = dp_mean.d.y;

@@ -103,7 +103,7 @@ void forwardRasterize(
         Projected2DGaussian proj = projected_2d[gaussian_idx];
         Gaussian3D g = gaussians[gaussian_idx];
 
-        float alpha_raw = evalGaussian2DFromCov(pixel_center, proj.mean, proj.cov2d, g.opacity);
+        float alpha_raw = evalGaussian2DFromCov(pixel_center, proj.mean, proj.cov2d, g.opacity, proj.opacity_compensation);
         float alpha = min(alpha_raw, ALPHA_MAX);
 
         if (alpha < ALPHA_MIN)

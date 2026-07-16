@@ -183,6 +183,13 @@ class Pipeline:
         # the backward + scoring reads it. Defaults to slot A (the sort source).
         self._sorted_values = self.buffers.sort_values_a
 
+        # Mip-Splatting: static training-camera array + sqrt(0.2)/max_focal
+        # coefficient, uploaded once by set_cameras(); consumed by
+        # compute_3d_filter(). None until --mip-splatting calls set_cameras.
+        self._mip_cameras_buffer: spy.Buffer | None = None
+        self._mip_num_cameras: int = 0
+        self._mip_filter_coef: float = 0.0
+
     def on_hot_reload(self) -> None:
         """Refresh reflection-dependent objects after device.reload_all_programs().
         Camera buffer is raw bytes so it survives reload. Only the module
@@ -504,6 +511,9 @@ class Pipeline:
                 blend_data=b.blend_data.storage,
                 tile_count_per_gaussian=b.tile_count_per_gaussian.storage,
                 cluster_visible=b.cluster_visible.storage,
+                filter_3D=b.filter_3D.storage,
+                mip_enabled=1 if self.cfg.mip_enabled else 0,
+                kernel_size=self.cfg.kernel_size,
                 z_near=self.cfg.z_near_cull,
                 max_splats=self.max_splats,
             )
@@ -775,6 +785,9 @@ class Pipeline:
                         grad_rot_x=gb["rot_x"].storage,
                         grad_rot_y=gb["rot_y"].storage,
                         grad_rot_z=gb["rot_z"].storage,
+                        filter_3D=b.filter_3D.storage,
+                        mip_enabled=1 if self.cfg.mip_enabled else 0,
+                        kernel_size=self.cfg.kernel_size,
                         cluster_visible=b.cluster_visible.storage,
                         max_splats=self.max_splats,
                     )
@@ -969,6 +982,71 @@ class Pipeline:
         return _densify.densify_simple(self, cfg, grad_thresh, scale_thresh,
                                        prune_big_scale, allow_scale_prune,
                                        carry_eta)
+
+    def set_cameras(self, cameras: list) -> None:
+        """Mip-Splatting setup: upload the (static) training-camera array and
+        derive the sqrt(0.2)/max_focal coefficient ONCE. Must be called before
+        :meth:`compute_3d_filter`.
+
+        Cameras are fixed for a run (intrinsics + extrinsics never change), so
+        this is a one-time upload; compute_3d_filter then only re-dispatches the
+        per-gaussian kernel each densify tick (the means move, the cameras do
+        not). Pass the TRAIN split to match mip-splatting / SADGS (held-out test
+        views must not influence the filter).
+
+        `cameras` are the same Camera objects the trainer renders; each packs to
+        a 144-byte CameraData (view 16f + proj 16f + image_size 2f + 2f pad).
+        """
+        n = len(cameras)
+        # CameraData packs to 36 float32s: view 4x4 (16) + proj 4x4 (16) +
+        # image_size (2) + 2 pad-to-16B-alignment. Buffer size derives from the
+        # array itself (data.nbytes) — no hardcoded byte count.
+        data = np.zeros((n, 36), dtype=np.float32)
+        max_focal = 0.0
+        for i, cam in enumerate(cameras):
+            data[i, 0:16] = cam.view_matrix.flatten()
+            data[i, 16:32] = cam.proj_matrix.flatten()
+            data[i, 32:34] = np.array(cam.image_size, dtype=np.float32)
+            # focal_x in pixels: proj[0][0] = 2*fx/W  ->  fx = proj[0][0]*W/2.
+            fx = abs(float(cam.proj_matrix[0, 0])) * float(cam.image_size[0]) * 0.5
+            max_focal = max(max_focal, fx)
+        buf = self.device.create_buffer(
+            size=data.nbytes,
+            usage=spy.BufferUsage.shader_resource | spy.BufferUsage.unordered_access,
+            label="mip_cameras",
+        )
+        buf.copy_from_numpy(np.ascontiguousarray(data.reshape(-1).view(np.uint8)))
+        self._mip_cameras_buffer = buf
+        self._mip_num_cameras = n
+        self._mip_filter_coef = float(np.sqrt(0.2) / max(max_focal, 1e-8))
+
+    def compute_3d_filter(self) -> None:
+        """Mip-Splatting: recompute the per-gaussian 3D smoothing-filter size
+        (buffers.filter_3D) from the cameras uploaded by :meth:`set_cameras`.
+        Run under no_grad — filter_3D is a geometric constant, never a gradient
+        target. Call once at init and after every densify+morton so new children
+        get a valid filter.
+
+        Only the per-gaussian dispatch runs here (means change every step); the
+        static camera array + filter coefficient were built once by set_cameras.
+        Heavy (O(n_gaussians * n_cameras)) but only fires on the ~17 densify
+        ticks of a run, off the hot path.
+        """
+        if getattr(self, "_mip_cameras_buffer", None) is None:
+            raise RuntimeError(
+                "compute_3d_filter() requires set_cameras(cameras) to be called first")
+        b = self.buffers
+        self._dispatch(self.k_compute_3d_filter, "compute_3d_filter",
+            thread_count=[self.max_splats, 1, 1],
+            gaussians=b.gaussians.storage,
+            num_gaussians_counter=b.num_gaussians_counter.storage,
+            cameras=self._mip_cameras_buffer,
+            filter_3D=b.filter_3D.storage,
+            num_cameras=self._mip_num_cameras,
+            filter_coef=self._mip_filter_coef,
+            max_splats=self.max_splats,
+        )
+        self.device.wait_for_idle()
 
     def reset_opacity(self, cfg) -> None:
         return _densify.reset_opacity(self, cfg)

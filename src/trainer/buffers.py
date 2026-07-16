@@ -72,6 +72,7 @@ GRAD_SCALAR_COMPONENTS = (
 GRAD_2D_SEED_COMPONENTS = (
     "mean2d_x", "mean2d_y",
     "cov2d_a", "cov2d_b", "cov2d_c",
+    "comp",   # Mip-Splatting: dL/d(opacity_compensation), fed to projection backward
 )
 
 # Structure-aware densification multiview accumulators (SoA uint), matching
@@ -108,6 +109,10 @@ class GaussianBuffers:
     # --- always-live gaussian state ---
     gaussians: spy.NDBuffer = field(init=False)
     num_gaussians_counter: spy.NDBuffer = field(init=False)
+    # Mip-Splatting per-gaussian 3D smoothing-filter size (float[max_splats]).
+    # Recomputed from the cameras under no_grad (see compute_3d_filter); a
+    # CONSTANT w.r.t. autodiff. 0 everywhere until --mip-splatting populates it.
+    filter_3D: spy.NDBuffer = field(init=False)
 
     # --- per-frame forward scratch / output ---
     projected_2d: spy.NDBuffer = field(init=False)
@@ -486,6 +491,9 @@ def allocate(
     buffers.visibility_count_accum = allocator.uint_buffer(max_splats)
     buffers.grad_2d_x_iter = allocator.i64_buffer(max_splats)
     buffers.grad_2d_y_iter = allocator.i64_buffer(max_splats)
+
+    # --- Mip-Splatting 3D smoothing filter (per-gaussian scalar) ---
+    buffers.filter_3D = allocator.typed_buffer("float", max_splats)
 
     # --- FastGS importance scoring ---
     buffers.importance_score_accum = allocator.uint_buffer(max_splats)

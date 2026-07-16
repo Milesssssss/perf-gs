@@ -84,6 +84,8 @@ KERNEL_SPECS: tuple[tuple[str, str, str], ...] = (
     ("scan_block",           "common/scan.slang",                              "scanBlock"),
     ("scan_block_sums",      "common/scan.slang",                              "scanBlockSums"),
     ("add_block_offsets",    "common/scan.slang",                              "addBlockOffsets"),
+    # mip-splatting (3D smoothing filter; 2D filter lives in project.slang)
+    ("compute_3d_filter",    "mip/compute_3d_filter.slang",                    "computeMip3DFilter"),
 )
 
 

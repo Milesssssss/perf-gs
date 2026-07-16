@@ -179,6 +179,7 @@ void backwardRasterizePerSplat(
     RWStructuredBuffer<int64_t> grad_cov2d_a,
     RWStructuredBuffer<int64_t> grad_cov2d_b,
     RWStructuredBuffer<int64_t> grad_cov2d_c,
+    RWStructuredBuffer<int64_t> grad_comp,   // Mip: dL/d(opacity_compensation)
     RWStructuredBuffer<int64_t> grad_opacity,
     RWStructuredBuffer<int64_t> grad_color_r,
     RWStructuredBuffer<int64_t> grad_color_g,
@@ -284,6 +285,7 @@ void backwardRasterizePerSplat(
         float2 acc_mean2d = float2(0.0);
         float3 acc_cov2d  = float3(0.0);
         float  acc_opacity = 0.0;
+        float  acc_comp = 0.0;   // Mip: sum_pixels dL/d(opacity_compensation)
         float3 acc_color  = float3(0.0);
         float  acc_absx = 0.0;
         float  acc_absy = 0.0;
@@ -374,7 +376,8 @@ void backwardRasterizePerSplat(
                 float alpha_raw = evalGaussian2DFromCov(pixel_center,
                                                        blend_only_data.mean,
                                                        blend_only_data.cov2d,
-                                                       blend_only_data.opacity);
+                                                       blend_only_data.opacity,
+                                                       blend_only_data.opacity_compensation);
                 alpha = min(alpha_raw, ALPHA_MAX);
                 alpha_grad_scale = (alpha_raw <= ALPHA_MAX) ? 1.0 : 0.0;
                 // Alpha-min skip — MUST be bit-identical to the forward
@@ -492,12 +495,14 @@ void backwardRasterizePerSplat(
                 var dp_mean_2d = diffPair(blend_only_data.mean);
                 var dp_cov2d   = diffPair(blend_only_data.cov2d);
                 var dp_opacity = diffPair(blend_only_data.opacity);
+                var dp_comp    = diffPair(blend_only_data.opacity_compensation);
                 
-                bwd_diff(evalGaussian2DFromCov)(pixel_center, dp_mean_2d, dp_cov2d, dp_opacity, dL_d_alpha_raw);
+                bwd_diff(evalGaussian2DFromCov)(pixel_center, dp_mean_2d, dp_cov2d, dp_opacity, dp_comp, dL_d_alpha_raw);
 
                 acc_mean2d += dp_mean_2d.d;
                 acc_cov2d  += dp_cov2d.d;
                 acc_opacity += dp_opacity.d;
+                acc_comp   += dp_comp.d;
                 // acc_color seed accumulated above (SH_C0 applied post-loop).
 
                 if (alpha >= ALPHA_MIN_TRACK)
@@ -529,6 +534,7 @@ void backwardRasterizePerSplat(
                 acc_mean2d *= s;
                 acc_cov2d  *= s;
                 acc_opacity *= s;
+                acc_comp   *= s;
                 acc_color  *= s;
                 acc_absx *= s;
                 acc_absy *= s;
@@ -544,6 +550,7 @@ void backwardRasterizePerSplat(
             InterlockedAdd(grad_cov2d_a[g_idx], toFixed(acc_cov2d.x));
             InterlockedAdd(grad_cov2d_b[g_idx], toFixed(acc_cov2d.y));
             InterlockedAdd(grad_cov2d_c[g_idx], toFixed(acc_cov2d.z));
+            InterlockedAdd(grad_comp[g_idx], toFixed(acc_comp));
             InterlockedAdd(grad_opacity[g_idx], toFixed(acc_opacity));
             InterlockedAdd(grad_color_r[g_idx], toFixed(acc_color.x));
             InterlockedAdd(grad_color_g[g_idx], toFixed(acc_color.y));
