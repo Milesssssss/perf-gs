@@ -53,137 +53,135 @@ def _build_proj_matrix(fovy_deg: float, aspect: float,
 
 
 class FlyCamera:
+    """Free-fly camera that stores an explicit orthonormal basis
+    (right, up, forward) instead of world-up-locked Euler angles.
+
+    Every rotation is applied incrementally IN THE CAMERA'S CURRENT FRAME:
+    mouse-look yaws about the current ``up`` and pitches about the current
+    ``right``; roll (R/T) spins about the current ``forward``. Because pan uses
+    the live ``up`` — the SAME axis Q/E translate along — a roll stays "baked
+    in": the global up reference becomes the camera's local up, so after rolling
+    the pan and the up/down movement remain in sync (no separate world-up axis
+    to drift out of alignment).
+
+    The constructor still accepts yaw/pitch/roll (for callers and the camera
+    tests); those seed the initial basis with the historical world-up
+    convention, after which only the basis is tracked.
+    """
+
     def __init__(self, eye=None, yaw=0.0, pitch=0.0, roll=0.0, speed=1.0):
         self.eye = np.array(eye if eye is not None else [0.0, 0.0, -2.0], dtype=np.float64)
-        self.yaw = yaw
-        self.pitch = pitch
-        # Roll (degrees) about the forward axis. Persisted so that snapping to a
-        # dataset camera can recover its roll and free-fly keeps it — leaving a
-        # rolled snapped pose then doesn't jump the horizon back to level.
-        self.roll = roll
         self.speed = speed
         self.sensitivity = 0.2
+        self._set_basis_from_euler(yaw, pitch, roll)
 
-    @property
-    def forward(self) -> np.ndarray:
-        yaw_r = math.radians(self.yaw)
-        pitch_r = math.radians(self.pitch)
-        return np.array([
+    # --- basis construction / maintenance -------------------------------
+    def _set_basis_from_euler(self, yaw: float, pitch: float, roll: float) -> None:
+        """Seed the (right, up, forward) basis from Euler angles, matching the
+        old world-up convention so a given (yaw, pitch, roll) yields the same
+        frame it used to."""
+        yaw_r = math.radians(yaw)
+        pitch_r = math.radians(pitch)
+        f = np.array([
             math.cos(pitch_r) * math.sin(yaw_r),
             -math.sin(pitch_r),
             math.cos(pitch_r) * math.cos(yaw_r),
         ], dtype=np.float64)
-
-    def _base_frame(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """Zero-roll orthonormal basis (right0, up0, forward) built from world
-        up. Roll is then applied by rotating (right0, up0) about forward."""
-        f = self.forward
         world_up = np.array([0.0, 1.0, 0.0])
         r0 = np.cross(world_up, f)
         n = np.linalg.norm(r0)
-        # Near-vertical forward makes right ill-defined against world up; fall
-        # back to the x-axis so the basis stays finite (roll is degenerate here).
+        # Near-vertical forward makes right ill-defined vs world up; fall back
+        # to the x-axis so the basis stays finite (roll is degenerate here).
         r0 = r0 / n if n > 1e-8 else np.array([1.0, 0.0, 0.0])
         u0 = np.cross(f, r0)
-        return r0, u0, f
+        a = math.radians(roll)
+        self._fwd = f
+        self._right = math.cos(a) * r0 + math.sin(a) * u0
+        self._up = math.cos(a) * u0 - math.sin(a) * r0
+        self._orthonormalize()
+
+    def _orthonormalize(self) -> None:
+        """Re-establish a right-handed orthonormal basis (right x up = forward)
+        from the current forward + right, killing accumulated float drift."""
+        f = self._fwd / (np.linalg.norm(self._fwd) + 1e-12)
+        r = self._right - f * np.dot(self._right, f)
+        r = r / (np.linalg.norm(r) + 1e-12)
+        u = np.cross(f, r)          # right x up = forward  ->  up = forward x right
+        self._fwd, self._right, self._up = f, r, u
+
+    @staticmethod
+    def _rotate_about(v: np.ndarray, axis: np.ndarray, angle: float) -> np.ndarray:
+        """Rodrigues rotation of ``v`` about unit ``axis`` by ``angle`` (rad)."""
+        c, s = math.cos(angle), math.sin(angle)
+        return v * c + np.cross(axis, v) * s + axis * np.dot(axis, v) * (1.0 - c)
+
+    @property
+    def forward(self) -> np.ndarray:
+        return self._fwd
 
     @property
     def right(self) -> np.ndarray:
-        # Rolled right = right0*cos - ... reduces to cross(up, forward) at
-        # roll=0, matching the right-handed _build_view_matrix basis (so
-        # D-strafe moves toward the camera's actual right, roll included).
-        r0, u0, _ = self._base_frame()
-        a = math.radians(self.roll)
-        return math.cos(a) * r0 + math.sin(a) * u0
+        return self._right
 
     @property
     def up(self) -> np.ndarray:
-        # Rolled up: rotate up0 about forward by the roll angle. At roll=0 this
-        # is the plain world-derived up, so nothing changes for level cameras.
-        r0, u0, _ = self._base_frame()
-        a = math.radians(self.roll)
-        return math.cos(a) * u0 - math.sin(a) * r0
+        return self._up
 
     def roll_by(self, degrees: float) -> None:
-        """Add to the roll angle (about the forward axis). Wraps to keep the
-        stored value bounded; the view matrix only depends on it mod 360."""
-        self.roll = (self.roll + degrees + 180.0) % 360.0 - 180.0
+        """Roll about the current forward axis (R/T). Positive rolls the view's
+        right toward its up; the up vector rolls WITH the camera, so subsequent
+        pan and Q/E keep using this rolled up (they stay in sync)."""
+        a = math.radians(degrees)
+        self._right = self._rotate_about(self._right, self._fwd, a)
+        self._up = self._rotate_about(self._up, self._fwd, a)
+        self._orthonormalize()
 
     def move(self, keys: set, dt: float):
         vel = self.speed * dt
         if "w" in keys:
-            self.eye += self.forward * vel
+            self.eye += self._fwd * vel
         if "s" in keys:
-            self.eye -= self.forward * vel
+            self.eye -= self._fwd * vel
         if "a" in keys:
-            self.eye -= self.right * vel
+            self.eye -= self._right * vel
         if "d" in keys:
-            self.eye += self.right * vel
+            self.eye += self._right * vel
+        # Q/E translate along the CURRENT (roll-aware) up, so they track roll.
         if "q" in keys:
-            self.eye += self.up * vel
+            self.eye += self._up * vel
         if "e" in keys:
-            self.eye -= self.up * vel
+            self.eye -= self._up * vel
 
     def rotate(self, dx: float, dy: float):
-        # +dx on yaw: in the right-handed basis, screen-right is view +x, and
-        # forward gains +x as yaw increases, so drag-right must INCREASE yaw
-        # ("look right"). Pitch: mouse-up (dy<0 in screen coords) should tilt
-        # the view upward, hence the -dy sign below.
-        #
-        # Roll compensation: yaw/pitch are defined against WORLD up (see
-        # _base_frame using [0,1,0]), so applying raw dx→yaw / dy→pitch tilts
-        # around world axes. When the camera is rolled, screen-right and
-        # screen-up are rotated by `roll` in that world-up basis; mouse
-        # motion must be rotated back into the world-up basis before feeding
-        # yaw/pitch, or a rolled camera's mouse-look will spin around the
-        # wrong axis. At roll=0 this reduces to the identity, so unrolled
-        # look-around is unchanged.
-        a = math.radians(self.roll)
-        ca, sa = math.cos(a), math.sin(a)
-        # Rotate the screen-space delta from the camera's ROLLED screen frame
-        # into the zero-roll (world-up) frame that yaw/pitch are defined in.
-        # The rolled right/up sit at angle +roll in the zero-roll basis, so
-        # mapping a rolled-frame delta back to it is a rotation by +roll:
-        #   [dx_w]   [ cos a  -sin a] [dx]
-        #   [dy_w] = [ sin a   cos a] [dy]
-        # At roll=0 this is the identity (unchanged level look-around). The
-        # previous matrix used the -roll rotation (wrong sign on both sa
-        # terms), which was correct only at roll=0 and skewed as roll grew.
-        dx_world = ca * dx - sa * dy
-        dy_world = sa * dx + ca * dy
-        self.yaw += dx_world * self.sensitivity
-        self.pitch += -dy_world * self.sensitivity
-        self.pitch = max(-89.0, min(89.0, self.pitch))
+        """Mouse-look in the camera's CURRENT frame: yaw about the live ``up``,
+        pitch about the live ``right``. Both axes are the actual basis (roll
+        included), so look-around is screen-relative at any roll and stays in
+        sync with the Q/E up/down axis — panning after a roll no longer fights a
+        separate world-up reference."""
+        yaw = math.radians(dx * self.sensitivity)     # drag-right -> look right
+        pitch = math.radians(-dy * self.sensitivity)  # drag-up -> look up
+        # Yaw about current up.
+        self._right = self._rotate_about(self._right, self._up, yaw)
+        self._fwd = self._rotate_about(self._fwd, self._up, yaw)
+        # Pitch about (new) current right.
+        self._up = self._rotate_about(self._up, self._right, pitch)
+        self._fwd = self._rotate_about(self._fwd, self._right, pitch)
+        self._orthonormalize()
 
     def set_from_view_matrix(self, view: np.ndarray) -> None:
-        """Snap this fly-cam to a world->view matrix (e.g. a dataset camera
-        pose). Recovers eye + yaw/pitch so subsequent WASD/look continue
-        smoothly from the snapped pose.
-
-        Our view matrix rows are (right, up, forward) and translation is
-        -R @ eye, so eye = -R^T @ t and the world-space forward is row 2.
-        The forward parameterization is
-          f = (cos(p)sin(y), -sin(p), cos(p)cos(y)),
-        which inverts to pitch = asin(-f_y), yaw = atan2(f_x, f_z).
-
-        Roll is recovered too: with yaw/pitch fixing the zero-roll basis
-        (right0, up0), the camera's actual right (view row 0) sits at angle
-        ``roll`` in that plane, so roll = atan2(right . up0, right . right0).
-        Recovering it means leaving a rolled snapped pose continues from the
-        dataset camera's roll instead of snapping the horizon level."""
+        """Snap to a world->view matrix (e.g. a dataset camera pose) so
+        subsequent WASD/look/roll continue from it. Our view rows are
+        (right, up, forward) and the translation is -R @ eye, so eye = -R^T @ t
+        and the basis is read straight off the rows — roll included, no Euler
+        round-trip needed."""
         view = np.asarray(view, dtype=np.float64)
         R = view[:3, :3]
         t = view[:3, 3]
         self.eye = (-R.T @ t).astype(np.float64)
-        f = R[2] / (np.linalg.norm(R[2]) + 1e-12)  # world-space forward
-        self.pitch = math.degrees(math.asin(max(-1.0, min(1.0, -f[1]))))
-        self.yaw = math.degrees(math.atan2(f[0], f[2]))
-        # Recover roll from the actual right axis (view row 0) against the
-        # zero-roll basis for the just-set yaw/pitch.
-        r0, u0, _ = self._base_frame()
-        right_actual = R[0] / (np.linalg.norm(R[0]) + 1e-12)
-        self.roll = math.degrees(math.atan2(float(np.dot(right_actual, u0)),
-                                            float(np.dot(right_actual, r0))))
+        self._right = R[0].astype(np.float64)
+        self._up = R[1].astype(np.float64)
+        self._fwd = R[2].astype(np.float64)
+        self._orthonormalize()
 
     def get_camera(self, width: int, height: int, fovy: float = 45.0,
                    aspect: float | None = None) -> Camera:
@@ -192,12 +190,10 @@ class FlyCamera:
         different aspect than the render buffer (e.g. a fixed-size render blit
         into a resized window) — passing the window aspect here keeps geometry
         undistorted instead of stretched."""
-        # Pass the ROLLED up so _build_view_matrix's basis includes roll; at
-        # roll=0 this is world up and the view is unchanged.
         view = _build_view_matrix(
             self.eye.astype(np.float32),
-            self.forward.astype(np.float32),
-            self.up.astype(np.float32),
+            self._fwd.astype(np.float32),
+            self._up.astype(np.float32),
         )
         proj = _build_proj_matrix(fovy, aspect if aspect is not None else width / height)
         return Camera(view_matrix=view, proj_matrix=proj, image_size=(width, height))

@@ -406,6 +406,8 @@ def main() -> None:
                     help="Path to an .ngfx-proj file saved from Nsight UI "
                          "(File > Save Project As). REQUIRED for 'trace' to "
                          "record any metrics; optional for 'frame'.")
+    ap.add_argument("--compute-final-metrics", action="store_true", default=True)
+    
     args = ap.parse_args()
 
     if args.profile_run:
