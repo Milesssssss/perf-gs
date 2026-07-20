@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import ctypes
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -87,10 +88,30 @@ def _default_dll_path() -> Path | None:
         key=lambda p: p.name,
         reverse=True,
     )
+
+    def _ver_key(d: Path) -> list[int]:
+        # "0.9.0" -> [0, 9, 0]; non-numeric names sort lowest.
+        return [int(x) for x in re.findall(r"\d+", d.name)] or [-1]
+
     for install in candidates:
-        dll = install / "SDKs" / "NsightGraphicsSDK" / "0.8.0" / "lib" / "x64" / "NGFX_Injection.dll"
-        if dll.is_file():
-            return dll
+        sdk_root = install / "SDKs" / "NsightGraphicsSDK"
+        if not sdk_root.is_dir():
+            continue
+        # Prefer the NEWEST SDK version folder (e.g. 0.9.0 over 0.8.0). The
+        # injection DLL must match the installed Nsight runtime: a newer Nsight
+        # (2026.2.0) ships both, and injecting with a STALE SDK DLL "succeeds"
+        # (ExecuteActivityCommand returns OK) but then loses the Vulkan device
+        # partway through GPU Trace collection. Hardcoding 0.8.0 broke exactly
+        # this way after upgrading Nsight. Override the auto-pick with the
+        # NGFX_INJECTION_DLL env var if a specific version is required.
+        versions = sorted(
+            (d for d in sdk_root.iterdir() if d.is_dir()),
+            key=_ver_key, reverse=True,
+        )
+        for vdir in versions:
+            dll = vdir / "lib" / "x64" / "NGFX_Injection.dll"
+            if dll.is_file():
+                return dll
     return None
 
 

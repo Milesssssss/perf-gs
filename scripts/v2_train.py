@@ -148,8 +148,15 @@ def _render_all_cameras(pipeline: Pipeline, scene, iter_idx: int, cams_dir: Path
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    #ap.add_argument("--scene", type=str, default="datasets/360_v2/bicycle")
-    ap.add_argument("--scene", type=str, default="datasets/360_v2/counter")
+    #ap.add_argument("--scene", type=str, default="datasets/360_v2/bicycle") V
+    #ap.add_argument("--scene", type=str, default="datasets/360_v2/counter") V
+    ap.add_argument("--scene", type=str, default="datasets/360_v2/bonsai")
+    #ap.add_argument("--scene", type=str, default="datasets/360_v2/garden")
+    #ap.add_argument("--scene", type=str, default="datasets/360_v2/kitchen")
+    #ap.add_argument("--scene", type=str, default="datasets/360_v2/room")
+    #ap.add_argument("--scene", type=str, default="datasets/360_v2/stump")
+    #ap.add_argument("--scene", type=str, default="datasets/360_extra_scenes/flowers")
+    #ap.add_argument("--scene", type=str, default="datasets/360_extra_scenes/treehill")
 
     #ap.add_argument("--scene", type=str, default="datasets/synthetic/suzanne_blender")
 
@@ -193,6 +200,19 @@ def main() -> None:
     ap.add_argument("--eval-holdout-stride", type=int, default=8,
                     help="holdout stride for --eval (3DGS llffhold=8). Test set is "
                          "cameras where index %% stride == 0.")
+    ap.add_argument("--psnr-curve", action="store_true",
+                    help="capture held-out TEST-set PSNR every --psnr-curve-every iters, "
+                         "sampled one iteration BEFORE each densify step (densify-1) so the "
+                         "reading reflects the settled pre-densify state. Writes "
+                         "psnr_curve.jsonl (streamed) + psnr_curve.json (iters[]/psnr_srgb[], "
+                         "built for cross-run averaging) and renders psnr_curve.png (PSNR vs "
+                         "iter) into the run dir at the end. Independent of --eval-every. "
+                         "Average many runs with scripts/plot_psnr_curves.py.", default=False)
+    ap.add_argument("--psnr-curve-every", type=int, default=0,
+                    help="capture cadence for --psnr-curve. A sample is taken at iter `it` "
+                         "when (it+1) %% this == 0, i.e. one iter before each densify boundary "
+                         "when --densify-every divides this (default 100 aligns with the "
+                         "default densify schedule).")
     ap.add_argument("--debug-bin-viz", action="store_true",
                     help="during the --eval-every sweep, write per-view debug "
                          "heatmaps: a per-tile binned-splat-count map, a per-pixel "
@@ -200,7 +220,7 @@ def main() -> None:
                          "stats to <run>/cams/cam_NN/binviz_* and binviz.jsonl. "
                          "Reads buffers the forward already fills (no extra kernel) "
                          "but adds readback + PNG encode per view, so it's off by "
-                         "default. Requires --eval-every > 0.", default=True)
+                         "default. Requires --eval-every > 0.", default=False)
     ap.add_argument("--densify-every", type=int, default=100)
     ap.add_argument("--densify-from", type=int, default=100)
     ap.add_argument("--densify-to", type=int, default=1900)
@@ -338,10 +358,10 @@ def main() -> None:
                          "state and BLOCK until the viewer's 'Start Training' "
                          "button is pressed (or Enter here). Lets you inspect "
                          "the init before training begins. No-op with --no-viewer.")
-    ap.add_argument("--stream-max-splats", type=int, default=8_500_000,
+    ap.add_argument("--stream-max-splats", type=int, default=7_000_000,
                     help="capacity of the live-viewer shared-memory stream (splats). "
                          "Snapshots beyond this are truncated for viewing only.")
-    ap.add_argument("--stream-every", type=int, default=50,
+    ap.add_argument("--stream-every", type=int, default=10,
                     help="push a gaussian snapshot to the in-process viewer every "
                          "N iters. Now a zero-copy GPU->GPU blit, so a fine cadence "
                          "is cheap (was coarse when it required a GPU->CPU readback).")
@@ -406,9 +426,32 @@ def main() -> None:
                     help="Path to an .ngfx-proj file saved from Nsight UI "
                          "(File > Save Project As). REQUIRED for 'trace' to "
                          "record any metrics; optional for 'frame'.")
-    ap.add_argument("--compute-final-metrics", action="store_true", default=True)
+    ap.add_argument("--capture-external", action="store_true", default=False,
+                    help="Headless capture driven by the Nsight CLI launcher "
+                         "(ngfx.exe), NOT by self-injection. In this mode we do "
+                         "NOT load NGFX_Injection (ngfx.exe injects for us) and "
+                         "do NOT trigger a capture; ngfx.exe starts/stops the "
+                         "trace via --start-after-frames/--limit-to-frames and "
+                         "AUTO-SAVES the .ngfx-gputrace to its --output-dir (no "
+                         "HUD Save/Open needed). The trainer just presents a "
+                         "stable frozen workload at --capture-iter for exactly "
+                         "--capture-frames frames, then exits. Launch this via "
+                         "scripts/capture_gpu_trace.py, which computes the frame "
+                         "counts and invokes ngfx.exe. Implies --profile-run.")
+    ap.add_argument("--capture-frames", type=int, default=240,
+                    help="External-capture only: number of frozen, bit-identical "
+                         "frames to Present() at --capture-iter before the "
+                         "process exits. Must comfortably exceed the CLI's "
+                         "start-after + limit-to window so the trace lands "
+                         "entirely inside the frozen steady state.")
+    ap.add_argument("--compute-final-metrics", action="store_true", default=False)
     
     args = ap.parse_args()
+
+    if args.capture_external:
+        # Headless CLI-driven capture implies a profile run, and skips
+        # self-injection entirely (ngfx.exe owns injection + start/stop/save).
+        args.profile_run = True
 
     if args.profile_run:
         # A profile run is a clean, self-contained presenting Vulkan app: no
@@ -422,8 +465,18 @@ def main() -> None:
     # Programmatic Nsight capture: inject BEFORE any Vulkan driver load. If the
     # SDK isn't installed or injection fails, we log and continue without
     # captures - training still runs normally.
+    #
+    # Two capture paths:
+    #   self-injection (--capture-iter, default): this process loads
+    #     NGFX_Injection.dll and triggers the capture itself. The trace lives
+    #     in the in-process HUD and must be persisted via the HUD's Save button
+    #     (there is NO save function in the NGFX_Injection API).
+    #   external (--capture-external): the Nsight CLI launcher (ngfx.exe) spawns
+    #     this process with Nsight injected and controls start/stop + AUTO-SAVE
+    #     of the .ngfx-gputrace. We do NOT self-inject here; we only present the
+    #     frozen workload at --capture-iter for --capture-frames frames.
     ngfx_cap = None
-    if args.capture_iter > 0:
+    if args.capture_iter > 0 and not args.capture_external:
         if not args.profile_run:
             print("[capture] --capture-iter requires --profile-run. ignoring.")
         else:
@@ -960,6 +1013,14 @@ def main() -> None:
         (run_dir / "eval_curve.jsonl").open("w", buffering=1)
         if args.eval_every > 0 else None
     )
+    # Pre-densify PSNR curve (--psnr-curve): a focused TEST-set PSNR sample
+    # taken one iter before each densify step, streamed to psnr_curve.jsonl and
+    # collected in-memory for the end-of-run psnr_curve.json + psnr_curve.png.
+    psnr_curve_json = (
+        (run_dir / "psnr_curve.jsonl").open("w", buffering=1)
+        if args.psnr_curve else None
+    )
+    psnr_curve_records: list[dict] = []
     # Binning/overlap debug viz (--debug-bin-viz): one JSONL line per rendered
     # eval view, plus per-view heatmap PNGs under cams/cam_NN/. Only when both
     # the flag and --eval-every are on.
@@ -1036,6 +1097,19 @@ def main() -> None:
     # Track the current live gaussian count Python-side to avoid a
     # per-iter counter readback. Updated from densify() return values.
     cur_n_gaussians = n_init
+
+    def _eval_test_psnr_srgb() -> tuple[float, int]:
+        """Mean per-image sRGB PSNR over the held-out TEST split (paper metric)
+        + the live gaussian count. Drains the GPU queue so the count and the
+        per-cam renders are settled. Used by the --psnr-curve capture."""
+        pipeline.device.wait_for_idle()
+        n_g = int(pipeline.buffers.num_gaussians_counter.to_numpy().view(np.uint32)[0])
+        frames = []
+        for cam_i in test_indices:
+            pipeline.render(scene.images[cam_i].camera)
+            r = np.clip(pipeline.read_output_image()[..., :3], 0.0, 1.0)
+            frames.append(_psnr_image(r, targets_srgb[cam_i][..., :3]))
+        return (float(np.mean(frames)) if frames else 0.0), n_g
 
     # ---- Queue-depth backpressure (fence-based) ----
     # Nothing in the hot loop drains the GPU queue anymore (wait_for_idle
@@ -1131,7 +1205,7 @@ def main() -> None:
         # overlay can open the capture UI; killing it early tears the
         # overlay down before the UI appears.
         #TODO: lets abstract away this nsight debugging code from the trainer script
-        if ngfx_cap is not None and it == args.capture_iter:
+        if (ngfx_cap is not None or args.capture_external) and it == args.capture_iter:
             print(f"[capture] draining queue at iter {it}...")
             pipeline.device.wait_for_idle()
             submit_id_ring.clear()
@@ -1162,16 +1236,32 @@ def main() -> None:
                     _profile_present()
             pipeline.device.wait_for_idle()
 
-            print(f"[capture] triggering Nsight capture at iter {it}")
-            ngfx_cap.trigger()
+            if ngfx_cap is not None:
+                print(f"[capture] triggering Nsight capture at iter {it}")
+                ngfx_cap.trigger()
 
             # Continuous capture loop: keep presenting the identical,
             # representative frame so Nsight can complete its multi-sample
-            # collection. Runs until the profile window is closed.
-            print("[capture] presenting pinned/frozen frames continuously for "
-                  "GPU Trace; close the profile window when Nsight is done.")
+            # collection.
+            #   self-injection: run until the profile window is closed (the
+            #     user saves from the HUD, then closes the window).
+            #   external (ngfx.exe): run a BOUNDED number of frames. ngfx.exe
+            #     starts the trace after --start-after-frames presents and
+            #     stops after --limit-to-frames; we present --capture-frames
+            #     (chosen > start+limit+margin) so the whole trace window falls
+            #     inside identical frozen frames, then exit so ngfx.exe can
+            #     finalize + auto-save the .ngfx-gputrace.
+            if args.capture_external:
+                print(f"[capture] external mode: presenting {args.capture_frames} "
+                      f"frozen frames for ngfx.exe, then exiting.")
+            else:
+                print("[capture] presenting pinned/frozen frames continuously for "
+                      "GPU Trace; close the profile window when Nsight is done.")
             import time as _t
+            frozen_i = 0
             while True:
+                if args.capture_external and frozen_i >= args.capture_frames:
+                    break
                 if profile_window is not None:
                     if profile_window.should_close():
                         break
@@ -1181,6 +1271,11 @@ def main() -> None:
                     _profile_present()
                 else:
                     _t.sleep(0.01)
+                frozen_i += 1
+
+            # Drain so the last presented frames complete before teardown —
+            # otherwise ngfx.exe may see an in-flight device at exit.
+            pipeline.device.wait_for_idle()
 
             if profile_window is not None:
                 try:
@@ -1198,7 +1293,9 @@ def main() -> None:
                 bin_viz_json.close()
             if profile_json:
                 profile_json.close()
-            print("[capture] window closed, exiting.")
+            print("[capture] window closed, exiting." if not args.capture_external
+                  else f"[capture] presented {args.capture_frames} frozen frames; "
+                       "exiting so ngfx.exe can finalize + auto-save the trace.")
             sys.exit(0)
 
         # SAD-GS: accumulate this view's eta sample online (paper Sec 3.6) so
@@ -1250,7 +1347,10 @@ def main() -> None:
         do_preview = False
         if args.preview_every > 0:
             bufferred_iters = [itr+350 if itr % args.reset_every == 0 else itr+50 for itr in range(args.preview_every, args.iters, args.preview_every)]
-            do_preview = it in bufferred_iters
+            # Always include the final iteration so a preview is dumped at the
+            # end even when preview_every >= iters (range() would otherwise be
+            # empty) — and regardless of --compute-final-metrics.
+            do_preview = (it in bufferred_iters) or (it == args.iters)
 
         densify_cfg = cfg
         # Skip densify on reset steps.
@@ -1546,6 +1646,22 @@ def main() -> None:
         if it > 1 and do_render_all:
             _render_all_cameras(pipeline, scene, it, cams_dir)
 
+        # --- Pre-densify PSNR curve (--psnr-curve): sample TEST-set PSNR one
+        # iter before each densify step (it+1 is the densify boundary), so the
+        # reading reflects the settled state rather than a just-perturbed one.
+        # Kept separate from the --eval-every sweep so it runs at the densify
+        # cadence without the bin-viz / SSIM overhead. Its time is folded into
+        # eval_time_total so the eval-curve's elapsed_s stays a fair train clock.
+        if psnr_curve_json is not None and (it + 1) % max(1, args.psnr_curve_every) == 0:
+            _pc_t0 = time.time()
+            _pc_psnr, _pc_ng = _eval_test_psnr_srgb()
+            _pc_rec = {"iter": it, "psnr_srgb": _pc_psnr, "n_gaussians": _pc_ng}
+            psnr_curve_records.append(_pc_rec)
+            psnr_curve_json.write(json.dumps(_pc_rec) + "\n")
+            eval_time_total += time.time() - _pc_t0
+            print(f"[psnr-curve] iter {it:6d}  psnr_srgb={_pc_psnr:5.2f}  "
+                  f"n_g={_pc_ng} (pre-densify)")
+
         # --- PSNR eval sweep (--eval-every). Renders the held-out TEST cameras
         # and reports the paper metric: mean of per-image PSNR (NOT dB-of-mean-
         # MSE). Logs (iter, elapsed_s, psnr_*) to eval_curve.jsonl. Only runs
@@ -1672,6 +1788,45 @@ def main() -> None:
         eval_curve_json.close()
     if bin_viz_json is not None:
         bin_viz_json.close()
+
+    # --- PSNR curve (--psnr-curve): write the per-run psnr_curve.json (arrays
+    # for cross-run averaging) and render psnr_curve.png (PSNR vs iteration).
+    # Done before the --profile-run early return so it always saves. ---
+    if args.psnr_curve:
+        if psnr_curve_json is not None:
+            psnr_curve_json.close()
+        curve = {
+            "scene": args.scene,
+            "run_name": run_name,
+            "eval_holdout": bool(args.eval_holdout),
+            "eval_holdout_stride": stride,
+            "n_eval_cams": len(test_indices),
+            "psnr_curve_every": args.psnr_curve_every,
+            "iters": [r["iter"] for r in psnr_curve_records],
+            "psnr_srgb": [r["psnr_srgb"] for r in psnr_curve_records],
+            "n_gaussians": [r["n_gaussians"] for r in psnr_curve_records],
+        }
+        (run_dir / "psnr_curve.json").write_text(json.dumps(curve, indent=2))
+        try:
+            import matplotlib
+            matplotlib.use("Agg")  # headless: no display needed
+            import matplotlib.pyplot as plt
+            fig, ax = plt.subplots(figsize=(10, 6), dpi=120)
+            ax.plot(curve["iters"], curve["psnr_srgb"], "-o", ms=3, lw=1.6,
+                    color="#1f77b4")
+            ax.set_xlabel("iteration")
+            ax.set_ylabel("test PSNR sRGB (dB)")
+            _scene_name = Path(args.scene).name or args.scene
+            ax.set_title(f"PSNR vs iteration — {_scene_name} ({run_name})")
+            ax.grid(True, alpha=0.3)
+            fig.tight_layout()
+            fig.savefig(run_dir / "psnr_curve.png")
+            plt.close(fig)
+            print(f"[psnr-curve] wrote {run_dir / 'psnr_curve.json'} + psnr_curve.png "
+                  f"({len(curve['iters'])} points)")
+        except Exception as e:  # noqa: BLE001 - plotting is best-effort
+            print(f"[psnr-curve] wrote psnr_curve.json but the PNG failed ({e}); "
+                  f"`.venv/Scripts/python.exe -m pip install matplotlib` to enable it.")
 
     # Under --profile-run we skip the final I/O-heavy metrics pass:
     # per-camera renders + PSNR + PLY export pollute the capture window
