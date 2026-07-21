@@ -100,6 +100,24 @@ def main() -> int:
     ap.add_argument("--python", type=str, default=sys.executable,
                     help="Python interpreter to run v2_train.py with "
                          "(default: this venv's python).")
+    ap.add_argument("--multi-pass-metrics",
+                    action=argparse.BooleanOptionalAction, default=True,
+                    help="Collect extra hardware counters over MULTIPLE frames "
+                         "(our frozen loop presents bit-identical frames, so "
+                         "this replays cleanly). Required for the Trace "
+                         "Analysis view's aggregated-frame bottleneck / "
+                         "expert-system advice. Pass --no-multi-pass-metrics "
+                         "for a faster single-pass timeline-only trace.")
+    ap.add_argument("--architecture", type=str, default="Ampere GA10x",
+                    help="GPU architecture the --metric-set-name applies to "
+                         "(default: Ampere GA10x = RTX 30-series). Set to your "
+                         "GPU's arch if different, e.g. 'Ada', 'Blackwell "
+                         "GB20x'.")
+    ap.add_argument("--metric-set-name", type=str, default="Throughput Metrics",
+                    help="GPU Trace metric set to collect (case sensitive). "
+                         "'Throughput Metrics' feeds the Trace Analysis "
+                         "bottleneck breakdown. Empty string keeps the "
+                         "project's own metric set.")
     ap.add_argument("--dry-run", action="store_true",
                     help="Print the ngfx.exe command and exit.")
     ap.add_argument("trainer_args", nargs=argparse.REMAINDER,
@@ -162,6 +180,16 @@ def main() -> int:
         "--auto-export",
         "--no-timeout",
     ]
+    # Metric set drives which counters (and thus which Trace Analysis bottleneck
+    # rules) are available; must be paired with --architecture. Empty name =
+    # keep the project's set.
+    if args.metric_set_name:
+        cmd += ["--architecture", args.architecture,
+                "--metric-set-name", args.metric_set_name]
+    # Multi-pass = the aggregated-frame counters + expert-system advice in the
+    # Trace Analysis view (single-pass gives only the timeline).
+    if args.multi_pass_metrics:
+        cmd += ["--multi-pass-metrics"]
     if args.limit_to_frames > 0:
         cmd += ["--limit-to-frames", str(args.limit_to_frames)]
 
@@ -172,6 +200,10 @@ def main() -> int:
           f"(capture-iter {args.capture_iter} + {_WARMUP_MARGIN} margin)")
     print(f"[capture] duration   : {args.max_duration_ms} ms"
           + (f", <= {args.limit_to_frames} frames" if args.limit_to_frames else ""))
+    print(f"[capture] metric set : "
+          + (f"{args.architecture!r} / {args.metric_set_name!r}"
+             if args.metric_set_name else "(project default)")
+          + (", multi-pass" if args.multi_pass_metrics else ", single-pass"))
     print(f"[capture] frozen pres: {capture_frames}")
     print("[capture] app args   :", app_args_str)
     print("[capture] full cmd   :", subprocess.list2cmdline(cmd))
