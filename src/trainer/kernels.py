@@ -36,6 +36,10 @@ KERNEL_SPECS: tuple[tuple[str, str, str], ...] = (
     ("forward",              "rasterize/tile_binned/forward.slang",            "forwardRasterize"),
     ("backward",             "rasterize/tile_binned/backward.slang",           "backwardRasterize"),
     ("backward_persplat",    "rasterize/tile_binned/backward_persplat.slang",  "backwardRasterizePerSplat"),
+    ("backward_persbucket",  "rasterize/tile_binned/backward_persplat.slang",  "backwardRasterizePerBucket"),
+    ("tile_max_processed",   "rasterize/tile_binned/live_buckets.slang",       "tileMaxProcessed"),
+    ("scatter_live_buckets", "rasterize/tile_binned/live_buckets.slang",       "scatterLiveBuckets"),
+    ("bucket_prepare_dispatch", "rasterize/tile_binned/live_buckets.slang",    "prepareBucketDispatchArgs"),
     ("projection_backward",  "rasterize/tile_binned/projection_backward.slang", "projectionBackward"),
     # losses
     ("loss",                 "losses/l1_l2_loss.slang",                        "computeLossGrad"),

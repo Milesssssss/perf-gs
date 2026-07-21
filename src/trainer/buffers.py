@@ -161,6 +161,18 @@ class GaussianBuffers:
     bucket_offset_total: spy.NDBuffer = field(init=False)
     raster_checkpoints: spy.NDBuffer = field(init=False)
 
+    # Live-bucket compaction for the flat (warp-per-bucket) backward
+    # (use_flat_bucket_backward). live_bucket_count[t] = ceil(max_processed_t/P)
+    # (<= bucket_count[t]); its exclusive scan is live_bucket_offsets with total
+    # live_bucket_total[0]. live_buckets[slot] = uint2(tile, local_bucket) for
+    # every live bucket, so the flat kernel needs no tile search and skips
+    # saturated buckets. bucket_dispatch_args = indirect (groups_x,1,1).
+    live_bucket_count: spy.NDBuffer = field(init=False)
+    live_bucket_offsets: spy.NDBuffer = field(init=False)
+    live_bucket_total: spy.NDBuffer = field(init=False)
+    live_buckets: spy.NDBuffer = field(init=False)
+    bucket_dispatch_args: spy.NDBuffer = field(init=False)
+
     output_image: spy.Texture = field(init=False)          # rgba32_float, UAV+SRV
                                                             # (.a = 1-T; final transmittance
                                                             # recovered as T = 1 - .a in backward)
@@ -470,6 +482,13 @@ def allocate(
     buffers.bucket_offset_total = allocator.uint_buffer(1)
     buffers.raster_checkpoints = allocator.typed_buffer("uint2", max_buckets * 256)
 
+    # Live-bucket compaction (flat warp-per-bucket backward).
+    buffers.live_bucket_count = allocator.uint_buffer(num_tiles)
+    buffers.live_bucket_offsets = allocator.uint_buffer(num_tiles)
+    buffers.live_bucket_total = allocator.uint_buffer(1)
+    buffers.live_buckets = allocator.typed_buffer("uint2", max_buckets)
+    buffers.bucket_dispatch_args = allocator.indirect_buffer()
+
     buffers.output_image = allocator.tex(spy.Format.rgba32_float, "output_image")
     buffers.gaussian_count_per_pixel = allocator.tex(spy.Format.r32_uint, "gaussian_count_per_pixel")
 
@@ -628,6 +647,13 @@ def allocate_viewer(
     buffers.bucket_offsets = allocator.uint_buffer(num_tiles)
     buffers.bucket_offset_total = allocator.uint_buffer(1)
     buffers.raster_checkpoints = allocator.typed_buffer("uint2", max_buckets * 256)
+
+    # Live-bucket compaction (flat warp-per-bucket backward).
+    buffers.live_bucket_count = allocator.uint_buffer(num_tiles)
+    buffers.live_bucket_offsets = allocator.uint_buffer(num_tiles)
+    buffers.live_bucket_total = allocator.uint_buffer(1)
+    buffers.live_buckets = allocator.typed_buffer("uint2", max_buckets)
+    buffers.bucket_dispatch_args = allocator.indirect_buffer()
 
     # Render outputs.
     buffers.output_image = allocator.tex(spy.Format.rgba32_float, "output_image")

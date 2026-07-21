@@ -27,6 +27,7 @@ def create_device(
     backend: Backend = "vulkan",
     enable_debug: bool = False,
     shader_debug_info: bool = False,
+    defines: dict[str, str] | None = None,
 ) -> spy.Device:
     """Create a SlangPy device for the requested backend.
 
@@ -42,13 +43,17 @@ def create_device(
         left at the default level so the profiled code is still the real,
         optimized code — only source-line mapping is added. Off by default
         because it enlarges shader binaries and is only useful under a profiler.
+    :param defines: preprocessor macros injected into every shader compile
+        (e.g. ``{"BACKWARD_PIXEL_STRIDE": "2"}``). Compile-time knobs the host
+        wants to sweep without editing shader source. Forces the
+        ``compiler_options`` path (like ``shader_debug_info``).
     :return: a configured :class:`slangpy.Device` with ``shaders/`` on the
         Slang include path.
     """
     if backend not in _BACKEND_MAP:
         raise ValueError(f"unknown backend {backend!r}; expected one of {list(_BACKEND_MAP)}")
 
-    if not shader_debug_info:
+    if not shader_debug_info and not defines:
         return spy.create_device(
             type=_BACKEND_MAP[backend],
             enable_debug_layers=enable_debug,
@@ -56,15 +61,19 @@ def create_device(
         )
 
     # spy.create_device() doesn't expose compiler_options, so drop to the
-    # underlying spy.Device to inject debug_info while replicating the
+    # underlying spy.Device to inject debug_info / defines while replicating the
     # convenience wrapper's include-path setup (slangpy's builtin SHADER_PATH
     # first, then our shaders/). Hot reload stays on to match the normal path.
+    compiler_options: dict = {
+        "include_paths": [spy.SHADER_PATH, str(SHADERS_DIR)],
+    }
+    if shader_debug_info:
+        compiler_options["debug_info"] = spy.SlangDebugInfoLevel.standard
+    if defines:
+        compiler_options["defines"] = dict(defines)
     return spy.Device(
         type=_BACKEND_MAP[backend],
         enable_debug_layers=enable_debug,
         enable_hot_reload=True,
-        compiler_options={
-            "include_paths": [spy.SHADER_PATH, str(SHADERS_DIR)],
-            "debug_info": spy.SlangDebugInfoLevel.standard,
-        },
+        compiler_options=compiler_options,
     )

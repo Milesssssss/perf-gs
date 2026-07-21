@@ -165,6 +165,16 @@ class Pipeline:
         # per-pixel backward.slang, kept for side-by-side comparison / fallback.
         self.use_persplat_backward = True
 
+        # Flat (warp-per-bucket) backward selector. When True AND
+        # use_persplat_backward, the transposed backward is dispatched as ONE
+        # WARP PER BUCKET over a compacted live-bucket list (live_buckets.slang)
+        # instead of one 256-thread workgroup per tile. This removes the
+        # inter-tile straggler tail and the wasted warps on light tiles; the
+        # per-pixel constants are read inline (no tile-wide LDS staging) to lift
+        # occupancy. Gradient-equivalent to backward_persplat (parity-tested).
+        # Default off pending trace validation of the win.
+        self.use_flat_bucket_backward = False
+
         # Mip-Splatting requires the per-splat backward: only backward_persplat
         # threads grad_comp (the opacity-compensation seed) back through project,
         # so the compensation term's gradient to scale/rot/mean is DROPPED on the
@@ -747,10 +757,70 @@ class Pipeline:
         sorted_values = self._sorted_values
         with self._marker_group("rasterize_backward"):
             if self.use_persplat_backward:
-                # Transposed per-splat backward: one workgroup (256 threads)
-                # per tile, splat-parallel with checkpoint reconstruction.
                 num_tiles = b.num_tiles_x * b.num_tiles_y
-                self._dispatch(self.k_backward_persplat, "backward_persplat",
+                if self.use_flat_bucket_backward:
+                    # Flat warp-per-bucket backward. Build the compacted
+                    # live-bucket list (only buckets a pixel actually reached),
+                    # then dispatch ONE WARP PER BUCKET indirectly. Same grads
+                    # as the per-tile path, no straggler tail / idle warps.
+                    with self._marker_group("live_bucket_compaction"):
+                        self._dispatch(self.k_tile_max_processed, "tile_max_processed",
+                            thread_count=[num_tiles * 256, 1, 1],
+                            gaussian_count_per_pixel=b.gaussian_count_per_pixel,
+                            live_bucket_count=b.live_bucket_count.storage,
+                            frame_dim_px=spy.uint2(self.width, self.height),
+                            num_tiles_x=b.num_tiles_x,
+                            num_tiles=num_tiles,
+                        )
+                        self._scan(
+                            n=num_tiles,
+                            in_buf=b.live_bucket_count,
+                            out_buf=b.live_bucket_offsets,
+                            total_buf=b.live_bucket_total,
+                        )
+                        self._dispatch(self.k_scatter_live_buckets, "scatter_live_buckets",
+                            thread_count=[num_tiles, 1, 1],
+                            live_bucket_count=b.live_bucket_count.storage,
+                            live_bucket_offsets=b.live_bucket_offsets.storage,
+                            live_buckets=b.live_buckets.storage,
+                            num_tiles=num_tiles,
+                        )
+                        max_buckets = (
+                            buffers._ceil_div(self.max_sort_pairs, buffers.RASTER_BUCKET_SIZE)
+                            + num_tiles)
+                        self._dispatch(self.k_bucket_prepare_dispatch, "bucket_prepare_dispatch",
+                            thread_count=[1, 1, 1],
+                            live_bucket_total=b.live_bucket_total.storage,
+                            dispatch_args=b.bucket_dispatch_args.storage,
+                            max_buckets=max_buckets,
+                        )
+                    self._dispatch_indirect(self.k_backward_persbucket, "backward_persbucket",
+                        args_buf=b.bucket_dispatch_args,
+                        blend_data=b.blend_data.storage,
+                        tile_start=b.tile_start.storage,
+                        tile_end=b.tile_end.storage,
+                        sorted_gaussian_ids=sorted_values.storage,
+                        bucket_offsets=b.bucket_offsets.storage,
+                        live_buckets=b.live_buckets.storage,
+                        live_bucket_total=b.live_bucket_total.storage,
+                        raster_checkpoints=b.raster_checkpoints.storage,
+                        camera=self._camera_buffer,
+                        output_image=b.output_image,
+                        gaussian_count_per_pixel=b.gaussian_count_per_pixel,
+                        dL_dC_texture=b.dL_dC_texture,
+                        **b.grad_seed_kwargs(),
+                        grad_opacity=gb["opacity"].storage,
+                        grad_color_r=gb["color_r"].storage,
+                        grad_color_g=gb["color_g"].storage,
+                        grad_color_b=gb["color_b"].storage,
+                        grad_2d_x_iter=b.grad_2d_x_iter.storage,
+                        grad_2d_y_iter=b.grad_2d_y_iter.storage,
+                        pixel_phase=self._backward_pixel_phase,
+                    )
+                else:
+                  # Transposed per-splat backward: one workgroup (256 threads)
+                  # per tile, splat-parallel with checkpoint reconstruction.
+                  self._dispatch(self.k_backward_persplat, "backward_persplat",
                     thread_count=[num_tiles * 256, 1, 1],
                     blend_data=b.blend_data.storage,
                     tile_start=b.tile_start.storage,

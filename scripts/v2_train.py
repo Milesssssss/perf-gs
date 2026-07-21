@@ -444,6 +444,27 @@ def main() -> None:
                          "process exits. Must comfortably exceed the CLI's "
                          "start-after + limit-to window so the trace lands "
                          "entirely inside the frozen steady state.")
+    ap.add_argument("--flat-bucket-backward",
+                    action=argparse.BooleanOptionalAction, default=True,
+                    help="Use the flat warp-per-bucket backward (live-bucket "
+                         "compaction + indirect one-warp-per-bucket dispatch) "
+                         "instead of the per-tile per-splat backward. "
+                         "Gradient-equivalent. Pass --no-flat-bucket-backward "
+                         "for the per-tile path (e.g. A/B timing).")
+    ap.add_argument("--backward-pixel-stride", type=int, default=1,
+                    choices=[1, 2, 4, 8, 16],
+                    help="Stochastic pixel-subsampling stride for the backward "
+                         "rasterizer (BACKWARD_PIXEL_STRIDE shader define). "
+                         "1 = exact full-pixel backward; N>1 visits 1/N of tile "
+                         "pixels per iter (unbiased SGD estimator, rotating "
+                         "phase) for a faster backward at some gradient-noise "
+                         "cost. Injected as a compile-time define.")
+    ap.add_argument("--final-test-psnr", action="store_true", default=False,
+                    help="After the timed loop, compute ONLY the held-out "
+                         "TEST-set PSNR (mean per-image sRGB, the paper metric "
+                         "behind sadgs_vs_slang) and write test_psnr.json. "
+                         "Lightweight: renders just the test cams, no full "
+                         "per-camera PNG dump / PLY. Does not affect train_wall_s.")
     ap.add_argument("--compute-final-metrics", action="store_true", default=False)
     
     args = ap.parse_args()
@@ -716,7 +737,10 @@ def main() -> None:
     # the SPIR-V.) Optimization stays at the default level so the profiled code
     # is the real optimized code.
     device = create_device(backend=args.backend,
-                           shader_debug_info=args.profile_run)
+                           shader_debug_info=args.profile_run,
+                           defines={"BACKWARD_PIXEL_STRIDE":
+                                    f"{args.backward_pixel_stride}u"}
+                           if args.backward_pixel_stride != 1 else None)
     if args.profile_run:
         print("[profile-run] shaders compiled with source-level debug info "
               "(SPIR-V NonSemantic.Shader.DebugInfo) for Nsight correlation.")
@@ -777,6 +801,8 @@ def main() -> None:
     )
     pipeline.set_gaussians_from_numpy(**scene.initial_points)
     pipeline.clear_tracking()
+    # Flat (warp-per-bucket) backward opt-in for A/B + tracing. Off by default.
+    pipeline.use_flat_bucket_backward = args.flat_bucket_backward
     # One-time full grad clear. Seeds the "scalar grads are zero at start-of-
     # iter" invariant that lets train_step's hot-path _clear_2d_grad_seeds skip
     # the 14 scalar-grad clears every iter (adam zeros them per-thread at
@@ -1752,6 +1778,22 @@ def main() -> None:
         "train_wall_s": train_wall_s,
         "it_per_s": completed_iters / max(train_wall_s, 1e-9),
     }) + "\n")
+
+    # Lightweight held-out TEST PSNR (paper metric, same as sadgs_vs_slang):
+    # renders ONLY the test cams — no full per-camera PNG dump / PLY. Runs
+    # AFTER train_wall_s is captured, so it never pollutes the timing.
+    if args.final_test_psnr and not args.profile_run:
+        _tp_psnr, _tp_ng = _eval_test_psnr_srgb()
+        (run_dir / "test_psnr.json").write_text(json.dumps({
+            "psnr_srgb": _tp_psnr,
+            "n_gaussians": _tp_ng,
+            "n_test_cams": len(test_indices),
+            "train_wall_s": train_wall_s,
+            "iters": completed_iters,
+            "flat_bucket_backward": bool(args.flat_bucket_backward),
+        }, indent=2))
+        print(f"[final-test-psnr] TEST PSNR sRGB = {_tp_psnr:.3f} dB over "
+              f"{len(test_indices)} held-out cams  (n_gaussians={_tp_ng})")
 
     if profile_window is not None:
         try:

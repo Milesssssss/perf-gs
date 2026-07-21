@@ -120,7 +120,14 @@ void blendPrefixExclusive(float T_step, float dLdC_weight, uint lane,
 // away and the scale is 1.0, so there is zero overhead. Only the per-PIXEL
 // cost is reduced; the per-splat projection backward + atomics run once per
 // splat regardless, so speedup is sub-linear in STRIDE.
-static const uint BACKWARD_PIXEL_STRIDE = 1u;
+//
+// Compile-time overridable (like BACKWARD_BLEND_SCAN_MODE) so the host can
+// sweep it via a shader define (create_device(defines=...)) without editing
+// this file. Higher STRIDE also shrinks STAGED_PIXELS (below) -> less LDS ->
+// higher occupancy.
+#ifndef BACKWARD_PIXEL_STRIDE
+#define BACKWARD_PIXEL_STRIDE 1u
+#endif
 
 // Per-pixel constants staged in LDS once (avoids re-reading global textures
 // on every bucket). dL_dC (rgb) + dL_dA (a) + T_final + C_total (rgb) = 8
@@ -563,5 +570,268 @@ void backwardRasterizePerSplat(
         // each warp's scans are self-contained and gs_* staging is read-only
         // here. But different warps finish their pixel loops independently,
         // and the next iteration re-reads only read-only LDS -> safe.
+    }
+}
+
+
+// ===========================================================================
+// FLAT (warp-per-bucket) backward. Same gradient math as
+// backwardRasterizePerSplat; only the work assignment differs.
+//
+// Layout: [numthreads(256)] = 8 INDEPENDENT warp-buckets per workgroup. Warp w
+// (tid / wave) handles the flat live-bucket slot gid.x*8 + w; lane L owns splat
+// local_bucket*32 + L. There is NO bucket loop (one bucket per warp) and NO
+// tile-wide per-pixel LDS staging: the per-pixel constants (dL_dC / T_final /
+// C_total / processed) are read INLINE from the textures as warp-uniform
+// broadcasts. Dropping the ~8 KB tile-wide staging leaves only the per-warp
+// checkpoint stage in LDS, which raises occupancy vs the per-tile kernel (which
+// is LDS-bound at ~50-60%). The tradeoff: a pixel's constants are re-read once
+// per live bucket it contributes to (no cross-bucket amortization), but those
+// are cached, warp-uniform texture reads.
+//
+// The dispatch is INDIRECT over the compacted live-bucket list built by
+// live_buckets.slang (tileMaxProcessed -> scan -> scatterLiveBuckets ->
+// prepareBucketDispatchArgs). live_buckets[slot] = (tile, local_bucket), so
+// there is no in-kernel tile search and saturated buckets are never launched.
+// ===========================================================================
+[shader("compute")]
+[numthreads(256, 1, 1)]
+void backwardRasterizePerBucket(
+    uint3 gid: SV_GroupID,
+    uint3 gtid: SV_GroupThreadID,
+    StructuredBuffer<BlendData> blend_data,
+    StructuredBuffer<uint> tile_start,
+    StructuredBuffer<uint> tile_end,
+    StructuredBuffer<uint> sorted_gaussian_ids,
+    StructuredBuffer<uint> bucket_offsets,
+    StructuredBuffer<uint2> live_buckets,        // (tile, local_bucket) per slot
+    StructuredBuffer<uint> live_bucket_total,    // [1]: number of live buckets
+    StructuredBuffer<uint2> raster_checkpoints,
+    StructuredBuffer<CameraData> camera,
+    RWTexture2D<float4> output_image,
+    RWTexture2D<uint> gaussian_count_per_pixel,
+    RWTexture2D<float4> dL_dC_texture,
+    RWStructuredBuffer<int64_t> grad_mean2d_x,
+    RWStructuredBuffer<int64_t> grad_mean2d_y,
+    RWStructuredBuffer<int64_t> grad_cov2d_a,
+    RWStructuredBuffer<int64_t> grad_cov2d_b,
+    RWStructuredBuffer<int64_t> grad_cov2d_c,
+    RWStructuredBuffer<int64_t> grad_comp,
+    RWStructuredBuffer<int64_t> grad_opacity,
+    RWStructuredBuffer<int64_t> grad_color_r,
+    RWStructuredBuffer<int64_t> grad_color_g,
+    RWStructuredBuffer<int64_t> grad_color_b,
+    RWStructuredBuffer<int64_t> grad_2d_x_iter,
+    RWStructuredBuffer<int64_t> grad_2d_y_iter,
+    uniform uint pixel_phase)
+{
+    uint tid = gtid.x;
+    uint lane = WaveGetLaneIndex();            // splat within the bucket [0,32)
+    uint warp_idx = tid / WaveGetLaneCount();  // which warp-bucket in the WG [0,8)
+
+    // Global live-bucket slot for this warp. Guard the tail block's extra warps
+    // (slot >= live_total): they must still reach the staging barrier below, so
+    // we only *return* AFTER it.
+    uint slot = gid.x * NUM_WARPS + warp_idx;
+    uint live_total = live_bucket_total[0];
+    bool bucket_valid = (slot < live_total);
+
+    uint2 frame_dim_px = uint2(camera[0].image_size);
+    uint2 grid_tiles = (frame_dim_px + TILE_SIZE - 1) / TILE_SIZE;
+
+    uint tile_idx = 0u, local_bucket = 0u;
+    uint t_start = 0u, tile_count = 0u;
+    uint tile_origin_x = 0u, tile_origin_y = 0u;
+    uint cp_bucket = 0u, bucket_first_splat = 0u;
+    if (bucket_valid)
+    {
+        uint2 lb = live_buckets[slot];
+        tile_idx = lb.x;
+        local_bucket = lb.y;
+        uint tile_x = tile_idx % grid_tiles.x;
+        uint tile_y = tile_idx / grid_tiles.x;
+        tile_origin_x = tile_x * TILE_SIZE;
+        tile_origin_y = tile_y * TILE_SIZE;
+        t_start = tile_start[tile_idx];
+        uint t_end = tile_end[tile_idx];
+        tile_count = (t_end > t_start) ? (t_end - t_start) : 0u;
+        cp_bucket = bucket_offsets[tile_idx] + local_bucket;
+        bucket_first_splat = local_bucket * RASTER_BUCKET_SIZE;
+    }
+
+    // --- Stage this warp's checkpoints into per-warp LDS (coalesced) ---
+    uint phase = pixel_phase % BACKWARD_PIXEL_STRIDE;   // 0 at STRIDE=1
+    if (bucket_valid)
+    {
+        uint cp_base = checkpointIndex(cp_bucket, 0u);
+        for (uint k = lane; k < STAGED_PIXELS; k += RASTER_BUCKET_SIZE)
+            gs_checkpoints[warp_idx][k] = raster_checkpoints[cp_base + phase + k * BACKWARD_PIXEL_STRIDE];
+    }
+    // RAW barrier: the pixel loop's cross-lane checkpoint reads must see the
+    // staged writes. ALL 8 warps must reach it (incl. invalid ones), so the
+    // slot >= live_total return happens AFTER, never before.
+    GroupMemoryBarrierWithGroupSync();
+    if (!bucket_valid) return;
+
+    // This lane's splat (index within the tile's sorted list).
+    uint local_splat = local_bucket * RASTER_BUCKET_SIZE + lane;
+    bool splat_valid = (local_splat < tile_count);
+    uint g_idx = 0u;
+    BlendData blend_only_data;
+    if (splat_valid)
+    {
+        g_idx = sorted_gaussian_ids[t_start + local_splat];
+        blend_only_data = blend_data[g_idx];
+    }
+
+    float2 acc_mean2d = float2(0.0);
+    float3 acc_cov2d  = float3(0.0);
+    float  acc_opacity = 0.0;
+    float  acc_comp = 0.0;
+    float3 acc_color  = float3(0.0);
+    float  acc_absx = 0.0;
+    float  acc_absy = 0.0;
+
+    float3 sh0 = splat_valid ? blend_only_data.sh0 : float3(0.0);
+    float3 c_i = shDC(sh0);
+
+    // --- Pixel loop: all 32 lanes lockstep so the wave scans stay valid ---
+    [loop]
+    for (uint p = 0u; p < TILE_AREA; ++p)
+    {
+        uint2 pixel = uint2(tile_origin_x + (p % TILE_SIZE),
+                            tile_origin_y + (p / TILE_SIZE));
+        bool pix_valid = (pixel.x < frame_dim_px.x && pixel.y < frame_dim_px.y);
+        // Inline per-pixel processed depth (was gs_processed[p]). OOB -> 0.
+        uint processed = pix_valid ? gaussian_count_per_pixel[pixel] : 0u;
+        // Saturation skip: no lane contributes if the ray ended before this
+        // bucket. Warp-uniform, so the wave scans stay in lockstep.
+        if (processed <= bucket_first_splat)
+            continue;
+
+        // Stochastic pixel subsampling (folds away at STRIDE=1). Warp-uniform.
+        if (BACKWARD_PIXEL_STRIDE > 1u && (p % BACKWARD_PIXEL_STRIDE) != phase)
+            continue;
+
+        bool contributes = splat_valid && (local_splat < processed);
+
+        uint checkpoint_slot = (p - phase) / BACKWARD_PIXEL_STRIDE;
+        float T_checkpoint; float3 C_checkpoint;
+        unpackCheckpoint(gs_checkpoints[warp_idx][checkpoint_slot], T_checkpoint, C_checkpoint);
+
+        float2 pixel_center = float2(pixel) + 0.5;
+
+        // Inline per-pixel dL_dC (was gs_dLdC[p]). In-bounds here (processed>0
+        // implies pix_valid). Warp-uniform broadcast.
+        float4 dLdC4 = dL_dC_texture[pixel];
+        float3 dL_dC = dLdC4.rgb;
+
+        float alpha = 0.0;
+        float alpha_grad_scale = 0.0;
+        if (contributes)
+        {
+            float alpha_raw = evalGaussian2DFromCov(pixel_center,
+                                                   blend_only_data.mean,
+                                                   blend_only_data.cov2d,
+                                                   blend_only_data.opacity,
+                                                   blend_only_data.opacity_compensation);
+            alpha = min(alpha_raw, ALPHA_MAX);
+            alpha_grad_scale = (alpha_raw <= ALPHA_MAX) ? 1.0 : 0.0;
+            if (alpha < ALPHA_MIN_TRACK)
+            {
+                alpha = 0.0;
+                alpha_grad_scale = 0.0;
+            }
+        }
+
+        float T_step = 1.0 - alpha;
+
+#if BACKWARD_BLEND_SCAN_MODE == 0
+        float dLdC_weight = dot(dL_dC, c_i) * alpha;
+        float T_prefix, dLdC_C_in_front_prefix;
+        blendPrefixExclusive(T_step, dLdC_weight, lane, T_prefix, dLdC_C_in_front_prefix);
+        float T_i     = T_checkpoint * T_prefix;
+        float alpha_T = alpha * T_i;
+        float dLdC_contrib = dLdC_weight * T_i;
+        float dLdC_C_in_front = dot(dL_dC, C_checkpoint) + T_checkpoint * dLdC_C_in_front_prefix;
+#else
+        float T_prefix = WavePrefixProduct(T_step);
+        float T_i     = T_checkpoint * T_prefix;
+        float alpha_T = alpha * T_i;
+        float3 contrib = c_i * alpha_T;
+        float3 C_in_front = C_checkpoint + float3(
+            WavePrefixSum(contrib.x),
+            WavePrefixSum(contrib.y),
+            WavePrefixSum(contrib.z));
+#endif
+
+        if (contributes)
+        {
+            float  dL_dA = dLdC4.a;
+            // Inline per-pixel T_final / C_total (was gs_Tfinal/gs_Ctotal).
+            float4 out_px  = output_image[pixel];
+            float  T_final = 1.0 - out_px.a;
+            float3 C_total = out_px.rgb;
+            float  oneMinusAlpha = 1.0 - alpha;
+
+            acc_color += dL_dC * alpha_T;
+
+#if BACKWARD_BLEND_SCAN_MODE == 0
+            float dLdC_Cbehind = dot(dL_dC, C_total) - dLdC_C_in_front - dLdC_contrib;
+            float dL_dalpha = dot(dL_dC, c_i) * T_i - dLdC_Cbehind / oneMinusAlpha + dL_dA * (T_final / oneMinusAlpha);
+#else
+            float3 C_behind = C_total - C_in_front - contrib;
+            float3 dC_dalpha = c_i * T_i - C_behind / oneMinusAlpha;
+            float dL_dalpha = dot(dL_dC, dC_dalpha) + dL_dA * (T_final / oneMinusAlpha);
+#endif
+            float dL_d_alpha_raw = dL_dalpha * alpha_grad_scale;
+
+            var dp_mean_2d = diffPair(blend_only_data.mean);
+            var dp_cov2d   = diffPair(blend_only_data.cov2d);
+            var dp_opacity = diffPair(blend_only_data.opacity);
+            var dp_comp    = diffPair(blend_only_data.opacity_compensation);
+
+            bwd_diff(evalGaussian2DFromCov)(pixel_center, dp_mean_2d, dp_cov2d, dp_opacity, dp_comp, dL_d_alpha_raw);
+
+            acc_mean2d += dp_mean_2d.d;
+            acc_cov2d  += dp_cov2d.d;
+            acc_opacity += dp_opacity.d;
+            acc_comp   += dp_comp.d;
+
+            if (alpha >= ALPHA_MIN_TRACK)
+            {
+                acc_absx += abs(dp_mean_2d.d.x);
+                acc_absy += abs(dp_mean_2d.d.y);
+            }
+        }
+    }
+
+    // --- Per-splat projection seed + atomics (one lane per splat) ---
+    if (splat_valid)
+    {
+        acc_color *= SH_C0;
+        if (BACKWARD_PIXEL_STRIDE > 1u)
+        {
+            float s = float(BACKWARD_PIXEL_STRIDE);
+            acc_mean2d *= s;
+            acc_cov2d  *= s;
+            acc_opacity *= s;
+            acc_comp   *= s;
+            acc_color  *= s;
+            acc_absx *= s;
+            acc_absy *= s;
+        }
+        InterlockedAdd(grad_mean2d_x[g_idx], toFixed(acc_mean2d.x));
+        InterlockedAdd(grad_mean2d_y[g_idx], toFixed(acc_mean2d.y));
+        InterlockedAdd(grad_cov2d_a[g_idx], toFixed(acc_cov2d.x));
+        InterlockedAdd(grad_cov2d_b[g_idx], toFixed(acc_cov2d.y));
+        InterlockedAdd(grad_cov2d_c[g_idx], toFixed(acc_cov2d.z));
+        InterlockedAdd(grad_comp[g_idx], toFixed(acc_comp));
+        InterlockedAdd(grad_opacity[g_idx], toFixed(acc_opacity));
+        InterlockedAdd(grad_color_r[g_idx], toFixed(acc_color.x));
+        InterlockedAdd(grad_color_g[g_idx], toFixed(acc_color.y));
+        InterlockedAdd(grad_color_b[g_idx], toFixed(acc_color.z));
+        InterlockedAdd(grad_2d_x_iter[g_idx], toFixed(acc_absx));
+        InterlockedAdd(grad_2d_y_iter[g_idx], toFixed(acc_absy));
     }
 }
