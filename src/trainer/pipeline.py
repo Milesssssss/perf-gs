@@ -185,6 +185,15 @@ class Pipeline:
                 "mip_enabled requires use_persplat_backward=True: the per-pixel "
                 "backward does not propagate opacity-compensation gradients.")
 
+        # Extinction hardness (compositor) is honored only by the per-splat
+        # backward (per-tile + flat); the legacy per-pixel backward.slang is
+        # alpha-over only. Fail loudly rather than train a hardened forward
+        # against an alpha-over backward.
+        if self.cfg.extinction_hardness != 1.0 and not self.use_persplat_backward:
+            raise RuntimeError(
+                "extinction_hardness != 1 requires use_persplat_backward=True: "
+                "the per-pixel backward does not implement hardened extinction.")
+
         # Rotating phase for the transposed backward's stochastic pixel
         # subsampling (BACKWARD_PIXEL_STRIDE in backward_persplat.slang).
         # Incremented each backward so the visited pixel subset alternates;
@@ -621,6 +630,7 @@ class Pipeline:
                 raster_checkpoints=b.raster_checkpoints.storage,
                 output_image=b.output_image,
                 gaussian_count_per_pixel=b.gaussian_count_per_pixel,
+                extinction_hardness=float(self.cfg.extinction_hardness),
             )
 
     def render(self, camera: Camera) -> None:
@@ -816,6 +826,7 @@ class Pipeline:
                         grad_2d_x_iter=b.grad_2d_x_iter.storage,
                         grad_2d_y_iter=b.grad_2d_y_iter.storage,
                         pixel_phase=self._backward_pixel_phase,
+                        extinction_hardness=float(self.cfg.extinction_hardness),
                     )
                 else:
                   # Transposed per-splat backward: one workgroup (256 threads)
@@ -842,6 +853,7 @@ class Pipeline:
                     # SGD pixel-subsampling phase; rotates each backward so the
                     # visited subset alternates (no-op at BACKWARD_PIXEL_STRIDE=1).
                     pixel_phase=self._backward_pixel_phase,
+                    extinction_hardness=float(self.cfg.extinction_hardness),
                 )
                 self._backward_pixel_phase += 1
                 # Per-gaussian projection backward: turn the summed 2D grads

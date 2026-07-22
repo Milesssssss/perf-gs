@@ -48,6 +48,12 @@ class RenderConfig:
     # compensation=1).
     mip_enabled: bool = False
     kernel_size: float = 0.3
+    # Compositor extinction hardness k (shaders/core/compositor.slang). 1.0 =
+    # standard alpha-over (bit-identical); k>1 sharpens the per-splat extinction
+    # to (1-alpha)^k so transmittance decays faster => stronger occlusion culling
+    # (earlier early-out in forward AND backward) at a quality tradeoff. Passed as
+    # a shader uniform, so it is tunable per run with no recompile.
+    extinction_hardness: float = 1.0
 
 
 @dataclass

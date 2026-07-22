@@ -27,6 +27,7 @@
 #include "../../common/math.slang"
 #include "../../primitives/gaussian/project.slang"
 #include "../../primitives/gaussian/eval.slang"
+#include "../../core/compositor.slang"
 #include "checkpoint.slang"
 
 static const uint TILE_SIZE = 16;
@@ -196,7 +197,9 @@ void backwardRasterizePerSplat(
     // Per-iteration phase in [0, BACKWARD_PIXEL_STRIDE) selecting which pixel
     // subset this backward visits. Host toggles it each iter so the SGD is
     // unbiased. Ignored when BACKWARD_PIXEL_STRIDE == 1.
-    uniform uint pixel_phase)
+    uniform uint pixel_phase,
+    // Compositor extinction hardness k (1 = alpha-over). See core/compositor.slang.
+    uniform float extinction_hardness)
 {
     uint tid = gtid.x;
     uint2 frame_dim_px = uint2(camera[0].image_size);
@@ -401,10 +404,13 @@ void backwardRasterizePerSplat(
                 }
             }
 
-            // Per-splat transmittance step: T advances by *= T_step across
-            // this splat. Identity (1) when the lane is masked (alpha=0) so
-            // the scan naturally skips masked lanes.
-            float T_step = 1.0 - alpha;
+            // Per-splat transmittance step: T advances by *= T_step across this
+            // splat. Identity (1) when the lane is masked (alpha=0) so the scan
+            // naturally skips masked lanes. hardness is a uniform: 1 = alpha-over
+            // (bit-identical); k > 1 sharpens extinction (see core/compositor.slang).
+            Compositor comp;
+            comp.hardness = extinction_hardness;
+            float T_step = comp.transmittance(alpha);
 
             // dL_dC (and C_checkpoint/C_total/T_final/dL_dA) are PER-PIXEL, hence
             // warp-uniform here: all 32 lanes share pixel p; lanes differ only
@@ -430,11 +436,11 @@ void backwardRasterizePerSplat(
             //   dLdC_C_in_front_prefix = sum_{j<i}  dLdC_weight_j * T_prefix_j
             //                     -> dLdC(C_in_front_excl) = dot(dL_dC,C_checkpoint)
             //                                              + T_checkpoint * dLdC_C_in_front_prefix
-            float dLdC_weight = dot(dL_dC, c_i) * alpha;      // 0 when masked
+            float dLdC_weight = dot(dL_dC, c_i) * comp.weight(alpha);   // 0 when masked
             float T_prefix, dLdC_C_in_front_prefix;
             blendPrefixExclusive(T_step, dLdC_weight, lane, T_prefix, dLdC_C_in_front_prefix);
             float T_i     = T_checkpoint * T_prefix;                   // pre-splat transmittance
-            float alpha_T = alpha * T_i;                       // this splat's blend weight
+            float alpha_T = comp.weight(alpha) * T_i;          // this splat's blend weight
             // This splat's contribution to dot(dL_dC, C_in_front_incl):
             //   dLdC_contrib = dot(dL_dC, c_i * alpha * T_i)
             //               = dot(dL_dC, c_i) * alpha_T
@@ -485,9 +491,10 @@ void backwardRasterizePerSplat(
                 //   dot(dL_dC, C_behind(i)), with
                 //   C_behind = C_total - C_in_front(i) - c_i*alpha_i*T_i:
                 float dLdC_Cbehind = dot(dL_dC, C_total) - dLdC_C_in_front - dLdC_contrib;
-                // dot(dL_dC, dC_dalpha) = dot(dL_dC, c_i)*T_i
-                //                       - dot(dL_dC, C_behind)/oneMinusAlpha.
-                float dL_dalpha = dot(dL_dC, c_i) * T_i - dLdC_Cbehind / oneMinusAlpha + dL_dA * (T_final / oneMinusAlpha);
+                // Per-splat dLoss/dcoverage; the compositor owns the alpha-over
+                // vs hardened-extinction math (bit-identical at hardness=1).
+                float dL_dalpha = comp.coverageGrad(alpha, dot(dL_dC, c_i), T_i,
+                                                    dLdC_Cbehind, dL_dA, T_final);
 #else
                 // LEGACY: use the vector C_in_front + contrib produced by the two
                 // separate scans.
@@ -623,7 +630,8 @@ void backwardRasterizePerBucket(
     RWStructuredBuffer<int64_t> grad_color_b,
     RWStructuredBuffer<int64_t> grad_2d_x_iter,
     RWStructuredBuffer<int64_t> grad_2d_y_iter,
-    uniform uint pixel_phase)
+    uniform uint pixel_phase,
+    uniform float extinction_hardness)
 {
     uint tid = gtid.x;
     uint lane = WaveGetLaneIndex();            // splat within the bucket [0,32)
@@ -744,14 +752,19 @@ void backwardRasterizePerBucket(
             }
         }
 
-        float T_step = 1.0 - alpha;
+        // Transmittance factor via the Compositor. hardness is a uniform:
+        // 1 = alpha-over (bit-identical); k > 1 sharpens extinction. Shared
+        // with the forward + per-tile backward. See core/compositor.slang.
+        Compositor comp;
+        comp.hardness = extinction_hardness;
+        float T_step = comp.transmittance(alpha);
 
 #if BACKWARD_BLEND_SCAN_MODE == 0
-        float dLdC_weight = dot(dL_dC, c_i) * alpha;
+        float dLdC_weight = dot(dL_dC, c_i) * comp.weight(alpha);
         float T_prefix, dLdC_C_in_front_prefix;
         blendPrefixExclusive(T_step, dLdC_weight, lane, T_prefix, dLdC_C_in_front_prefix);
         float T_i     = T_checkpoint * T_prefix;
-        float alpha_T = alpha * T_i;
+        float alpha_T = comp.weight(alpha) * T_i;
         float dLdC_contrib = dLdC_weight * T_i;
         float dLdC_C_in_front = dot(dL_dC, C_checkpoint) + T_checkpoint * dLdC_C_in_front_prefix;
 #else
@@ -778,7 +791,8 @@ void backwardRasterizePerBucket(
 
 #if BACKWARD_BLEND_SCAN_MODE == 0
             float dLdC_Cbehind = dot(dL_dC, C_total) - dLdC_C_in_front - dLdC_contrib;
-            float dL_dalpha = dot(dL_dC, c_i) * T_i - dLdC_Cbehind / oneMinusAlpha + dL_dA * (T_final / oneMinusAlpha);
+            float dL_dalpha = comp.coverageGrad(alpha, dot(dL_dC, c_i), T_i,
+                                                dLdC_Cbehind, dL_dA, T_final);
 #else
             float3 C_behind = C_total - C_in_front - contrib;
             float3 dC_dalpha = c_i * T_i - C_behind / oneMinusAlpha;

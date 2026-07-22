@@ -383,30 +383,6 @@ def densify_simple(pipeline: Pipeline, cfg: DensifyConfig,
     pipeline._encoder = enc
     with pipeline._marker_group("densify_simple"):
         # ---- Wait-free densify pipeline (all GPU, no CPU readbacks) ----
-        #
-        # Counts flow like this:
-        #   num_gaussians_counter[0] ─(snapshot)─▶ densify_pre_count[0]
-        #                                             │
-        #     ┌───────────────────────────────────────┘
-        #     ▼
-        #   splitAndClone atomically bumps num_gaussians_counter[0]
-        #     │
-        #     └─(snapshot)─▶ densify_post_count[0]
-        #                       │
-        #     ┌─────────────────┴──────────────────────┐
-        #     ▼                                        ▼
-        #   buildPruneMask over [max_splats]         scatterCompact over [max_splats]
-        #     (zeros valid_mask tail beyond           (skips i where valid_mask=0)
-        #      post_count)
-        #     │
-        #     ▼
-        #   _scan over max_splats → scan_total[0] = final_count
-        #     │
-        #     └─(snapshot)─▶ num_gaussians_counter[0]  (final_count)
-        #
-        # Everything except splitAndClone runs at [max_splats] and self-bounds
-        # off the snapshot buffers, so we only need one indirect-dispatch path.
-
         # Phase A: decide actions. Dispatches [max_splats]; shader early-outs
         # per-thread on i >= num_gaussians_counter[0] (GPU-resident).
         pipeline._dispatch(pipeline.k_decide_actions_simple, "decide_actions_simple",
@@ -805,9 +781,6 @@ def densify_structure_aware(pipeline: Pipeline, cfg: StructureConfig) -> dict:
     }
 
 
-# ----------------------------------------------------------------------
-# Periodic Morton-order sort of the gaussian buffer
-# ----------------------------------------------------------------------
 
 def morton_sort(pipeline: Pipeline, world_min: np.ndarray,
                 world_max: np.ndarray, carry_eta: bool = False) -> None:

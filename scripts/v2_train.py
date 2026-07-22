@@ -32,102 +32,21 @@ from PIL import Image
 
 from trainer.colmap import load_colmap, load_image
 from trainer.device import create_device
-from trainer.export import render_to_png, save_ply
+from trainer.export import save_ply
 from trainer.color import linear_to_srgb, srgb_to_linear
 from trainer.config import AdamLRs, RenderConfig
 from trainer.densify import StructureConfig
+from trainer.metrics import psnr as _psnr_image, ssim as _ssim_image
 from trainer.pipeline import DensifyConfig, Pipeline
 
-# Sibling script (scripts/ is on sys.path[0] when v2_train is run directly).
+# Sibling scripts (scripts/ is on sys.path[0] when v2_train is run directly).
 from bin_viz import write_bin_viz
+from _v2_profiling import Profiler
+from _v2_sampling import CameraSampler
 
 
 def _srgb_to_linear(c: np.ndarray) -> np.ndarray:
     return srgb_to_linear(c)
-
-
-def _psnr_image(rendered: np.ndarray, target: np.ndarray) -> float:
-    """Per-image PSNR for data in [0, 1] — the paper's metric.
-
-    Algebraically identical to INRIA 3DGS / SAD-GS `image_utils.psnr`
-    (20*log10(1/sqrt(mse)) == -10*log10(mse)); see scripts/image_metrics.py
-    for the vendored reference. This is the ONLY PSNR primitive the trainer
-    should use: compute it per image, then average the resulting dB across
-    frames (mean-of-per-image PSNR). Do NOT pool MSE across frames and take
-    the log once (dB-of-mean-MSE) — that is a different, more-pessimistic
-    number that the paper never reports.
-    """
-    mse = float(np.mean((rendered - target) ** 2))
-    if mse <= 1e-12:
-        return 99.0
-    return -10.0 * math.log10(mse)
-
-
-# Back-compat alias: _psnr_linear was the old name; kept so any external
-# caller/import still resolves. Same per-image formula.
-_psnr_linear = _psnr_image
-
-
-def _ssim_gaussian_window(window_size: int = 11, sigma: float = 1.5) -> np.ndarray:
-    """1D Gaussian window, matching INRIA 3DGS/SAD-GS loss_utils.gaussian."""
-    coords = np.arange(window_size) - window_size // 2
-    g = np.exp(-(coords ** 2) / (2.0 * sigma ** 2))
-    return (g / g.sum()).astype(np.float64)
-
-
-# Precompute the separable 2D window once (11x11, sigma=1.5) — identical to the
-# reference create_window(11, ...).
-_SSIM_WIN_1D = _ssim_gaussian_window(11, 1.5)
-_SSIM_WIN_2D = np.outer(_SSIM_WIN_1D, _SSIM_WIN_1D)
-
-
-def _ssim_image(rendered: np.ndarray, target: np.ndarray) -> float:
-    """Per-image SSIM for HxWxC data in [0, 1] — the paper's metric.
-
-    NumPy port of INRIA 3DGS / SAD-GS `loss_utils.ssim` (see the vendored torch
-    reference in scripts/image_metrics.py). Matches it faithfully: 11x11
-    Gaussian window (sigma=1.5), 'same' convolution with ZERO padding (torch
-    conv2d padding=5), C1=0.01^2, C2=0.03^2, per-channel SSIM map, then the
-    GLOBAL mean over all pixels & channels (size_average=True). The trainer
-    holds images as HxWxC numpy; torch uses CxHxW, but the per-channel windowed
-    stats and the final scalar mean are identical either way.
-
-    Validated against the torch reference (scripts/image_metrics.py) to ~1e-6.
-    Do NOT "optimize" the padding or window — fidelity to the reference is what
-    makes this comparable to the SAD-GS / 3DGS SSIM column.
-    """
-    from scipy.ndimage import correlate  # local import: scipy is always present
-
-    r = rendered.astype(np.float64)
-    t = target.astype(np.float64)
-    if r.ndim == 2:
-        r = r[..., None]
-        t = t[..., None]
-
-    C1 = 0.01 ** 2
-    C2 = 0.03 ** 2
-    w = _SSIM_WIN_2D
-
-    def filt(img2d: np.ndarray) -> np.ndarray:
-        # 'constant' mode with cval=0 == torch conv2d zero-padding=5.
-        return correlate(img2d, w, mode="constant", cval=0.0)
-
-    ssim_channels = []
-    for c in range(r.shape[-1]):
-        x = r[..., c]
-        y = t[..., c]
-        mu_x = filt(x)
-        mu_y = filt(y)
-        mu_x2 = mu_x * mu_x
-        mu_y2 = mu_y * mu_y
-        mu_xy = mu_x * mu_y
-        sigma_x2 = filt(x * x) - mu_x2
-        sigma_y2 = filt(y * y) - mu_y2
-        sigma_xy = filt(x * y) - mu_xy
-        ssim_map = (((2 * mu_xy + C1) * (2 * sigma_xy + C2)) /
-                    ((mu_x2 + mu_y2 + C1) * (sigma_x2 + sigma_y2 + C2)))
-        ssim_channels.append(ssim_map)
-    return float(np.mean(ssim_channels))
 
 
 def _linear_to_srgb(c: np.ndarray) -> np.ndarray:
@@ -146,7 +65,7 @@ def _render_all_cameras(pipeline: Pipeline, scene, iter_idx: int, cams_dir: Path
         Image.fromarray(png, mode="RGBA").save(out_path)
 
 
-def main() -> None:
+def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser()
     #ap.add_argument("--scene", type=str, default="datasets/360_v2/bicycle") V
     #ap.add_argument("--scene", type=str, default="datasets/360_v2/counter") V
@@ -459,6 +378,14 @@ def main() -> None:
                          "pixels per iter (unbiased SGD estimator, rotating "
                          "phase) for a faster backward at some gradient-noise "
                          "cost. Injected as a compile-time define.")
+    ap.add_argument("--extinction-hardness", type=float, default=1.0,
+                    help="Compositor extinction hardness k (a shader UNIFORM, so "
+                         "no recompile). 1.0 (default) = standard alpha-over "
+                         "(bit-identical). k>1 hardens the per-splat transmittance "
+                         "to (1-alpha)^k so T decays faster => stronger occlusion "
+                         "culling (earlier early-out in forward AND backward) at a "
+                         "quality tradeoff. Beer-Lambert-style; requires the "
+                         "per-splat backward (the default).")
     ap.add_argument("--final-test-psnr", action="store_true", default=False,
                     help="After the timed loop, compute ONLY the held-out "
                          "TEST-set PSNR (mean per-image sRGB, the paper metric "
@@ -466,51 +393,18 @@ def main() -> None:
                          "Lightweight: renders just the test cams, no full "
                          "per-camera PNG dump / PLY. Does not affect train_wall_s.")
     ap.add_argument("--compute-final-metrics", action="store_true", default=False)
-    
-    args = ap.parse_args()
+    return ap
 
-    if args.capture_external:
-        # Headless CLI-driven capture implies a profile run, and skips
-        # self-injection entirely (ngfx.exe owns injection + start/stop/save).
-        args.profile_run = True
 
-    if args.profile_run:
-        # A profile run is a clean, self-contained presenting Vulkan app: no
-        # viewer stream (a second device/window pollutes the capture), and no
-        # previews (frame-boundary I/O breaks Nsight's step-per-frame cadence).
-        # Vulkan is the only backend Nsight Graphics can hook.
-        args.no_viewer = True
-        args.backend = "vulkan"
-        args.preview_every = 0
+def main() -> None:
+    args = build_parser().parse_args()
 
-    # Programmatic Nsight capture: inject BEFORE any Vulkan driver load. If the
-    # SDK isn't installed or injection fails, we log and continue without
-    # captures - training still runs normally.
-    #
-    # Two capture paths:
-    #   self-injection (--capture-iter, default): this process loads
-    #     NGFX_Injection.dll and triggers the capture itself. The trace lives
-    #     in the in-process HUD and must be persisted via the HUD's Save button
-    #     (there is NO save function in the NGFX_Injection API).
-    #   external (--capture-external): the Nsight CLI launcher (ngfx.exe) spawns
-    #     this process with Nsight injected and controls start/stop + AUTO-SAVE
-    #     of the .ngfx-gputrace. We do NOT self-inject here; we only present the
-    #     frozen workload at --capture-iter for --capture-frames frames.
-    ngfx_cap = None
-    if args.capture_iter > 0 and not args.capture_external:
-        if not args.profile_run:
-            print("[capture] --capture-iter requires --profile-run. ignoring.")
-        else:
-            from trainer.ngfx_capture import NgfxCapture
-            ngfx_cap = NgfxCapture()
-            if not ngfx_cap.inject(activity=args.capture_activity,
-                                   project_path=args.capture_project):
-                ngfx_cap = None
-            else:
-                proj_msg = (f" (project={args.capture_project})"
-                            if args.capture_project else "")
-                print(f"[capture] will trigger Nsight {args.capture_activity!r} "
-                      f"capture at iter {args.capture_iter}{proj_msg}")
+    # All Nsight Graphics profiling lives in the Profiler (_v2_profiling.py):
+    # session tweaks, self-injection, the present window, and the capture loop.
+    # Every hook is a no-op unless --profile-run / --capture-* is set.
+    profiler = Profiler(args)
+    profiler.configure_session()   # profile runs disable the viewer + previews
+    profiler.inject()              # self-injection when --capture-iter
 
     run_name = args.run_name or datetime.now().strftime("%Y%m%d_%H%M%S")
     run_dir = Path("outputs/train") / run_name
@@ -547,48 +441,6 @@ def main() -> None:
         train_indices = list(range(n_cams))
         print(f"[eval] holdout protocol OFF: training on all {n_cams} cameras, "
               f"reporting over all cameras (internal metric).")
-    train_indices_arr = np.array(train_indices, dtype=np.int64)
-
-    # --- SADGS-matching sampling mode (--sample-mode sadgs) ---
-    # Replicate the reference SADGS trainer's EXACT per-iteration camera draw so
-    # a like-for-like PSNR comparison isolates the renderer, not the data order.
-    # SADGS (INRIA lineage) consumes the Python `random` stream like so:
-    #   safe_state              -> random.seed(0)
-    #   Scene(shuffle=True)     -> random.shuffle(train_cams); random.shuffle(test_cams)
-    #   epoch cycling: viewpoint_stack = getTrainCameras().copy() (the load-shuffled
-    #     order, popped IN ORDER for the FIRST epoch — no reshuffle), then on each
-    #     refill (stack empty) random.shuffle(stack) before popping from the front.
-    # We mirror that here: same seed, same shuffle-call order over same-length
-    # train/test index lists, same first-epoch-no-reshuffle + refill-reshuffle
-    # cadence, batch_size=1 (the reference default). Our camera order already
-    # matches SADGS (both name-sort then drop every `stride`-th as holdout), so
-    # index i maps to the same image on both sides. NOTE: bit-exactness assumes
-    # SADGS makes no other `random.*` draws inside the loop (holds for the SH0
-    # bicycle config: random_background is off and densify uses torch RNG).
-    _sadgs_sampler = None
-    if args.sample_mode == "sadgs":
-        import random as _pyrandom
-        _pyrandom.seed(args.seed)
-        _sadgs_train = list(train_indices)   # name-sorted ascending, minus holdout
-        _sadgs_test = list(test_indices)
-        _pyrandom.shuffle(_sadgs_train)      # Scene load-time shuffle (train)
-        _pyrandom.shuffle(_sadgs_test)       # Scene load-time shuffle (test) — consumes stream
-        _sadgs_base = list(_sadgs_train)     # getTrainCameras() order
-        _sadgs_stack = list(_sadgs_base)     # initial viewpoint_stack = getTrainCameras().copy()
-
-        def _sadgs_next_cam() -> int:
-            # SADGS pops from the front; on an exhausted epoch it refills from
-            # getTrainCameras().copy() and reshuffles before the next pop.
-            if not _sadgs_stack:
-                _sadgs_stack.extend(_sadgs_base)
-                _pyrandom.shuffle(_sadgs_stack)
-            return _sadgs_stack.pop(0)
-
-        _sadgs_sampler = _sadgs_next_cam
-        print(f"[sample-mode=sadgs] replicating SADGS random-shuffle sampling "
-              f"(seed={args.seed}, {len(_sadgs_base)} train cams, batch_size=1, "
-              f"first epoch in load-shuffled order, reshuffle on refill)")
-
     # AABB of the initial point cloud, padded 20% per axis. Used only if
     # --morton-every > 0 (Morton quantization needs a normalized coord frame).
     # A stale bbox is fine — the shader saturates out-of-box means, so
@@ -736,11 +588,15 @@ def main() -> None:
     # (On Vulkan there are no PDBs; this embeds NonSemantic.Shader.DebugInfo in
     # the SPIR-V.) Optimization stays at the default level so the profiled code
     # is the real optimized code.
+    # Compile-time shader define for the backward pixel-subsampling stride.
+    # Omitted at the default so the shipped path stays bit-identical. (Extinction
+    # hardness is a runtime uniform via RenderConfig, not a define.)
+    _defines: dict[str, str] = {}
+    if args.backward_pixel_stride != 1:
+        _defines["BACKWARD_PIXEL_STRIDE"] = f"{args.backward_pixel_stride}u"
     device = create_device(backend=args.backend,
                            shader_debug_info=args.profile_run,
-                           defines={"BACKWARD_PIXEL_STRIDE":
-                                    f"{args.backward_pixel_stride}u"}
-                           if args.backward_pixel_stride != 1 else None)
+                           defines=_defines or None)
     if args.profile_run:
         print("[profile-run] shaders compiled with source-level debug info "
               "(SPIR-V NonSemantic.Shader.DebugInfo) for Nsight correlation.")
@@ -797,6 +653,7 @@ def main() -> None:
             cluster_cull=args.cluster_cull,
             mip_enabled=args.mip_splatting,
             kernel_size=(args.mip_kernel_size if args.mip_splatting else 0.3),
+            extinction_hardness=args.extinction_hardness,
         ),
     )
     pipeline.set_gaussians_from_numpy(**scene.initial_points)
@@ -958,58 +815,10 @@ def main() -> None:
         viewer.start()
         print("[viewer] render thread started.", flush=True)
 
-    # ------------------------------------------------------------------
-    # Nsight Graphics profiling: window + present hook.
-    #
-    # Nsight Graphics is a graphics-API debugger that hooks the Vulkan device
-    # and delimits work by Present, so profiling needs a real windowed,
-    # presenting Vulkan app. When --profile-run is set we open a window,
-    # create a swapchain surface, and Present() one frame per iter — same
-    # normal training loop otherwise (densify + logs still run). The viewer
-    # stream is disabled to avoid a second device/window polluting the
-    # capture. Launch this process as the Nsight target (or connect), then
-    # capture a frame: each frame is one full train_step (clear_grads/
-    # forward/loss/backward/regularization/adam), plus densify on schedule.
-    profile_window = None
-    profile_surface = None
-    if args.profile_run:
-        import slangpy as spy
-        profile_window = spy.Window(width=IMAGES_WIDTH, height=IMAGES_HEIGHT,
-                                    title="3DGS profile (Nsight Graphics)")
-        profile_surface = pipeline.device.create_surface(profile_window)
-        profile_surface.configure(width=IMAGES_WIDTH, height=IMAGES_HEIGHT)
-        print("[profile-run] presenting one frame per train_step for Nsight "
-              "Graphics. Launch this process as the ngfx target (or connect), "
-              "then capture a frame. Densify + logs still run on schedule; "
-              "close the window (or reach --iters) to quit.")
-
-    def _profile_present() -> None:
-        """Best-effort present of the latest render (Nsight's frame boundary).
-        acquire_next_image can RAISE (not just return None) when the window is
-        minimized/resized/loses the swapchain, so we catch it and reconfigure —
-        a dropped frame must never kill the training loop we're profiling."""
-        if profile_surface is None:
-            return
-        nonlocal_surface = profile_surface
-        surf_tex = None
-        try:
-            surf_tex = nonlocal_surface.acquire_next_image()
-        except Exception:
-            surf_tex = None
-        if surf_tex is None:
-            try:
-                w, h = max(profile_window.width, 1), max(profile_window.height, 1)
-                pipeline.device.wait_for_idle()
-                nonlocal_surface.unconfigure()
-                nonlocal_surface.configure(width=w, height=h)
-            except Exception:
-                pass
-            return
-        enc = pipeline.device.create_command_encoder()
-        enc.blit(surf_tex, pipeline.buffers.output_image)
-        pipeline.device.submit_command_buffer(enc.finish())
-        nonlocal_surface.present()
-
+    # Nsight Graphics hooks the Vulkan device and delimits work by Present, so
+    # profiling needs a real windowed, presenting app; open one for
+    # --profile-run (no-op otherwise). Each presented frame is one train_step.
+    profiler.open_window(pipeline, IMAGES_WIDTH, IMAGES_HEIGHT)
 
     profile_json = (run_dir / "profile_log.jsonl").open("w", buffering=1) if args.profile_every > 0 else None
     log_txt = (run_dir / "log.txt").open("w", buffering=1)
@@ -1062,6 +871,11 @@ def main() -> None:
                   f"[{args.densify_from}, {args.densify_to}]\n")
 
     rng = np.random.default_rng(args.seed)
+    # Per-iteration train-camera draw. 'ours' shares this rng so its stream
+    # stays interleaved with the densify view-scoring draws; 'sadgs' replicates
+    # the reference shuffle/pop (see scripts/_v2_sampling.py).
+    sampler = CameraSampler(args.sample_mode, train_indices, test_indices,
+                            args.seed, rng)
 
     # gsplat/3DGS scale the means LR by scene extent (getNerfppNorm radius):
     # means are the only world-unit parameter, so their LR must track scene
@@ -1162,34 +976,15 @@ def main() -> None:
     # --profile-run we also stop when the user closes the profile window
     # (so Nsight can capture and quit cleanly).
     it = 0
-    # State machine for the capture:
-    #   armed: at iter == capture_iter we drain the queue and fire the trigger
-    #          BEFORE Present, so the presented frame contains exactly one
-    #          fully-completed iter's work.
-    #   hold : after firing, we keep Present()ing the SAME output_image
-    #          (no more train_steps) for capture_hold_frames iters so
-    #          Nsight's multi-frame collection sees identical content and
-    #          the capture doesn't drift across whatever number of frames
-    #          it actually samples.
-    # Capture protocol: when we reach iter == capture_iter, we drain the
-    # queue after that iter's train_step, run the trigger inline, then
-    # burn a fixed number of Presents of the frozen image so Nsight's
-    # counter-sampling window falls entirely inside frames of identical
-    # content. Then training resumes.
     while it < args.iters:
-        if profile_window is not None and profile_window.should_close():
+        if profiler.should_stop():
             break
         it += 1
 
         # Sample a TRAIN camera. With --eval, train_indices excludes the
         # held-out test views, so they are never optimized against (nor fed to
         # the structure-densify accumulator, which uses this same camera).
-        # --sample-mode sadgs swaps our default_rng draw for a byte-for-byte
-        # replica of the reference SADGS shuffle/pop sequence (see setup above).
-        if _sadgs_sampler is not None:
-            cam_idx = _sadgs_sampler()
-        else:
-            cam_idx = int(train_indices_arr[rng.integers(0, train_indices_arr.shape[0])])
+        cam_idx = sampler.next()
         entry = scene.images[cam_idx]
         pipeline.set_target_texture(target_textures[cam_idx])
 
@@ -1206,108 +1001,10 @@ def main() -> None:
         lrs = AdamLRs(mean=_mean_lr(it - 1), scale=base_lrs.scale,
                       rot=base_lrs.rot, opacity=base_lrs.opacity, color=base_lrs.color)
 
-        # ---- Deterministic capture protocol for GPU Trace ----
-        #
-        # GPU Trace is NOT a single-frame debugger. It is a continuous
-        # hardware-counter profiler: after arm it samples counters across
-        # a collection window (~1-2 seconds) of CONTINUOUSLY-PRESENTED
-        # frames, replaying/re-sampling the recurring per-frame workload.
-        # It needs a steady stream of representative frames for the whole
-        # window - freezing on a static blit after one train_step gives
-        # it nothing to sample (that's why earlier attempts were empty /
-        # truncated / marker-less).
-        #
-        # So at capture_iter we enter a dedicated capture loop that keeps
-        # presenting representative frames, made deterministic + stable by:
-        #   - PIN the camera to capture_iter's camera. Every frame in the
-        #     window renders the same view, so whichever frame Nsight
-        #     samples shows the same camera across runs.
-        #   - lr = 0 so the Adam step still runs (full backward workload
-        #     IS profiled) but gaussians never move -> every frame is
-        #     bit-identical -> the sampled counters are reproducible.
-        #   - No densify / opacity-reset / readback in the loop, so the
-        #     workload shape is a pure, stable train_step.
-        # The process stays alive (loop until window close) so Nsight's
-        # overlay can open the capture UI; killing it early tears the
-        # overlay down before the UI appears.
-        #TODO: lets abstract away this nsight debugging code from the trainer script
-        if (ngfx_cap is not None or args.capture_external) and it == args.capture_iter:
-            print(f"[capture] draining queue at iter {it}...")
-            pipeline.device.wait_for_idle()
-            submit_id_ring.clear()
-            try:
-                n_g_capture = int(
-                    pipeline.buffers.num_gaussians_counter.to_numpy().view(np.uint32)[0])
-            except Exception:
-                n_g_capture = -1
-            print(f"[capture] state @ iter {it}: cam_idx={cam_idx}  "
-                  f"n_gaussians={n_g_capture}")
-
-            pinned_camera = entry.camera
-            # Zero ALL learning rates (mean/scale/rot/opacity/color) so the
-            # Adam step runs its full workload but no parameter moves -> every
-            # frame in the collection window is bit-identical.
-            frozen_lrs = AdamLRs(mean=0.0, scale=0.0, rot=0.0,
-                                 opacity=0.0, color=0.0)
-
-            # Warm up a few frames of the pinned, frozen workload BEFORE
-            # arming so Nsight sees a steady state (caches warm, no
-            # first-frame compile/alloc spikes) when it starts sampling.
-            print("[capture] warming up pinned/frozen frames before arm...")
-            for _ in range(8):
-                if profile_window is not None:
-                    profile_window.process_events()
-                pipeline.train_step(pinned_camera, lrs=frozen_lrs)
-                if profile_window is not None:
-                    _profile_present()
-            pipeline.device.wait_for_idle()
-
-            if ngfx_cap is not None:
-                print(f"[capture] triggering Nsight capture at iter {it}")
-                ngfx_cap.trigger()
-
-            # Continuous capture loop: keep presenting the identical,
-            # representative frame so Nsight can complete its multi-sample
-            # collection.
-            #   self-injection: run until the profile window is closed (the
-            #     user saves from the HUD, then closes the window).
-            #   external (ngfx.exe): run a BOUNDED number of frames. ngfx.exe
-            #     starts the trace after --start-after-frames presents and
-            #     stops after --limit-to-frames; we present --capture-frames
-            #     (chosen > start+limit+margin) so the whole trace window falls
-            #     inside identical frozen frames, then exit so ngfx.exe can
-            #     finalize + auto-save the .ngfx-gputrace.
-            if args.capture_external:
-                print(f"[capture] external mode: presenting {args.capture_frames} "
-                      f"frozen frames for ngfx.exe, then exiting.")
-            else:
-                print("[capture] presenting pinned/frozen frames continuously for "
-                      "GPU Trace; close the profile window when Nsight is done.")
-            import time as _t
-            frozen_i = 0
-            while True:
-                if args.capture_external and frozen_i >= args.capture_frames:
-                    break
-                if profile_window is not None:
-                    if profile_window.should_close():
-                        break
-                    profile_window.process_events()
-                pipeline.train_step(pinned_camera, lrs=frozen_lrs)
-                if profile_window is not None:
-                    _profile_present()
-                else:
-                    _t.sleep(0.01)
-                frozen_i += 1
-
-            # Drain so the last presented frames complete before teardown —
-            # otherwise ngfx.exe may see an in-flight device at exit.
-            pipeline.device.wait_for_idle()
-
-            if profile_window is not None:
-                try:
-                    profile_window.close()
-                except Exception:
-                    pass
+        # Deterministic Nsight GPU-Trace capture at --capture-iter (no-op
+        # otherwise). When a capture runs it never returns to training: the
+        # process finalizes its own logs here and exits.
+        if profiler.run_capture_if_due(pipeline, it, entry, cam_idx, submit_id_ring):
             log_txt.close()
             log_json.close()
             densify_json.close()
@@ -1319,9 +1016,6 @@ def main() -> None:
                 bin_viz_json.close()
             if profile_json:
                 profile_json.close()
-            print("[capture] window closed, exiting." if not args.capture_external
-                  else f"[capture] presented {args.capture_frames} frozen frames; "
-                       "exiting so ngfx.exe can finalize + auto-save the trace.")
             sys.exit(0)
 
         # SAD-GS: accumulate this view's eta sample online (paper Sec 3.6) so
@@ -1347,13 +1041,9 @@ def main() -> None:
                             structure_kwargs=struct_kwargs)
         submit_id_ring.append(pipeline.last_submit_id)
 
-        # Profile hook: Present() the just-rendered frame so Nsight has a
-        # frame boundary to capture on. train_step ran the forward for this
-        # camera, so output_image is fresh. Pump events first so window
-        # close/resize is picked up promptly.
-        if profile_window is not None:
-            profile_window.process_events()
-            _profile_present()
+        # Profile hook: present the just-rendered frame so Nsight has a fresh
+        # frame boundary to capture on (no-op outside a profile run).
+        profiler.present_frame()
 
         # Push a gaussian snapshot to the in-process viewer every N iters.
         # This is a zero-copy GPU->GPU buffer blit (no readback, no numpy, no
@@ -1736,7 +1426,10 @@ def main() -> None:
                 mask = (t_srgb.sum(-1) > 0.05) | (r_srgb.sum(-1) > 0.05)
                 if mask.sum() > 0:
                     psnr_srgb_mask_frames.append(_psnr_image(r_srgb[mask], t_srgb[mask]))
-            _mean = lambda xs: float(np.mean(xs)) if xs else 0.0
+
+            def _mean(values: list[float]) -> float:
+                return float(np.mean(values)) if values else 0.0
+
             psnr_srgb = _mean(psnr_srgb_frames)
             ssim_srgb = _mean(ssim_srgb_frames)
             psnr_lin = _mean(psnr_lin_frames)
@@ -1795,11 +1488,7 @@ def main() -> None:
         print(f"[final-test-psnr] TEST PSNR sRGB = {_tp_psnr:.3f} dB over "
               f"{len(test_indices)} held-out cams  (n_gaussians={_tp_ng})")
 
-    if profile_window is not None:
-        try:
-            profile_window.close()
-        except Exception:
-            pass
+    profiler.close()
 
     if viewer is not None:
         # Push the final state so the window shows the trained result, then

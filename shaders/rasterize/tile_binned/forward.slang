@@ -15,6 +15,8 @@
 #include "../../common/types.slang"
 #include "../../common/math.slang"
 #include "../../primitives/gaussian/eval.slang"
+#include "../../primitives/gaussian/blend.slang"
+#include "../../core/compositor.slang"
 #include "checkpoint.slang"
 
 static const uint TILE_SIZE = 16;
@@ -60,7 +62,8 @@ void forwardRasterize(
     StructuredBuffer<uint> bucket_offsets,
     RWStructuredBuffer<uint2> raster_checkpoints,
     RWTexture2D<float4> output_image,
-    RWTexture2D<uint> gaussian_count_per_pixel)
+    RWTexture2D<uint> gaussian_count_per_pixel,
+    uniform float extinction_hardness)
 {
     uint2 pixel = dtid.xy;
     uint2 frame_dim_px = uint2(camera[0].image_size);
@@ -85,6 +88,11 @@ void forwardRasterize(
     float T = 1.0;
     uint processed = 0;
 
+    // Compositing / extinction operator. hardness is a uniform: 1 = alpha-over,
+    // k > 1 sharpens extinction / occlusion culling (see core/compositor.slang).
+    Compositor comp;
+    comp.hardness = extinction_hardness;
+
     for (uint local_splat_index = 0; local_splat_index < tile_count; ++local_splat_index)
     {
         // Checkpoint the state at the START of each bucket (before
@@ -103,16 +111,21 @@ void forwardRasterize(
         Projected2DGaussian proj = projected_2d[gaussian_idx];
         Gaussian3D g = gaussians[gaussian_idx];
 
-        float alpha_raw = evalGaussian2DFromCov(pixel_center, proj.mean, proj.cov2d, g.opacity, proj.opacity_compensation);
+        // Generic blend seam: the primitive owns falloff (coverage) + color;
+        // the loop below owns compositing. Same loads + math as before.
+        GaussianBlend blend = GaussianBlend.make(
+            proj.mean, proj.cov2d, g.opacity, g.sh0, proj.opacity_compensation);
+
+        float alpha_raw = blend.coverage(pixel_center);
         float alpha = min(alpha_raw, ALPHA_MAX);
 
         if (alpha < ALPHA_MIN)
             continue;
 
-        float3 color_rgb = shDC(g.sh0);
+        float3 color_rgb = blend.color();
 
-        C += color_rgb * alpha * T;
-        T *= (1.0 - alpha);
+        C += color_rgb * comp.weight(alpha) * T;
+        T *= comp.transmittance(alpha);
         processed = local_splat_index + 1u;   // absolute stop-index of last contributor
 
         if (T < T_EARLY_BREAK)
