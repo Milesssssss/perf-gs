@@ -44,14 +44,84 @@ static const float ALPHA_MAX = 0.99;
 // contribute — otherwise the T reconstruction desyncs and gradients corrupt.
 static const float ALPHA_MIN = 1.0 / 255.0;
 
+// Generic tile blend: front-to-back composite of a tile's depth-sorted
+// primitives, checkpointing (T, C_in_front) at each RASTER_BUCKET_SIZE boundary
+// and breaking once transmittance drops below T_EARLY_BREAK. Generic over the
+// IPrimitiveSource, so every primitive reuses this exact loop, compositing, and
+// checkpoint bookkeeping — only primitiveAt() (the per-primitive gather) varies.
+// The loop runs for invalid (out-of-frame) pixels too, exactly as before; only
+// the checkpoint write and the caller's output write are gated on valid_pixel.
+void blendForward<S : IPrimitiveSource>(
+    S src,
+    uint t_start,
+    uint tile_count,
+    no_diff float2 pixel_center,
+    bool valid_pixel,
+    uint pixel_in_tile,
+    uint tile_bucket_base,
+    StructuredBuffer<uint> sorted_primitive_ids,
+    RWStructuredBuffer<uint2> raster_checkpoints,
+    float extinction_hardness,
+    out float3 C,
+    out float T,
+    out uint processed)
+{
+    C = float3(0.0, 0.0, 0.0);
+    T = 1.0;
+    processed = 0;
+
+    // Compositing / extinction operator. hardness is a uniform: 1 = alpha-over,
+    // k > 1 sharpens extinction / occlusion culling (see core/compositor.slang).
+    Compositor comp;
+    comp.hardness = extinction_hardness;
+
+    for (uint local_index = 0; local_index < tile_count; ++local_index)
+    {
+        // Checkpoint the state at the START of each bucket (before
+        // blending primitive i == k*RASTER_BUCKET_SIZE). Bucket 0's checkpoint
+        // is the initial (T=1, C=0). We record (T, C_in_front): the
+        // transmittance and accumulated color IN FRONT of primitive i. The
+        // backward derives C_behind = C_total - C_in_front - c_i*alpha_i*T_i.
+        if (valid_pixel && (local_index % RASTER_BUCKET_SIZE) == 0u)
+        {
+            uint gb = tile_bucket_base + (local_index / RASTER_BUCKET_SIZE);
+            raster_checkpoints[checkpointIndex(gb, pixel_in_tile)] = packCheckpoint(T, C);
+        }
+
+        uint primitive_idx = sorted_primitive_ids[t_start + local_index];
+
+        // Primitive seam: the source owns the per-primitive gather + record
+        // build; the loop owns compositing. Same loads + math, any primitive.
+        let prim = src.primitiveAt(primitive_idx);
+
+        float alpha_raw = prim.coverage(pixel_center);
+        float alpha = min(alpha_raw, ALPHA_MAX);
+
+        if (alpha < ALPHA_MIN)
+            continue;
+
+        float3 color_rgb = prim.color();
+
+        C += color_rgb * comp.weight(alpha) * T;
+        T *= comp.transmittance(alpha);
+        processed = local_index + 1u;   // absolute stop-index of last contributor
+
+        if (T < T_EARLY_BREAK)
+            break;
+    }
+}
+
 [shader("compute")]
 [numthreads(TILE_SIZE, TILE_SIZE, 1)]
 void forwardRasterize(
     uint3 dtid: SV_DispatchThreadID,
     uint3 gid: SV_GroupID,
     uint3 gtid: SV_GroupThreadID,
-    StructuredBuffer<Gaussian3D> gaussians,
-    StructuredBuffer<Projected2DGaussian> projected_2d,
+    // Compact per-splat blend record packed by bin_count (mean, cov2d, opacity,
+    // sh0, opacity_compensation) — same repacked fields as the fat gaussians[]
+    // + projected_2d[] pair, one 36 B gather instead of 80 B. Matches the
+    // backward's gather so both read the primitive identically.
+    StructuredBuffer<BlendData> blend_data,
     StructuredBuffer<uint> tile_start,
     StructuredBuffer<uint> tile_end,
     StructuredBuffer<uint> sorted_gaussian_ids,   // the value array after sort
@@ -84,53 +154,21 @@ void forwardRasterize(
     bool valid_pixel = (pixel.x < frame_dim_px.x && pixel.y < frame_dim_px.y);
 
     float2 pixel_center = float2(pixel) + 0.5;
-    float3 C = float3(0.0, 0.0, 0.0);
-    float T = 1.0;
-    uint processed = 0;
 
-    // Compositing / extinction operator. hardness is a uniform: 1 = alpha-over,
-    // k > 1 sharpens extinction / occlusion culling (see core/compositor.slang).
-    Compositor comp;
-    comp.hardness = extinction_hardness;
+    // Generic tile blend over the primitive source. GaussianSource is the only
+    // Gaussian-specific glue here; the loop, compositing, checkpointing, and
+    // early-out live in blendForward<S> (shared by every primitive). Gathers
+    // the compact BlendData bin_count packed.
+    GaussianSource src;
+    src.blend_data = blend_data;
 
-    for (uint local_splat_index = 0; local_splat_index < tile_count; ++local_splat_index)
-    {
-        // Checkpoint the state at the START of each bucket (before
-        // blending splat i == k*RASTER_BUCKET_SIZE). Bucket 0's checkpoint
-        // is the initial (T=1, C=0). We record (T, C_in_front): the
-        // transmittance and accumulated color IN FRONT of splat i. The
-        // backward derives C_behind = C_total - C_in_front - c_i*alpha_i*T_i.
-        if (valid_pixel && (local_splat_index % RASTER_BUCKET_SIZE) == 0u)
-        {
-            uint gb = tile_bucket_base + (local_splat_index / RASTER_BUCKET_SIZE);
-            raster_checkpoints[checkpointIndex(gb, pixel_in_tile)] = packCheckpoint(T, C);
-        }
-
-        uint gaussian_idx = sorted_gaussian_ids[t_start + local_splat_index];
-
-        Projected2DGaussian proj = projected_2d[gaussian_idx];
-        Gaussian3D g = gaussians[gaussian_idx];
-
-        // Generic blend seam: the primitive owns falloff (coverage) + color;
-        // the loop below owns compositing. Same loads + math as before.
-        GaussianBlend blend = GaussianBlend.make(
-            proj.mean, proj.cov2d, g.opacity, g.sh0, proj.opacity_compensation);
-
-        float alpha_raw = blend.coverage(pixel_center);
-        float alpha = min(alpha_raw, ALPHA_MAX);
-
-        if (alpha < ALPHA_MIN)
-            continue;
-
-        float3 color_rgb = blend.color();
-
-        C += color_rgb * comp.weight(alpha) * T;
-        T *= comp.transmittance(alpha);
-        processed = local_splat_index + 1u;   // absolute stop-index of last contributor
-
-        if (T < T_EARLY_BREAK)
-            break;
-    }
+    float3 C;
+    float T;
+    uint processed;
+    blendForward<GaussianSource>(
+        src, t_start, tile_count, pixel_center, valid_pixel,
+        pixel_in_tile, tile_bucket_base, sorted_gaussian_ids,
+        raster_checkpoints, extinction_hardness, C, T, processed);
 
     if (!valid_pixel)
         return;

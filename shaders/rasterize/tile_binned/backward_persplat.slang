@@ -27,6 +27,7 @@
 #include "../../common/math.slang"
 #include "../../primitives/gaussian/project.slang"
 #include "../../primitives/gaussian/eval.slang"
+#include "../../primitives/gaussian/blend.slang"
 #include "../../core/compositor.slang"
 #include "checkpoint.slang"
 
@@ -300,8 +301,17 @@ void backwardRasterizePerSplat(
         float  acc_absx = 0.0;
         float  acc_absy = 0.0;
 
-        float3 sh0 = splat_valid ? blend_only_data.sh0 : float3(0.0);
-        float3 c_i = shDC(sh0);
+        // Build the primitive record once per lane via the SAME
+        // IBlendablePrimitive conformer the forward uses (GaussianPrimitive), so
+        // coverage()/color() + their bwd_diff define the gaussian's
+        // differentiable behavior in ONE place. Masked lanes get a zero prim
+        // (finite color()/coverage(); they're scan identities via alpha=0).
+        GaussianPrimitive prim = splat_valid
+            ? GaussianPrimitive.make(blend_only_data.mean, blend_only_data.cov2d,
+                                     blend_only_data.opacity, blend_only_data.sh0,
+                                     blend_only_data.opacity_compensation)
+            : GaussianPrimitive.make(float2(0.0), float3(0.0), 0.0, float3(0.0), 0.0);
+        float3 c_i = prim.color();
 
         uint cp_bucket = tile_bucket_base + bucket;
         // First splat index of this bucket. A pixel contributes to this
@@ -383,11 +393,7 @@ void backwardRasterizePerSplat(
             float alpha_grad_scale = 0.0;
             if (contributes)
             {
-                float alpha_raw = evalGaussian2DFromCov(pixel_center,
-                                                       blend_only_data.mean,
-                                                       blend_only_data.cov2d,
-                                                       blend_only_data.opacity,
-                                                       blend_only_data.opacity_compensation);
+                float alpha_raw = prim.coverage(pixel_center);
                 alpha = min(alpha_raw, ALPHA_MAX);
                 alpha_grad_scale = (alpha_raw <= ALPHA_MAX) ? 1.0 : 0.0;
                 // Alpha-min skip — MUST be bit-identical to the forward
@@ -506,28 +512,24 @@ void backwardRasterizePerSplat(
 #endif
                 float dL_d_alpha_raw = dL_dalpha * alpha_grad_scale;
 
-                var dp_mean_2d = diffPair(blend_only_data.mean);
-                var dp_cov2d   = diffPair(blend_only_data.cov2d);
-                var dp_opacity = diffPair(blend_only_data.opacity);
-                var dp_comp    = diffPair(blend_only_data.opacity_compensation);
+                var dp_prim = diffPair(prim);
                 
-                bwd_diff(evalGaussian2DFromCov)(pixel_center, dp_mean_2d, dp_cov2d, dp_opacity, dp_comp, dL_d_alpha_raw);
+                bwd_diff(primitiveCoverage<GaussianPrimitive>)(dp_prim, pixel_center, dL_d_alpha_raw);
 
-                acc_mean2d += dp_mean_2d.d;
-                acc_cov2d  += dp_cov2d.d;
-                acc_opacity += dp_opacity.d;
-                acc_comp   += dp_comp.d;
+                acc_mean2d += dp_prim.d.mean;
+                acc_cov2d  += dp_prim.d.cov2d;
+                acc_opacity += dp_prim.d.opacity;
+                acc_comp   += dp_prim.d.opacity_compensation;
                 // acc_color seed accumulated above (SH_C0 applied post-loop).
 
                 if (alpha >= ALPHA_MIN_TRACK)
                 {
-                    acc_absx += abs(dp_mean_2d.d.x);
-                    acc_absy += abs(dp_mean_2d.d.y);
+                    acc_absx += abs(dp_prim.d.mean.x);
+                    acc_absy += abs(dp_prim.d.mean.y);
                 }
             }
         }
 
-        // --- Per-splat projection backward + atomics (one lane per splat) ---
         if (splat_valid)
         {
             // Apply shDC's constant Jacobian once for the whole bucket: the
@@ -700,8 +702,16 @@ void backwardRasterizePerBucket(
     float  acc_absx = 0.0;
     float  acc_absy = 0.0;
 
-    float3 sh0 = splat_valid ? blend_only_data.sh0 : float3(0.0);
-    float3 c_i = shDC(sh0);
+    // Build the primitive record once per lane via the SAME IBlendablePrimitive
+    // conformer the forward uses (GaussianPrimitive), so coverage()/color() +
+    // their bwd_diff define the gaussian's differentiable behavior in ONE place.
+    // Masked lanes get a zero prim (finite results; scan identities via alpha=0).
+    GaussianPrimitive prim = splat_valid
+        ? GaussianPrimitive.make(blend_only_data.mean, blend_only_data.cov2d,
+                                 blend_only_data.opacity, blend_only_data.sh0,
+                                 blend_only_data.opacity_compensation)
+        : GaussianPrimitive.make(float2(0.0), float3(0.0), 0.0, float3(0.0), 0.0);
+    float3 c_i = prim.color();
 
     // --- Pixel loop: all 32 lanes lockstep so the wave scans stay valid ---
     [loop]
@@ -738,11 +748,7 @@ void backwardRasterizePerBucket(
         float alpha_grad_scale = 0.0;
         if (contributes)
         {
-            float alpha_raw = evalGaussian2DFromCov(pixel_center,
-                                                   blend_only_data.mean,
-                                                   blend_only_data.cov2d,
-                                                   blend_only_data.opacity,
-                                                   blend_only_data.opacity_compensation);
+            float alpha_raw = prim.coverage(pixel_center);
             alpha = min(alpha_raw, ALPHA_MAX);
             alpha_grad_scale = (alpha_raw <= ALPHA_MAX) ? 1.0 : 0.0;
             if (alpha < ALPHA_MIN_TRACK)
@@ -800,22 +806,19 @@ void backwardRasterizePerBucket(
 #endif
             float dL_d_alpha_raw = dL_dalpha * alpha_grad_scale;
 
-            var dp_mean_2d = diffPair(blend_only_data.mean);
-            var dp_cov2d   = diffPair(blend_only_data.cov2d);
-            var dp_opacity = diffPair(blend_only_data.opacity);
-            var dp_comp    = diffPair(blend_only_data.opacity_compensation);
+            var dp_prim = diffPair(prim);
 
-            bwd_diff(evalGaussian2DFromCov)(pixel_center, dp_mean_2d, dp_cov2d, dp_opacity, dp_comp, dL_d_alpha_raw);
+            bwd_diff(primitiveCoverage<GaussianPrimitive>)(dp_prim, pixel_center, dL_d_alpha_raw);
 
-            acc_mean2d += dp_mean_2d.d;
-            acc_cov2d  += dp_cov2d.d;
-            acc_opacity += dp_opacity.d;
-            acc_comp   += dp_comp.d;
+            acc_mean2d += dp_prim.d.mean;
+            acc_cov2d  += dp_prim.d.cov2d;
+            acc_opacity += dp_prim.d.opacity;
+            acc_comp   += dp_prim.d.opacity_compensation;
 
             if (alpha >= ALPHA_MIN_TRACK)
             {
-                acc_absx += abs(dp_mean_2d.d.x);
-                acc_absy += abs(dp_mean_2d.d.y);
+                acc_absx += abs(dp_prim.d.mean.x);
+                acc_absy += abs(dp_prim.d.mean.y);
             }
         }
     }

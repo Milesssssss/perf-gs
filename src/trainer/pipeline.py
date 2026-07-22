@@ -620,8 +620,7 @@ class Pipeline:
         with self._marker_group("rasterize"):
             self._dispatch(self.k_forward, "forward",
                 thread_count=[b.num_tiles_x * 16, b.num_tiles_y * 16, 1],
-                gaussians=b.gaussians.storage,
-                projected_2d=b.projected_2d.storage,
+                blend_data=b.blend_data.storage,
                 tile_start=b.tile_start.storage,
                 tile_end=b.tile_end.storage,
                 sorted_gaussian_ids=sorted_v.storage,
