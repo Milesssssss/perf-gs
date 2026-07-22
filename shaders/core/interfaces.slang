@@ -96,4 +96,35 @@ void projectModel<M : IProjectableModel>(
                       mean2d, cov2d, depth_vs, cov2d_det, opacity_compensation);
 }
 
+// The projected primitive's SCREEN FOOTPRINT: the tile-binning contract. Given
+// a projected primitive, it answers which tiles the primitive touches so the
+// generic count/emit walks (rasterize/tile_binned/tile_walk.slang) can size the
+// sort and place one (tile, depth, primitive) pair per touched tile. NON-
+// differentiable — this is the integer tile walk, orthogonal to the per-pixel
+// blend. A gaussian conforms with a SnugBox AABB + AccuTile ellipse crossing
+// (primitives/gaussian/footprint.slang); a 2D disk would supply a circle bbox +
+// circle-tile crossing with no change to the walks or the binning kernels.
+interface IScreenFootprint
+{
+    // Unclamped screen-space AABB of the footprint. Returns false when the
+    // primitive has no extent (fully culled); out params are then undefined.
+    bool bounds(out float2 out_min, out float2 out_max);
+
+    // Pick the walk axis: true iterates ROWS (per-row column spans via
+    // rowTiles), false iterates COLUMNS (per-column row spans via colTiles).
+    // Choosing the shorter axis keeps the per-strip crossing tests minimal.
+    bool iterateRows(uint2 tile_min, uint2 tile_max);
+
+    // For tile row `ty`, the inclusive column range [tx_lo, tx_hi] the footprint
+    // actually crosses within [tile_min_x, tile_max_x]. False if the row is
+    // untouched (skip it).
+    bool rowTiles(float2 bbox_min, float2 bbox_max, uint ty,
+                  uint tile_min_x, uint tile_max_x, out uint tx_lo, out uint tx_hi);
+
+    // Column twin of rowTiles: the inclusive row range [ty_lo, ty_hi] crossed in
+    // tile column `tx` within [tile_min_y, tile_max_y]. False if untouched.
+    bool colTiles(float2 bbox_min, float2 bbox_max, uint tx,
+                  uint tile_min_y, uint tile_max_y, out uint ty_lo, out uint ty_hi);
+}
+
 #endif // TRAINER_CORE_INTERFACES_SLANG

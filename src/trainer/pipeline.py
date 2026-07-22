@@ -201,6 +201,13 @@ class Pipeline:
         # when STRIDE == 1.
         self._backward_pixel_phase = 0
 
+        # Compositor extinction hardness ACTUALLY dispatched each forward /
+        # backward. cfg.extinction_hardness is the run TARGET; the trainer may
+        # SCHEDULE the live value over training (e.g. hold at 1.0 until the
+        # first densify, then ramp to the target) via set_extinction_hardness.
+        # Defaults to the target so an unscheduled run is bit-identical.
+        self._extinction_hardness = float(self.cfg.extinction_hardness)
+
         # Active loss target texture. Defaults to the pipeline's own
         # target_image; set_target_image / set_target_texture swap it. Kept
         # initialized here so _run_loss reads self._active_target directly.
@@ -629,8 +636,18 @@ class Pipeline:
                 raster_checkpoints=b.raster_checkpoints.storage,
                 output_image=b.output_image,
                 gaussian_count_per_pixel=b.gaussian_count_per_pixel,
-                extinction_hardness=float(self.cfg.extinction_hardness),
+                extinction_hardness=float(self._extinction_hardness),
             )
+
+    def set_extinction_hardness(self, hardness: float) -> None:
+        """Set the compositor extinction hardness used by subsequent forward /
+        backward dispatches. Lets the trainer SCHEDULE k across training (e.g.
+        hold at 1.0 until the first densify, then ramp to the target) without
+        rebuilding the frozen RenderConfig. cfg.extinction_hardness stays the
+        run TARGET; the construction guard already required the per-splat
+        backward for a target != 1, so any scheduled value in [1, target] is
+        honored by that path."""
+        self._extinction_hardness = float(hardness)
 
     def render(self, camera: Camera) -> None:
         # Hold gpu_lock across the whole forward + drain: when an in-process
@@ -825,7 +842,7 @@ class Pipeline:
                         grad_2d_x_iter=b.grad_2d_x_iter.storage,
                         grad_2d_y_iter=b.grad_2d_y_iter.storage,
                         pixel_phase=self._backward_pixel_phase,
-                        extinction_hardness=float(self.cfg.extinction_hardness),
+                        extinction_hardness=float(self._extinction_hardness),
                     )
                 else:
                   # Transposed per-splat backward: one workgroup (256 threads)
@@ -852,7 +869,7 @@ class Pipeline:
                     # SGD pixel-subsampling phase; rotates each backward so the
                     # visited subset alternates (no-op at BACKWARD_PIXEL_STRIDE=1).
                     pixel_phase=self._backward_pixel_phase,
-                    extinction_hardness=float(self.cfg.extinction_hardness),
+                    extinction_hardness=float(self._extinction_hardness),
                 )
                 self._backward_pixel_phase += 1
                 # Per-gaussian projection backward: turn the summed 2D grads

@@ -378,7 +378,7 @@ def build_parser() -> argparse.ArgumentParser:
                          "pixels per iter (unbiased SGD estimator, rotating "
                          "phase) for a faster backward at some gradient-noise "
                          "cost. Injected as a compile-time define.")
-    ap.add_argument("--extinction-hardness", type=float, default=1.0,
+    ap.add_argument("--extinction-hardness", type=float, default=4.0,
                     help="Compositor extinction hardness k (a shader UNIFORM, so "
                          "no recompile). 1.0 (default) = standard alpha-over "
                          "(bit-identical). k>1 hardens the per-splat transmittance "
@@ -386,6 +386,17 @@ def build_parser() -> argparse.ArgumentParser:
                          "culling (earlier early-out in forward AND backward) at a "
                          "quality tradeoff. Beer-Lambert-style; requires the "
                          "per-splat backward (the default).")
+    ap.add_argument("--extinction-hardness-warmup", type=int, default=500,
+                    help="Steps to ramp the extinction hardness from 1.0 up to "
+                         "--extinction-hardness AFTER the first densification. "
+                         "k is held at 1.0 (standard alpha-over) until the first "
+                         "densify fires, then log-linearly ramps 1 -> target over "
+                         "this many steps (like the mean-LR schedule), so "
+                         "extinction only sharpens once geometry starts forming. "
+                         "0 = jump straight to the target after the first densify; "
+                         "<0 = disable the schedule (constant target from step 0, "
+                         "the pre-schedule behavior). No-op when "
+                         "--extinction-hardness <= 1.")
     ap.add_argument("--final-test-psnr", action="store_true", default=False,
                     help="After the timed loop, compute ONLY the held-out "
                          "TEST-set PSNR (mean per-image sRGB, the paper metric "
@@ -897,6 +908,28 @@ def main() -> None:
         return float(np.exp(np.log(lr_mean_init) * (1.0 - t)
                             + np.log(lr_mean_final) * t))
 
+    # Extinction-hardness warmup schedule. Hold k = 1.0 (standard alpha-over)
+    # until the first densification, then ramp 1 -> target over
+    # --extinction-hardness-warmup steps (log-linear, like the mean LR). Only
+    # sharpening extinction once geometry starts forming avoids over-culling the
+    # noisy early splats. `first_densify_it` is filled the first time a densify
+    # actually fires (below). target <= 1 disables hardening; warmup < 0
+    # disables the schedule (constant target from step 0, the old behavior).
+    eh_target = float(args.extinction_hardness)
+    eh_warmup = int(args.extinction_hardness_warmup)
+    first_densify_it: int | None = None
+
+    def _extinction_hardness(step: int) -> float:
+        if eh_target <= 1.0 or eh_warmup < 0:
+            return eh_target
+        if first_densify_it is None or step <= first_densify_it:
+            return 1.0
+        if eh_warmup == 0:
+            return eh_target
+        t = min((step - first_densify_it) / eh_warmup, 1.0)
+        # Log-linear 1 -> target (== target**t, since log(1) = 0).
+        return float(np.exp(np.log(eh_target) * t))
+
     # Optionally hold before training so the viewer can inspect the initialized
     # gaussians. We push the initial snapshot (iter 0) so the viewer has data,
     # then block until the viewer presses "Start Training" (sets the shared
@@ -1037,6 +1070,9 @@ def main() -> None:
                 "per_view_grad_thresh": (args.sad_freq_grad_threshold
                                          * IMAGES_WIDTH * IMAGES_HEIGHT * 3.0),
             }
+        # Compositor extinction hardness for this step: 1.0 during the warmup
+        # hold (pre-first-densify), then the ramped value toward the target.
+        pipeline.set_extinction_hardness(_extinction_hardness(it))
         pipeline.train_step(entry.camera, lrs=lrs, structure_tensor=struct_tex,
                             structure_kwargs=struct_kwargs)
         submit_id_ring.append(pipeline.last_submit_id)
@@ -1089,6 +1125,11 @@ def main() -> None:
         )
 
         if do_densify:
+
+            # First densify marks the start of the extinction-hardness ramp
+            # (held at 1.0 up to here; see _extinction_hardness).
+            if first_densify_it is None:
+                first_densify_it = it
 
             stats = {}
 
@@ -1207,7 +1248,7 @@ def main() -> None:
             # children get a valid filter for the next window's forwards.
             if args.mip_splatting:
                 pipeline.compute_3d_filter()
-                _log_filter3d("post-densify", it)
+                #_log_filter3d("post-densify", it)
             # densify_simple runs wait-free and returns None for counts
             # (they live GPU-side); the log-every branch below reads the
             # counter on its own cadence. densify()'s stats are still
@@ -1463,6 +1504,9 @@ def main() -> None:
     pipeline.device.wait_for_idle()
     train_wall_s = time.time() - t_start
     completed_iters = it
+    # Post-training renders (final test PSNR, final metrics, viewer) use the
+    # run's TARGET hardness, not whatever mid-ramp value a short run left behind.
+    pipeline.set_extinction_hardness(eh_target)
     print(f"[train] loop done: {completed_iters} iters in {train_wall_s:.1f}s "
           f"({completed_iters / max(train_wall_s, 1e-9):.1f} it/s)")
     log_json.write(json.dumps({
@@ -1575,7 +1619,7 @@ def main() -> None:
     # filter ~100-200 iters stale.
     if args.mip_splatting:
         pipeline.compute_3d_filter()
-        _log_filter3d("final")
+        #_log_filter3d("final")
 
     # Post-training per-camera metrics. Include BOTH the full-frame PSNR
     # (linear and sRGB) and the foreground-masked sRGB PSNR — the latter
