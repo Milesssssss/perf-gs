@@ -57,7 +57,7 @@ static const float ALPHA_MIN_TRACK = 1.0 / 255.0;
 //
 // See commit 6be3f5e ("wave op speedup") for the fusion history.
 #ifndef BACKWARD_BLEND_SCAN_MODE
-#define BACKWARD_BLEND_SCAN_MODE 0
+#define BACKWARD_BLEND_SCAN_MODE 1
 #endif
 
 // Fused exclusive prefix scan of the alpha-blend LINEAR recurrence across a
@@ -461,7 +461,7 @@ void backwardRasterizePerSplat(
             // Kept for A/B comparison against the fused path.
             float T_prefix = WavePrefixProduct(T_step);        // exclusive
             float T_i     = T_checkpoint * T_prefix;
-            float alpha_T = alpha * T_i;                       // this splat's blend weight
+            float alpha_T = comp.weight(alpha) * T_i;          // this splat's blend weight
             // Color contribution c*alpha*T for the prefix-sum of C_in_front.
             // Use the SAME luminance-free vector sum the forward used.
             float3 contrib = c_i * alpha_T;                    // 0 when masked
@@ -507,8 +507,12 @@ void backwardRasterizePerSplat(
                 // C_behind(i) = C_total - C_in_front(i) - c_i*alpha_i*T_i
                 //            = sum_{j>i, j<processed} c_j*alpha_j*T_j.
                 float3 C_behind = C_total - C_in_front - contrib;
-                float3 dC_dalpha = c_i * T_i - C_behind / oneMinusAlpha;
-                float dL_dalpha = dot(dL_dC, dC_dalpha) + dL_dA * (T_final / oneMinusAlpha);
+                // Route the coverage-gradient through the SAME Compositor as the
+                // fused path so both scan modes honor extinction_hardness
+                // (bit-identical at hardness=1: coverageGrad reduces to the
+                // c_i*T_i - C_behind/(1-alpha) telescoping this replaced).
+                float dL_dalpha = comp.coverageGrad(alpha, dot(dL_dC, c_i), T_i,
+                                                    dot(dL_dC, C_behind), dL_dA, T_final);
 #endif
                 float dL_d_alpha_raw = dL_dalpha * alpha_grad_scale;
 
@@ -706,11 +710,9 @@ void backwardRasterizePerBucket(
     // conformer the forward uses (GaussianPrimitive), so coverage()/color() +
     // their bwd_diff define the gaussian's differentiable behavior in ONE place.
     // Masked lanes get a zero prim (finite results; scan identities via alpha=0).
-    GaussianPrimitive prim = splat_valid
-        ? GaussianPrimitive.make(blend_only_data.mean, blend_only_data.cov2d,
+    GaussianPrimitive prim = splat_valid ? GaussianPrimitive.make(blend_only_data.mean, blend_only_data.cov2d,
                                  blend_only_data.opacity, blend_only_data.sh0,
-                                 blend_only_data.opacity_compensation)
-        : GaussianPrimitive.make(float2(0.0), float3(0.0), 0.0, float3(0.0), 0.0);
+                                 blend_only_data.opacity_compensation) : GaussianPrimitive.make(float2(0.0), float3(0.0), 0.0, float3(0.0), 0.0);
     float3 c_i = prim.color();
 
     // --- Pixel loop: all 32 lanes lockstep so the wave scans stay valid ---
@@ -776,7 +778,7 @@ void backwardRasterizePerBucket(
 #else
         float T_prefix = WavePrefixProduct(T_step);
         float T_i     = T_checkpoint * T_prefix;
-        float alpha_T = alpha * T_i;
+        float alpha_T = comp.weight(alpha) * T_i;
         float3 contrib = c_i * alpha_T;
         float3 C_in_front = C_checkpoint + float3(
             WavePrefixSum(contrib.x),
@@ -797,12 +799,13 @@ void backwardRasterizePerBucket(
 
 #if BACKWARD_BLEND_SCAN_MODE == 0
             float dLdC_Cbehind = dot(dL_dC, C_total) - dLdC_C_in_front - dLdC_contrib;
-            float dL_dalpha = comp.coverageGrad(alpha, dot(dL_dC, c_i), T_i,
-                                                dLdC_Cbehind, dL_dA, T_final);
+            float dL_dalpha = comp.coverageGrad(alpha, dot(dL_dC, c_i), T_i, dLdC_Cbehind, dL_dA, T_final);
 #else
-            float3 C_behind = C_total - C_in_front - contrib;
-            float3 dC_dalpha = c_i * T_i - C_behind / oneMinusAlpha;
-            float dL_dalpha = dot(dL_dC, dC_dalpha) + dL_dA * (T_final / oneMinusAlpha);
+            float3 C_behind = C_total - C_in_front - contrib; //remember that C_total = C_in_front + contrib_this_prim + C_behind, easy
+            // Route the coverage-gradient through the SAME Compositor as the fused
+            // path so both scan modes honor extinction_hardness (bit-identical at
+            // hardness=1: coverageGrad reduces to c_i*T_i - C_behind/(1-alpha)).
+            float dL_dalpha = comp.coverageGrad(alpha, dot(dL_dC, c_i), T_i, dot(dL_dC, C_behind), dL_dA, T_final);
 #endif
             float dL_d_alpha_raw = dL_dalpha * alpha_grad_scale;
 
@@ -826,7 +829,10 @@ void backwardRasterizePerBucket(
     // --- Per-splat projection seed + atomics (one lane per splat) ---
     if (splat_valid)
     {
+        //rendered color is produced by taking the sh0 coeff, multiplying it by SH_C0 and adding 0.5. So the grad wrt to
+        //Loss is SH_C0*dL_dC_i, where dL_dC_i is the accumulated seed sum(dL_dC * alpha_T) from the pixel loop above.
         acc_color *= SH_C0;
+        
         if (BACKWARD_PIXEL_STRIDE > 1u)
         {
             float s = float(BACKWARD_PIXEL_STRIDE);

@@ -13,6 +13,8 @@
 #ifndef TRAINER_CORE_INTERFACES_SLANG
 #define TRAINER_CORE_INTERFACES_SLANG
 
+#include "../common/types.slang"   // CameraData (projection contract)
+
 // A differentiable, BLENDABLE PRIMITIVE: the compact per-pixel-evaluable form a
 // primitive takes inside the tile blend loop. `: IDifferentiable` lets the
 // backward flow per-pixel gradients into the primitive's stored fields via
@@ -61,6 +63,37 @@ interface IPrimitiveSource
     // storage load is a plain gather; the diff path runs through the returned
     // primitive's coverage()/color().
     Primitive primitiveAt(uint idx);
+}
+
+// The STORED, optimizable geometry of a primitive that knows how to PROJECT
+// itself to screen — the "3D model" side (IBlendablePrimitive is the projected
+// "2D" side). `: IDifferentiable` lets the projection backward flow dL/d(screen)
+// into the stored params via bwd_diff. A gaussian's model is mean + log_scale +
+// rot_quat; the projected mean2d/cov2d/comp receive gradient seeds, while
+// depth/det are forward-only (binning) and get zero seeds.
+interface IProjectableModel : IDifferentiable
+{
+    [Differentiable]
+    void projectInto(no_diff CameraData cam,
+                     no_diff float filter_3D, no_diff float kernel_size, no_diff uint mip_enabled,
+                     out float2 mean2d, out float3 cov2d, out float depth_vs,
+                     out float cov2d_det, out float opacity_compensation);
+}
+
+// Free-function wrapper so the projection's REVERSE derivative is nameable via
+// bwd_diff (interface methods aren't; same pattern as primitiveCoverage). The
+// projection backward seeds the out-param differentials and reads the model's
+// differential (dp_model.d.{mean,log_scale,rot_quat}). Validated by
+// shaders/_spike/proj_spike.slang.
+[Differentiable]
+void projectModel<M : IProjectableModel>(
+    M model, no_diff CameraData cam,
+    no_diff float filter_3D, no_diff float kernel_size, no_diff uint mip_enabled,
+    out float2 mean2d, out float3 cov2d, out float depth_vs,
+    out float cov2d_det, out float opacity_compensation)
+{
+    model.projectInto(cam, filter_3D, kernel_size, mip_enabled,
+                      mean2d, cov2d, depth_vs, cov2d_det, opacity_compensation);
 }
 
 #endif // TRAINER_CORE_INTERFACES_SLANG

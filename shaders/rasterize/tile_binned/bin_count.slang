@@ -78,11 +78,15 @@ void binCount(
     float f3d = (mip_enabled != 0u) ? filter_3D[gid] : 0.0;
     float comp;
 
-    projectGaussian3DTo2D(
-        g.mean, g.log_scale, g.rot_quat,
-        camera[0].view_matrix, camera[0].proj_matrix, camera[0].image_size,
-        f3d, kernel_size, mip_enabled,
-        mean_2d, cov2d, depth_vs, cov2d_det, comp);
+    // Project through the primitive model (GaussianModel = mean/log_scale/
+    // rot_quat). projectInto wraps the same projectGaussian3DTo2D, so the
+    // projected values are bit-identical — the projection seam is now generic.
+    GaussianModel model;
+    model.mean = g.mean;
+    model.log_scale = g.log_scale;
+    model.rot_quat = g.rot_quat;
+    model.projectInto(camera[0], f3d, kernel_size, mip_enabled,
+                      mean_2d, cov2d, depth_vs, cov2d_det, comp);
 
     Projected2DGaussian proj;
     proj.mean = mean_2d;
@@ -91,12 +95,8 @@ void binCount(
     proj.opacity_compensation = comp;
     projected_2d[gid] = proj;
 
-    // Pack the compact blend record here: all four fields are already in hand
-    // (mean_2d/cov2d just computed, opacity/sh0 from g), so this is a free
-    // write — no extra global loads. The blend backward gathers this 36 B
-    // record instead of the 80 B (gaussians + projected_2d) pair, cutting L2
-    // pollution on its random-order gather. Written alongside projected_2d so
-    // it covers every projected gaussian the blend could reference.
+    //The blend backward gathers this 36 B
+    // record instead of the 80 B (gaussians + projected_2d) pair
     BlendData bd;
     bd.mean = mean_2d;
     bd.cov2d = cov2d;

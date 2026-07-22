@@ -84,28 +84,34 @@ void projectionBackward(
 
     Gaussian3D g = gaussians[gid];
 
-    var dp_mean      = diffPair(g.mean);
-    var dp_log_scale = diffPair(g.log_scale);
-    var dp_rot_quat  = diffPair(g.rot_quat);
+    // Route the projection backward through the primitive model: one diffPair
+    // over the GaussianModel (mean/log_scale/rot_quat) instead of three. The
+    // projection MATH is unchanged (projectInto wraps projectGaussian3DTo2D),
+    // so the gradients are bit-identical.
+    GaussianModel model;
+    model.mean = g.mean;
+    model.log_scale = g.log_scale;
+    model.rot_quat = g.rot_quat;
+    var dp_model = diffPair(model);
 
     float f3d = (mip_enabled != 0u) ? filter_3D[gid] : 0.0;
     float g_comp = fromFixed(grad_comp[gid]);   // Mip: dL/d(opacity_compensation) seed
-    bwd_diff(projectGaussian3DTo2D)(
-        dp_mean, dp_log_scale, dp_rot_quat,
-        camera[0].view_matrix, camera[0].proj_matrix, camera[0].image_size,
-        f3d, kernel_size, mip_enabled,
+    // Seeds match the old call exactly: dL/dmean2d, dL/dcov2d, 0 (depth), 0
+    // (det), dL/dcomp. Wrapper is bwd_diff-able (interface methods aren't).
+    bwd_diff(projectModel<GaussianModel>)(
+        dp_model, camera[0], f3d, kernel_size, mip_enabled,
         grad_mean2d, grad_cov2d, 0.0, 0.0, g_comp);
 
     // Sole writer per gaussian -> direct store. Regularization / adam run in
     // later dispatches and InterlockedAdd on top, so store-then-add is safe.
-    grad_mean_x[gid] = toFixed(dp_mean.d.x);
-    grad_mean_y[gid] = toFixed(dp_mean.d.y);
-    grad_mean_z[gid] = toFixed(dp_mean.d.z);
-    grad_log_scale_x[gid] = toFixed(dp_log_scale.d.x);
-    grad_log_scale_y[gid] = toFixed(dp_log_scale.d.y);
-    grad_log_scale_z[gid] = toFixed(dp_log_scale.d.z);
-    grad_rot_w[gid] = toFixed(dp_rot_quat.d.x);
-    grad_rot_x[gid] = toFixed(dp_rot_quat.d.y);
-    grad_rot_y[gid] = toFixed(dp_rot_quat.d.z);
-    grad_rot_z[gid] = toFixed(dp_rot_quat.d.w);
+    grad_mean_x[gid] = toFixed(dp_model.d.mean.x);
+    grad_mean_y[gid] = toFixed(dp_model.d.mean.y);
+    grad_mean_z[gid] = toFixed(dp_model.d.mean.z);
+    grad_log_scale_x[gid] = toFixed(dp_model.d.log_scale.x);
+    grad_log_scale_y[gid] = toFixed(dp_model.d.log_scale.y);
+    grad_log_scale_z[gid] = toFixed(dp_model.d.log_scale.z);
+    grad_rot_w[gid] = toFixed(dp_model.d.rot_quat.x);
+    grad_rot_x[gid] = toFixed(dp_model.d.rot_quat.y);
+    grad_rot_y[gid] = toFixed(dp_model.d.rot_quat.z);
+    grad_rot_z[gid] = toFixed(dp_model.d.rot_quat.w);
 }

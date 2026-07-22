@@ -1,3 +1,10 @@
+#ifndef TRAINER_GAUSSIAN_PROJECT_SLANG
+#define TRAINER_GAUSSIAN_PROJECT_SLANG
+
+#include "../../common/types.slang"
+#include "../../common/math.slang"
+#include "../../core/interfaces.slang"
+
 //[PreferRecompute]
 [Differentiable]
 void projectGaussian3DTo2D(
@@ -102,3 +109,29 @@ void projectGaussian3DTo2D(
         opacity_compensation = 1.0;
     }
 }
+
+// The Gaussian's stored geometry as an IProjectableModel (mean + log_scale +
+// rot_quat; opacity/sh0 don't affect projection). projectInto wraps the same
+// projectGaussian3DTo2D above, so projected values + their gradients are
+// UNCHANGED — bin_count + projection_backward just route through the model,
+// making the projection seam primitive-generic.
+struct GaussianModel : IProjectableModel
+{
+    float3 mean;
+    float3 log_scale;
+    float4 rot_quat;
+
+    [Differentiable]
+    void projectInto(no_diff CameraData cam,
+                     no_diff float filter_3D, no_diff float kernel_size, no_diff uint mip_enabled,
+                     out float2 mean2d, out float3 cov2d, out float depth_vs,
+                     out float cov2d_det, out float opacity_compensation)
+    {
+        projectGaussian3DTo2D(mean, log_scale, rot_quat,
+            cam.view_matrix, cam.proj_matrix, cam.image_size,
+            filter_3D, kernel_size, mip_enabled,
+            mean2d, cov2d, depth_vs, cov2d_det, opacity_compensation);
+    }
+}
+
+#endif // TRAINER_GAUSSIAN_PROJECT_SLANG
