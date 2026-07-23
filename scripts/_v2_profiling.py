@@ -154,7 +154,7 @@ class Profiler:
     # -- deterministic GPU-Trace capture ----------------------------------
 
     def run_capture_if_due(self, pipeline, it: int, entry, cam_idx: int,
-                           submit_id_ring: list) -> bool:
+                           queue_limiter) -> bool:
         """Run the deterministic GPU-Trace capture when ``it == capture_iter``.
 
         GPU Trace is NOT a single-frame debugger: it is a continuous
@@ -181,7 +181,7 @@ class Profiler:
 
         print(f"[capture] draining queue at iter {it}...")
         pipeline.device.wait_for_idle()
-        submit_id_ring.clear()
+        queue_limiter.clear()
         try:
             n_g_capture = int(
                 pipeline.buffers.num_gaussians_counter.to_numpy().view(np.uint32)[0])

@@ -63,6 +63,7 @@ struct Compositor
         float beta = 1.0 - a;
         float dWeight = hardness * pow(beta, hardness - 1.0);   // weight'(a)
         float transLogGrad = -hardness / beta;                 // t'(a)/t(a)
+        //maybe could be clearer mathematically if we had dL/dai = dL_dC * (ci*dWeight*Ti + t'(ai)/t(ai)*Cbehind))
         return dWeight * dLdc * T_i + transLogGrad * (dLdCbehind - dL_dA * T_final);
     }
 };

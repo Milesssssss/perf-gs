@@ -9,8 +9,6 @@ image with :meth:`Pipeline.set_target_image` and call
 from __future__ import annotations
 
 import contextlib
-import hashlib
-from functools import lru_cache
 
 import numpy as np
 import slangpy as spy
@@ -28,7 +26,10 @@ from trainer.config import AdamLRs, RenderConfig
 from trainer.dataset import Camera
 from trainer.densify import DensifyConfig
 from trainer.device import SHADERS_DIR
+from trainer.gpu import CommandBatch, GpuRuntime
 from trainer.kernels import load_kernels
+from trainer.losses import ImageLoss
+from trainer.rasterizer import RasterizationContext
 
 # DensifyConfig / AdamLRs / RenderConfig are imported (not defined) here and
 # re-exported for back-compat: existing callers do
@@ -45,25 +46,19 @@ _RADIX_SCAN_DIM = 128
 _RADIX_D_DIM = 256
 
 
-@lru_cache(maxsize=None)
-def _marker_color(name: str) -> tuple[float, float, float]:
-    """Deterministic pseudo-random RGB for a debug-marker/group name, so the
-    same phase gets the same color across runs (profiler captures stay
-    diff-able). Uses blake2s, NOT builtin hash() — CPython salts str hashing
-    per-process, which would recolor every run."""
-    digest = hashlib.blake2s(name.encode("utf-8"), digest_size=3).digest()
-    # Bias into [0.35, 1.0] so colors stay legible (never near-black).
-    return tuple(0.35 + (b / 255.0) * 0.65 for b in digest)  # type: ignore[return-value]
-
-
-# TODO: bad swe, we are importing adam, which idiomatically does not explain what we are importing
-# ideally we should be importing the shared data module, importing adam because adam imports the shared data module + its own structs is bad.
 def _module_for_reflection(device: spy.Device) -> spy.Module:
-    """Load a shader file that includes all the shared struct types so
-    buffers.py can reflect ``Gaussian3D`` / ``Projected2DGaussian`` /
-    ``AdamState``."""
+    """Load the NEUTRAL shared-layout module (``common/types.slang``) so
+    buffers.py can reflect the primitive/projected/optimizer struct layouts
+    (``Gaussian3D`` / ``Projected2DGaussian`` / ``BlendData`` / ``AdamState``)
+    without depending on an optimizer file. types.slang is the single source of
+    those layouts — every shader that needs them includes it — and buffers sizes
+    every NDBuffer from this reflection so Python never duplicates the layout.
+    (Reflecting through optimizers/adam.slang worked only because it transitively
+    includes types.slang; pointing straight at the shared module removes that
+    accidental optimizer coupling. Layout is byte-identical — see
+    tests/test_reflection_layout.py.)"""
     return spy.Module.load_from_file(
-        device, str(SHADERS_DIR / "optimizers" / "adam.slang")
+        device, str(SHADERS_DIR / "common" / "types.slang")
     )
 
 
@@ -90,6 +85,9 @@ class Pipeline:
         # Defaults to a no-op so single-threaded use (tests, --no-viewer) is
         # unchanged.
         self.gpu_lock = gpu_lock if gpu_lock is not None else contextlib.nullcontext()
+        # GPU runtime: owns the device + queue-lock discipline and hands out
+        # CommandBatches (command recording + one-submit under the shared lock).
+        self.runtime = GpuRuntime(device, self.gpu_lock)
         self.width = width
         self.height = height
         self.max_splats = max_splats
@@ -120,6 +118,20 @@ class Pipeline:
             max_sort_pairs=max_sort_pairs,
         )
 
+        # Image-space loss (SSIM / L1+L2), recorded independently of how the
+        # pixels were produced. viewer_only skips it: allocate_viewer builds no
+        # loss kernels, SSIM maps, or dL_dC texture, and _run_loss never runs.
+        self.image_loss = None if viewer_only else ImageLoss(
+            ssim_maps_kernel=self.k_ssim_maps,
+            ssim_grad_kernel=self.k_ssim_grad,
+            loss_kernel=self.k_loss,
+            ssim_m1=self.buffers.ssim_m1,
+            ssim_m2=self.buffers.ssim_m2,
+            ssim_m3=self.buffers.ssim_m3,
+            image_gradient=self.buffers.dL_dC_texture,
+            width=width, height=height,
+        )
+
         # Camera buffer: raw 144-byte buffer (136 data + 8 padding to 16-byte align).
         # Using a raw Buffer avoids reflection dependency (survives hot-reload).
         self._camera_buffer = device.create_buffer(
@@ -131,8 +143,11 @@ class Pipeline:
         # Training step counter (Python-side, for Adam bias correction).
         self.iteration = 0
 
-        # When set, all dispatches route through this encoder (for debug markers).
-        self._encoder: spy.CommandEncoder | None = None
+        # Active command batch during a recorded step. When set, _dispatch /
+        # _marker_group record into it; None => immediate dispatch. External
+        # encoder owners (densify, viewer) assign a raw encoder via the
+        # `_encoder` compat property below, which wraps it in a CommandBatch.
+        self._batch: CommandBatch | None = None
 
         # ID of the most recent submit_command_buffer call. Callers (the train
         # loop) can wait on this via device.wait_for_submit(id) to bound queue
@@ -232,75 +247,48 @@ class Pipeline:
         reference needs refreshing (for any code that uses reflected types)."""
         self.shared_data_module = _module_for_reflection(self.device)
 
-    def _dispatch(self, kernel, marker: str, **kwargs):
-        """Dispatch a kernel, tagging it with a flat debug marker ``marker``
-        (only when an encoder is active). ``marker`` is the phase/kernel name
-        shown in profiler captures; its color is derived deterministically
-        from the name (see _marker_color)."""
-        if self._encoder:
-            self._encoder.insert_debug_marker(marker, spy.math.float3(*_marker_color(marker)))
-        kernel.dispatch(command_encoder=self._encoder, **kwargs)
+    @property
+    def _encoder(self) -> "spy.CommandEncoder | None":
+        """Compat view of the active command batch's raw encoder. External
+        encoder owners (densify, viewer) assign a raw encoder here; the setter
+        wraps it in a CommandBatch so ALL dispatch routing goes through one
+        path. Internal code uses ``self._batch`` directly."""
+        return self._batch.encoder if self._batch is not None else None
 
-    #TODO: double check this function, im not sure about the setup
+    @_encoder.setter
+    def _encoder(self, encoder: "spy.CommandEncoder | None") -> None:
+        self._batch = CommandBatch(encoder) if encoder is not None else None
+
+    def _dispatch(self, kernel, marker: str, **kwargs):
+        """Dispatch a kernel, tagging it with a flat debug marker ``marker`` when
+        a command batch is active (train_step / densify / viewer); otherwise an
+        immediate dispatch. Recording is delegated to the active CommandBatch."""
+        if self._batch is not None:
+            self._batch.dispatch(kernel, marker, **kwargs)
+        else:
+            kernel.dispatch(command_encoder=None, **kwargs)
+
     def _dispatch_indirect(self, kernel, marker: str, args_buf: spy.NDBuffer,
                            offset: int = 0, **kwargs) -> None:
-        """Dispatch a compute kernel indirectly (group count read from args_buf
-        at `offset` bytes as three uint32s: groups_x, groups_y, groups_z).
+        """Indirect compute dispatch (group count read from ``args_buf`` at
+        ``offset`` as three uint32s). Records into the active batch; if none is
+        active (e.g. from render()) a transient one-shot batch is created and
+        submitted so this works from any caller. The write-visibility global
+        barrier before the indirect fetch lives in CommandBatch.dispatch_indirect."""
+        if self._batch is not None:
+            self._batch.dispatch_indirect(kernel, marker, args_buf, offset, **kwargs)
+        else:
+            transient = self.runtime.command_batch(marker)
+            transient.dispatch_indirect(kernel, marker, args_buf, offset, **kwargs)
+            self.last_submit_id = self.runtime.submit(transient).submit_id
 
-        Opens a scoped compute pass on the active encoder, binds the pipeline,
-        writes entry-point parameters via a ShaderCursor (matching
-        kernel.dispatch(**kwargs) semantics), then dispatch_compute_indirect.
-        If no encoder is active (e.g. from render()) a transient encoder is
-        created and submitted so this helper works from any caller.
-        """
-        enc = self._encoder
-        transient = enc is None
-        if transient:
-            enc = self.device.create_command_encoder()
-        enc.insert_debug_marker(marker, spy.math.float3(*_marker_color(marker)))
-        # HAZARD: the args_buf was written by a preceding kernel dispatch
-        # (e.g. prepareDispatchArgs). dispatch_compute_indirect reads it as
-        # driver-consumed indirect arguments; without a barrier the read
-        # may race the write and pick up garbage → a catastrophic group
-        # count. Insert a global barrier to force write-visibility before
-        # the indirect fetch. Cheap compared to the cost of the failure
-        # mode (a 32-bit garbage groups_x can queue billions of workgroups).
-        enc.global_barrier() #TODO: im honestly not sure I need this barrier
-        pass_enc = enc.begin_compute_pass()
-        try:
-            shader_obj = pass_enc.bind_pipeline(kernel.pipeline)
-            cursor = spy.ShaderCursor(shader_obj).find_entry_point(0)
-            cursor.write(kwargs)
-            pass_enc.dispatch_compute_indirect(
-                spy.BufferOffsetPair(args_buf.storage, offset)
-            )
-        finally:
-            pass_enc.end()
-        if transient:
-            cmd = enc.finish()
-            with self.gpu_lock:
-                self.last_submit_id = self.device.submit_command_buffer(cmd)
-
-    @contextlib.contextmanager
     def _marker_group(self, label: str):
-        """Nested debug-group scope for profiling captures (e.g. Nsight
-        Graphics). No-op when no encoder is active, so it costs nothing outside
-        an encoder-backed train_step. Groups nest, so wrapping a sub-stage of a
-        phase (bin / scan / sort / rasterize) gives a drill-down tree under the
-        top-level phase group instead of one flat run of per-kernel markers.
-
-        The group color is derived deterministically from ``label`` (see
-        _marker_color), so a phase keeps its color across runs and callers no
-        longer hand-pick RGB tuples."""
-        enc = self._encoder
-        if enc is None:
-            yield
-            return
-        enc.push_debug_group(label, spy.math.float3(*_marker_color(label)))
-        try:
-            yield
-        finally:
-            enc.pop_debug_group()
+        """Nested debug-group scope for profiler captures (Nsight etc.). No-op
+        (nullcontext) when no batch is active, so it costs nothing outside a
+        recorded step; otherwise delegates to CommandBatch.marker_group."""
+        if self._batch is None:
+            return contextlib.nullcontext()
+        return self._batch.marker_group(label)
 
     # ------------------------------------------------------------------
     # Data loading
@@ -488,7 +476,7 @@ class Pipeline:
             src_v, dst_v = dst_v, src_v
         return src_lo, src_hi, src_v
 
-    def _run_forward(self, camera: Camera) -> None:
+    def _run_forward(self, camera: Camera) -> RasterizationContext:
         self._upload_camera(camera)
         b = self.buffers
         num_tiles = b.num_tiles
@@ -639,6 +627,11 @@ class Pipeline:
                 extinction_hardness=float(self._extinction_hardness),
             )
 
+        # Explicit forward -> backward handoff (was the hidden self._sorted_values,
+        # which is still set above for importance scoring + introspection). The
+        # backward takes this context so the dependency is a passed value.
+        return RasterizationContext(sorted_ids=sorted_v)
+
     def set_extinction_hardness(self, hardness: float) -> None:
         """Set the compositor extinction hardness used by subsequent forward /
         backward dispatches. Lets the trainer SCHEDULE k across training (e.g.
@@ -650,11 +643,6 @@ class Pipeline:
         self._extinction_hardness = float(hardness)
 
     def render(self, camera: Camera) -> None:
-        # Hold gpu_lock across the whole forward + drain: when an in-process
-        # viewer shares this device, its render thread submits on the same
-        # VkQueue. Without the lock, this forward + wait_for_idle races the
-        # viewer's submits/presents (non-deterministic stall or device fault).
-        # No-op lock in single-threaded use.
         with self.gpu_lock:
             self._run_forward(camera)
             self.device.wait_for_idle()
@@ -730,57 +718,23 @@ class Pipeline:
             )
 
     def _run_loss(self) -> None:
-        b = self.buffers
-        target = self._active_target
-        if self.cfg.lambda_ssim > 0:
-            # Two-pass SSIM: pass 1 builds the m1/m2/m3 back-projection maps,
-            # pass 2 convolves them and blends with the L1 + alpha gradient.
-            # The 121-tap window loops are cache-bound, not tap-bound; a
-            # separable 4-pass rewrite measured ~70% slower (global-scratch
-            # round-trips beat the tap savings). See ssim_loss.slang header.
-            with self._marker_group("ssim_maps"):
-                self._dispatch(self.k_ssim_maps, "ssim_maps",
-                    thread_count=[self.width, self.height, 1],
-                    output_image=b.output_image,
-                    target_image=target,
-                    ssim_m1=b.ssim_m1,
-                    ssim_m2=b.ssim_m2,
-                    ssim_m3=b.ssim_m3,
-                    frame_dim=spy.uint2(self.width, self.height),
-                )
-            with self._marker_group("ssim_grad"):
-                self._dispatch(self.k_ssim_grad, "ssim_grad",
-                    thread_count=[self.width, self.height, 1],
-                    output_image=b.output_image,
-                    target_image=target,
-                    ssim_m1=b.ssim_m1,
-                    ssim_m2=b.ssim_m2,
-                    ssim_m3=b.ssim_m3,
-                    dL_dC=b.dL_dC_texture,
-                    frame_dim=spy.uint2(self.width, self.height),
-                    lambda_ssim=self.cfg.lambda_ssim,
-                    w_alpha=self.cfg.w_alpha,
-                    lambda_l2=self.cfg.lambda_l2,
-                )
-        else:
-            with self._marker_group("l1_l2_loss"):
-                self._dispatch(self.k_loss, "loss",
-                    thread_count=[self.width, self.height, 1],
-                    output_image=b.output_image,
-                    target_image=target,
-                    dL_dC=b.dL_dC_texture,
-                    frame_dim=spy.uint2(self.width, self.height),
-                    w_alpha=self.cfg.w_alpha,
-                    lambda_l2=self.cfg.lambda_l2,
-                )
+        self.image_loss.record(
+            self._batch,
+            rendered=self.buffers.output_image,
+            target=self._active_target,
+            cfg=self.cfg,
+        )
 
-    def _run_backward(self, structure_tensor=None,
+    def _run_backward(self, context: "RasterizationContext | None" = None,
+                      structure_tensor=None,
                       structure_kwargs: dict | None = None) -> None:
         b = self.buffers
         gb = b.grad_buffers
-        # The forward left the sorted gaussian-id buffer on one of the two
-        # ping-pong slots. We cache it during _run_forward.
-        sorted_values = self._sorted_values
+        # Explicit forward -> backward handoff: the sorted gaussian-id buffer (the
+        # radix ping-pong winner) comes from the forward's RasterizationContext.
+        # Falls back to self._sorted_values for callers that split forward/backward
+        # without threading the context (e.g. the test kit's backward()).
+        sorted_values = context.sorted_ids if context is not None else self._sorted_values
         with self._marker_group("rasterize_backward"):
             if self.use_persplat_backward:
                 num_tiles = b.num_tiles_x * b.num_tiles_y
@@ -1024,7 +978,7 @@ class Pipeline:
 
     def train_step(self, camera: Camera, lrs: AdamLRs | None = None,
                    structure_tensor=None, structure_kwargs: dict | None = None) -> None:
-        """Run one training step: forward → loss → backward → regularization → adam.
+        """Run one training step: forward -> loss -> backward -> regularization -> adam.
 
         The target image must have been uploaded via
         :meth:`set_target_image` before calling.
@@ -1040,15 +994,15 @@ class Pipeline:
         accumulate_structure_scores; the caller gates cadence by simply passing
         structure_tensor=None on iters it wants to skip.
 
-        NO CPU/GPU sync here — training submits kernels and returns
+        NO CPU/GPU sync here, training submits kernels and returns
         immediately. This keeps the GPU saturated; the queue drains
         when the training loop next reads back data (loss sample,
         preview render, densify).
         """
         if lrs is None:
             lrs = AdamLRs()
-        enc = self.device.create_command_encoder()
-        self._encoder = enc
+        batch = self.runtime.command_batch("train_step")
+        self._batch = batch
         with self._marker_group("clear_grads"):
             # Hot path: only zero the 5 2D grad seeds. The 14 scalar param
             # grad buffers are already zero because Adam zero'd them per-thread
@@ -1057,20 +1011,18 @@ class Pipeline:
             # running _clear_grads() once at pipeline setup.
             self._clear_2d_grad_seeds()
         with self._marker_group("forward"):
-            self._run_forward(camera)
+            raster_ctx = self._run_forward(camera)
         with self._marker_group("loss"):
             self._run_loss()
         with self._marker_group("backward"):
-            self._run_backward(structure_tensor=structure_tensor,
+            self._run_backward(raster_ctx, structure_tensor=structure_tensor,
                                structure_kwargs=structure_kwargs)
         with self._marker_group("regularization"):
             self._run_regularization()
         with self._marker_group("adam"):
             self._run_adam(lrs)
-        cmd = enc.finish()
-        with self.gpu_lock:
-            self.last_submit_id = self.device.submit_command_buffer(cmd)
-        self._encoder = None
+        self.last_submit_id = self.runtime.submit(batch).submit_id
+        self._batch = None
 
     # ------------------------------------------------------------------
     # Densification (strategies + scoring live in trainer.densify; these
