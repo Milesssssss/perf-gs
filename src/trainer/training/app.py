@@ -40,7 +40,11 @@ from trainer.color import linear_to_srgb, srgb_to_linear
 from trainer.config import AdamLRs, RenderConfig
 from trainer.metrics import psnr as _psnr_image
 from trainer.pipeline import Pipeline
-from trainer.config_types import ScheduleConfig
+from trainer.config_types import (
+    DensificationMode,
+    ScheduleConfig,
+    validate_training_config,
+)
 from trainer.training.cli import build_parser
 from trainer.training.lr_schedule import (
     ExtinctionHardnessSchedule,
@@ -110,16 +114,18 @@ def main() -> None:
 
     # --- Train/test split (paper eval protocol) ---
     stride, test_indices, train_indices = resolve_holdout_split(args, n_cams)
-    # Morton normalization AABB (only used when --morton-every > 0). A stale
-    # bbox is fine — the shader saturates out-of-box means.
+
+    densify_mode = validate_training_config(
+        args, n_cams=n_cams, n_train=len(train_indices), n_test=len(test_indices))
+
     morton_world_min, morton_world_max = compute_morton_bounds(
         scene.initial_points["means"])
-    #print(f"schedule: densify [{args.densify_from}, {args.densify_to}] every {args.densify_every}, "
-    #      f"opacity_reset@{args.opacity_reset_iters or 'none'}")
 
     print(f"schedule: densify [{args.densify_from}, {args.densify_to}] every {args.densify_every}")
 
     cfg, structure_cfg = build_densify_configs(args, extent)
+
+    eff_lambda_l2, eff_lambda_ssim, base_lrs = resolve_loss_and_lrs(args)
 
     # --- Resolved opacity-bundle settings (CLI -> config object) ---
     # Printed at startup and at every structure pass so it is unambiguous whether
@@ -151,7 +157,7 @@ def main() -> None:
               f"structure_grad_thresh={s['structure_grad_thresh']} "
               f"absgs_grad_thresh={s['absgs_grad_thresh']}", flush=True)
 
-    if args.structure_densify:
+    if densify_mode == DensificationMode.STRUCTURE_AWARE:
         _print_opacity_bundle("startup")
         _s0 = _opacity_bundle_settings()
         if (not _s0["opacity_cap_enabled"]) or _s0["structure_min_opacity"] < 0.1:
@@ -183,6 +189,22 @@ def main() -> None:
         "mip_enabled": bool(args.mip_splatting),
         "mip_kernel_size": (args.mip_kernel_size if args.mip_splatting else 0.3),
         "run_name": run_name, "n_cams": n_cams, "n_init_points": n_init,
+        # Complete resolved-config record (reproducibility): EVERY parsed CLI arg
+        # plus the values the frontend resolves from them. The raw args alone
+        # hide the --sad-match-loss-lrs override of lambda/LRs, the resolved
+        # densify mode, and the scene-derived image size.
+        "cli_args": {k: v for k, v in vars(args).items()},
+        "resolved": {
+            "densify_mode": densify_mode.value,
+            "width": IMAGES_WIDTH, "height": IMAGES_HEIGHT,
+            "n_cams": n_cams, "n_init_points": n_init,
+            "n_train": len(train_indices), "n_test": len(test_indices),
+            "holdout_stride": stride,
+            "eff_lambda_l2": eff_lambda_l2,
+            "eff_lambda_ssim": eff_lambda_ssim,
+            "base_lr_scale": base_lrs.scale, "base_lr_rot": base_lrs.rot,
+            "base_lr_opacity": base_lrs.opacity, "base_lr_color": base_lrs.color,
+        },
     }, indent=2))
 
     use_alpha = args.w_alpha > 0
@@ -248,8 +270,6 @@ def main() -> None:
     # the same thread re-enter while still blocking the viewer thread.
     gpu_lock = _threading.RLock() if not args.no_viewer else None
 
-    eff_lambda_l2, eff_lambda_ssim, base_lrs = resolve_loss_and_lrs(args)
-
     pipeline = Pipeline(
         device=device, width=IMAGES_WIDTH, height=IMAGES_HEIGHT,
         max_splats=args.max_splats,
@@ -277,7 +297,7 @@ def main() -> None:
     # end-of-iter, so subsequent iters are already zero). NDBuffer contents
     # aren't guaranteed zero on allocation, so this initial pass is required.
     pipeline._clear_grads()
-    if args.structure_densify:
+    if densify_mode == DensificationMode.STRUCTURE_AWARE:
         # Zero the eta accumulators before the first online-accumulation window
         # (NDBuffer contents are not guaranteed zeroed on allocation).
         pipeline.clear_structure_scores()
@@ -336,7 +356,7 @@ def main() -> None:
     # scripts/preprocess_structure.py (fields take seconds/image to compute);
     # fall back to computing on the fly (with a warning) if none is present.
     structure_textures = []
-    if args.structure_densify:
+    if densify_mode == DensificationMode.STRUCTURE_AWARE:
         import slangpy as spy
         from trainer.structure_analysis import cache_path, compute_structure_tensor_field
 
@@ -480,13 +500,14 @@ def main() -> None:
     # QueueLimiter keeps a rolling window of the last max_depth submit
     # IDs and waits on the oldest before recording a new one, no wait_for_idle
     # in the hot path.
-    queue_limiter = QueueLimiter(pipeline.device, max_depth=1)
+    queue_limiter = QueueLimiter(pipeline.runtime, max_depth=1)
 
     # Densification subsystem (all four densify modes + eta-window carry, Morton
     # re-sort, mip recompute, popstat + diagnostics). Constructed once with its
     # dependencies; the loop calls densifier.run(it, ev, count) on densify ticks.
     densifier = DensificationController(
-        pipeline=pipeline, args=args, densify_cfg=cfg, structure_cfg=structure_cfg,
+        pipeline=pipeline, args=args, densify_mode=densify_mode,
+        densify_cfg=cfg, structure_cfg=structure_cfg,
         extent=extent, n_init=n_init, n_cams=n_cams, rng=rng, scene=scene,
         target_textures=target_textures, image_width=IMAGES_WIDTH,
         image_height=IMAGES_HEIGHT, morton_world_min=morton_world_min,
@@ -517,26 +538,14 @@ def main() -> None:
         lrs = AdamLRs(mean=mean_lr.at(it - 1), scale=base_lrs.scale,
                       rot=base_lrs.rot, opacity=base_lrs.opacity, color=base_lrs.color)
 
-        # Deterministic Nsight GPU-Trace capture at --capture-iter (no-op
-        # otherwise). When a capture runs it never returns to training: the
-        # process finalizes its own logs here and exits.
         if profiler.run_capture_if_due(pipeline, it, entry, cam_idx, queue_limiter):
             artifacts.close_all()
             sys.exit(0)
 
-        # SAD-GS: accumulate this view's eta sample online (paper Sec 3.6) so
-        # the multiview fraction gate has ~window-many samples by densify time.
-        # CADENCE (SADGS #1): accumulate only every N iters (SADGS
-        # `iteration % 10 == 0`), not every iter — eta_max is a running max, so
-        # sampling 10x more views only inflates it and oversizes splits.
-        # PER-VIEW GRAD GATE (SADGS #2): only fold eta from high-per-view-grad
-        # views. SADGS's freq_grad_threshold (0.00002) applies to its per-view
-        # NDC mean-loss gradient; our per-view grad seed is a SUM-of-abs over
-        # covered pixels (no 1/N), so — exactly as the window gate does — we
-        # rescale the floor by W*H*channels into our accumulator's convention.
         struct_tex = None
         struct_kwargs = None
-        if (args.structure_densify and args.densify_from < it <= args.densify_to
+        if (densify_mode == DensificationMode.STRUCTURE_AWARE
+                and args.densify_from < it <= args.densify_to
                 and it % args.sad_accum_every == 0):
             struct_tex = structure_textures[cam_idx]
             struct_kwargs = {
@@ -551,22 +560,12 @@ def main() -> None:
 
         queue_limiter.record(pipeline.last_submit_id)
 
-        # Profile hook: present the just-rendered frame so Nsight has a fresh
-        # frame boundary to capture on (no-op outside a profile run).
+        #TODO: the intention is not well communicated. Profiler here is called regardless but if it happens or not is hidden behing the interface
         profiler.present_frame()
 
-        # Push a gaussian snapshot to the in-process viewer every N iters.
-        # This is a zero-copy GPU->GPU buffer blit (no readback, no numpy, no
-        # device drain), so it can run at a fine cadence without stalling the
-        # training pipeline. Serialized against the viewer's render via gpu_lock.
         if it % args.stream_every == 0:
             viewer.push_snapshot(pipeline)
 
-        # Per-iteration schedule (pure; trainer.training.schedule). The tricky
-        # invariants — reset-wins-over-densify, ABSOLUTE structure-pass alignment
-        # (SADGS `iteration % densification_interval == 0`, NOT phase-offset by
-        # densify_from), and preview buffering (+50, or +350 on a reset iter) —
-        # all live in events_at() and are unit-tested (tests/test_training_schedule.py).
         ev = schedule.events_at(it)
         do_densify = ev.densify
         do_opacity_reset = ev.opacity_reset
@@ -580,17 +579,13 @@ def main() -> None:
             densify_json.write(json.dumps({"iter": it, "event": "opacity_reset"}) + "\n")
             print(f"iter {it}: opacity reset")
 
-        # Periodic standalone Morton re-sort (in addition to the post-densify
-        # sort above). Only fires on non-densify iters, since densify already
-        # did one this iter. clear_tracking follows because Morton permutes
-        # slots and the grad/visibility window would otherwise reference the
-        # wrong gaussians. On the SAD path the eta window must SURVIVE this
+        #On the SAD path the eta window must SURVIVE this
         # sort (it's only reset at a structure tick), so we carry eta through
         # the permutation instead of clearing it — otherwise enabling
         # --morton-every would silently wipe the multiview window mid-interval.
         if ev.morton:
             pipeline.morton_sort(morton_world_min, morton_world_max,
-                                 carry_eta=args.structure_densify)
+                                 carry_eta=(densify_mode == DensificationMode.STRUCTURE_AWARE))
             pipeline.clear_tracking()
             if pipeline.last_submit_id:
                 queue_limiter.record(pipeline.last_submit_id)
@@ -610,8 +605,6 @@ def main() -> None:
         if it > 1 and (do_log or do_preview):
 
             pipeline.render(entry.camera)
-            # Refresh cur_n_gaussians on log ticks — wait-free densify_simple
-            # keeps the count GPU-side, so we sample it here at log cadence.
             cur_n_gaussians = int(
                 pipeline.buffers.num_gaussians_counter.to_numpy().view(np.uint32)[0]
             )
@@ -652,9 +645,6 @@ def main() -> None:
         if it > 1 and do_render_all:
             render_all_cameras(pipeline, scene, it, cams_dir)
 
-        # --- Pre-densify PSNR curve (--psnr-curve): sample TEST-set PSNR one
-        # iter before each densify step (it+1 is the densify boundary), so the
-        # reading reflects the settled state rather than a just-perturbed one.
         if psnr_curve_json is not None and ev.psnr_curve:
             _pc_t0 = time.time()
             _pc_psnr, _pc_ng = eval_test_psnr_srgb(pipeline, scene, test_indices, targets_srgb)
@@ -665,9 +655,6 @@ def main() -> None:
             print(f"[psnr-curve] iter {it:6d}  psnr_srgb={_pc_psnr:5.2f}  "
                   f"n_g={_pc_ng} (pre-densify)")
 
-        # --- PSNR eval sweep (--eval-every): held-out TEST-split paper metric
-        # (mean of per-image PSNR/SSIM) into eval_curve.jsonl. Sweep time is
-        # excluded from the reported train clock; see run_eval_sweep. ---
         if eval_curve_json is not None and ev.eval:
             eval_time_total = run_eval_sweep(
                 pipeline=pipeline, scene=scene, it=it, test_indices=test_indices,
@@ -677,14 +664,14 @@ def main() -> None:
                 eval_time_total=eval_time_total, eval_holdout=bool(args.eval_holdout),
             )
 
-    # Drain the GPU queue first queue-depth backpressure lets the CPU run ahead, so without this the
-    # timer would miss in-flight GPU work.
-    pipeline.device.wait_for_idle()
+    pipeline.runtime.wait_for_idle()
     train_wall_s = time.time() - t_start
     completed_iters = it
+
     # Post-training renders (final test PSNR, final metrics, viewer) use the
     # run's TARGET hardness, not whatever mid-ramp value a short run left behind.
     pipeline.set_extinction_hardness(extinction.target)
+
     print(f"[train] loop done: {completed_iters} iters in {train_wall_s:.1f}s "
           f"({completed_iters / max(train_wall_s, 1e-9):.1f} it/s)")
     log_json.write(json.dumps({
@@ -693,7 +680,6 @@ def main() -> None:
         "train_wall_s": train_wall_s,
         "it_per_s": completed_iters / max(train_wall_s, 1e-9),
     }) + "\n")
-
 
     if args.final_test_psnr and not args.profile_run:
         _tp_psnr, _tp_ng = eval_test_psnr_srgb(pipeline, scene, test_indices, targets_srgb)
@@ -714,9 +700,6 @@ def main() -> None:
 
     artifacts.close_all()
 
-    # --- PSNR curve (--psnr-curve): write the per-run psnr_curve.json (arrays
-    # for cross-run averaging) and render psnr_curve.png (PSNR vs iteration).
-    # Done before the --profile-run early return so it always saves. ---
     if args.psnr_curve:
         curve = {
             "scene": args.scene,

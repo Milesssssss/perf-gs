@@ -15,6 +15,7 @@ from __future__ import annotations
 import numpy as np
 
 from trainer.buffers import GAUSSIAN_FLOAT_COUNT, GaussianBuffers
+from trainer.contracts import gaussian_numpy_dtype
 
 
 def set_num_gaussians(buffers: GaussianBuffers, n: int) -> None:
@@ -47,19 +48,17 @@ def write_gaussians(
     p = np.clip(opacities, 1e-5, 1.0 - 1e-5).astype(np.float32)
     opacity_logits = np.log(p / (1.0 - p))
 
-    # Gaussian3D is GAUSSIAN_FLOAT_COUNT contiguous float32s with no padding:
-    #   mean(3), log_scale(3), rot_quat(4), opacity(1), color_logit(3).
-    # Build the whole block with vectorized numpy and upload in one
-    # copy_from_numpy — the per-element cursor loop below built ~5*n
-    # temporary spy.float3/float4 objects (≈90ms per 5k gaussians, seconds
-    # after densification grows the count into the hundreds of thousands).
-    block = np.empty((n, GAUSSIAN_FLOAT_COUNT), dtype=np.float32)
-    block[:, 0:3] = means
-    block[:, 3:6] = log_scales
-    block[:, 6:10] = rot_quats
-    block[:, 10] = opacity_logits
-    block[:, 11:14] = color_logits
-    buffers.gaussians.copy_from_numpy(np.ascontiguousarray(block.reshape(-1)))
+    # Pack into the contract's structured Gaussian3D dtype (named fields, not
+    # hand-coded scalar offsets), then upload as the flat float32 the shader
+    # struct expects. One vectorized build + a single copy_from_numpy.
+    block = np.zeros(n, dtype=gaussian_numpy_dtype())
+    block["mean"] = means
+    block["log_scale"] = log_scales
+    block["rot_quat"] = rot_quats
+    block["opacity"] = opacity_logits
+    block["sh0"] = color_logits
+    buffers.gaussians.copy_from_numpy(
+        np.ascontiguousarray(block).view(np.float32).reshape(-1))
 
     set_num_gaussians(buffers, n)
 
@@ -77,15 +76,3 @@ def write_gaussians_raw(buffers: GaussianBuffers, floats: np.ndarray, n: int) ->
     if n > 0:
         buffers.gaussians.copy_from_numpy(block)
     set_num_gaussians(buffers, n)
-
-
-def zero_adam_state(buffers: GaussianBuffers) -> None:
-    """Reset all Adam first/second-moment state to zero.
-
-    The whole AdamState buffer is contiguous POD, so a single zero-filled
-    copy_from_numpy clears it regardless of the internal field layout. The
-    old per-element cursor loop ran over all max_splats (~820ms per 50k,
-    i.e. ~80s at a 5M cap) on every set_gaussians_from_numpy call.
-    """
-    n_floats = buffers.adam_state.to_numpy().view(np.float32).size
-    buffers.adam_state.copy_from_numpy(np.zeros(n_floats, dtype=np.float32))

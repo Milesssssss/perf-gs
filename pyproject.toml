@@ -15,6 +15,9 @@ dependencies = [
     "scipy",
 ]
 
+[project.scripts]
+generate-contracts = "trainer.contracts:main"
+
 [project.optional-dependencies]
 dev = [
     "pytest",

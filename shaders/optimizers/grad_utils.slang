@@ -1,4 +1,5 @@
-// Utility kernels for int64 gradient-accumulator buffers.
+// Utility kernels for int64 gradient-accumulator buffers + Adam moment state.
+#include "../common/types.slang"
 
 [shader("compute")]
 [numthreads(256, 1, 1)]
@@ -10,6 +11,22 @@ void clearGradBuffer(
     uint i = dtid.x;
     if (i >= max_splats) return;
     grad_buffer[i] = int64_t(0);
+}
+
+// Zero all per-gaussian Adam first/second moments device-side. Replaces a host
+// round-trip (readback-to-size + host zero upload) at set-gaussians time. Uses
+// Slang's zero-init cast so it never enumerates AdamState's fields (which are
+// generated from the contract) — a new moment field needs no edit here.
+[shader("compute")]
+[numthreads(256, 1, 1)]
+void clearAdamState(
+    uint3 dtid: SV_DispatchThreadID,
+    RWStructuredBuffer<AdamState> adam_state,
+    uniform uint max_splats)
+{
+    uint i = dtid.x;
+    if (i >= max_splats) return;
+    adam_state[i] = (AdamState)0;
 }
 
 [shader("compute")]

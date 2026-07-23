@@ -4,19 +4,14 @@
 #ifndef TRAINER_TYPES_SLANG
 #define TRAINER_TYPES_SLANG
 
-struct Gaussian3D
-{
-    float3 mean;            // world-space position
-    float3 log_scale;       // exp(log_scale) = per-axis scale of the 3D gaussian
-    float4 rot_quat;        // rotation quaternion (w, x, y, z)
-    float opacity;          // pre-sigmoid opacity logit; sigmoid(opacity) is the
-                            // real probability in [0, 1]. Parameterized as a logit
-                            // so Adam's opacity LR operates on an unbounded scalar
-                            // (matches gsplat; see shaders/primitives/gaussian/eval.slang).
-    float3 sh0;             // SH band-0 (DC) color coeff; linear RGB = 0.5 + C0*sh0
-                            // (affine, unbounded — see shDC in math.slang). Replaces
-                            // the old sigmoid(color_logit) parameterization.
-};
+#include "camera.slang"
+#include "fixed_point.slang"
+
+// Gaussian3D (packed storage) + AdamState (Adam moments) are GENERATED from the
+// host<->shader schema in src/trainer/contracts.py — the single source of truth
+// for the primitive layout. See that module for the field semantics (logit
+// opacity, SH0 DC color, quaternion (w,x,y,z) order).
+#include "generated/gaussian_types.slang"
 
 struct Projected2DGaussian
 {
@@ -44,36 +39,5 @@ struct BlendData
     float3 sh0;             // == Gaussian3D.sh0
     float  opacity_compensation; // == Projected2DGaussian.opacity_compensation (mip)
 };
-
-struct CameraData
-{
-    float4x4 view_matrix;   // world -> view
-    float4x4 proj_matrix;   // view  -> clip
-    float2 image_size;      // width, height in pixels
-};
-
-// Per-gaussian Adam first/second-moment state. AoS matches the read
-// pattern: the Adam kernel loads all m/v for one gaussian, steps it,
-// writes it back. No atomics needed (one thread per gaussian).
-struct AdamState
-{
-    float3 mean_m;
-    float3 mean_v;
-    float3 log_scale_m;
-    float3 log_scale_v;
-    float4 rot_m;
-    float4 rot_v;
-    float  opacity_m;
-    float  opacity_v;
-    float3 color_m;
-    float3 color_v;
-};
-
-// Fixed-point atomic gradient accumulation (int64, no overflow).
-static const float FIXED_SCALE = 65536.0;
-static const float FIXED_INV_SCALE = 1.0 / FIXED_SCALE;
-
-int64_t toFixed(float f)   { return int64_t(f * FIXED_SCALE); }
-float fromFixed(int64_t i) { return float(i) * FIXED_INV_SCALE; }
 
 #endif // TRAINER_TYPES_SLANG

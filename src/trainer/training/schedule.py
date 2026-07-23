@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from trainer.config_types import ScheduleConfig
+from trainer.config_types import DensificationMode, ScheduleConfig
 
 
 @dataclass(frozen=True)
@@ -65,12 +65,13 @@ class TrainingSchedule:
         # Reset WINS: a reset iter never also densifies.
         if do_densify and do_opacity_reset:
             do_densify = False
-        do_structure = (c.structure_densify and do_densify
-                        and (it % c.sad_structure_every == 0))
+        do_structure = (c.densify_mode == DensificationMode.STRUCTURE_AWARE
+                        and do_densify and (it % c.sad_structure_every == 0))
 
         do_preview = False
         if c.preview_every > 0:
-            buffered = [itr + 350 if itr % c.reset_every == 0 else itr + 50
+            buffered = [itr + 350 if (c.reset_every > 0 and itr % c.reset_every == 0)
+                        else itr + 50
                         for itr in range(c.preview_every, c.iterations,
                                          c.preview_every)]
             do_preview = (it in buffered) or (it == c.iterations)

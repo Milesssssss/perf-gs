@@ -21,7 +21,8 @@
 #ifndef TRAINER_SCAN_SLANG
 #define TRAINER_SCAN_SLANG
 
-static const uint SCAN_BLOCK_SIZE = 1024;
+#include "generated/execution_contract.slang"
+static const uint SCAN_BLOCK_SIZE = CONTRACT_SCAN_BLOCK_SIZE;
 // scanBlockSums is a single-workgroup scan so it caps at SCAN_BLOCK_SIZE
 // inputs. When the level-2 count exceeds this, pipeline._scan does an
 // extra scanBlock+scanBlockSums pass (the 3-level branch).

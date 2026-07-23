@@ -55,13 +55,24 @@ def test_blend_variants_share_layout() -> None:
         alpha.param_float_count, alpha.grad_field_names)
 
 
+def test_disk_proof_registered_but_not_pipeline_ready() -> None:
+    disk = get_specialization(
+        PrimitiveLayoutKey(PrimitiveKind.DISK_2D, BlendKind.ALPHA_OVER))
+    assert disk.parameter_struct == "Disk2D"
+    assert disk.parameter_field_names == ("center", "log_radius", "opacity", "color_value")
+    assert disk.param_float_count == 7
+    assert disk.grad_2d_seed_names == ()
+    assert disk.shader_dir == "primitives/disk"
+    assert disk.pipeline_ready is False
+
+
 def test_unknown_pair_raises() -> None:
     with pytest.raises(KeyError):
         get_specialization(
-            PrimitiveLayoutKey(PrimitiveKind.DISK_2D, BlendKind.ALPHA_OVER))
+            PrimitiveLayoutKey(PrimitiveKind.SPHERE_3D, BlendKind.ALPHA_OVER))
 
 
-def test_registry_only_gaussian_today() -> None:
+def test_registry_distinguishes_proof_from_pipeline_ready() -> None:
     keys = registered_keys()
-    assert len(keys) == 2
-    assert all(k.primitive == PrimitiveKind.GAUSSIAN_3D for k in keys)
+    assert len(keys) == 3
+    assert sum(get_specialization(key).pipeline_ready for key in keys) == 2

@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import argparse
 
+from trainer.config_types import DensificationMode
+
 
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser()
@@ -127,22 +129,29 @@ def build_parser() -> argparse.ArgumentParser:
                          "(and clear_structure_scores on SAD runs) since window "
                          "accumulators are slot-indexed and must be reset when "
                          "slots are permuted.")
-    ap.add_argument("--cluster-cull", action="store_true",
+    ap.add_argument("--cluster-cull", action=argparse.BooleanOptionalAction,
+                    default=True,
                     help="Cluster-frustum cull before each forward: bound the "
                          "128-splat clusters (Morton-adjacent) by a per-cluster "
                          "AABB and skip clusters fully outside the view frustum. "
+                         "On by default; pass --no-cluster-cull to disable. "
                          "Requires --morton-every > 0 for the clusters to be "
                          "spatially coherent (without it, each cluster spans the "
                          "whole scene). Mask-in-bin_count design (no compaction, "
-                         "no slot remap) — every downstream pass is unaware.", default=True)
-    ap.add_argument("--simple-densify", action="store_true",
-                    help="use reference 3DGS threshold-based densification instead of score-ranked")
-    ap.add_argument("--importance-score-densify", action="store_true",
-                   help="use score-ranked densification instead of reference 3DGS threshold-based (FastGS)")
-    ap.add_argument("--structure-densify", action="store_true",
-                    help="use structure-aware anisotropic densification (SAD-GS, arXiv 2604.28016): "
-                         "precomputes a multi-scale structure-tensor field per view and grid-splits "
-                         "Gaussians that under-resolve local texture frequency. Overrides --simple-densify.", default=True)
+                         "no slot remap) — every downstream pass is unaware.")
+    ap.add_argument("--densify-mode",
+                    choices=[m.value for m in DensificationMode],
+                    default=DensificationMode.STRUCTURE_AWARE.value,
+                    help="densification strategy the loop runs on a densify tick "
+                         "(default: structure_aware). Replaces the former "
+                         "--simple-densify / --importance-score-densify / "
+                         "--structure-densify booleans, which had ambiguous "
+                         "precedence. Modes: 'none' = no densification; 'simple' "
+                         "= reference 3DGS threshold-based clone/split; "
+                         "'importance_score' = score-ranked (FastGS); "
+                         "'structure_aware' = SAD-GS anisotropic grid-split "
+                         "(arXiv 2604.28016) with an interleaved AbsGS gradient "
+                         "filler on the non-structure densify ticks.")
     ap.add_argument("--sad-tau-split", type=float, default=0.4,
                     help="SAD split_ratio_threshold: split if high_ratio (fraction of views "
                          "with scalar eta>1) exceeds this AND the gradient is high (SADGS 0.8)")
@@ -186,11 +195,13 @@ def build_parser() -> argparse.ArgumentParser:
                          "structure prune (SADGS inverse_sigmoid(min(opacity,0.8))). "
                          "0 = off (current). Set 0.8 to match the reference (measured: "
                          "ref it500-post opacity p90=p99=max=0.8).")
-    ap.add_argument("--sad-relative-reset", action="store_true",
+    ap.add_argument("--sad-relative-reset", action=argparse.BooleanOptionalAction,
+                    default=True,
                     help="use SADGS RELATIVE opacity reset (opacity *= decay) instead of "
                          "the gsplat CLAMP-to-0.01. Preserves strong/weak ordering through "
-                         "reset. REQUIRED when --sad-structure-min-opacity=0.1 so the floor "
-                         "doesn't wipe the scene at the first post-reset structure pass.", default=True)
+                         "reset. On by default; pass --no-sad-relative-reset to disable. "
+                         "REQUIRED when --sad-structure-min-opacity=0.1 so the floor "
+                         "doesn't wipe the scene at the first post-reset structure pass.")
     ap.add_argument("--sad-reset-decay", type=float, default=0.1,
                     help="RELATIVE-reset multiplier (SADGS opacity_reset_decay=0.1). "
                          "Only used with --sad-relative-reset.")
@@ -203,12 +214,12 @@ def build_parser() -> argparse.ArgumentParser:
                          "densify tick (~17 ticks/run), off the hot path but not "
                          "free. Use to debug runaway / untargeted densification.")
     ap.add_argument("--sad-match-loss-lrs", type=int, default=1,
-                    help="when --structure-densify: 1 (default) = use SADGS's loss (lambda_l2) "
+                    help="when --densify-mode structure_aware: 1 (default) = use SADGS's loss (lambda_l2) "
                          "and per-parameter LRs so we train exactly as they do; 0 = keep our "
                          "own loss/LR defaults and only swap the densification strategy.")
     ap.add_argument("--sad-lambda-l2", type=float, default=2.0,
                     help="SADGS additive L2 loss weight (their opt.lambda_l2). Applied when "
-                         "--structure-densify and --sad-match-loss-lrs (else --lambda-l2 is used).")
+                         "--densify-mode structure_aware and --sad-match-loss-lrs (else --lambda-l2 is used).")
     ap.add_argument("--lambda-l2", type=float, default=0.0,
                     help="additive L2 loss weight for non-SAD runs (0 = pure L1(+SSIM))")
     ap.add_argument("--grad-thresh", type=float, default=0.0005,

@@ -49,7 +49,7 @@ def eval_test_psnr_srgb(pipeline: "Pipeline", scene,
     Drains the GPU queue first so the count and the per-cam renders are settled.
     Used by the ``--psnr-curve`` capture and the final test-PSNR report.
     """
-    pipeline.device.wait_for_idle()
+    pipeline.runtime.wait_for_idle()
     n_g = int(pipeline.buffers.num_gaussians_counter.to_numpy().view(np.uint32)[0])
     frames = []
     for cam_i in test_indices:
@@ -87,7 +87,7 @@ def run_eval_sweep(
     eval_t0 = time.time()
     # Drain GPU queue so num_gaussians_counter is accurate and no in-flight
     # work skews the per-cam renders.
-    pipeline.device.wait_for_idle()
+    pipeline.runtime.wait_for_idle()
     eval_n_g = int(
         pipeline.buffers.num_gaussians_counter.to_numpy().view(np.uint32)[0]
     )

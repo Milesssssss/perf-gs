@@ -170,10 +170,10 @@ Scenes use the Mip-NeRF 360 layout (a COLMAP `sparse/` folder plus `images/`). P
 ```bash
 # Structure-aware densification with anti-aliasing, headless
 python scripts/running/v2_train.py --scene datasets/360_v2/garden \
-    --structure-densify --mip-splatting --no-viewer
+    --densify-mode structure_aware --mip-splatting --no-viewer
 
 # Watch it train in the live viewer
-python scripts/running/v2_train.py --scene datasets/360_v2/room --structure-densify
+python scripts/running/v2_train.py --scene datasets/360_v2/room --densify-mode structure_aware
 
 # Cross-check the same run on D3D12
 python scripts/running/v2_train.py --scene datasets/360_v2/room --backend d3d12 --no-viewer

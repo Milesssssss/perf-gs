@@ -1,9 +1,7 @@
 """GPU buffer/texture allocation for the trainer.
 
-v1 resources: everything v0 had (forward) plus the backward/loss/Adam
-pieces. Allocating the v1 resources unconditionally costs a small fixed
-amount of VRAM when only the forward path runs; the reverse would force
-a re-allocation when v1 training activates. Easier to over-allocate once.
+Trainer allocation includes forward, backward, optimizer, and densification
+capabilities. Viewer allocation intentionally omits training-only capabilities.
 
 Design notes:
 - Gaussian buffer is allocated at ``max_splats`` capacity; the active count
@@ -12,6 +10,8 @@ Design notes:
   scalar component. ``InterlockedAdd`` on int32 is universally supported
   cross-IHV; ``VK_EXT_shader_atomic_float`` is not.
 - Adam state is AoS: one :class:`AdamState` per gaussian.
+- Primitive, Adam, scan, densification, and eta resources have explicit
+    capability owners. Flat aliases remain temporarily for unmigrated paths.
 - Shader struct types are looked up via :mod:`slangpy` reflection from the
   loaded module, so Python never duplicates the memory layout.
 """
@@ -23,23 +23,27 @@ from dataclasses import dataclass, field
 import numpy as np
 import slangpy as spy
 
+# Authoritative host<->shader layout + execution constants (single source of
+# truth; the same schema generates the Slang side). See trainer/contracts.py.
+from trainer.contracts import (
+    CLUSTER_SIZE,
+    ETA_ACCUM_COMPONENTS,
+    GAUSSIAN_FLOAT_COUNT,
+    GRAD_2D_SEED_COMPONENTS,
+    GRAD_SCALAR_COMPONENTS,
+    RADIX_GLOBAL_HIST_SIZE,
+    RADIX_PART_SIZE,
+    RASTER_BUCKET_SIZE,
+    SCAN_BLOCK_SIZE,
+    TILE_SIZE,
+)
 
-# --- Shader-layout constants ---
-# Each MUST match the named shader. There is no codegen bridge between Python
-# and Slang, so these comments are the contract that keeps the two in sync.
-# Consumers (pipeline.py) import these rather than redefining them, so the
-# value lives in exactly one place on the Python side.
-TILE_SIZE = 16                    # tile_binned/*.slang, densify/score_forward.slang
-CLUSTER_SIZE = 128                # rasterize/cluster_cull.slang CLUSTER_SIZE
-                                  # (also referenced by bin_count.slang via gid >> 7)
-RADIX_PART_SIZE = 2048            # sort/device_radix_sort.slang PART_SIZE (D_DIM * KEYS_PER_THREAD)
-RADIX_GLOBAL_HIST_SIZE = 256 * 8  # device_radix_sort.slang: one 256-region per pass, 8 passes
-SCAN_BLOCK_SIZE = 1024            # common/scan.slang SCAN_BLOCK_SIZE
-RASTER_BUCKET_SIZE = 32           # rasterize/tile_binned/checkpoint.slang RASTER_BUCKET_SIZE
-# Gaussian3D packed layout: 14 contiguous float32s, no padding —
-# mean(3) + log_scale(3) + rot_quat(4) + opacity(1) + sh0(3). Used by the CPU
-# marshalling in buffer_io.py and the densify readback in pipeline.py.
-GAUSSIAN_FLOAT_COUNT = 14
+
+# --- Shader-layout + execution constants ---
+# The AUTHORITATIVE source is trainer.contracts (imported at the top of this
+# module): the executable host<->shader schema that derives these Python values
+# AND generates the Slang side, so the layout lives in exactly one place and
+# cannot silently drift. See trainer/contracts.py + tests/test_contracts.py.
 
 # Default cap on the total number of (tile_id, depth, gaussian_idx) pairs
 # emitted by bin_emit before the global radix sort. A single gaussian
@@ -54,48 +58,80 @@ def _ceil_div(a: int, b: int) -> int:
     return (a + b - 1) // b
 
 
-# Names of the 14 scalar grad buffers (SoA). Order matches how the
-# backward kernel reads/writes them and how Adam consumes them.
-GRAD_SCALAR_COMPONENTS = (
-    "mean_x", "mean_y", "mean_z",
-    "log_scale_x", "log_scale_y", "log_scale_z",
-    "rot_w", "rot_x", "rot_y", "rot_z",
-    "opacity",
-    "color_r", "color_g", "color_b",
-)
+@dataclass
+class PrimitiveStorage:
+    values: spy.NDBuffer
+    active_count: spy.NDBuffer
+    filter_3d: spy.NDBuffer
 
-# Per-gaussian 2D gradient seeds, summed across all tiles a gaussian touches
-# by the blend backward (backward_persplat.slang). projection_backward.slang
-# then applies the 3D projection backward ONCE per gaussian on these sums,
-# instead of once per (gaussian, tile). Atomic-accumulated, so cleared each
-# iteration alongside GRAD_SCALAR_COMPONENTS.
-GRAD_2D_SEED_COMPONENTS = (
-    "mean2d_x", "mean2d_y",
-    "cov2d_a", "cov2d_b", "cov2d_c",
-    "comp",   # Mip-Splatting: dL/d(opacity_compensation), fed to projection backward
-)
 
-# Structure-aware densification multiview accumulators (SoA uint), matching
-# SADGS. n_high/n_low are SCALAR per-gaussian view counts (classified on the
-# max-over-axes eta), so high_ratio = n_high/n_total drives the split GATE.
-# max_x/y/z are per-axis max eta (fixed-point) driving the split FACTOR
-# n_k = ceil(sqrt(eta_max_k)). Names match score_structure_aware.slang.
-ETA_ACCUM_COMPONENTS = (
-    "n_high", "n_low",
-    "max_x", "max_y", "max_z",
-)
+@dataclass
+class AdamResources:
+    state: spy.NDBuffer
+
+
+@dataclass
+class ScanResources:
+    work: spy.NDBuffer | None
+    block_sums: spy.NDBuffer
+    block_sums_l2: spy.NDBuffer
+    total: spy.NDBuffer
+
+
+@dataclass
+class DensificationResources:
+    grad_mean_2d_mag: spy.NDBuffer
+    visibility_count: spy.NDBuffer
+    primitive_scratch: spy.NDBuffer
+    adam_scratch: spy.NDBuffer
+    actions: spy.NDBuffer
+    valid_mask: spy.NDBuffer
+    pre_count: spy.NDBuffer
+    post_count: spy.NDBuffer
+    dispatch_args: spy.NDBuffer
+
+    def commit_compaction(
+        self,
+        primitive: PrimitiveStorage,
+        adam: AdamResources,
+        eta: "EtaResources | None" = None,
+    ) -> None:
+        primitive.values, self.primitive_scratch = \
+            self.primitive_scratch, primitive.values
+        adam.state, self.adam_scratch = self.adam_scratch, adam.state
+        if eta is not None:
+            eta.swap()
+
+
+@dataclass
+class EtaResources:
+    components: dict[str, spy.NDBuffer]
+    n_total: spy.NDBuffer
+    scratch_components: dict[str, spy.NDBuffer]
+    scratch_n_total: spy.NDBuffer
+
+    def scatter_kwargs(self) -> dict[str, spy.NDBuffer]:
+        primary = {"n_total": self.n_total, **self.components}
+        scratch = {"n_total": self.scratch_n_total, **self.scratch_components}
+        kwargs = {f"eta_{name}_in": buffer.storage for name, buffer in primary.items()}
+        kwargs.update(
+            {f"eta_{name}_out": buffer.storage for name, buffer in scratch.items()})
+        return kwargs
+
+    def swap(self) -> None:
+        self.n_total, self.scratch_n_total = self.scratch_n_total, self.n_total
+        self.components, self.scratch_components = \
+            self.scratch_components, self.components
 
 
 @dataclass
 class GaussianBuffers:
-    """Container for every GPU resource the trainer uses.
+    """Compatibility facade plus explicit resource capability owners.
 
-    The 6 size fields are the only constructor inputs; every resource field is
-    ``field(init=False)`` and assigned by :func:`allocate` immediately after
-    construction. This keeps the resource fields honestly typed_buffer (no ``| None``)
-    without needing dummy defaults or a place in ``__init__`` — every buffer
-    below is ALWAYS allocated (see the module docstring: over-allocate once).
-    The comment banners are purely organizational.
+    Trainer allocation supplies every capability. Viewer allocation supplies
+    primitive + scan capabilities and forward resources only; training-only
+    access fails explicitly. Flat fields remain while forward/backward bundles
+    are migrated to injection.
     """
 
     # --- sizes (the only constructor inputs) ---
@@ -106,13 +142,13 @@ class GaussianBuffers:
     num_tiles_x: int = 0
     num_tiles_y: int = 0
 
-    # --- always-live gaussian state ---
-    gaussians: spy.NDBuffer = field(init=False)
-    num_gaussians_counter: spy.NDBuffer = field(init=False)
-    # Mip-Splatting per-gaussian 3D smoothing-filter size (float[max_splats]).
-    # Recomputed from the cameras under no_grad (see compute_3d_filter); a
-    # CONSTANT w.r.t. autodiff. 0 everywhere until --mip-splatting populates it.
-    filter_3D: spy.NDBuffer = field(init=False)
+    # Authoritative capability owners. Viewer allocation intentionally omits
+    # training-only capabilities (adam/densification/eta).
+    primitive: PrimitiveStorage = field(init=False)
+    scan: ScanResources = field(init=False)
+    adam: AdamResources | None = field(init=False, default=None)
+    densification: DensificationResources | None = field(init=False, default=None)
+    eta: EtaResources | None = field(init=False, default=None)
 
     # --- per-frame forward scratch / output ---
     projected_2d: spy.NDBuffer = field(init=False)
@@ -189,7 +225,6 @@ class GaussianBuffers:
     # Per-gaussian summed 2D grad seeds (mean2d/cov2d) bridging the split
     # backward: blend kernel accumulates, projection kernel consumes.
     grad_2d_seed_buffers: dict[str, spy.NDBuffer] = field(init=False)
-    adam_state: spy.NDBuffer = field(init=False)  # AdamState[max_splats]
     training_step: spy.NDBuffer = field(init=False)    # uint[1] (Adam bias correction)
 
     # --- v2 densification tracking (accumulated over a window) ---
@@ -199,8 +234,6 @@ class GaussianBuffers:
     #                            gsplat's `state["count"]`.
     # grad_2d_{x,y}_iter       : per-iter vector accumulators; cleared by
     #                            accumulate_iter at each step end.
-    grad_mean_2d_mag_accum: spy.NDBuffer = field(init=False)  # int64[max_splats], fixed-point
-    visibility_count_accum: spy.NDBuffer = field(init=False)  # uint[max_splats]
     grad_2d_x_iter: spy.NDBuffer = field(init=False)          # int64[max_splats], fixed-point
     grad_2d_y_iter: spy.NDBuffer = field(init=False)          # int64[max_splats], fixed-point
 
@@ -214,24 +247,12 @@ class GaussianBuffers:
 
     # --- v2 densification scratch + pipeline state ---
     densify_score: spy.NDBuffer = field(init=False)       # float[max_splats]
-    gaussians_scratch: spy.NDBuffer = field(init=False)   # Gaussian3D[max_splats]
-    adam_state_scratch: spy.NDBuffer = field(init=False)  # AdamState[max_splats]
-    action_buffer: spy.NDBuffer = field(init=False)       # uint[max_splats]
-    valid_mask_buffer: spy.NDBuffer = field(init=False)   # uint[max_splats]
-    scan_buffer: spy.NDBuffer = field(init=False)         # uint[max_splats]
-    scan_block_sums: spy.NDBuffer = field(init=False)     # uint[max_blocks]
-    scan_block_sums_l2: spy.NDBuffer = field(init=False)  # uint[max_l2_blocks]
-    scan_total: spy.NDBuffer = field(init=False)          # uint[1]
-
     # --- densify_simple wait-free dispatch state ---
     # Snapshots of num_gaussians_counter[0] taken via snapshotCount so that
     # splitAndClone/buildPruneMask/scatterCompact can read the counts they
     # need as GPU-resident buffers instead of via CPU readback.
-    densify_pre_count: spy.NDBuffer = field(init=False)      # uint[1]
-    densify_post_count: spy.NDBuffer = field(init=False)     # uint[1]
     # DispatchIndirect args (groups_x, 1, 1) for the pre-count-sized
     # splitAndClone dispatch. Also requires BufferUsage.indirect_argument.
-    densify_dispatch_args: spy.NDBuffer = field(init=False)  # uint[3]
     # DispatchIndirect args for the Adam step. Populated every iter from
     # num_gaussians_counter via prepareDensifyArgs (reused shader). Sized so
     # groups_x = ceil(count/256); dispatching indirect lets Adam launch only
@@ -242,14 +263,10 @@ class GaussianBuffers:
     # --- structure-aware densification (SAD-GS, arXiv 2604.28016) ---
     # Per-axis multiview frequency-violation accumulators, name -> uint[max_splats].
     # Keys are ETA_ACCUM_COMPONENTS. Only allocated/used on the structure path.
-    eta_buffers: dict[str, spy.NDBuffer] = field(init=False)
-    eta_n_total: spy.NDBuffer = field(init=False)  # uint[max_splats], views observed
     # Scratch doubles for the eta accumulators, so the SAD-GS window statistics
     # can be carried through the slot permutations of a filler densify
     # (scatterCompactEta) and a Morton re-sort (mortonScatterEta) instead of
     # being zeroed. Same swap idiom as gaussians_scratch / adam_state_scratch.
-    eta_buffers_scratch: dict[str, spy.NDBuffer] = field(init=False)
-    eta_n_total_scratch: spy.NDBuffer = field(init=False)
     # Per-axis grid split factor n_k (uint[max_splats]) written by the GPU
     # decision (decide_actions_structure.slang) and consumed by
     # split_anisotropic.slang.
@@ -289,6 +306,49 @@ class GaussianBuffers:
     def num_tiles(self) -> int:
         return self.num_tiles_x * self.num_tiles_y
 
+    def _require_adam(self) -> AdamResources:
+        if self.adam is None:
+            raise RuntimeError("optimizer resources are unavailable in viewer-only mode")
+        return self.adam
+
+    def _require_densification(self) -> DensificationResources:
+        if self.densification is None:
+            raise RuntimeError("densification resources are unavailable in viewer-only mode")
+        return self.densification
+
+    def _require_eta(self) -> EtaResources:
+        if self.eta is None:
+            raise RuntimeError("eta resources are unavailable in viewer-only mode")
+        return self.eta
+
+    # Transitional compatibility aliases for paths not yet migrated to nested
+    # capabilities. New components receive the capability objects directly.
+    gaussians = property(lambda self: self.primitive.values)
+    num_gaussians_counter = property(lambda self: self.primitive.active_count)
+    filter_3D = property(lambda self: self.primitive.filter_3d)
+    adam_state = property(lambda self: self._require_adam().state)
+    scan_buffer = property(lambda self: self.scan.work)
+    scan_block_sums = property(lambda self: self.scan.block_sums)
+    scan_block_sums_l2 = property(lambda self: self.scan.block_sums_l2)
+    scan_total = property(lambda self: self.scan.total)
+    grad_mean_2d_mag_accum = property(
+        lambda self: self._require_densification().grad_mean_2d_mag)
+    visibility_count_accum = property(
+        lambda self: self._require_densification().visibility_count)
+    gaussians_scratch = property(
+        lambda self: self._require_densification().primitive_scratch)
+    adam_state_scratch = property(lambda self: self._require_densification().adam_scratch)
+    action_buffer = property(lambda self: self._require_densification().actions)
+    valid_mask_buffer = property(lambda self: self._require_densification().valid_mask)
+    densify_pre_count = property(lambda self: self._require_densification().pre_count)
+    densify_post_count = property(lambda self: self._require_densification().post_count)
+    densify_dispatch_args = property(
+        lambda self: self._require_densification().dispatch_args)
+    eta_buffers = property(lambda self: self._require_eta().components)
+    eta_n_total = property(lambda self: self._require_eta().n_total)
+    eta_buffers_scratch = property(lambda self: self._require_eta().scratch_components)
+    eta_n_total_scratch = property(lambda self: self._require_eta().scratch_n_total)
+
     def grad_kwargs(self) -> dict[str, spy.NDBuffer]:
         """Dispatch bindings for the 14 SoA scalar gradients:
         ``{"grad_<component>": buf.storage}``. The kwarg name is exactly
@@ -319,22 +379,27 @@ class GaussianBuffers:
         where ``<name>`` in {n_total, n_high, n_low, max_x, max_y, max_z}.
         eta_n_total is bundled with the 5 eta_buffers components. The caller
         swaps primary<->scratch after the dispatch via :meth:`swap_eta`."""
-        prim = {"n_total": self.eta_n_total, **self.eta_buffers}
-        scratch = {"n_total": self.eta_n_total_scratch, **self.eta_buffers_scratch}
-        kw = {f"eta_{name}_in": buf.storage for name, buf in prim.items()}
-        kw.update({f"eta_{name}_out": buf.storage for name, buf in scratch.items()})
-        return kw
+        return self._require_eta().scatter_kwargs()
 
     def swap_eta(self) -> None:
         """Swap the eta primary<->scratch references after an eta-carrying
         scatter, mirroring the gaussians/adam_state swap. The just-written
         scratch becomes the live buffer set."""
-        self.eta_n_total, self.eta_n_total_scratch = \
-            self.eta_n_total_scratch, self.eta_n_total
-        self.eta_buffers, self.eta_buffers_scratch = \
-            self.eta_buffers_scratch, self.eta_buffers
+        self._require_eta().swap()
 
+    def swap_primitive_storage(self, *, carry_eta: bool = False) -> None:
+        """Commit a completed scatter/permutation as the new live storage.
 
+        Call only after the command buffer that wrote the scratch resources was
+        submitted successfully. Keeping Gaussian values, Adam moments, and
+        optional eta accumulators in one operation prevents partial ownership
+        transitions.
+        """
+        eta = self._require_eta() if carry_eta else None
+        self._require_densification().commit_compaction(
+            self.primitive, self._require_adam(), eta)
+
+#TODO_refactor: same thing here, the _ShaderTypes has a hard contract with the Slang module.
 @dataclass
 class _ShaderTypes:
     """The four Slang struct types :func:`allocate` sizes NDBuffers from,
@@ -344,7 +409,8 @@ class _ShaderTypes:
     blend: object
     adam: object
 
-
+                  
+#TODO_refactor: the reflection still has a hard dependency on the Slang module here, Ideally this type information should be passed from the caller
 def _reflect_types(module: spy.Module) -> _ShaderTypes:
     """Look up the shader struct layouts by name (Python never duplicates the
     memory layout). Raises with the offending name if the module doesn't
@@ -453,8 +519,8 @@ def allocate(
     )
 
     # --- always-live gaussian state ---
-    buffers.gaussians = allocator.typed_buffer(types.gaussian, max_splats)
-    buffers.num_gaussians_counter = allocator.uint_buffer(1)
+    primitive_values = allocator.typed_buffer(types.gaussian, max_splats)
+    active_count = allocator.uint_buffer(1)
 
     # --- per-frame forward scratch / output ---
     buffers.projected_2d = allocator.typed_buffer(types.projected, max_splats)
@@ -502,17 +568,19 @@ def allocate(
     buffers.grad_buffers = {name: allocator.i64_buffer(max_splats) for name in GRAD_SCALAR_COMPONENTS}
     buffers.grad_2d_seed_buffers = {name: allocator.i64_buffer(max_splats) for name in GRAD_2D_SEED_COMPONENTS}
 
-    buffers.adam_state = allocator.typed_buffer(types.adam, max_splats)
+    adam_state = allocator.typed_buffer(types.adam, max_splats)
     buffers.training_step = allocator.uint_buffer(1)
 
     # --- v2 densification tracking ---
-    buffers.grad_mean_2d_mag_accum = allocator.i64_buffer(max_splats)
-    buffers.visibility_count_accum = allocator.uint_buffer(max_splats)
+    grad_mean_2d_mag = allocator.i64_buffer(max_splats)
+    visibility_count = allocator.uint_buffer(max_splats)
     buffers.grad_2d_x_iter = allocator.i64_buffer(max_splats)
     buffers.grad_2d_y_iter = allocator.i64_buffer(max_splats)
 
     # --- Mip-Splatting 3D smoothing filter (per-gaussian scalar) ---
-    buffers.filter_3D = allocator.typed_buffer("float", max_splats)
+    filter_3d = allocator.typed_buffer("float", max_splats)
+    buffers.primitive = PrimitiveStorage(primitive_values, active_count, filter_3d)
+    buffers.adam = AdamResources(adam_state)
 
     # --- FastGS importance scoring ---
     buffers.importance_score_accum = allocator.uint_buffer(max_splats)
@@ -524,27 +592,43 @@ def allocate(
 
     # --- v2 densification scratch + pipeline state ---
     buffers.densify_score = allocator.typed_buffer("float", max_splats)
-    buffers.gaussians_scratch = allocator.typed_buffer(types.gaussian, max_splats)
-    buffers.adam_state_scratch = allocator.typed_buffer(types.adam, max_splats)
-    buffers.action_buffer = allocator.uint_buffer(max_splats)
-    buffers.valid_mask_buffer = allocator.uint_buffer(max_splats)
-    buffers.scan_buffer = allocator.uint_buffer(max_splats)
-    buffers.scan_block_sums = allocator.uint_buffer(num_l1_blocks)
-    buffers.scan_block_sums_l2 = allocator.uint_buffer(num_l2_blocks)
-    buffers.scan_total = allocator.uint_buffer(1)
+    primitive_scratch = allocator.typed_buffer(types.gaussian, max_splats)
+    adam_scratch = allocator.typed_buffer(types.adam, max_splats)
+    actions = allocator.uint_buffer(max_splats)
+    valid_mask = allocator.uint_buffer(max_splats)
+    scan_work = allocator.uint_buffer(max_splats)
+    scan_block_sums = allocator.uint_buffer(num_l1_blocks)
+    scan_block_sums_l2 = allocator.uint_buffer(num_l2_blocks)
+    scan_total = allocator.uint_buffer(1)
+    buffers.scan = ScanResources(
+        scan_work, scan_block_sums, scan_block_sums_l2, scan_total)
 
     # --- densify_simple wait-free dispatch state ---
-    buffers.densify_pre_count = allocator.uint_buffer(1)
-    buffers.densify_post_count = allocator.uint_buffer(1)
-    buffers.densify_dispatch_args = allocator.indirect_buffer()
+    pre_count = allocator.uint_buffer(1)
+    post_count = allocator.uint_buffer(1)
+    densify_dispatch_args = allocator.indirect_buffer()
+    buffers.densification = DensificationResources(
+        grad_mean_2d_mag=grad_mean_2d_mag,
+        visibility_count=visibility_count,
+        primitive_scratch=primitive_scratch,
+        adam_scratch=adam_scratch,
+        actions=actions,
+        valid_mask=valid_mask,
+        pre_count=pre_count,
+        post_count=post_count,
+        dispatch_args=densify_dispatch_args,
+    )
     # Adam indirect-dispatch args (populated every iter from num_gaussians_counter).
     buffers.adam_dispatch_args = allocator.indirect_buffer()
 
     # --- structure-aware densification (SAD-GS) ---
-    buffers.eta_buffers = {name: allocator.uint_buffer(max_splats) for name in ETA_ACCUM_COMPONENTS}
-    buffers.eta_n_total = allocator.uint_buffer(max_splats)
-    buffers.eta_buffers_scratch = {name: allocator.uint_buffer(max_splats) for name in ETA_ACCUM_COMPONENTS}
-    buffers.eta_n_total_scratch = allocator.uint_buffer(max_splats)
+    buffers.eta = EtaResources(
+        components={name: allocator.uint_buffer(max_splats) for name in ETA_ACCUM_COMPONENTS},
+        n_total=allocator.uint_buffer(max_splats),
+        scratch_components={
+            name: allocator.uint_buffer(max_splats) for name in ETA_ACCUM_COMPONENTS},
+        scratch_n_total=allocator.uint_buffer(max_splats),
+    )
     buffers.split_factor_x = allocator.uint_buffer(max_splats)
     buffers.split_factor_y = allocator.uint_buffer(max_splats)
     buffers.split_factor_z = allocator.uint_buffer(max_splats)
@@ -612,14 +696,15 @@ def allocate_viewer(
     )
 
     # Gaussian state (blit target from trainer).
-    buffers.gaussians = allocator.typed_buffer(types.gaussian, max_splats)
-    buffers.num_gaussians_counter = allocator.uint_buffer(1)
+    primitive_values = allocator.typed_buffer(types.gaussian, max_splats)
+    active_count = allocator.uint_buffer(1)
     # bin_count binds filter_3D unconditionally (see pipeline._run_forward). The
     # viewer never computes the mip 3D filter and renders with mip_enabled=0, so
     # the shader ignores the contents — but the buffer must still exist for the
     # bind. Allocate it (zero cost vs. the sort/scan buffers) so the shared
     # forward path doesn't AttributeError on b.filter_3D.
-    buffers.filter_3D = allocator.typed_buffer("float", max_splats)
+    filter_3d = allocator.typed_buffer("float", max_splats)
+    buffers.primitive = PrimitiveStorage(primitive_values, active_count, filter_3d)
 
     # Forward scratch.
     buffers.projected_2d = allocator.typed_buffer(types.projected, max_splats)
@@ -660,9 +745,12 @@ def allocate_viewer(
     buffers.gaussian_count_per_pixel = allocator.tex(spy.Format.r32_uint, "gaussian_count_per_pixel")
 
     # Scan scratch (needed for tile-offset scan + bucket-offset scan).
-    buffers.scan_block_sums = allocator.uint_buffer(num_l1_blocks)
-    buffers.scan_block_sums_l2 = allocator.uint_buffer(num_l2_blocks)
-    buffers.scan_total = allocator.uint_buffer(1)
+    buffers.scan = ScanResources(
+        work=None,
+        block_sums=allocator.uint_buffer(num_l1_blocks),
+        block_sums_l2=allocator.uint_buffer(num_l2_blocks),
+        total=allocator.uint_buffer(1),
+    )
 
     # bin_count reads cluster_visible unconditionally. The viewer never
     # runs the cluster-cull kernels (they mutate this buffer per-frame from
@@ -685,7 +773,6 @@ from trainer.buffer_io import (  # noqa: E402
     set_num_gaussians,
     write_gaussians,
     write_gaussians_raw,
-    zero_adam_state,
 )
 
 __all__ = [
@@ -705,5 +792,4 @@ __all__ = [
     "set_num_gaussians",
     "write_gaussians",
     "write_gaussians_raw",
-    "zero_adam_state",
 ]

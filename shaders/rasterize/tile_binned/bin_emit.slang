@@ -16,8 +16,9 @@
 #include "../../primitives/gaussian/snugbox.slang"
 #include "../../primitives/gaussian/accutile.slang"
 
-static const uint TILE_SIZE = 16;
-static const uint CLUSTER_SIZE = 128;  // must match cluster_cull.slang
+#include "generated/execution_contract.slang"
+static const uint TILE_SIZE = CONTRACT_TILE_SIZE;
+static const uint CLUSTER_SIZE = CONTRACT_CLUSTER_SIZE;
 
 // IEEE float32 -> sortable uint32. For positive finite floats, flipping
 // the sign bit makes the uint32 bit-pattern ascend with the float value.

@@ -1,6 +1,6 @@
 """Precompute and cache the multi-scale structure-tensor fields for a scene.
 
-Structure-aware densification (``v2_train.py --structure-densify``) needs a
+Structure-aware densification (``v2_train.py --densify-mode structure_aware``) needs a
 per-view structure-tensor field S̄, and computing them takes several seconds
 per image. This script does that once and writes them to a cache under
 ``<scene>/structure_cache/`` so training runs load them instantly instead of

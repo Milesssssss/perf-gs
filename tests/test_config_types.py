@@ -18,13 +18,13 @@ from trainer.config_types import (
     SamplingMode,
     ScheduleConfig,
     resolve_blend_kind,
-    resolve_densification_mode,
 )
 
 
 def test_enum_values_frozen() -> None:
     assert SamplingMode.OURS == "ours"
     assert SamplingMode.SADGS == "sadgs"
+    assert DensificationMode.NONE == "none"
     assert DensificationMode.SIMPLE == "simple"
     assert DensificationMode.IMPORTANCE == "importance_score"
     assert DensificationMode.STRUCTURE_AWARE == "structure_aware"
@@ -35,26 +35,15 @@ def test_enum_values_frozen() -> None:
     assert BlendKind.HARDENED_EXTINCTION == "hardened_extinction"
 
 
-def test_densify_precedence_structure_over_simple_over_importance() -> None:
-    assert resolve_densification_mode(
-        structure_densify=True, simple_densify=True, importance_score_densify=True
-    ) == DensificationMode.STRUCTURE_AWARE
-    assert resolve_densification_mode(
-        structure_densify=False, simple_densify=True, importance_score_densify=True
-    ) == DensificationMode.SIMPLE
-    assert resolve_densification_mode(
-        structure_densify=False, simple_densify=False, importance_score_densify=True
-    ) == DensificationMode.IMPORTANCE
+def test_densify_mode_from_args_reads_cli_choice() -> None:
+    for choice in ("none", "simple", "importance_score", "structure_aware"):
+        args = build_parser().parse_args(["--densify-mode", choice])
+        assert DensificationMode.from_args(args) == DensificationMode(choice)
 
 
 def test_densify_mode_from_cli_default_is_structure_aware() -> None:
     args = build_parser().parse_args([])
-    mode = resolve_densification_mode(
-        structure_densify=args.structure_densify,
-        simple_densify=args.simple_densify,
-        importance_score_densify=args.importance_score_densify,
-    )
-    assert mode == DensificationMode.STRUCTURE_AWARE
+    assert DensificationMode.from_args(args) == DensificationMode.STRUCTURE_AWARE
 
 
 def test_sampling_mode_from_cli_default_is_sadgs() -> None:
@@ -73,7 +62,7 @@ def test_schedule_config_from_args_defaults() -> None:
     assert sc.iterations == 3000
     assert (sc.densify_from, sc.densify_to, sc.densify_every) == (100, 1900, 100)
     assert sc.reset_every == 1200
-    assert sc.structure_densify is True
+    assert sc.densify_mode == DensificationMode.STRUCTURE_AWARE
     assert sc.sad_structure_every == 500
     assert sc.sad_accum_every == 10
     assert sc.preview_every == 3000

@@ -13,7 +13,8 @@
 #include "../common/math.slang"
 #include "../primitives/gaussian/eval.slang"
 
-static const uint TILE_SIZE = 16;
+#include "generated/execution_contract.slang"
+static const uint TILE_SIZE = CONTRACT_TILE_SIZE;
 static const float T_EARLY_BREAK = 1e-4;
 static const float ALPHA_MAX = 0.99;
 static const float ALPHA_MIN_SCORE = 1.0 / 255.0;

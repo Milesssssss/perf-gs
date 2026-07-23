@@ -10,6 +10,7 @@ from PIL import Image
 
 from trainer.pipeline import Pipeline
 from trainer.dataset import Camera, _SH_C0
+from trainer.contracts import gaussian_numpy_dtype
 
 
 def render_to_png(pipeline: Pipeline, camera: Camera, path: str | Path) -> None:
@@ -50,13 +51,13 @@ def save_ply(pipeline: Pipeline, path: str | Path) -> None:
         raise ValueError("pipeline has 0 gaussians; nothing to save")
 
     raw = pipeline.buffers.gaussians.to_numpy()
-    floats = np.frombuffer(raw.tobytes(), dtype=np.float32).reshape(-1, 14)[:n]
+    g = np.frombuffer(raw.tobytes(), dtype=gaussian_numpy_dtype())[:n]
 
-    mean = floats[:, 0:3]
-    log_scale = floats[:, 3:6]
-    rot_quat = floats[:, 6:10]
-    opacity_logit = floats[:, 10].astype(np.float32)   # stored as logit already
-    sh0 = floats[:, 11:14]
+    mean = g["mean"]
+    log_scale = g["log_scale"]
+    rot_quat = g["rot_quat"]
+    opacity_logit = g["opacity"].astype(np.float32)   # stored as logit already
+    sh0 = g["sh0"]
 
     # Our renderer now composites in sRGB: color = 0.5 + SH_C0 * sh0 IS sRGB,
     # matching the 3DGS PLY convention (viewers render SH_C0*f_dc + 0.5 as sRGB),

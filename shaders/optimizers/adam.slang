@@ -6,7 +6,8 @@
 
 #include "../common/types.slang"
 
-static const uint CLUSTER_SIZE = 128;  // must match cluster_cull.slang
+#include "generated/execution_contract.slang"
+static const uint CLUSTER_SIZE = CONTRACT_CLUSTER_SIZE;
 
 static const float ADAM_BETA1 = 0.9;
 static const float ADAM_BETA2 = 0.999;
@@ -143,7 +144,7 @@ void adamStep(
     g.rot_quat = adam_vec4(g.rot_quat, g_rot, s.rot_m, s.rot_v,
                            cfg.lr_rot, cfg.bias_correction1, cfg.bias_correction2);
 
-    g.rot_quat = normalize(g.rot_quat);
+    normalizeGaussian3D(g);
 
     g.opacity = adam_scalar(g.opacity, g_op, s.opacity_m, s.opacity_v,
                             cfg.lr_opacity, cfg.bias_correction1, cfg.bias_correction2);

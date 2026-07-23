@@ -1,7 +1,4 @@
-"""
-Claude did a shitty job architecting the viewer.
-TODO: refactor from the ground up
-"""
+"""Interactive in-process viewer sharing the trainer's GPU device and queue."""
 from __future__ import annotations
 
 import math
@@ -15,6 +12,7 @@ import slangpy as spy
 from trainer.dataset import Camera
 from trainer.device import SHADERS_DIR
 from trainer.config import RenderConfig
+from trainer.gpu import GpuRuntime
 from trainer.pipeline import Pipeline
 
 
@@ -206,9 +204,10 @@ class _ShaderWatcher:
     DEBOUNCE_S = 0.4
     POLL_INTERVAL = 0.5
 
-    def __init__(self, device: spy.Device, pipeline: Pipeline):
+    def __init__(self, device: spy.Device, pipeline: Pipeline, runtime: GpuRuntime):
         self._device = device
         self._pipeline = pipeline
+        self._runtime = runtime
         self._mtimes: dict[str, float] = {}
         self._last_poll = 0.0
         self._change_at: float | None = None
@@ -240,8 +239,9 @@ class _ShaderWatcher:
 
         if self._change_at is not None and now - self._change_at >= self.DEBOUNCE_S:
             self._change_at = None
-            self._device.wait_for_idle()
-            self._device.reload_all_programs()
+            with self._runtime.queue_scope():
+                self._runtime.wait_for_idle()
+                self._device.reload_all_programs()
             try:
                 self._pipeline.on_hot_reload()
                 print("[Viewer] shaders reloaded")
@@ -266,6 +266,7 @@ class Viewer:
         # never races the training thread's submits on the shared VkQueue.
         import contextlib
         self.gpu_lock = gpu_lock if gpu_lock is not None else contextlib.nullcontext()
+        self.runtime = GpuRuntime(device, self.gpu_lock)
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
         # Set by the in-panel "Start Training" button. The trainer blocks on
@@ -306,6 +307,7 @@ class Viewer:
         self._pipeline = Pipeline(
             device=device, width=width, height=height, max_splats=max_splats,
             max_sort_pairs=max_sort_pairs,
+            gpu_lock=self.gpu_lock,
             # Render-only viewer: no loss, so SSIM/alpha weights are irrelevant.
             cfg=RenderConfig(lambda_ssim=0.0, w_alpha=0.0),
             # Skip the ~3.5 GB of training-only buffers (grads/adam/densify
@@ -327,12 +329,11 @@ class Viewer:
         dst_g = self._pipeline.buffers.gaussians.storage
         src_n = train_pipeline.buffers.num_gaussians_counter.storage
         dst_n = self._pipeline.buffers.num_gaussians_counter.storage
-        encoder = self.device.create_command_encoder()
+        batch = self.runtime.command_batch("viewer_update")
+        encoder = batch.encoder
         encoder.copy_buffer(dst_g, 0, src_g, 0, src_g.size)
         encoder.copy_buffer(dst_n, 0, src_n, 0, src_n.size)
-        cmd = encoder.finish()
-        with self.gpu_lock:
-            self.device.submit_command_buffer(cmd)
+        self.runtime.submit(batch)
         self._has_data = True
 
     def start_requested(self) -> bool:
@@ -443,7 +444,8 @@ class Viewer:
         window.on_resize = on_resize
 
         configured = True
-        watcher = _ShaderWatcher(self.device, self._pipeline) if self.hot_reload else None
+        watcher = _ShaderWatcher(
+            self.device, self._pipeline, self.runtime) if self.hot_reload else None
 
         while not window.should_close() and not self._stop_event.is_set():
             window.process_events()
@@ -456,10 +458,10 @@ class Viewer:
                 new_w, new_h = window.width, window.height
                 if new_w > 0 and new_h > 0:
                     try:
-                        with self.gpu_lock:
-                            self.device.wait_for_idle()
+                        with self.runtime.queue_scope():
+                            self.runtime.wait_for_idle()
                             surface.unconfigure()
-                            self.device.wait_for_idle()
+                            self.runtime.wait_for_idle()
                             surface.configure(width=new_w, height=new_h)
                         configured = True
                     except Exception as e:
@@ -486,14 +488,14 @@ class Viewer:
                 # Still pump the UI so the Start button is clickable before the
                 # first gaussian snapshot arrives.
                 try:
-                    with self.gpu_lock:
+                    with self.runtime.queue_scope():
                         surface_tex = surface.acquire_next_image()
                         if surface_tex is not None:
-                            encoder = self.device.create_command_encoder()
+                            batch = self.runtime.command_batch("viewer_ui")
+                            encoder = batch.encoder
                             ui.begin_frame(window.width, window.height)
                             ui.end_frame(surface_tex, encoder)
-                            self.device.submit_command_buffer(encoder.finish())
-                            surface.present()
+                            self.runtime.submit(batch, after_submit=surface.present)
                 except Exception:
                     pass
                 time.sleep(0.016)
@@ -515,7 +517,8 @@ class Viewer:
                 # otherwise vsync wait pins the lock for ~16ms per frame
                 # while the queue is idle, starving the trainer thread.
                 surface_tex = surface.acquire_next_image()
-                encoder = self.device.create_command_encoder()
+                batch = self.runtime.command_batch("viewer_frame")
+                encoder = batch.encoder
                 self._pipeline._encoder = encoder
                 try:
                     self._pipeline._run_forward(camera)
@@ -526,15 +529,12 @@ class Viewer:
                     # Draw the panel on top, same swapchain image + encoder.
                     ui.begin_frame(window.width, window.height)
                     ui.end_frame(surface_tex, encoder)
-                cmd = encoder.finish()
                 # submit_command_buffer is async (queues work + returns in
                 # ~30us); present() is a queue op too and MUST be under
                 # gpu_lock (Vulkan requires external synchronization of all
                 # queue ops on the same VkQueue).
-                with self.gpu_lock:
-                    submit_id = self.device.submit_command_buffer(cmd)
-                    if surface_tex is not None:
-                        surface.present()
+                present = surface.present if surface_tex is not None else None
+                submit = self.runtime.submit(batch, after_submit=present)
                 # Backpressure: keep at most ONE viewer frame in flight on
                 # the shared VkQueue. Without this, at 60 fps the viewer
                 # queues 5+ frames between trainer iterations; Vulkan
@@ -546,7 +546,7 @@ class Viewer:
                 # cleanly (viewer takes ~1 frame slot; trainer takes the
                 # next). Also naturally caps viewer FPS at min(vsync, GPU
                 # capability while sharing with trainer).
-                self.device.wait_for_submit(submit_id)
+                self.runtime.wait_for_submit(submit)
             except Exception as e:
                 if not getattr(self, '_err_printed', False):
                     print(f"[Viewer] frame error: {e}")

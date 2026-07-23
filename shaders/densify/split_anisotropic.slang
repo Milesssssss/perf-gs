@@ -26,15 +26,11 @@ static const uint ACTION_SPLIT = 1;
 static const uint ACTION_CLONE = 2;
 static const uint ACTION_PRUNE = 3;
 
+// Zero-initialized AdamState: fresh Adam moments for children. Uses the Slang
+// zero-init cast so it never enumerates AdamState's contract-generated fields.
 AdamState _zero_adam()
 {
-    AdamState s;
-    s.mean_m = float3(0, 0, 0); s.mean_v = float3(0, 0, 0);
-    s.log_scale_m = float3(0, 0, 0); s.log_scale_v = float3(0, 0, 0);
-    s.rot_m = float4(0, 0, 0, 0); s.rot_v = float4(0, 0, 0, 0);
-    s.opacity_m = 0.0; s.opacity_v = 0.0;
-    s.color_m = float3(0, 0, 0); s.color_v = float3(0, 0, 0);
-    return s;
+    return (AdamState)0;
 }
 
 // One child of the grid at integer coords (ix, iy, iz) within an

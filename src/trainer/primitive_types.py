@@ -23,6 +23,12 @@ from trainer.buffers import (
     GRAD_2D_SEED_COMPONENTS,
     GRAD_SCALAR_COMPONENTS,
 )
+from trainer.contract_schema import (
+    DISK_FIELDS,
+    DISK_FLOAT_COUNT,
+    DISK_GRAD_SCALAR_COMPONENTS,
+    GAUSSIAN_FIELDS,
+)
 from trainer.config_types import BlendKind, PrimitiveKind
 
 
@@ -45,6 +51,7 @@ class PrimitiveSpecialization:
     grad_field_names: tuple[str, ...]        # per-scalar gradient buffers (SoA)
     grad_2d_seed_names: tuple[str, ...]      # projected 2D gradient seeds
     shader_dir: str                          # shaders/<shader_dir>/ holds its kernels
+    pipeline_ready: bool                     # full Pipeline allocation/binning path exists
 
     @property
     def primitive(self) -> PrimitiveKind:
@@ -62,19 +69,32 @@ class PrimitiveSpecialization:
 _GAUSSIAN_ALPHA_OVER = PrimitiveSpecialization(
     key=PrimitiveLayoutKey(PrimitiveKind.GAUSSIAN_3D, BlendKind.ALPHA_OVER),
     parameter_struct="Gaussian3D",
-    parameter_field_names=("mean", "log_scale", "rot_quat", "opacity", "sh0"),
+    parameter_field_names=tuple(field.name for field in GAUSSIAN_FIELDS),
     param_float_count=GAUSSIAN_FLOAT_COUNT,
     grad_field_names=GRAD_SCALAR_COMPONENTS,
     grad_2d_seed_names=GRAD_2D_SEED_COMPONENTS,
     shader_dir="primitives/gaussian",
+    pipeline_ready=True,
 )
 _GAUSSIAN_HARDENED = replace(
     _GAUSSIAN_ALPHA_OVER,
     key=PrimitiveLayoutKey(PrimitiveKind.GAUSSIAN_3D, BlendKind.HARDENED_EXTINCTION),
 )
 
+_DISK_ALPHA_OVER = PrimitiveSpecialization(
+    key=PrimitiveLayoutKey(PrimitiveKind.DISK_2D, BlendKind.ALPHA_OVER),
+    parameter_struct="Disk2D",
+    parameter_field_names=tuple(field.name for field in DISK_FIELDS),
+    param_float_count=DISK_FLOAT_COUNT,
+    grad_field_names=DISK_GRAD_SCALAR_COMPONENTS,
+    grad_2d_seed_names=(),  # disk is already screen-space; no projection bridge
+    shader_dir="primitives/disk",
+    pipeline_ready=False,
+)
+
 _REGISTRY: dict[PrimitiveLayoutKey, PrimitiveSpecialization] = {
-    spec.key: spec for spec in (_GAUSSIAN_ALPHA_OVER, _GAUSSIAN_HARDENED)
+    spec.key: spec for spec in (
+        _GAUSSIAN_ALPHA_OVER, _GAUSSIAN_HARDENED, _DISK_ALPHA_OVER)
 }
 
 # The current 3DGS pipeline's default (bit-identical alpha-over Gaussians).

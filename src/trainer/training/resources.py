@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from trainer.config import AdamLRs
+from trainer.config_types import DensificationMode
 from trainer.densify import StructureConfig
 from trainer.pipeline import DensifyConfig
 
@@ -120,7 +121,9 @@ def resolve_loss_and_lrs(
 
     Returns ``(eff_lambda_l2, eff_lambda_ssim, base_lrs)``.
     """
-    sad_match = bool(args.structure_densify and args.sad_match_loss_lrs)
+    sad_match = bool(
+        DensificationMode.from_args(args) == DensificationMode.STRUCTURE_AWARE
+        and args.sad_match_loss_lrs)
     if sad_match:
         eff_lambda_l2 = args.sad_lambda_l2      # SADGS opt.lambda_l2 = 2.0
         # SSIM lambda: default 0.2 (SADGS opt.lambda_dssim). --lambda-ssim

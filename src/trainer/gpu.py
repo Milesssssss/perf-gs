@@ -21,6 +21,7 @@ import contextlib
 import hashlib
 from dataclasses import dataclass
 from functools import lru_cache
+from typing import Callable
 
 import slangpy as spy
 
@@ -130,15 +131,30 @@ class GpuRuntime:
         """Start recording a new batch on a fresh command encoder."""
         return CommandBatch(self.device.create_command_encoder(), label)
 
-    def submit(self, batch: CommandBatch) -> SubmitHandle:
-        """Finish + submit a batch as a single command buffer under the lock."""
+    def submit(self, batch: CommandBatch,
+               after_submit: Callable[[], None] | None = None) -> SubmitHandle:
+        """Finish + submit a batch under the queue lock.
+
+        ``after_submit`` runs before releasing the lock. The viewer uses this
+        for ``surface.present`` so submit+present are one externally-synchronized
+        queue transaction without teaching the runtime about swapchains.
+        """
         cmd = batch.finish()
         with self.gpu_lock:
             submit_id = self.device.submit_command_buffer(cmd)
+            if after_submit is not None:
+                after_submit()
         return SubmitHandle(submit_id)
 
-    def wait_for_submit(self, handle: SubmitHandle) -> None:
-        self.device.wait_for_submit(handle.submit_id)
+    def wait_for_submit(self, handle: SubmitHandle | int) -> None:
+        submit_id = handle.submit_id if isinstance(handle, SubmitHandle) else handle
+        with self.gpu_lock:
+            self.device.wait_for_submit(submit_id)
 
     def wait_for_idle(self) -> None:
-        self.device.wait_for_idle()
+        with self.gpu_lock:
+            self.device.wait_for_idle()
+
+    def queue_scope(self):
+        """Lock scope for compound queue-adjacent operations (reload/reconfigure)."""
+        return self.gpu_lock

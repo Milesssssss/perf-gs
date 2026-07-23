@@ -31,7 +31,8 @@
 // drop the rest. Shrinking the checkpoint buffer must be done by capping
 // max_sort_pairs, NOT by raising P.
 // MUST match _RASTER_BUCKET_SIZE in src/trainer/buffers.py.
-static const uint RASTER_BUCKET_SIZE = 32u;
+#include "generated/execution_contract.slang"
+static const uint RASTER_BUCKET_SIZE = CONTRACT_RASTER_BUCKET_SIZE;
 
 // Pack (a, b) two floats into one uint as two fp16 halves (a low, b high).
 uint packHalf2(float a, float b)

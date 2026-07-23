@@ -14,13 +14,14 @@ from dataclasses import asdict
 
 import pytest
 
-from trainer.config_types import ScheduleConfig
+from trainer.config_types import DensificationMode, ScheduleConfig
 from trainer.training.schedule import TrainingSchedule
 
 # Schedule knobs at their CLI defaults.
 DEFAULT_KNOBS = dict(
     iterations=3000, densify_from=100, densify_to=1900, densify_every=100,
-    reset_every=1200, structure_densify=True, sad_structure_every=500,
+    reset_every=1200, densify_mode=DensificationMode.STRUCTURE_AWARE,
+    sad_structure_every=500,
     sad_accum_every=10, preview_every=3000, log_every=0, render_all_every=0,
     eval_every=3000, psnr_curve_enabled=False, psnr_curve_every=0,
     morton_every=0, stream_every=10, mip_enabled=True,
@@ -67,11 +68,12 @@ def _inline(it, k):
                 and k["densify_from"] <= it <= k["densify_to"])
     if do_densify and do_reset:
         do_densify = False
-    do_structure = (k["structure_densify"] and do_densify
-                    and it % k["sad_structure_every"] == 0)
+    do_structure = (k["densify_mode"] == DensificationMode.STRUCTURE_AWARE
+                    and do_densify and it % k["sad_structure_every"] == 0)
     do_preview = False
     if k["preview_every"] > 0:
-        buffered = [itr + 350 if itr % k["reset_every"] == 0 else itr + 50
+        buffered = [itr + 350 if (k["reset_every"] > 0 and itr % k["reset_every"] == 0)
+                    else itr + 50
                     for itr in range(k["preview_every"], k["iterations"],
                                      k["preview_every"])]
         do_preview = (it in buffered) or (it == k["iterations"])
@@ -103,7 +105,7 @@ EQUIV_CONFIGS = [
     {"render_all_every": 50},
     {"log_every": 25},
     {"mip_enabled": False},
-    {"structure_densify": False},
+    {"densify_mode": DensificationMode.SIMPLE},
 ]
 
 

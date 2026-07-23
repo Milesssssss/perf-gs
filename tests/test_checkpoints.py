@@ -20,12 +20,12 @@ import numpy as np
 import pytest
 
 from trainer.dataset import simple_camera
+from trainer.contracts import RASTER_BUCKET_SIZE, TILE_SIZE
 from trainer.device import create_device
 from trainer.pipeline import Pipeline
 
 
-TILE_SIZE = 16
-BUCKET = 32          # must match RASTER_BUCKET_SIZE in checkpoint.slang
+BUCKET = RASTER_BUCKET_SIZE
 ALPHA_MAX = 0.99     # must match forward.slang
 ALPHA_MIN = 1.0 / 255.0   # must match forward.slang alpha-min skip
 T_EARLY_BREAK = 1e-3      # must match forward.slang

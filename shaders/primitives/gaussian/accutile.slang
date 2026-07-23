@@ -13,6 +13,7 @@
 #define TRAINER_GAUSSIAN_ACCUTILE_SLANG
 
 #include "../../common/math.slang"
+#include "generated/execution_contract.slang"
 
 // Ellipse data in pre-computed form (inverse covariance a,b,c + threshold t).
 // Callers get this from snugBoxEllipse (see below).
@@ -185,7 +186,10 @@ void computeExtremumOffsets(EllipseParams e, out float x_d_args, out float y_d_a
 // reads the SAME stored projected_2d bin_count wrote, so mean/cov/opacity are
 // bit-identical) — the only float-sensitive work lives here, once.
 
-static const uint ACCUTILE_TILE_SIZE = 16u;
+// AccuTile emits the rasterizer's tile coordinates, so this is deliberately
+// the SAME contract as bin_count/bin_emit/rasterization, not an independent
+// algorithm knob.
+static const uint ACCUTILE_TILE_SIZE = CONTRACT_TILE_SIZE;
 
 // Iterate the shorter tile-axis (Speedy-Splat: fewer strips = less work, and
 // each strip prunes the corner tiles the SnugBox rectangle would over-count).

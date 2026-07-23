@@ -32,7 +32,7 @@ Usage
         --capture-iter 560 \\
         --project nsight/gpu_trace/gpu_trace_base/gpu_trace_base.ngfx-proj \\
         --output-dir nsight/gpu_trace/out \\
-        -- --structure-densify --seed 42
+        -- --densify-mode structure_aware --seed 42
 
 Everything after ``--`` is forwarded verbatim to v2_train.py.
 """

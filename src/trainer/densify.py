@@ -25,7 +25,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 import slangpy as spy
 
-from trainer.buffers import GAUSSIAN_FLOAT_COUNT
+from trainer.contracts import gaussian_numpy_dtype
 
 if TYPE_CHECKING:
     from trainer.pipeline import Pipeline
@@ -118,20 +118,20 @@ def compute_importance_scores(
     """
     b = pipeline.buffers
 
-    pipeline._dispatch(pipeline.k_clear_importance, "clear_importance",
+    pipeline.dispatch(pipeline.k_clear_importance, "clear_importance",
         thread_count=[pipeline.max_splats, 1, 1],
         importance_score_accum=b.importance_score_accum.storage,
         max_splats=pipeline.max_splats,
     )
 
     for cam, target_tex in zip(cameras, target_textures):
-        pipeline._run_forward(cam)
+        raster = pipeline.rasterize(cam)
 
         # Initialize minmax: min=+inf (0x7f7fffff), max=0 (0x00000000).
         b.l1_minmax.copy_from_numpy(np.array([0x7f7fffff, 0x00000000], dtype=np.uint32))
 
         # Pass 1: compute L1 per pixel, find min/max.
-        pipeline._dispatch(pipeline.k_compute_l1_minmax, "compute_l1_minmax",
+        pipeline.dispatch(pipeline.k_compute_l1_minmax, "compute_l1_minmax",
             thread_count=[pipeline.width, pipeline.height, 1],
             output_image=b.output_image,
             target_image=target_tex,
@@ -141,7 +141,7 @@ def compute_importance_scores(
         )
 
         # Pass 2: normalize and threshold.
-        pipeline._dispatch(pipeline.k_compute_error_mask, "compute_error_mask",
+        pipeline.dispatch(pipeline.k_compute_error_mask, "compute_error_mask",
             thread_count=[pipeline.width, pipeline.height, 1],
             l1_map=b.l1_map,
             minmax_buf=b.l1_minmax.storage,
@@ -150,15 +150,15 @@ def compute_importance_scores(
             loss_thresh=cfg.loss_thresh,
         )
 
-        sorted_values = pipeline._sorted_values
-        pipeline._dispatch(pipeline.k_score_forward, "score_forward",
+        sorted_values = raster.sorted_ids
+        pipeline.dispatch(pipeline.k_score_forward, "score_forward",
             thread_count=[b.num_tiles_x * 16, b.num_tiles_y * 16, 1],
             gaussians=b.gaussians.storage,
             projected_2d=b.projected_2d.storage,
             tile_start=b.tile_start.storage,
             tile_end=b.tile_end.storage,
             sorted_gaussian_ids=sorted_values.storage,
-            camera=pipeline._camera_buffer,
+            camera=pipeline.camera_buffer,
             error_mask=b.error_mask,
             importance_score_accum=b.importance_score_accum.storage,
         )
@@ -190,7 +190,7 @@ def densify(pipeline: Pipeline, cfg: DensifyConfig,
 
     b = pipeline.buffers
 
-    pipeline.device.wait_for_idle()
+    pipeline.runtime.wait_for_idle()
     pre_count = int(b.num_gaussians_counter.to_numpy().view(np.uint32)[0])
     if pre_count == 0:
         return {"pre_count": 0, "post_split_count": 0, "final_count": 0,
@@ -204,14 +204,17 @@ def densify(pipeline: Pipeline, cfg: DensifyConfig,
     N = max(n_densify_steps, 1)
     x = min(densify_step, N)
     target_at_x = S + (B - S) * (x / N) ** 0.5
-    growth = max(0, int(target_at_x) - pre_count)
+    # The schedule is a continuous target population; round to the nearest
+    # primitive instead of flooring every step. Flooring systematically lags
+    # the curve and turns targets such as 5.999 into zero growth from count 5.
+    growth = max(0, int(round(target_at_x)) - pre_count)
 
     # Prune budget: at most 50% of current count.
     prune = max(1, pre_count // 2)
     b.prune_budget.copy_from_numpy(np.array([prune], dtype=np.int32))
 
     # Phase A: GPU computes scores and applies pruning.
-    pipeline._dispatch(pipeline.k_decide_actions, "decide_actions",
+    pipeline.dispatch(pipeline.k_decide_actions, "decide_actions",
         thread_count=[pre_count, 1, 1],
         gaussians=b.gaussians.storage,
         num_gaussians_counter=b.num_gaussians_counter.storage,
@@ -225,7 +228,7 @@ def densify(pipeline: Pipeline, cfg: DensifyConfig,
         t_big_scale=cfg.t_big_scale,
         n_scoring_views=cfg.n_scoring_views,
     )
-    pipeline.device.wait_for_idle()
+    pipeline.runtime.wait_for_idle()
 
     # Phase B (CPU): read scores + actions, rank, select top-B.
     actions_raw = b.action_buffer.to_numpy()
@@ -237,8 +240,8 @@ def densify(pipeline: Pipeline, cfg: DensifyConfig,
     if growth > 0:
         # Read gaussian scales for split/clone classification.
         gauss_raw = b.gaussians.to_numpy()
-        gauss_floats = np.frombuffer(gauss_raw.tobytes(), dtype=np.float32).reshape(-1, GAUSSIAN_FLOAT_COUNT)
-        scales = np.exp(gauss_floats[:pre_count, 3:6])
+        gauss = np.frombuffer(gauss_raw.tobytes(), dtype=gaussian_numpy_dtype())
+        scales = np.exp(gauss["log_scale"][:pre_count])
         # Surface area proxy: sum of pairwise axis products (∝ ellipsoid SA).
         sa = (scales[:, 0] * scales[:, 1]
             + scales[:, 0] * scales[:, 2]
@@ -275,7 +278,7 @@ def densify(pipeline: Pipeline, cfg: DensifyConfig,
     # The shader now reads pre_count from a GPU buffer (unified path with
     # densify_simple's wait-free dispatch); upload our Python-known value.
     b.densify_pre_count.copy_from_numpy(np.array([pre_count], dtype=np.uint32))
-    pipeline._dispatch(pipeline.k_split_and_clone, "split_and_clone",
+    pipeline.dispatch(pipeline.k_split_and_clone, "split_and_clone",
         thread_count=[pre_count, 1, 1],
         gaussians=b.gaussians.storage,
         adam_state=b.adam_state.storage,
@@ -284,13 +287,13 @@ def densify(pipeline: Pipeline, cfg: DensifyConfig,
         pre_count_buf=b.densify_pre_count.storage,
         max_splats=pipeline.max_splats,
     )
-    pipeline.device.wait_for_idle()
+    pipeline.runtime.wait_for_idle()
     post_split_count = int(b.num_gaussians_counter.to_numpy().view(np.uint32)[0])
     post_split_count = min(post_split_count, pipeline.max_splats)
 
     # Phases D/E: compact. Same upload-then-pass-buffer pattern.
     b.densify_post_count.copy_from_numpy(np.array([post_split_count], dtype=np.uint32))
-    pipeline._dispatch(pipeline.k_build_prune_mask, "build_prune_mask",
+    pipeline.dispatch(pipeline.k_build_prune_mask, "build_prune_mask",
         thread_count=[pipeline.max_splats, 1, 1],
         action=b.action_buffer.storage,
         valid_mask=b.valid_mask_buffer.storage,
@@ -298,8 +301,8 @@ def densify(pipeline: Pipeline, cfg: DensifyConfig,
         post_count_buf=b.densify_post_count.storage,
         max_splats=pipeline.max_splats,
     )
-    pipeline._scan(pipeline.max_splats)
-    pipeline._dispatch(pipeline.k_scatter_compact, "scatter_compact",
+    pipeline.scan_service.scan(pipeline.max_splats, b.valid_mask_buffer)
+    pipeline.dispatch(pipeline.k_scatter_compact, "scatter_compact",
         thread_count=[pipeline.max_splats, 1, 1],
         gaussians_in=b.gaussians.storage,
         adam_state_in=b.adam_state.storage,
@@ -310,12 +313,10 @@ def densify(pipeline: Pipeline, cfg: DensifyConfig,
         max_splats=pipeline.max_splats,
     )
 
-    b.gaussians, b.gaussians_scratch = b.gaussians_scratch, b.gaussians
-    b.adam_state, b.adam_state_scratch = b.adam_state_scratch, b.adam_state
-
-    pipeline.device.wait_for_idle()
+    pipeline.runtime.wait_for_idle()
     final_count = int(b.scan_total.to_numpy().view(np.uint32)[0])
     b.num_gaussians_counter.copy_from_numpy(np.array([final_count], dtype=np.uint32))
+    b.swap_primitive_storage()
 
     n_keep  = int((actions == ACTION_KEEP).sum())
     n_split = int((actions == ACTION_SPLIT).sum())
@@ -339,174 +340,12 @@ def densify_simple(pipeline: Pipeline, cfg: DensifyConfig,
                    prune_big_scale: float | None = None,
                    allow_scale_prune: bool = True,
                    carry_eta: bool = False) -> dict:
-    """Reference 3DGS densification: threshold on avg_grad, split/clone by scale.
-
-    No rank-selection, no importance scoring, no growth budget. Every gaussian
-    that exceeds grad_thresh gets densified. Simple and proven.
-
-    ``prune_big_scale`` is the world-space max-scale prune threshold
-    (gsplat prune_scale3d * scene_scale). ``allow_scale_prune`` gates it so the
-    caller can disable big-scale pruning until after the first opacity reset,
-    matching gsplat's ``step > reset_every`` guard. Low-opacity pruning is
-    always active.
-
-    ``carry_eta`` (SAD-GS dual schedule): when True, the compaction pass ALSO
-    permutes the slot-indexed eta accumulators through the same valid_mask/scan
-    (via scatterCompactEta), carrying the multiview frequency statistics of
-    surviving gaussians and zeroing them for new children — so a filler densify
-    no longer resets the eta window. When False (non-SAD callers), the plain
-    scatterCompact runs and eta is left untouched (the SAD caller clears it).
-    """
-
-    b = pipeline.buffers
-
-    if scale_thresh is None:
-        scale_thresh = cfg.t_big_scale * 0.1
-
-    # ``grad_thresh`` is expressed in gsplat's convention: the NDC-space
-    # densification gradient of the MEAN L1 loss (F.l1_loss averages over
-    # H*W*channels). Our accumulator already carries the NDC conversion
-    # (accumulate_iter multiplies by frame_dim/2) but NOT the loss-mean
-    # factor — the loss shader emits the raw per-pixel gradient sum, and
-    # the 1/(H*W*3) factor is too small to survive the 2^16 fixed-point
-    # accumulator. So we scale the threshold UP by H*W*channels here to
-    # compare against our sum-convention signal. With this, grad_thresh
-    # stays resolution- and convention-compatible with gsplat's 0.0002.
-    channels = 3.0
-    grad_thresh_internal = grad_thresh * (pipeline.width * pipeline.height * channels)
-    big_scale = prune_big_scale if prune_big_scale is not None else cfg.t_big_scale
-
-    # Record all densify dispatches into ONE encoder + ONE submit so the
-    # whole pass is a single command buffer with no mid-flight submit
-    # overhead. Uses the same pattern as train_step.
-    enc = pipeline.device.create_command_encoder()
-    pipeline._encoder = enc
-    with pipeline._marker_group("densify_simple"):
-        # ---- Wait-free densify pipeline (all GPU, no CPU readbacks) ----
-        # Phase A: decide actions. Dispatches [max_splats]; shader early-outs
-        # per-thread on i >= num_gaussians_counter[0] (GPU-resident).
-        pipeline._dispatch(pipeline.k_decide_actions_simple, "decide_actions_simple",
-            thread_count=[pipeline.max_splats, 1, 1],
-            gaussians=b.gaussians.storage,
-            num_gaussians_counter=b.num_gaussians_counter.storage,
-            grad_mean_2d_mag_accum=b.grad_mean_2d_mag_accum.storage,
-            visibility_count_accum=b.visibility_count_accum.storage,
-            action=b.action_buffer.storage,
-            grad_thresh=grad_thresh_internal,
-            scale_thresh=scale_thresh,
-            t_opacity=cfg.t_opacity,
-            t_big_scale=big_scale,
-            allow_scale_prune=1 if allow_scale_prune else 0,
-            max_splats=pipeline.max_splats,
-        )
-
-        # Snapshot pre_count = num_gaussians_counter[0] (before splitAndClone
-        # atomically bumps it). Then compute indirect-dispatch args from that
-        # snapshot for splitAndClone.
-        pipeline._dispatch(pipeline.k_densify_snapshot, "densify_snapshot",
-            thread_count=[1, 1, 1],
-            src=b.num_gaussians_counter.storage,
-            dst=b.densify_pre_count.storage,
-        )
-        pipeline._dispatch(pipeline.k_densify_prepare_args, "densify_prepare_args",
-            thread_count=[1, 1, 1],
-            count_buf=b.densify_pre_count.storage,
-            dispatch_args=b.densify_dispatch_args.storage,
-            max_splats=pipeline.max_splats,
-        )
-
-        # Phase B: split and clone. Indirect so group count scales with
-        # pre_count, not max_splats.
-        pipeline._dispatch_indirect(pipeline.k_split_and_clone, "split_and_clone",
-            b.densify_dispatch_args,
-            gaussians=b.gaussians.storage,
-            adam_state=b.adam_state.storage,
-            num_gaussians_counter=b.num_gaussians_counter.storage,
-            action=b.action_buffer.storage,
-            pre_count_buf=b.densify_pre_count.storage,
-            max_splats=pipeline.max_splats,
-        )
-
-        # Snapshot post_count = num_gaussians_counter[0] (after splitAndClone).
-        pipeline._dispatch(pipeline.k_densify_snapshot, "densify_snapshot",
-            thread_count=[1, 1, 1],
-            src=b.num_gaussians_counter.storage,
-            dst=b.densify_post_count.storage,
-        )
-
-        # Phase C: mark valid. Dispatched over [max_splats]; shader zeros
-        # valid_mask for i >= post_count so the subsequent max_splats-wide
-        # scan sees a padded 0-tail.
-        pipeline._dispatch(pipeline.k_build_prune_mask, "build_prune_mask",
-            thread_count=[pipeline.max_splats, 1, 1],
-            action=b.action_buffer.storage,
-            valid_mask=b.valid_mask_buffer.storage,
-            pre_count_buf=b.densify_pre_count.storage,
-            post_count_buf=b.densify_post_count.storage,
-            max_splats=pipeline.max_splats,
-        )
-
-        # Phase D: prefix-scan valid_mask into scan_buffer. Runs at max_splats
-        # (the tail 0s contribute nothing to scan_total[0]).
-        pipeline._scan(pipeline.max_splats)
-
-        # Phase E: scatter live gaussians into scratch. Dispatched over
-        # [max_splats]; skips slots where valid_mask=0 (includes the tail).
-        # On the SAD dual-schedule path (carry_eta), the eta-carrying variant
-        # ALSO permutes the 6 eta accumulators through the same valid_mask/scan
-        # so the multiview window survives this filler pass (see
-        # scatterCompactEta); otherwise the plain scatter runs.
-        if carry_eta:
-            pipeline._dispatch(pipeline.k_scatter_compact_eta, "scatter_compact_eta",
-                thread_count=[pipeline.max_splats, 1, 1],
-                gaussians_in=b.gaussians.storage,
-                adam_state_in=b.adam_state.storage,
-                valid_mask=b.valid_mask_buffer.storage,
-                scan=b.scan_buffer.storage,
-                action=b.action_buffer.storage,
-                pre_count_buf=b.densify_pre_count.storage,
-                **b.eta_scatter_kwargs(),
-                gaussians_out=b.gaussians_scratch.storage,
-                adam_state_out=b.adam_state_scratch.storage,
-                max_splats=pipeline.max_splats,
-            )
-        else:
-            pipeline._dispatch(pipeline.k_scatter_compact, "scatter_compact",
-                thread_count=[pipeline.max_splats, 1, 1],
-                gaussians_in=b.gaussians.storage,
-                adam_state_in=b.adam_state.storage,
-                valid_mask=b.valid_mask_buffer.storage,
-                scan=b.scan_buffer.storage,
-                gaussians_out=b.gaussians_scratch.storage,
-                adam_state_out=b.adam_state_scratch.storage,
-                max_splats=pipeline.max_splats,
-            )
-
-        b.gaussians, b.gaussians_scratch = b.gaussians_scratch, b.gaussians
-        b.adam_state, b.adam_state_scratch = b.adam_state_scratch, b.adam_state
-        if carry_eta:
-            b.swap_eta()
-
-        # Final: num_gaussians_counter[0] = scan_total[0]. GPU copy — no
-        # readback, no upload.
-        pipeline._dispatch(pipeline.k_densify_snapshot, "densify_snapshot",
-            thread_count=[1, 1, 1],
-            src=b.scan_total.storage,
-            dst=b.num_gaussians_counter.storage,
-        )
-
-    cmd = enc.finish()
-    with pipeline.gpu_lock:
-        pipeline.last_submit_id = pipeline.device.submit_command_buffer(cmd)
-    pipeline._encoder = None
-
-    # No wait_for_idle. Return an empty stats dict; the caller reads
-    # num_gaussians_counter on its own cadence (e.g. log-every).
-    return {
-        "pre_count": None,
-        "post_split_count": None,
-        "final_count": None,
-    }
+    """Compatibility shim; the implementation lives in ``SimpleDensifier``."""
+    if pipeline.simple_densifier is None:
+        raise RuntimeError("densification is unavailable in viewer-only mode")
+    return pipeline.simple_densifier.run(
+        cfg, grad_thresh, scale_thresh, prune_big_scale,
+        allow_scale_prune, carry_eta)
 
 
 def reset_opacity(pipeline: Pipeline, cfg: DensifyConfig) -> None:
@@ -516,7 +355,7 @@ def reset_opacity(pipeline: Pipeline, cfg: DensifyConfig) -> None:
     geometry; RELATIVE preserves the strong/weak ranking through the reset."""
     b = pipeline.buffers
     relative = getattr(cfg, "reset_relative", False)
-    pipeline._dispatch(pipeline.k_opacity_reset, "opacity_reset",
+    pipeline.dispatch(pipeline.k_opacity_reset, "opacity_reset",
         thread_count=[pipeline.max_splats, 1, 1],
         gaussians=b.gaussians.storage,
         adam_state=b.adam_state.storage,
@@ -535,7 +374,7 @@ def clear_structure_scores(pipeline: Pipeline) -> None:
     accumulation window (right after a densify reorders gaussian slots), so
     the multiview statistics are gathered over a stable gaussian set."""
     b = pipeline.buffers
-    pipeline._dispatch(pipeline.k_clear_structure_scores, "clear_structure_scores",
+    pipeline.dispatch(pipeline.k_clear_structure_scores, "clear_structure_scores",
         thread_count=[pipeline.max_splats, 1, 1],
         **b.eta_kwargs(),
         eta_n_total=b.eta_n_total.storage,
@@ -548,7 +387,7 @@ def accumulate_structure_scores(pipeline: Pipeline, structure_tensor,
                                 opacity_threshold: float = 0.05,
                                 per_view_grad_thresh: float = 0.0) -> None:
     """Fold ONE per-gaussian eta sample into the accumulators for the current
-    camera (already uploaded to ``pipeline._camera_buffer`` by the forward
+    camera (already uploaded to ``pipeline.camera_buffer`` by the forward
     pass). Called once per training iteration from train_step to build the
     N_high/N_low/eta_max multiview statistics online (paper Section 3.6),
     which is what makes the N_high/N_total fraction gate meaningful — a handful
@@ -574,11 +413,11 @@ def accumulate_structure_scores(pipeline: Pipeline, structure_tensor,
     b = pipeline.buffers
     if pass_idx is None:
         pass_idx = pipeline.iteration
-    pipeline._dispatch(pipeline.k_score_structure_aware, "score_structure_aware",
+    pipeline.dispatch(pipeline.k_score_structure_aware, "score_structure_aware",
         thread_count=[pipeline.max_splats, 1, 1],
         gaussians=b.gaussians.storage,
         num_gaussians_counter=b.num_gaussians_counter.storage,
-        camera=pipeline._camera_buffer,
+        camera=pipeline.camera_buffer,
         structure_tensor=structure_tensor,
         tile_count_per_gaussian=b.tile_count_per_gaussian.storage,
         grad_2d_x_iter=b.grad_2d_x_iter.storage,
@@ -606,7 +445,7 @@ def compute_structure_scores(
     for view_idx, (cam, structure_tex) in enumerate(zip(cameras, structure_textures)):
         # Run the forward pass so tile_count_per_gaussian reflects THIS view's
         # visibility (the eta kernel gates on it). Also uploads the camera.
-        pipeline._run_forward(cam)
+        pipeline.rasterize(cam)
         accumulate_structure_scores(pipeline, structure_tex, pass_idx=view_idx)
 
 def densify_structure_aware(pipeline: Pipeline, cfg: StructureConfig) -> dict:
@@ -646,13 +485,12 @@ def densify_structure_aware(pipeline: Pipeline, cfg: StructureConfig) -> dict:
         max_splats=pipeline.max_splats,
     )
 
-    enc = pipeline.device.create_command_encoder()
-    pipeline._encoder = enc
-    with pipeline._marker_group("densify_structure"):
+    with pipeline.recording("densify_structure") as recording, \
+            pipeline.marker_group("densify_structure"):
         # P0: zero the capacity-bound scratch (children_sum, fanout_hist,
         # fanout_threshold). Dispatched at [513] so a single workgroup covers
         # every histogram bin.
-        pipeline._dispatch(pipeline.k_clear_capacity_scratch, "clear_capacity_scratch",
+        pipeline.dispatch(pipeline.k_clear_capacity_scratch, "clear_capacity_scratch",
             thread_count=[513, 1, 1],
             densify_children_sum=b.densify_children_sum.storage,
             densify_fanout_hist=b.densify_fanout_hist.storage,
@@ -660,7 +498,7 @@ def densify_structure_aware(pipeline: Pipeline, cfg: StructureConfig) -> dict:
         )
 
         # P1: tentative decide + fan-out sum + histogram.
-        pipeline._dispatch(pipeline.k_decide_actions_structure_pass1, "decide_actions_structure_pass1",
+        pipeline.dispatch(pipeline.k_decide_actions_structure_pass1, "decide_actions_structure_pass1",
             thread_count=[pipeline.max_splats, 1, 1],
             densify_children_sum=b.densify_children_sum.storage,
             densify_fanout_hist=b.densify_fanout_hist.storage,
@@ -669,14 +507,14 @@ def densify_structure_aware(pipeline: Pipeline, cfg: StructureConfig) -> dict:
 
         # P2: snapshot pre_count (needed by the threshold picker and by the
         # split_anisotropic indirect dispatch).
-        pipeline._dispatch(pipeline.k_densify_snapshot, "densify_snapshot",
+        pipeline.dispatch(pipeline.k_densify_snapshot, "densify_snapshot",
             thread_count=[1, 1, 1],
             src=b.num_gaussians_counter.storage,
             dst=b.densify_pre_count.storage,
         )
 
         # P3: single-thread threshold picker.
-        pipeline._dispatch(pipeline.k_decide_actions_structure_threshold, "decide_actions_structure_threshold",
+        pipeline.dispatch(pipeline.k_decide_actions_structure_threshold, "decide_actions_structure_threshold",
             thread_count=[1, 1, 1],
             num_gaussians_counter=b.num_gaussians_counter.storage,
             densify_children_sum=b.densify_children_sum.storage,
@@ -686,14 +524,14 @@ def densify_structure_aware(pipeline: Pipeline, cfg: StructureConfig) -> dict:
         )
 
         # P4: demote high-fan-out splits to CLONE (no-op if threshold sentinel).
-        pipeline._dispatch(pipeline.k_decide_actions_structure_pass2, "decide_actions_structure_pass2",
+        pipeline.dispatch(pipeline.k_decide_actions_structure_pass2, "decide_actions_structure_pass2",
             thread_count=[pipeline.max_splats, 1, 1],
             densify_fanout_threshold=b.densify_fanout_threshold.storage,
             **decide_inputs,
         )
 
         # P5: indirect-dispatch args for split_anisotropic (groups = ceil(pre_count/256)).
-        pipeline._dispatch(pipeline.k_densify_prepare_args, "densify_prepare_args",
+        pipeline.dispatch(pipeline.k_densify_prepare_args, "densify_prepare_args",
             thread_count=[1, 1, 1],
             count_buf=b.densify_pre_count.storage,
             dispatch_args=b.densify_dispatch_args.storage,
@@ -701,7 +539,7 @@ def densify_structure_aware(pipeline: Pipeline, cfg: StructureConfig) -> dict:
         )
 
         # P6: split_anisotropic — indirect, self-bounds on pre_count_buf.
-        pipeline._dispatch_indirect(pipeline.k_split_anisotropic, "split_anisotropic",
+        pipeline.dispatch_indirect(pipeline.k_split_anisotropic, "split_anisotropic",
             b.densify_dispatch_args,
             gaussians=b.gaussians.storage,
             adam_state=b.adam_state.storage,
@@ -716,14 +554,14 @@ def densify_structure_aware(pipeline: Pipeline, cfg: StructureConfig) -> dict:
         )
 
         # P7: snapshot post_count.
-        pipeline._dispatch(pipeline.k_densify_snapshot, "densify_snapshot",
+        pipeline.dispatch(pipeline.k_densify_snapshot, "densify_snapshot",
             thread_count=[1, 1, 1],
             src=b.num_gaussians_counter.storage,
             dst=b.densify_post_count.storage,
         )
 
         # P8: build prune mask + scan + scatter-compact.
-        pipeline._dispatch(pipeline.k_build_prune_mask, "build_prune_mask",
+        pipeline.dispatch(pipeline.k_build_prune_mask, "build_prune_mask",
             thread_count=[pipeline.max_splats, 1, 1],
             action=b.action_buffer.storage,
             valid_mask=b.valid_mask_buffer.storage,
@@ -731,8 +569,8 @@ def densify_structure_aware(pipeline: Pipeline, cfg: StructureConfig) -> dict:
             post_count_buf=b.densify_post_count.storage,
             max_splats=pipeline.max_splats,
         )
-        pipeline._scan(pipeline.max_splats)
-        pipeline._dispatch(pipeline.k_scatter_compact, "scatter_compact",
+        pipeline.scan_service.scan(pipeline.max_splats, b.valid_mask_buffer)
+        pipeline.dispatch(pipeline.k_scatter_compact, "scatter_compact",
             thread_count=[pipeline.max_splats, 1, 1],
             gaussians_in=b.gaussians.storage,
             adam_state_in=b.adam_state.storage,
@@ -742,11 +580,8 @@ def densify_structure_aware(pipeline: Pipeline, cfg: StructureConfig) -> dict:
             adam_state_out=b.adam_state_scratch.storage,
             max_splats=pipeline.max_splats,
         )
-        b.gaussians, b.gaussians_scratch = b.gaussians_scratch, b.gaussians
-        b.adam_state, b.adam_state_scratch = b.adam_state_scratch, b.adam_state
-
         # P9: final count = scan_total (GPU copy — no readback).
-        pipeline._dispatch(pipeline.k_densify_snapshot, "densify_snapshot",
+        pipeline.dispatch(pipeline.k_densify_snapshot, "densify_snapshot",
             thread_count=[1, 1, 1],
             src=b.scan_total.storage,
             dst=b.num_gaussians_counter.storage,
@@ -755,22 +590,19 @@ def densify_structure_aware(pipeline: Pipeline, cfg: StructureConfig) -> dict:
         # P10: post-densify opacity cap (SADGS gaussian_model.py:1046 applies
         # inverse_sigmoid(min(get_opacity, 0.8)) to ALL survivors after the
         # structure prune). resetOpacity does min(logit, logit(cap)) which is
-        # exactly that cap. Runs on the compacted buffer (now b.gaussians) over
-        # the final count. Skipped when opacity_cap <= 0 (ablation off).
+        # exactly that cap. Runs on the just-compacted scratch buffer; host
+        # ownership changes only after submit succeeds. Skipped when
+        # opacity_cap <= 0 (ablation off).
         if cfg.opacity_cap and cfg.opacity_cap > 0.0:
-            pipeline._dispatch(pipeline.k_opacity_reset, "opacity_cap",
+            pipeline.dispatch(pipeline.k_opacity_reset, "opacity_cap",
                 thread_count=[pipeline.max_splats, 1, 1],
-                gaussians=b.gaussians.storage,
-                adam_state=b.adam_state.storage,
+            gaussians=b.gaussians_scratch.storage,
+            adam_state=b.adam_state_scratch.storage,
                 num_gaussians_counter=b.num_gaussians_counter.storage,
                 reset_value=float(cfg.opacity_cap),
                 mode=0,   # CLAMP: min(logit, logit(0.8)) == inverse_sigmoid(min(a,0.8))
             )
-
-    cmd = enc.finish()
-    with pipeline.gpu_lock:
-        pipeline.last_submit_id = pipeline.device.submit_command_buffer(cmd)
-    pipeline._encoder = None
+            recording.after_submit(b.swap_primitive_storage)
 
     # Wait-free: return None counts. The caller reads num_gaussians_counter on
     # its own cadence (log-every ticks).
@@ -816,11 +648,10 @@ def morton_sort(pipeline: Pipeline, world_min: np.ndarray,
     extent = np.maximum(world_max - world_min, 1e-6)
     inv_extent = (1.0 / extent).astype(np.float32)
 
-    enc = pipeline.device.create_command_encoder()
-    pipeline._encoder = enc
-    with pipeline._marker_group("morton_sort"):
+    with pipeline.recording("morton_sort") as recording, \
+            pipeline.marker_group("morton_sort"):
         # 1. Publish n GPU-side: scan_total[0] = num_gaussians_counter[0].
-        pipeline._dispatch(pipeline.k_densify_snapshot, "morton_snapshot",
+        pipeline.dispatch(pipeline.k_densify_snapshot, "morton_snapshot",
             thread_count=[1, 1, 1],
             src=b.num_gaussians_counter.storage,
             dst=b.scan_total.storage,
@@ -828,7 +659,7 @@ def morton_sort(pipeline: Pipeline, world_min: np.ndarray,
 
         # 2. Encode Morton codes over max_splats. Tail slots get
         # 0xFFFF...FF so the radix parks them at the end.
-        pipeline._dispatch(pipeline.k_morton_encode, "morton_encode",
+        pipeline.dispatch(pipeline.k_morton_encode, "morton_encode",
             thread_count=[pipeline.max_splats, 1, 1],
             gaussians=b.gaussians.storage,
             count_buf=b.scan_total.storage,
@@ -841,10 +672,10 @@ def morton_sort(pipeline: Pipeline, world_min: np.ndarray,
         )
 
         # 3. 8-pass LSD radix; deterministic return to the A slot.
-        pipeline._radix_sort_pairs()
+        pipeline.radix_sort_pairs()
 
         # 4. Gather-permute Gaussian3D + AdamState via sorted_values.
-        pipeline._dispatch(pipeline.k_morton_scatter, "morton_scatter",
+        pipeline.dispatch(pipeline.k_morton_scatter, "morton_scatter",
             thread_count=[pipeline.max_splats, 1, 1],
             gaussians_in=b.gaussians.storage,
             adam_state_in=b.adam_state.storage,
@@ -860,21 +691,12 @@ def morton_sort(pipeline: Pipeline, world_min: np.ndarray,
         # permutation (no create/destroy), reading the identical sorted_values
         # slot as step 4 — the two permutations are consistent by construction.
         if carry_eta:
-            pipeline._dispatch(pipeline.k_morton_scatter_eta, "morton_scatter_eta",
+            pipeline.dispatch(pipeline.k_morton_scatter_eta, "morton_scatter_eta",
                 thread_count=[pipeline.max_splats, 1, 1],
                 sorted_values=b.sort_values_a.storage,
                 count_buf=b.scan_total.storage,
                 **b.eta_scatter_kwargs(),
                 max_splats=pipeline.max_splats,
             )
-
-    # 5. Swap primary <-> scratch. Same idiom densify uses.
-    b.gaussians, b.gaussians_scratch = b.gaussians_scratch, b.gaussians
-    b.adam_state, b.adam_state_scratch = b.adam_state_scratch, b.adam_state
-    if carry_eta:
-        b.swap_eta()
-
-    cmd = enc.finish()
-    with pipeline.gpu_lock:
-        pipeline.last_submit_id = pipeline.device.submit_command_buffer(cmd)
-    pipeline._encoder = None
+        recording.after_submit(
+            lambda: b.swap_primitive_storage(carry_eta=carry_eta))

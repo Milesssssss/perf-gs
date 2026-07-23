@@ -29,8 +29,8 @@ BETA2 = 0.999
 EPS = 1e-8
 FIXED_SCALE = 65536.0
 
-# Packed Gaussian3D channel index -> LR group. Gradients and both moments use
-# this exact channel-major order.
+# Packed Gaussian3D channel index -> LR group, in GRAD_SCALAR_COMPONENTS (SoA)
+# order. The 14 gradient buffers and both AoS moments follow this order.
 LR_GROUPS = [
     "mean", "mean", "mean",
     "scale", "scale", "scale",
@@ -39,6 +39,13 @@ LR_GROUPS = [
     "color", "color", "color",
 ]
 ROT_SLICE = slice(6, 10)   # packed params renormalized after the step
+
+# AoS AdamState float offsets for each channel's first (m) / second (v) moment,
+# in GRAD_SCALAR_COMPONENTS order. AdamState = mean_m(0:3) mean_v(3:6)
+# log_scale_m(6:9) log_scale_v(9:12) rot_m(12:16) rot_v(16:20) opacity_m(20)
+# opacity_v(21) color_m(22:25) color_v(25:28).
+_ADAM_M_IDX = [0, 1, 2, 6, 7, 8, 12, 13, 14, 15, 20, 22, 23, 24]
+_ADAM_V_IDX = [3, 4, 5, 9, 10, 11, 16, 17, 18, 19, 21, 25, 26, 27]
 
 
 def _adam_scalar(param, grad, lr, bc1, bc2):
@@ -93,13 +100,13 @@ def test_adam_step_matches_reference(backend: str) -> None:
     # Known fixed-point gradients, distinct per (component, gaussian) so a
     # mis-wiring (swapped m/v, wrong LR, wrong param slot) shows as a mismatch.
     rng = np.random.default_rng(1234)
-    gradient_plane = np.zeros((14, max_splats), dtype=np.int64)
     grad_raw = {}
     for ci, name in enumerate(GRAD_SCALAR_COMPONENTS):
         vals = (0.5 + 0.13 * ci) + 0.37 * np.arange(N) + rng.uniform(-0.1, 0.1, N)
-        gradient_plane[ci, :N] = np.round(vals * FIXED_SCALE).astype(np.int64)
-        grad_raw[name] = gradient_plane[ci, :N].astype(np.float64) / FIXED_SCALE
-    p.buffers.gradients.copy_from_numpy(np.ascontiguousarray(gradient_plane.reshape(-1)))
+        fixed = np.zeros(max_splats, dtype=np.int64)
+        fixed[:N] = np.round(vals * FIXED_SCALE).astype(np.int64)
+        p.buffers.grad_buffers[name].copy_from_numpy(fixed)
+        grad_raw[name] = fixed[:N].astype(np.float64) / FIXED_SCALE
 
     lr = dict(mean=1e-3, scale=5e-3, rot=2e-3, opacity=5e-2, color=2.5e-3)
     bc1 = 1.0 - BETA1 ** 5
@@ -109,25 +116,26 @@ def test_adam_step_matches_reference(backend: str) -> None:
 
     p._dispatch(p.k_adam, "adam",
         thread_count=[max_splats, 1, 1],
-        primitives=p.buffers.gaussians.storage,
-        gradients=p.buffers.gradients.storage,
-        moment1=p.buffers.moment1.storage,
-        moment2=p.buffers.moment2.storage,
-        num_primitives_counter=p.buffers.num_gaussians_counter.storage,
+        gaussians=p.buffers.gaussians.storage,
+        adam_state=p.buffers.adam_state.storage,
+        num_gaussians_counter=p.buffers.num_gaussians_counter.storage,
+        **p.buffers.grad_kwargs(),
         cluster_visible=p.buffers.cluster_visible.storage,
-        learning_rates={"values": [lr[group] for group in LR_GROUPS]},
-        cfg={"bias_correction1": bc1, "bias_correction2": bc2},
+        cfg={"lr_mean": lr["mean"], "lr_scale": lr["scale"], "lr_rot": lr["rot"],
+             "lr_opacity": lr["opacity"], "lr_color": lr["color"],
+             "bias_correction1": bc1, "bias_correction2": bc2},
         pixels_per_step=pixels_per_step,
-        channel_stride=max_splats,
     )
     device.wait_for_idle()
 
     g_out = np.frombuffer(p.buffers.gaussians.to_numpy().tobytes(),
                           dtype=np.float32).reshape(-1, 14)[:N].astype(np.float64)
-    m1_out = np.frombuffer(p.buffers.moment1.to_numpy().tobytes(),
-                           dtype=np.float32).reshape(14, max_splats)[:, :N].T.astype(np.float64)
-    m2_out = np.frombuffer(p.buffers.moment2.to_numpy().tobytes(),
-                           dtype=np.float32).reshape(14, max_splats)[:, :N].T.astype(np.float64)
+    # AoS AdamState: 28 floats/gaussian. Pull each channel's m/v moment in
+    # GRAD_SCALAR_COMPONENTS order via the offset tables above.
+    adam = np.frombuffer(p.buffers.adam_state.to_numpy().tobytes(),
+                         dtype=np.float32).reshape(-1, 28)[:N].astype(np.float64)
+    m1_out = adam[:, _ADAM_M_IDX]
+    m2_out = adam[:, _ADAM_V_IDX]
 
     # --- numpy reference ---
     new_p = orig.copy()
@@ -150,6 +158,7 @@ def test_adam_step_matches_reference(backend: str) -> None:
     np.testing.assert_allclose(m2_out, new_v, atol=1e-6, rtol=1e-4)
 
     # Adam must zero the grad accumulators for the next iteration.
-    raw = np.frombuffer(p.buffers.gradients.to_numpy().tobytes(), dtype=np.int64)
-    plane = raw.reshape(14, max_splats)
-    assert np.all(plane[:, :N] == 0), "gradient plane not zeroed after Adam"
+    for name in GRAD_SCALAR_COMPONENTS:
+        raw = np.frombuffer(p.buffers.grad_buffers[name].to_numpy().tobytes(),
+                            dtype=np.int64)
+        assert np.all(raw[:N] == 0), f"grad buffer {name} not zeroed after Adam"

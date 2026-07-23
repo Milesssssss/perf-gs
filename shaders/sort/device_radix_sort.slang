@@ -44,10 +44,11 @@ static const uint RADIX_LOG = 8u;
 static const uint US_DIM = 128u;
 static const uint SCAN_DIM = 128u;
 
-// Downsweep block size and keys/thread. PART_SIZE = D_DIM * KEYS_PER_THREAD.
-static const uint D_DIM = 256u;
-static const uint KEYS_PER_THREAD = 8u;
-static const uint PART_SIZE = D_DIM * KEYS_PER_THREAD;  // 2048
+// Downsweep block size + keys/thread, sourced from the host<->shader contract.
+#include "generated/execution_contract.slang"
+static const uint D_DIM = CONTRACT_RADIX_DIGITS;
+static const uint KEYS_PER_THREAD = CONTRACT_RADIX_KEYS_PER_THREAD;
+static const uint PART_SIZE = CONTRACT_RADIX_PART_SIZE;
 
 // Shared-memory size for the Downsweep. Sized as
 //   max(waveHist@minLane, PART_SIZE + RADIX)

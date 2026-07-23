@@ -3,7 +3,8 @@
 #include "../common/types.slang"
 #include "../common/math.slang"
 
-static const uint CLUSTER_SIZE = 128;  // must match cluster_cull.slang
+#include "generated/execution_contract.slang"
+static const uint CLUSTER_SIZE = CONTRACT_CLUSTER_SIZE;
 
 [shader("compute")]
 [numthreads(256, 1, 1)]

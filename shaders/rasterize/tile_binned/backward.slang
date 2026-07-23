@@ -11,7 +11,8 @@
 #include "../../primitives/gaussian/project.slang"
 #include "../../primitives/gaussian/eval.slang"
 
-static const uint TILE_SIZE = 16;
+#include "generated/execution_contract.slang"
+static const uint TILE_SIZE = CONTRACT_TILE_SIZE;
 static const uint TILE_AREA = TILE_SIZE * TILE_SIZE;
 
 static const float ALPHA_MAX = 0.99;

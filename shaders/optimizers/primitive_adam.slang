@@ -1,7 +1,7 @@
 #ifndef TRAINER_OPTIMIZER_PRIMITIVE_ADAM_SLANG
 #define TRAINER_OPTIMIZER_PRIMITIVE_ADAM_SLANG
 
-#include "../common/types.slang"   // fromFixed / int64_t fixed-point gradients
+#include "../common/fixed_point.slang"
 
 // Generic Adam over an arbitrary primitive's flat scalar parameter vector.
 //
@@ -34,6 +34,12 @@ struct ChannelCursor<let N : int>
         data[offset] = v;
         offset += 1u;
     }
+    [mutating] void write2(inout float data[N], float2 v)
+    {
+        data[offset + 0u] = v.x;
+        data[offset + 1u] = v.y;
+        offset += 2u;
+    }
     [mutating] void write3(inout float data[N], float3 v)
     {
         data[offset + 0u] = v.x;
@@ -54,6 +60,12 @@ struct ChannelCursor<let N : int>
     {
         float v = data[offset];
         offset += 1u;
+        return v;
+    }
+    [mutating] float2 read2(inout float data[N])
+    {
+        float2 v = float2(data[offset + 0u], data[offset + 1u]);
+        offset += 2u;
         return v;
     }
     [mutating] float3 read3(inout float data[N])

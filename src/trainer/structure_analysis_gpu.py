@@ -27,6 +27,7 @@ import numpy as np
 import slangpy as spy
 
 from trainer.device import SHADERS_DIR
+from trainer.gpu import GpuRuntime
 from trainer.structure_analysis import (
     GAMMA,
     MIN_ENERGY,
@@ -71,6 +72,7 @@ class StructureTensorGPU:
         gamma: float = GAMMA,
     ) -> None:
         self.device = device
+        self.runtime = GpuRuntime(device)
         self.width = int(width)
         self.height = int(height)
         self.num_levels = int(num_levels)
@@ -148,7 +150,8 @@ class StructureTensorGPU:
         rgba[..., :3] = img[..., :3]
         self.img_tex.copy_from_numpy(np.ascontiguousarray(rgba))
 
-        enc = self.device.create_command_encoder()
+        batch = self.runtime.command_batch("structure_tensor")
+        enc = batch.encoder
 
         # 1) Base orientation tensor at the finest scale, then normalized by the
         #    batch-max trace (SADGS _structure_tensor).
@@ -191,8 +194,8 @@ class StructureTensorGPU:
         self._d(enc, self.k_finalize, accum=self.accum_tex, fieldOut=self.out_tex,
                 dim=self._dim, min_energy=float(MIN_ENERGY))
 
-        self.device.submit_command_buffer(enc.finish())
-        self.device.wait_for_idle()
+        self.runtime.submit(batch)
+        self.runtime.wait_for_idle()
 
         return np.ascontiguousarray(self.out_tex.to_numpy()[..., :3].astype(np.float32))
 

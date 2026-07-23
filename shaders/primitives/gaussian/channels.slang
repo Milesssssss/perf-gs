@@ -3,17 +3,9 @@
 
 #include "../../common/types.slang"   // toFixed / fromFixed fixed-point gradients
 
-// The single semantic definition of the Gaussian's optimized scalar layout.
-// rot_quat is stored (w, x, y, z), represented by float4.xyzw respectively.
-namespace GaussianChannel
-{
-    static const uint Mean = 0u;       // 3: x, y, z
-    static const uint LogScale = 3u;   // 3: x, y, z
-    static const uint Rotation = 6u;   // 4: w, x, y, z
-    static const uint Opacity = 10u;   // 1
-    static const uint Color = 11u;     // 3: sh0 r, g, b
-    static const int Count = 14;
-}
+// GaussianChannel is generated with Gaussian3D in gaussian_types.slang,
+// included transitively through common/types.slang above. This file owns only
+// the typed writer behavior, not channel offsets or counts.
 
 // Typed semantic writer used by every Gaussian backward/regularization pass.
 // Physical storage is channel-major SoA:

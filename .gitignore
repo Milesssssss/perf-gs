@@ -6,6 +6,9 @@ build/
 outputs/
 datasets/
 .*/
+!.github/
+!.github/workflows/
+!.github/workflows/contracts.yml
 dist/
 .pytest_cache/
 .ruff_cache/

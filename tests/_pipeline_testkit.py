@@ -33,8 +33,9 @@ class TestPipeline(Pipeline):
         handle the sync. Tests that explicitly sample intermediates
         insert the wait at their own callsite.
         """
-        self._run_forward(camera)
-        self._run_loss()
+        with self.recording("forward_and_loss"):
+            self.rasterize(camera)
+            self._run_loss()
 
     def backward(self) -> None:
         """Run the backward rasterizer. Assumes forward + loss have run."""

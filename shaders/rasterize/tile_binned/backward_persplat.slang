@@ -31,7 +31,8 @@
 #include "../../core/compositor.slang"
 #include "checkpoint.slang"
 
-static const uint TILE_SIZE = 16;
+#include "generated/execution_contract.slang"
+static const uint TILE_SIZE = CONTRACT_TILE_SIZE;
 static const uint TILE_AREA = TILE_SIZE * TILE_SIZE;   // 256
 static const uint NUM_WARPS = TILE_AREA / 32u;         // 8 (assumes wave=32)
 

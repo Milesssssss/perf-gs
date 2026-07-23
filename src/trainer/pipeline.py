@@ -9,6 +9,7 @@ image with :meth:`Pipeline.set_target_image` and call
 from __future__ import annotations
 
 import contextlib
+from collections.abc import Callable
 
 import numpy as np
 import slangpy as spy
@@ -20,16 +21,21 @@ from trainer.buffers import (
     GRAD_SCALAR_COMPONENTS,
     RADIX_GLOBAL_HIST_SIZE,
     RADIX_PART_SIZE,
-    SCAN_BLOCK_SIZE,
 )
 from trainer.config import AdamLRs, RenderConfig
 from trainer.dataset import Camera
 from trainer.densify import DensifyConfig
 from trainer.device import SHADERS_DIR
 from trainer.gpu import CommandBatch, GpuRuntime
+from trainer.gpu_scan import GpuScan, ScanKernels
 from trainer.kernels import load_kernels
 from trainer.losses import ImageLoss
 from trainer.rasterizer import RasterizationContext
+from trainer.simple_densifier import (
+    CommandInterface,
+    SimpleDensifier,
+    SimpleDensifyKernels,
+)
 
 # DensifyConfig / AdamLRs / RenderConfig are imported (not defined) here and
 # re-exported for back-compat: existing callers do
@@ -39,11 +45,25 @@ __all__ = ["Pipeline", "DensifyConfig", "AdamLRs", "RenderConfig"]
 
 # DeviceRadixSort dispatch dims — must match shaders/sort/device_radix_sort.slang.
 # (The layout-sizing constants RADIX_PART_SIZE / RADIX_GLOBAL_HIST_SIZE /
-# SCAN_BLOCK_SIZE are imported from buffers.py; these three are used only in
+# SCAN_BLOCK_SIZE are imported from buffers.py; these two are used only in
 # thread_count computations here, not in allocation.)
 _RADIX_US_DIM = 128
 _RADIX_SCAN_DIM = 128
-_RADIX_D_DIM = 256
+
+
+class _RecordingTransaction:
+    """A recorded batch plus host-state commits that run after submit succeeds."""
+
+    def __init__(self, batch: CommandBatch) -> None:
+        self.batch = batch
+        self._commits: list[Callable[[], None]] = []
+
+    def after_submit(self, commit: Callable[[], None]) -> None:
+        self._commits.append(commit)
+
+    def commit(self) -> None:
+        for commit in self._commits:
+            commit()
 
 
 def _module_for_reflection(device: spy.Device) -> spy.Module:
@@ -76,17 +96,10 @@ class Pipeline:
     ) -> None:
         self.device = device
         # Serializes GPU queue access (submit/present/wait_for_idle) against
-        # any OTHER thread sharing this device — notably the live Viewer, which
-        # runs its render loop on a background thread. Vulkan requires queue
-        # submission to be externally synchronized; without this, the training
-        # thread and viewer thread race on the shared VkQueue, which
-        # non-deterministically either faults the device ("Vulkan returned a
-        # failure") or thrashes (both threads stall fighting for the queue).
-        # Defaults to a no-op so single-threaded use (tests, --no-viewer) is
-        # unchanged.
+        # any OTHER thread sharing this device, notably the live Viewer, which
+        # runs its render loop on a background thread.
         self.gpu_lock = gpu_lock if gpu_lock is not None else contextlib.nullcontext()
-        # GPU runtime: owns the device + queue-lock discipline and hands out
-        # CommandBatches (command recording + one-submit under the shared lock).
+        # GPU runtime: owns the device + queue-lock discipline and hands out CommandBatches
         self.runtime = GpuRuntime(device, self.gpu_lock)
         self.width = width
         self.height = height
@@ -129,7 +142,7 @@ class Pipeline:
             ssim_m2=self.buffers.ssim_m2,
             ssim_m3=self.buffers.ssim_m3,
             image_gradient=self.buffers.dL_dC_texture,
-            width=width, height=height,
+            width=width, height=height, runtime=self.runtime,
         )
 
         # Camera buffer: raw 144-byte buffer (136 data + 8 padding to 16-byte align).
@@ -148,6 +161,41 @@ class Pipeline:
         # encoder owners (densify, viewer) assign a raw encoder via the
         # `_encoder` compat property below, which wraps it in a CommandBatch.
         self._batch: CommandBatch | None = None
+        self.scan_service = GpuScan(
+            resources=self.buffers.scan,
+            kernels=ScanKernels(
+                scan_block=self.k_scan_block,
+                scan_block_sums=self.k_scan_block_sums,
+                add_block_offsets=self.k_add_block_offsets,
+            ),
+            runtime=self.runtime,
+            active_batch=lambda: self._batch,
+        )
+        self.simple_densifier = SimpleDensifier(
+            primitive=self.buffers.primitive,
+            adam=self.buffers._require_adam(),
+            resources=self.buffers._require_densification(),
+            eta=self.buffers.eta,
+            scan=self.scan_service,
+            kernels=SimpleDensifyKernels(
+                decide_actions=self.k_decide_actions_simple,
+                snapshot_count=self.k_densify_snapshot,
+                prepare_dispatch=self.k_densify_prepare_args,
+                split_and_clone=self.k_split_and_clone,
+                build_prune_mask=self.k_build_prune_mask,
+                scatter_compact=self.k_scatter_compact,
+                scatter_compact_eta=self.k_scatter_compact_eta,
+            ),
+            commands=CommandInterface(
+                dispatch=self.dispatch,
+                dispatch_indirect=self.dispatch_indirect,
+                recording=self.recording,
+                marker_group=self.marker_group,
+            ),
+            width=self.width,
+            height=self.height,
+            max_primitives=self.max_splats,
+        ) if not viewer_only else None
 
         # ID of the most recent submit_command_buffer call. Callers (the train
         # loop) can wait on this via device.wait_for_submit(id) to bound queue
@@ -266,7 +314,9 @@ class Pipeline:
         if self._batch is not None:
             self._batch.dispatch(kernel, marker, **kwargs)
         else:
-            kernel.dispatch(command_encoder=None, **kwargs)
+            transient = self.runtime.command_batch(marker)
+            transient.dispatch(kernel, marker, **kwargs)
+            self.last_submit_id = self.runtime.submit(transient).submit_id
 
     def _dispatch_indirect(self, kernel, marker: str, args_buf: spy.NDBuffer,
                            offset: int = 0, **kwargs) -> None:
@@ -290,6 +340,55 @@ class Pipeline:
             return contextlib.nullcontext()
         return self._batch.marker_group(label)
 
+    # Public command contract for extracted GPU services. The private aliases
+    # remain while Pipeline's internal implementation is migrated incrementally.
+    def dispatch(self, kernel, marker: str, **kwargs) -> None:
+        self._dispatch(kernel, marker, **kwargs)
+
+    def dispatch_indirect(self, kernel, marker: str, args_buf: spy.NDBuffer,
+                          offset: int = 0, **kwargs) -> None:
+        self._dispatch_indirect(kernel, marker, args_buf, offset, **kwargs)
+
+    def marker_group(self, label: str):
+        return self._marker_group(label)
+
+    def recording(self, label: str):
+        return self._recording(label)
+
+    @property
+    def camera_buffer(self):
+        """Read-only uploaded camera resource for specialized GPU services."""
+        return self._camera_buffer
+
+    def rasterize(self, camera: Camera) -> RasterizationContext:
+        """Record one forward rasterization and return its explicit handoff."""
+        return self._run_forward(camera)
+
+    def radix_sort_pairs(self) -> tuple[spy.NDBuffer, spy.NDBuffer, spy.NDBuffer]:
+        """Record the shared 64-bit-key radix sort service."""
+        return self._radix_sort_pairs()
+
+    @contextlib.contextmanager
+    def _recording(self, label: str):
+        """Record GPU work into a fresh command batch installed as the active
+        batch, then submit it once on success.
+
+        The active-batch install is cleared in a ``finally`` so a mid-recording
+        exception can't leave the pipeline wedged with a stale batch; the submit
+        (and the resulting ``last_submit_id``) happens only if the body completed
+        without raising. Used by ``train_step`` and the densify passes, which
+        record via ``_dispatch`` / ``_marker_group`` into the installed batch.
+        """
+        batch = self.runtime.command_batch(label)
+        transaction = _RecordingTransaction(batch)
+        self._batch = batch
+        try:
+            yield transaction
+            self.last_submit_id = self.runtime.submit(batch).submit_id
+            transaction.commit()
+        finally:
+            self._batch = None
+
     # ------------------------------------------------------------------
     # Data loading
     # ------------------------------------------------------------------
@@ -307,7 +406,13 @@ class Pipeline:
             means=means, log_scales=log_scales, rot_quats=rot_quats,
             opacities=opacities, color_logits=color_logits,
         )
-        buffers.zero_adam_state(self.buffers)
+        # Zero the Adam moments device-side (one clear kernel over the AdamState
+        # buffer). Replaces a full GPU->CPU readback that existed only to size a
+        # host zero-array — wasteful (>1 GB at a large --max-splats).
+        self._dispatch(self.k_clear_adam_state, "clear_adam_state",
+            thread_count=[self.max_splats, 1, 1],
+            adam_state=self.buffers.adam_state.storage,
+            max_splats=self.max_splats)
         self.iteration = 0
 
     def set_gaussians_raw(self, floats: np.ndarray, count: int) -> None:
@@ -643,9 +748,9 @@ class Pipeline:
         self._extinction_hardness = float(hardness)
 
     def render(self, camera: Camera) -> None:
-        with self.gpu_lock:
-            self._run_forward(camera)
-            self.device.wait_for_idle()
+        with self.recording("render"):
+            self.rasterize(camera)
+        self.runtime.wait_for_idle()
 
     def read_output_image(self) -> np.ndarray:
         with self.gpu_lock:
@@ -1001,28 +1106,25 @@ class Pipeline:
         """
         if lrs is None:
             lrs = AdamLRs()
-        batch = self.runtime.command_batch("train_step")
-        self._batch = batch
-        with self._marker_group("clear_grads"):
-            # Hot path: only zero the 5 2D grad seeds. The 14 scalar param
-            # grad buffers are already zero because Adam zero'd them per-thread
-            # at the end of the previous iter (see _clear_2d_grad_seeds docs).
-            # Callers must ensure the scalar-grad invariant is seeded by
-            # running _clear_grads() once at pipeline setup.
-            self._clear_2d_grad_seeds()
-        with self._marker_group("forward"):
-            raster_ctx = self._run_forward(camera)
-        with self._marker_group("loss"):
-            self._run_loss()
-        with self._marker_group("backward"):
-            self._run_backward(raster_ctx, structure_tensor=structure_tensor,
-                               structure_kwargs=structure_kwargs)
-        with self._marker_group("regularization"):
-            self._run_regularization()
-        with self._marker_group("adam"):
-            self._run_adam(lrs)
-        self.last_submit_id = self.runtime.submit(batch).submit_id
-        self._batch = None
+        with self._recording("train_step"):
+            with self._marker_group("clear_grads"):
+                # Hot path: only zero the 5 2D grad seeds. The 14 scalar param
+                # grad buffers are already zero because Adam zero'd them per-thread
+                # at the end of the previous iter (see _clear_2d_grad_seeds docs).
+                # Callers must ensure the scalar-grad invariant is seeded by
+                # running _clear_grads() once at pipeline setup.
+                self._clear_2d_grad_seeds()
+            with self._marker_group("forward"):
+                raster_ctx = self._run_forward(camera)
+            with self._marker_group("loss"):
+                self._run_loss()
+            with self._marker_group("backward"):
+                self._run_backward(raster_ctx, structure_tensor=structure_tensor,
+                                   structure_kwargs=structure_kwargs)
+            with self._marker_group("regularization"):
+                self._run_regularization()
+            with self._marker_group("adam"):
+                self._run_adam(lrs)
 
     # ------------------------------------------------------------------
     # Densification (strategies + scoring live in trainer.densify; these
@@ -1039,9 +1141,11 @@ class Pipeline:
     def densify_simple(self, cfg, grad_thresh=0.0002, scale_thresh=None,
                        prune_big_scale=None, allow_scale_prune=True,
                        carry_eta=False) -> dict:
-        return _densify.densify_simple(self, cfg, grad_thresh, scale_thresh,
-                                       prune_big_scale, allow_scale_prune,
-                                       carry_eta)
+        if self.simple_densifier is None:
+            raise RuntimeError("densification is unavailable in viewer-only mode")
+        return self.simple_densifier.run(
+            cfg, grad_thresh, scale_thresh, prune_big_scale,
+            allow_scale_prune, carry_eta)
 
     def set_cameras(self, cameras: list) -> None:
         """Mip-Splatting setup: upload the (static) training-camera array and
@@ -1106,7 +1210,7 @@ class Pipeline:
             filter_coef=self._mip_filter_coef,
             max_splats=self.max_splats,
         )
-        self.device.wait_for_idle()
+        self.runtime.wait_for_idle()
 
     def reset_opacity(self, cfg) -> None:
         return _densify.reset_opacity(self, cfg)
@@ -1129,71 +1233,9 @@ class Pipeline:
               in_buf: spy.NDBuffer | None = None,
               out_buf: spy.NDBuffer | None = None,
               total_buf: spy.NDBuffer | None = None) -> None:
-        """Run a multi-level Blelloch scan on ``in_buf`` into ``out_buf``,
-        writing the total into ``total_buf[0]`` (default ``scan_total[0]``).
-
-        ``total_buf`` lets a caller redirect the scan total to a dedicated
-        buffer instead of the shared ``scan_total`` (which holds num_rendered
-        during the forward pass and must not be clobbered by a side scan).
-
-        Supports up to SCAN_BLOCK_SIZE^3 (~1 billion) elements via 3 levels.
-        """
-        b = self.buffers
+        """Compatibility delegate; new components receive ``scan_service``."""
         if in_buf is None:
-            in_buf = b.valid_mask_buffer
-        if out_buf is None:
-            out_buf = b.scan_buffer
-        if total_buf is None:
-            total_buf = b.scan_total
-
-        num_blocks = max(1, (n + SCAN_BLOCK_SIZE - 1) // SCAN_BLOCK_SIZE)
-
-        # Level 1: per-block scan, producing block_sums[num_blocks].
-        self._dispatch(self.k_scan_block, "scan_block",
-            thread_count=[num_blocks * SCAN_BLOCK_SIZE, 1, 1],
-            in_buf=in_buf.storage,
-            out_buf=out_buf.storage,
-            block_sums=b.scan_block_sums.storage,
-            n=n,
-        )
-
-        if num_blocks <= SCAN_BLOCK_SIZE:
-            # 2-level: single-workgroup scan of block sums.
-            self._dispatch(self.k_scan_block_sums, "scan_block_sums",
-                thread_count=[SCAN_BLOCK_SIZE, 1, 1],
-                block_sums=b.scan_block_sums.storage,
-                total_out=total_buf.storage,
-                num_blocks=num_blocks,
-            )
-        else:
-            # 3-level: scan block_sums using the same 2-level pattern.
-            num_l2_blocks = max(1, (num_blocks + SCAN_BLOCK_SIZE - 1) // SCAN_BLOCK_SIZE)
-            # Scan block_sums → block_sums (in-place prefix), with l2 block sums.
-            self._dispatch(self.k_scan_block, "scan_block",
-                thread_count=[num_l2_blocks * SCAN_BLOCK_SIZE, 1, 1],
-                in_buf=b.scan_block_sums.storage,
-                out_buf=b.scan_block_sums.storage,
-                block_sums=b.scan_block_sums_l2.storage,
-                n=num_blocks,
-            )
-            self._dispatch(self.k_scan_block_sums, "scan_block_sums",
-                thread_count=[SCAN_BLOCK_SIZE, 1, 1],
-                block_sums=b.scan_block_sums_l2.storage,
-                total_out=total_buf.storage,
-                num_blocks=num_l2_blocks,
-            )
-            self._dispatch(self.k_add_block_offsets, "add_block_offsets",
-                thread_count=[num_l2_blocks * SCAN_BLOCK_SIZE, 1, 1],
-                out_buf=b.scan_block_sums.storage,
-                block_sums=b.scan_block_sums_l2.storage,
-                n=num_blocks,
-            )
-
-        # Final: add block offsets to per-element results.
-        self._dispatch(self.k_add_block_offsets, "add_block_offsets",
-            thread_count=[num_blocks * SCAN_BLOCK_SIZE, 1, 1],
-            out_buf=out_buf.storage,
-            block_sums=b.scan_block_sums.storage,
-            n=n,
-        )
+            densification = self.buffers._require_densification()
+            in_buf = densification.valid_mask
+        self.scan_service.scan(n, in_buf, out_buf, total_buf)
 

@@ -107,9 +107,8 @@ def test_densify_action_counts(backend: str) -> None:
 
 
 @pytest.mark.parametrize("backend", BACKENDS)
-def test_densify_clone_halves_opacity(backend: str) -> None:
-    """A small gaussian with high importance should be CLONED with halved
-    opacity on both parent and clone."""
+def test_densify_clone_copies_opacity(backend: str) -> None:
+    """A reference-3DGS clone is an exact parameter copy with fresh moments."""
     pipeline = _setup(backend)
 
     pipeline.set_gaussians_from_numpy(
@@ -143,8 +142,9 @@ def test_densify_clone_halves_opacity(backend: str) -> None:
     assert stats["final_count"] == 2
 
     post = _read_gaussians(pipeline)
-    # Both should have opacity logit corresponding to 0.7/2 = 0.35
-    expected_logit = float(np.log(0.35 / (1.0 - 0.35)))
+    # duplicate()/clone copies opacity unchanged. Halving parent+child is not
+    # alpha-neutral and drove repeated clones toward transparent floater haze.
+    expected_logit = float(np.log(0.7 / (1.0 - 0.7)))
     np.testing.assert_allclose(post[0, 10], expected_logit, atol=1e-4)
     np.testing.assert_allclose(post[1, 10], expected_logit, atol=1e-4)
 

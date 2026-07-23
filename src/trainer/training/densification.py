@@ -19,6 +19,8 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING, Callable
 
+from trainer.config_types import DensificationMode
+
 if TYPE_CHECKING:
     import argparse
 
@@ -37,6 +39,7 @@ class DensificationController:
         *,
         pipeline: "Pipeline",
         args: "argparse.Namespace",
+        densify_mode: DensificationMode,
         densify_cfg,
         structure_cfg,
         extent: float,
@@ -58,6 +61,7 @@ class DensificationController:
     ) -> None:
         self._pipeline = pipeline
         self._args = args
+        self._densify_mode = densify_mode
         self._densify_cfg = densify_cfg
         self._structure_cfg = structure_cfg
         self._extent = extent
@@ -83,6 +87,7 @@ class DensificationController:
         # verbatim lift of the original inline ``if do_densify:`` block.
         pipeline = self._pipeline
         args = self._args
+        mode = self._densify_mode
         densify_cfg = self._densify_cfg
         structure_cfg = self._structure_cfg
         extent = self._extent
@@ -117,7 +122,7 @@ class DensificationController:
         _diag_rec = None
         if densify_diag_json is not None:
             _diag_rec = _diag.capture_pre(
-                pipeline, structure=args.structure_densify,
+                pipeline, structure=(mode == DensificationMode.STRUCTURE_AWARE),
                 width=IMAGES_WIDTH, height=IMAGES_HEIGHT,
                 structure_cfg=structure_cfg,
                 grad_thresh_internal=_diag_grad_internal,
@@ -140,7 +145,8 @@ class DensificationController:
         # reset every filler tick (~10). A STRUCTURE tick instead clears eta
         # afterward to start a fresh window (SADGS zeroes eta right after a
         # normal/structure densification). Non-SAD paths never touch eta.
-        sad_carry_eta = args.structure_densify and not do_structure_step
+        sad_carry_eta = (mode == DensificationMode.STRUCTURE_AWARE
+                         and not do_structure_step)
 
         if do_structure_step:
             # Print the resolved bundle settings at every structure pass so
@@ -148,9 +154,9 @@ class DensificationController:
             # active (they are OFF unless the flags were passed).
             _print_opacity_bundle(f"structure pass @ iter {it}")
             stats = pipeline.densify_structure_aware(structure_cfg)
-        elif args.structure_densify:
+        elif mode == DensificationMode.STRUCTURE_AWARE:
             # Interleaved AbsGS gradient densify (dual-schedule filler). Same
-            # gentle gradient clone/split as --simple-densify; scale prune
+            # gentle gradient clone/split as --densify-mode simple; scale prune
             # gated on step > reset_every so kNN-init blobs aren't culled
             # before structure densify can subdivide them.
             allow_scale_prune = it > args.reset_every
@@ -162,7 +168,7 @@ class DensificationController:
                 allow_scale_prune=allow_scale_prune,
                 carry_eta=True,
             )
-        elif args.simple_densify:
+        elif mode == DensificationMode.SIMPLE:
             # we gate the too-big prune on step > reset_every: don't delete large kNN-init blobs before densification can split them
             #And normalize the prune threshold by scene extent
             allow_scale_prune = it > args.reset_every
@@ -173,7 +179,7 @@ class DensificationController:
                 prune_big_scale=extent * args.prune_scale3d,
                 allow_scale_prune=allow_scale_prune,
             )
-        elif args.importance_score_densify:
+        elif mode == DensificationMode.IMPORTANCE:
             # Score-ranked densification with importance scoring.
             n_score = min(densify_cfg.n_scoring_views, n_cams)
             score_indices = rng.choice(n_cams, size=n_score, replace=False)
@@ -206,7 +212,7 @@ class DensificationController:
         #     already permuted eta through the compaction, so DON'T clear —
         #     the window keeps accumulating across the whole structure
         #     interval. The Morton sort below must then also carry eta.
-        if args.structure_densify and not sad_carry_eta:
+        if mode == DensificationMode.STRUCTURE_AWARE and not sad_carry_eta:
             pipeline.clear_structure_scores()
         # Morton re-sort after every densify: the fresh gaussians live at
         # the tail of the buffer (appended by split_and_clone), so a
@@ -234,7 +240,7 @@ class DensificationController:
         if stats.get("final_count") is not None:
             cur_n_gaussians = stats["final_count"]
         kind = "structure" if do_structure_step else (
-            "absgs" if args.structure_densify else "densify")
+            "absgs" if mode == DensificationMode.STRUCTURE_AWARE else "densify")
         densify_json.write(json.dumps(
             {"iter": it, "event": "densify", "kind": kind, **stats}) + "\n")
 
@@ -248,7 +254,7 @@ class DensificationController:
         # concentration, after densify + morton have settled.
         if _diag_rec is not None:
             _diag_rec = _diag.capture_post(pipeline, _diag_rec,
-                                           structure=args.structure_densify)
+                                           structure=(mode == DensificationMode.STRUCTURE_AWARE))
             _diag_rec["iter"] = it
             _diag_rec["kind"] = kind
             densify_diag_json.write(json.dumps(_diag_rec) + "\n")

@@ -3,21 +3,18 @@
 Extracts ``Pipeline._run_loss``'s SSIM / L1+L2 logic so the loss can be recorded
 independently of HOW the pixels were produced (a future learned render head or a
 different primitive reuses it unchanged). ``ImageLoss.record`` emits into a
-:class:`~trainer.gpu.CommandBatch` — or does an immediate dispatch when no batch
-is active, matching the pipeline's dispatch routing (the ``forward_and_loss``
-test path runs with no active batch) — and returns the image-space gradient
-texture the backward consumes.
+caller batch or creates one runtime-owned transient batch for the complete
+multi-pass loss. It returns the image-space gradient texture the backward uses.
 """
 
 from __future__ import annotations
 
-import contextlib
 from dataclasses import dataclass
 
 import slangpy as spy
 
 from trainer.config import RenderConfig
-from trainer.gpu import CommandBatch
+from trainer.gpu import CommandBatch, GpuRuntime
 
 
 @dataclass(frozen=True)
@@ -35,7 +32,7 @@ class ImageLoss:
 
     def __init__(self, *, ssim_maps_kernel, ssim_grad_kernel, loss_kernel,
                  ssim_m1, ssim_m2, ssim_m3, image_gradient: spy.Texture,
-                 width: int, height: int) -> None:
+                 width: int, height: int, runtime: GpuRuntime) -> None:
         self._k_ssim_maps = ssim_maps_kernel
         self._k_ssim_grad = ssim_grad_kernel
         self._k_loss = loss_kernel
@@ -45,22 +42,20 @@ class ImageLoss:
         self._image_gradient = image_gradient
         self._width = width
         self._height = height
-
-    # Dispatch routing mirrors Pipeline._dispatch/_marker_group: record into the
-    # active batch, or immediate-dispatch (command_encoder=None) when there is
-    # none (the forward_and_loss test path).
-    @staticmethod
-    def _emit(batch: CommandBatch | None, kernel, marker: str, **kwargs) -> None:
-        if batch is not None:
-            batch.dispatch(kernel, marker, **kwargs)
-        else:
-            kernel.dispatch(command_encoder=None, **kwargs)
+        self._runtime = runtime
 
     @staticmethod
-    def _group(batch: CommandBatch | None, label: str):
-        return batch.marker_group(label) if batch is not None else contextlib.nullcontext()
+    def _emit(batch: CommandBatch, kernel, marker: str, **kwargs) -> None:
+        batch.dispatch(kernel, marker, **kwargs)
+
+    @staticmethod
+    def _group(batch: CommandBatch, label: str):
+        return batch.marker_group(label)
 
     def record(self, batch: CommandBatch | None, *, rendered: spy.Texture, target: spy.Texture, cfg: RenderConfig) -> LossResult:
+        owned_batch = batch is None
+        if batch is None:
+            batch = self._runtime.command_batch("image_loss")
         dims = spy.uint2(self._width, self._height)
         if cfg.lambda_ssim > 0:
             # Two-pass SSIM: pass 1 builds the m1/m2/m3 back-projection maps,
@@ -100,4 +95,6 @@ class ImageLoss:
                     w_alpha=cfg.w_alpha,
                     lambda_l2=cfg.lambda_l2,
                 )
+        if owned_batch:
+            self._runtime.submit(batch)
         return LossResult(image_gradient=self._image_gradient)

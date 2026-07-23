@@ -55,6 +55,7 @@ KERNEL_SPECS: tuple[tuple[str, str, str], ...] = (
     # optimizers
     ("adam",                 "optimizers/adam.slang",                          "adamStep"),
     ("grad_clear",           "optimizers/grad_utils.slang",                    "clearGradBuffer"),
+    ("clear_adam_state",     "optimizers/grad_utils.slang",                    "clearAdamState"),
     # densify
     ("clear_tracking",       "densify/clear_tracking.slang",                   "clearTracking"),
     ("accumulate_iter",      "densify/accumulate_iter.slang",                  "accumulateIter"),

@@ -15,9 +15,11 @@ from __future__ import annotations
 from v2_train import build_parser
 
 # dest -> default, exactly as build_parser() defines today. This is the frozen
-# CLI contract. Includes the intentionally-quirky `store_true, default=True`
-# flags (cluster_cull / structure_densify / sad_relative_reset) — the refactor
-# must PRESERVE them, not "fix" them, so they are pinned as True here.
+# CLI contract. The former quirky `store_true, default=True` flags were fixed by
+# the CLI/config-correctness refactor: cluster_cull / sad_relative_reset are now
+# BooleanOptionalAction (still default True, but --no-... can disable them), and
+# the three overlapping densify booleans (simple / importance / structure) were
+# replaced by the single --densify-mode choice (default "structure_aware").
 EXPECTED_DEFAULTS = {
     "scene": "datasets/360_v2/bonsai",
     "iters": 3000,
@@ -53,9 +55,7 @@ EXPECTED_DEFAULTS = {
     "profile_every": 0,
     "morton_every": 0,
     "cluster_cull": True,
-    "simple_densify": False,
-    "importance_score_densify": False,
-    "structure_densify": True,
+    "densify_mode": "structure_aware",
     "sad_tau_split": 0.4,
     "sad_tau_prune": 0.8,
     "sad_grad_threshold": 1e-5,

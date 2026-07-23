@@ -10,13 +10,17 @@ the queue in the hot path. Extracted from the training entry's nested
 from __future__ import annotations
 
 from collections import deque
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from trainer.gpu import GpuRuntime
 
 
 class QueueLimiter:
-    """Fence-based queue-depth cap over a device's submit IDs."""
+    """Fence-based queue-depth cap over runtime-owned submit IDs."""
 
-    def __init__(self, device, max_depth: int = 1) -> None:
-        self._device = device
+    def __init__(self, runtime: "GpuRuntime", max_depth: int = 1) -> None:
+        self._runtime = runtime
         self._max_depth = max_depth
         self._ring: deque[int] = deque()
 
@@ -25,7 +29,7 @@ class QueueLimiter:
         if len(self._ring) >= self._max_depth:
             oldest = self._ring.popleft()
             if oldest:  # 0 means "no submit yet"
-                self._device.wait_for_submit(oldest)
+                self._runtime.wait_for_submit(oldest)
 
     def record(self, submit_id: int) -> None:
         """Add a submit ID to the window."""

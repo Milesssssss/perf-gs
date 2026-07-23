@@ -19,7 +19,8 @@
 
 #include "checkpoint.slang"   // RASTER_BUCKET_SIZE
 
-static const uint TILE_SIZE = 16u;
+#include "generated/execution_contract.slang"
+static const uint TILE_SIZE = CONTRACT_TILE_SIZE;
 static const uint TILE_AREA = TILE_SIZE * TILE_SIZE;   // 256
 static const uint FLAT_WARPS_PER_WG = 8u;              // 256 threads / 32 lanes
 

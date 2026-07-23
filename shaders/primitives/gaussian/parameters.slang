@@ -33,9 +33,10 @@ struct GaussianParameterStorage : IPrimitiveParameterStorage<GaussianChannel::Co
         cursor.offset = 0u;
         primitive.mean = cursor.read3(values.data);
         primitive.log_scale = cursor.read3(values.data);
-        primitive.rot_quat = normalize(cursor.read4(values.data));
+        primitive.rot_quat = cursor.read4(values.data);
         primitive.opacity = cursor.read1(values.data);
         primitive.sh0 = cursor.read3(values.data);
+        normalizeGaussian3D(primitive);
         primitives[index] = primitive;
     }
 }

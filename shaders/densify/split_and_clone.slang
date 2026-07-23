@@ -82,20 +82,12 @@ Gaussian3D _child_for_split(Gaussian3D parent, uint seed)
     return child;
 }
 
+// Zero-initialized AdamState: children start with fresh Adam moments. Uses the
+// Slang zero-init cast so it never enumerates AdamState's contract-generated
+// fields (a new moment field needs no edit here).
 AdamState _zero_adam()
 {
-    AdamState s;
-    s.mean_m = float3(0, 0, 0);
-    s.mean_v = float3(0, 0, 0);
-    s.log_scale_m = float3(0, 0, 0);
-    s.log_scale_v = float3(0, 0, 0);
-    s.rot_m = float4(0, 0, 0, 0);
-    s.rot_v = float4(0, 0, 0, 0);
-    s.opacity_m = 0.0;
-    s.opacity_v = 0.0;
-    s.color_m = float3(0, 0, 0);
-    s.color_v = float3(0, 0, 0);
-    return s;
+    return (AdamState)0;
 }
 
 [shader("compute")]

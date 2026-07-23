@@ -26,7 +26,8 @@
 #include "../common/types.slang"
 #include "../common/math.slang"
 
-static const uint CLUSTER_SIZE = 128;
+#include "generated/execution_contract.slang"
+static const uint CLUSTER_SIZE = CONTRACT_CLUSTER_SIZE;
 static const float K_SIGMA = 3.0;  // 3-sigma ellipsoid extent
 
 // Per-cluster reduction scratch (min/max across 128 gaussian AABBs).

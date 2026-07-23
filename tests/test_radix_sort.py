@@ -11,19 +11,20 @@ import numpy as np
 import pytest
 import slangpy as spy
 
+from trainer.contracts import EXECUTION
 from trainer.device import SHADERS_DIR, create_device
 
 
 BACKENDS = ["vulkan", "d3d12"]
 
 
-# Must match device_radix_sort.slang.
-PART_SIZE = 2048
+# Shader execution parameters come from the same host<->shader contract.
+PART_SIZE = EXECUTION.radix_part_size
 US_DIM = 128
 SCAN_DIM = 128
-D_DIM = 256
-RADIX = 256
-GLOBAL_HIST_SIZE = RADIX * 8  # 2048 — one 256-region per pass
+D_DIM = EXECUTION.radix_digits
+RADIX = EXECUTION.radix_digits
+GLOBAL_HIST_SIZE = EXECUTION.radix_global_hist_size
 
 
 def _make_device_and_kernels(backend: str):

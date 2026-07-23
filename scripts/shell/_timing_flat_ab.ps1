@@ -35,7 +35,7 @@ foreach ($s in $scenes) {
         else { $bwd = "--no-flat-bucket-backward" }
         Write-Host "==================== [$(Get-Date -Format HH:mm:ss)] $runName ===================="
         & $py scripts/running/v2_train.py --scene $s.path --iters 3000 `
-            --structure-densify --mip-splatting --mip-kernel-size 0.1 `
+            --densify-mode structure_aware --mip-splatting --mip-kernel-size 0.1 `
             --sample-mode sadgs --preview-every 0 --eval-every 0 `
             --final-test-psnr `
             --no-viewer --seed 0 --run-name $runName $bwd 2>&1 |

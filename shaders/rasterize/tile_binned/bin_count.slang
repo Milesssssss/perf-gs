@@ -18,8 +18,9 @@
 
 //TODO: I believe this and bin_emit.slang could be merged into a single kernel, mot likely
 
-static const uint TILE_SIZE = 16;
-static const uint CLUSTER_SIZE = 128;  // must match cluster_cull.slang
+#include "generated/execution_contract.slang"
+static const uint TILE_SIZE = CONTRACT_TILE_SIZE;
+static const uint CLUSTER_SIZE = CONTRACT_CLUSTER_SIZE;
 
 [shader("compute")]
 [numthreads(256, 1, 1)]

@@ -14,11 +14,11 @@ import numpy as np
 import pytest
 import slangpy as spy
 
+from trainer.contracts import SCAN_BLOCK_SIZE
 from trainer.device import SHADERS_DIR, create_device
 
 
 BACKENDS = ["vulkan", "d3d12"]
-SCAN_BLOCK_SIZE = 1024
 
 
 def _make_kernels(backend: str):

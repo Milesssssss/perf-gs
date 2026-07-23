@@ -45,10 +45,13 @@ from multiprocessing import shared_memory
 
 import numpy as np
 
+from trainer.contracts import GAUSSIAN_FLOAT_COUNT
+
 MAGIC = 0x53504C54  # 'SPLT'
 VERSION = 1
 HEADER_BYTES = 64
-FLOATS_PER_SPLAT = 14  # mean3, log_scale3, rot_quat4, opacity1, sh0_3
+# Packed Gaussian layout width — from the authoritative contract, not a local 14.
+FLOATS_PER_SPLAT = GAUSSIAN_FLOAT_COUNT  # mean3, log_scale3, rot_quat4, opacity1, sh0_3
 
 # The trainer writes its live stream name here; the viewer reads it when no
 # --stream is given. Single source of truth for both processes.
@@ -164,7 +167,7 @@ class SplatStreamWriter:
         Piggyback this on a point where the training loop is already syncing
         (log/preview/densify) so the GPU->CPU readback is not an extra stall.
         """
-        pipeline.device.wait_for_idle()
+        pipeline.runtime.wait_for_idle()
         raw = pipeline.buffers.gaussians.to_numpy()
         floats = np.frombuffer(raw, dtype=np.float32)
         count = int(pipeline.buffers.num_gaussians_counter.to_numpy().view(np.uint32)[0])

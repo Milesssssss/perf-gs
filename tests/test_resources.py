@@ -78,7 +78,7 @@ def test_densify_configs_extent_scaling() -> None:
 
 
 def test_loss_and_lrs_sad_match() -> None:
-    args = _args(structure_densify=True, sad_match_loss_lrs=True)
+    args = _args(densify_mode="structure_aware", sad_match_loss_lrs=True)
     l2, ssim, base = resolve_loss_and_lrs(args)
     assert l2 == args.sad_lambda_l2
     assert ssim == args.lambda_ssim
@@ -86,7 +86,7 @@ def test_loss_and_lrs_sad_match() -> None:
 
 
 def test_loss_and_lrs_defaults_when_not_structure() -> None:
-    args = _args(structure_densify=False)
+    args = _args(densify_mode="simple")
     l2, ssim, base = resolve_loss_and_lrs(args)
     default = AdamLRs()
     assert l2 == args.lambda_l2
