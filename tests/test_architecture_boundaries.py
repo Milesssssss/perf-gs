@@ -6,6 +6,7 @@ import ast
 from pathlib import Path
 
 from trainer import buffers
+from trainer.config_types import DensificationMode
 from trainer.simple_densifier import SimpleDensifier
 
 
@@ -42,3 +43,30 @@ def test_capability_resources_are_real_dataclasses() -> None:
         buffers.EtaResources,
     ):
         assert hasattr(capability, "__dataclass_fields__")
+
+
+def test_fastgs_importance_path_is_absent() -> None:
+    forbidden_symbols = {
+        "importance_score", "importance_score_accum", "FastGS",
+        "densify_score", "growth_budget", "prune_budget",
+        "error_mask", "l1_map", "l1_minmax", "loss_thresh",
+    }
+    production = []
+    for root in (ROOT / "src" / "trainer", ROOT / "shaders"):
+        for path in root.rglob("*"):
+            if path.suffix in {".py", ".slang"}:
+                production.append(path.read_text(encoding="utf-8"))
+    text = "\n".join(production)
+    assert all(symbol not in text for symbol in forbidden_symbols)
+    assert tuple(mode.value for mode in DensificationMode) == (
+        "none", "simple", "structure_aware")
+    for field in (
+        "importance_score_accum", "growth_budget", "prune_budget",
+        "error_mask", "l1_map", "l1_minmax", "densify_score",
+    ):
+        assert field not in buffers.GaussianBuffers.__dataclass_fields__
+    for shader in (
+        "clear_importance.slang", "compute_error_mask.slang",
+        "decide_actions.slang", "score_forward.slang",
+    ):
+        assert not (ROOT / "shaders" / "densify" / shader).exists()

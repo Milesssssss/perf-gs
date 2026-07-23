@@ -185,7 +185,7 @@ Each run writes to `outputs/train/<run-name>/`: a `log.jsonl`, a `final_psnr.jso
 
 - **A new primitive.** Add a folder under `shaders/primitives/`, implement the small project / evaluate / covariance interface, and register a specialization. The rasterizer talks to primitives through that interface, not concrete types.
 - **A new loss.** Drop a kernel in `shaders/losses/` and add it to the image-loss pass; the Python side reads it back like the existing L2 and SSIM terms.
-- **A new densification strategy.** Extend the controller in `training/densification.py`; the four existing modes (structure-aware, AbsGS filler, simple, importance-score) show the shape.
+- **A new densification strategy.** Extend the controller in `training/densification.py`; the structure-aware path, its AbsGS filler, and simple 3DGS mode show the shape.
 - **A new backend.** When slang-rhi gains one, add it to `create_device` and the backend smoke test. The shaders do not change.
 
 ## Testing

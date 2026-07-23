@@ -58,7 +58,8 @@ class TrainingSchedule:
     def events_at(self, it: int) -> IterationEvents:
         c = self._cfg
 
-        do_densify = (c.densify_from < it <= c.densify_to
+        do_densify = (c.densify_mode != DensificationMode.NONE
+                  and c.densify_from < it <= c.densify_to
                       and (it - c.densify_from) % c.densify_every == 0)
         do_opacity_reset = (c.reset_every > 0 and it % c.reset_every == 0
                             and c.densify_from <= it <= c.densify_to)

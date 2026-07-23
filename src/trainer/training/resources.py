@@ -81,11 +81,8 @@ def build_densify_configs(
     """Construct the :class:`DensifyConfig` + :class:`StructureConfig` from CLI
     args and the scene extent (extent-scaled scale thresholds)."""
     cfg = DensifyConfig(
-        n_scoring_views=args.n_scoring_views,
-        loss_thresh=args.loss_thresh,
         t_opacity=args.t_opacity,
         t_big_scale=args.t_big_scale * extent,
-        opacity_cap=args.opacity_cap,
         t_opacity_reset_value=args.opacity_reset_value,
         # SADGS RELATIVE opacity reset (opacity bundle ablation).
         reset_relative=args.sad_relative_reset,

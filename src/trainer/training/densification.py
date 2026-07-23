@@ -1,8 +1,8 @@
 """Densification subsystem controller for the training loop.
 
 The v2 loop's ``if do_densify:`` block was ~200 lines of tightly-ordered GPU work
-mixing four densify-mode branches (structure-aware / AbsGS filler / simple /
-importance-score) with the SAD-GS eta-window carry logic, a post-densify Morton
+mixing structure-aware / AbsGS filler / simple branches with the SAD-GS eta-window
+carry logic, a post-densify Morton
 re-sort, the Mip-Splatting filter recompute, population-trajectory snapshots and
 a read-back diagnostics pass. :class:`DensificationController` owns that whole
 subsystem: it is constructed once with its dependencies, and :meth:`run` executes
@@ -32,7 +32,7 @@ if TYPE_CHECKING:
 
 
 class DensificationController:
-    """Owns the per-tick densification pipeline (all four modes + bookkeeping)."""
+    """Owns simple/structure densification plus bookkeeping."""
 
     def __init__(
         self,
@@ -43,11 +43,6 @@ class DensificationController:
         densify_cfg,
         structure_cfg,
         extent: float,
-        n_init: int,
-        n_cams: int,
-        rng,
-        scene,
-        target_textures,
         image_width: int,
         image_height: int,
         morton_world_min,
@@ -65,11 +60,6 @@ class DensificationController:
         self._densify_cfg = densify_cfg
         self._structure_cfg = structure_cfg
         self._extent = extent
-        self._n_init = n_init
-        self._n_cams = n_cams
-        self._rng = rng
-        self._scene = scene
-        self._target_textures = target_textures
         self._image_width = image_width
         self._image_height = image_height
         self._morton_world_min = morton_world_min
@@ -91,11 +81,6 @@ class DensificationController:
         densify_cfg = self._densify_cfg
         structure_cfg = self._structure_cfg
         extent = self._extent
-        n_init = self._n_init
-        n_cams = self._n_cams
-        rng = self._rng
-        scene = self._scene
-        target_textures = self._target_textures
         IMAGES_WIDTH = self._image_width
         IMAGES_HEIGHT = self._image_height
         morton_world_min = self._morton_world_min
@@ -179,22 +164,6 @@ class DensificationController:
                 prune_big_scale=extent * args.prune_scale3d,
                 allow_scale_prune=allow_scale_prune,
             )
-        elif mode == DensificationMode.IMPORTANCE:
-            # Score-ranked densification with importance scoring.
-            n_score = min(densify_cfg.n_scoring_views, n_cams)
-            score_indices = rng.choice(n_cams, size=n_score, replace=False)
-            score_cameras = [scene.images[i].camera for i in score_indices]
-            score_targets = [target_textures[i] for i in score_indices]
-
-            n_densify_steps = (args.densify_to - args.densify_from) // args.densify_every + 1
-            densify_step = (it - args.densify_from) // args.densify_every + 1
-
-            pipeline.compute_importance_scores(score_cameras, score_targets, densify_cfg)
-            stats = pipeline.densify(densify_cfg,
-                                        densify_step=densify_step,
-                                        n_densify_steps=n_densify_steps,
-                                        init_count=n_init)
-
         # densify_simple did its own submit_command_buffer inside
         # (one encoder for the whole pass). Add its submit to the
         # backpressure ring so it's subject to the same queue-depth cap.

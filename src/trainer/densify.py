@@ -1,13 +1,4 @@
-"""Densification strategies, importance scoring, and opacity reset.
-
-Two strategies live here:
-- :func:`densify` (score-ranked / FastGS): score → CPU rank → select top-B →
-  split/clone → compact. Uses CPU readback (breaks async), for the score path.
-- :func:`densify_simple` (reference 3DGS): threshold on avg_grad, fully
-  wait-free (all GPU, no readback).
-
-Plus :func:`compute_importance_scores` (the scoring pass feeding ``densify``)
-and :func:`reset_opacity`.
+"""Simple/structure-aware densification, Morton sorting, and opacity reset.
 
 These operate ON a :class:`~trainer.pipeline.Pipeline`: they dispatch its
 kernels, read/write its buffer bag, and use its ``_scan`` / ``_run_forward`` /
@@ -25,28 +16,13 @@ from typing import TYPE_CHECKING
 import numpy as np
 import slangpy as spy
 
-from trainer.contracts import gaussian_numpy_dtype
-
 if TYPE_CHECKING:
     from trainer.pipeline import Pipeline
 
 
 @dataclass
 class DensifyConfig:
-    """Threshold-free score-ranked densification with budget-scheduled growth.
-
-    Growth follows a sqrt schedule from initial count to max_splats over
-    the densification window. The budget at each step is deterministic.
-
-    Growth selection is purely rank-based: the top-B gaussians by
-    composite score get densified each step. No signal thresholds — the
-    schedule determines how many, the ranking determines which ones.
-
-    Score = importance * avg_grad * opacity * surface_area_proxy.
-    Split/clone classification: median surface area within the selected set.
-    """
-    n_scoring_views: int = 10       # cameras sampled for importance scoring
-    loss_thresh: float = 0.1        # L1 threshold for binary error mask
+    """Shared simple-densify and opacity-reset thresholds."""
     t_opacity: float = 0.005        # prune if sigmoid(opacity) < this. MUST stay BELOW
                                     # t_opacity_reset_value (0.01): reset clamps opacity down
                                     # to the reset value, so a floor ABOVE it prunes every
@@ -54,7 +30,6 @@ class DensifyConfig:
                                     # prune 0.005 < reset 0.01 so reset splats survive and only
                                     # genuinely-dead ones decaying below 0.005 get culled.
     t_big_scale: float = 0.1        # prune if max_scale > this (world-space floater removal)
-    opacity_cap: float = 0.8        # post-densify opacity cap (softer than reset)
     t_opacity_reset_value: float = 0.01  # reset opacity to this value (CLAMP mode)
     # Opacity-reset mode. False (default): gsplat CLAMP — opacity <- min(opacity,
     # logit(t_opacity_reset_value)). True: SADGS RELATIVE decay — opacity <-
@@ -102,236 +77,6 @@ class StructureConfig:
     # args.dense * scene_extent. A triggered gaussian with max world-space scale
     # <= this is CLONED (exact duplicate); larger ones are anisotropically split.
     dense_scale: float = 0.0         # dense * extent, in world units; set by the caller
-
-
-def compute_importance_scores(
-    pipeline: Pipeline,
-    cameras: list,
-    target_textures: list,
-    cfg: DensifyConfig,
-) -> None:
-    """Run N scoring views to accumulate per-gaussian importance scores.
-
-    For each view: render → compute binary error mask → walk tiles and
-    count how many high-error pixels each gaussian touches. Results
-    accumulate into buffers.importance_score_accum (uint per gaussian).
-    """
-    b = pipeline.buffers
-
-    pipeline.dispatch(pipeline.k_clear_importance, "clear_importance",
-        thread_count=[pipeline.max_splats, 1, 1],
-        importance_score_accum=b.importance_score_accum.storage,
-        max_splats=pipeline.max_splats,
-    )
-
-    for cam, target_tex in zip(cameras, target_textures):
-        raster = pipeline.rasterize(cam)
-
-        # Initialize minmax: min=+inf (0x7f7fffff), max=0 (0x00000000).
-        b.l1_minmax.copy_from_numpy(np.array([0x7f7fffff, 0x00000000], dtype=np.uint32))
-
-        # Pass 1: compute L1 per pixel, find min/max.
-        pipeline.dispatch(pipeline.k_compute_l1_minmax, "compute_l1_minmax",
-            thread_count=[pipeline.width, pipeline.height, 1],
-            output_image=b.output_image,
-            target_image=target_tex,
-            l1_map=b.l1_map,
-            minmax_buf=b.l1_minmax.storage,
-            frame_dim=spy.uint2(pipeline.width, pipeline.height),
-        )
-
-        # Pass 2: normalize and threshold.
-        pipeline.dispatch(pipeline.k_compute_error_mask, "compute_error_mask",
-            thread_count=[pipeline.width, pipeline.height, 1],
-            l1_map=b.l1_map,
-            minmax_buf=b.l1_minmax.storage,
-            error_mask=b.error_mask,
-            frame_dim=spy.uint2(pipeline.width, pipeline.height),
-            loss_thresh=cfg.loss_thresh,
-        )
-
-        sorted_values = raster.sorted_ids
-        pipeline.dispatch(pipeline.k_score_forward, "score_forward",
-            thread_count=[b.num_tiles_x * 16, b.num_tiles_y * 16, 1],
-            gaussians=b.gaussians.storage,
-            projected_2d=b.projected_2d.storage,
-            tile_start=b.tile_start.storage,
-            tile_end=b.tile_end.storage,
-            sorted_gaussian_ids=sorted_values.storage,
-            camera=pipeline.camera_buffer,
-            error_mask=b.error_mask,
-            importance_score_accum=b.importance_score_accum.storage,
-        )
-
-
-def densify(pipeline: Pipeline, cfg: DensifyConfig,
-            densify_step: int, n_densify_steps: int,
-            init_count: int) -> dict:
-    """Run one densification pass: score → rank → select top-B → split/clone.
-
-    Growth follows a sqrt schedule: target(x) = S + (B - S) * sqrt(x/N).
-    Front-loads growth (large steps early when sparse, tapering toward
-    the target). The per-step budget is max(0, target - current_count),
-    catching up if pruning dropped the count below the curve.
-
-    Phases:
-      A  decide_actions     - compute scores, apply pruning rules
-      B  (CPU) rank+select  - top-B by score, classify split/clone by scale
-      C  split_and_clone    - append children, overwrite parent slot for splits
-      D  build_prune_mask   - mark valid[i] across post-split range
-      E  scan + compact     - prefix-sum + scatter
-
-    Returns a stats dict for logging.
-    """
-    ACTION_KEEP = 0
-    ACTION_SPLIT = 1
-    ACTION_CLONE = 2
-    ACTION_PRUNE = 3
-
-    b = pipeline.buffers
-
-    pipeline.runtime.wait_for_idle()
-    pre_count = int(b.num_gaussians_counter.to_numpy().view(np.uint32)[0])
-    if pre_count == 0:
-        return {"pre_count": 0, "post_split_count": 0, "final_count": 0,
-                "n_split": 0, "n_clone": 0, "n_prune": 0, "n_keep": 0}
-
-    # Growth schedule: sqrt curve front-loads growth (big steps early when
-    # sparse, tapering as we approach target). Catch-up: if pruning dropped
-    # count below the curve, we grow more this step.
-    B = pipeline.max_splats
-    S = init_count
-    N = max(n_densify_steps, 1)
-    x = min(densify_step, N)
-    target_at_x = S + (B - S) * (x / N) ** 0.5
-    # The schedule is a continuous target population; round to the nearest
-    # primitive instead of flooring every step. Flooring systematically lags
-    # the curve and turns targets such as 5.999 into zero growth from count 5.
-    growth = max(0, int(round(target_at_x)) - pre_count)
-
-    # Prune budget: at most 50% of current count.
-    prune = max(1, pre_count // 2)
-    b.prune_budget.copy_from_numpy(np.array([prune], dtype=np.int32))
-
-    # Phase A: GPU computes scores and applies pruning.
-    pipeline.dispatch(pipeline.k_decide_actions, "decide_actions",
-        thread_count=[pre_count, 1, 1],
-        gaussians=b.gaussians.storage,
-        num_gaussians_counter=b.num_gaussians_counter.storage,
-        importance_score_accum=b.importance_score_accum.storage,
-        grad_mean_2d_mag_accum=b.grad_mean_2d_mag_accum.storage,
-        visibility_count_accum=b.visibility_count_accum.storage,
-        action=b.action_buffer.storage,
-        densify_score=b.densify_score.storage,
-        prune_budget=b.prune_budget.storage,
-        t_opacity=cfg.t_opacity,
-        t_big_scale=cfg.t_big_scale,
-        n_scoring_views=cfg.n_scoring_views,
-    )
-    pipeline.runtime.wait_for_idle()
-
-    # Phase B (CPU): read scores + actions, rank, select top-B.
-    actions_raw = b.action_buffer.to_numpy()
-    actions = np.frombuffer(actions_raw.tobytes(), dtype=np.uint32)[:pre_count].copy()
-
-    scores_raw = b.densify_score.to_numpy()
-    scores = np.frombuffer(scores_raw.tobytes(), dtype=np.float32)[:pre_count]
-
-    if growth > 0:
-        # Read gaussian scales for split/clone classification.
-        gauss_raw = b.gaussians.to_numpy()
-        gauss = np.frombuffer(gauss_raw.tobytes(), dtype=gaussian_numpy_dtype())
-        scales = np.exp(gauss["log_scale"][:pre_count])
-        # Surface area proxy: sum of pairwise axis products (∝ ellipsoid SA).
-        sa = (scales[:, 0] * scales[:, 1]
-            + scales[:, 0] * scales[:, 2]
-            + scales[:, 1] * scales[:, 2])
-
-        # Only consider non-pruned gaussians with positive score.
-        candidates = (actions == ACTION_KEEP) & (scores > 0)
-        candidate_indices = np.where(candidates)[0]
-
-        if len(candidate_indices) > 0:
-            candidate_scores = scores[candidate_indices]
-            # Select top-B by score (no threshold).
-            n_select = min(growth, len(candidate_indices))
-            top_local = np.argpartition(candidate_scores, -n_select)[-n_select:]
-            top_indices = candidate_indices[top_local]
-
-            # Classify by surface area: above-median → split (too big,
-            # needs subdivision), at/below → clone (right size, region
-            # needs more coverage). Relative to the selected set.
-            selected_sa = sa[top_indices]
-            sa_median = float(np.median(selected_sa))
-            for idx in top_indices:
-                if sa[idx] > sa_median:
-                    actions[idx] = ACTION_SPLIT
-                else:
-                    actions[idx] = ACTION_CLONE
-
-    # Write the final action buffer back to GPU.
-    action_upload = np.zeros(pipeline.max_splats, dtype=np.uint32)
-    action_upload[:pre_count] = actions
-    b.action_buffer.copy_from_numpy(action_upload)
-
-    # Phase C: split and clone (may increment counter).
-    # The shader now reads pre_count from a GPU buffer (unified path with
-    # densify_simple's wait-free dispatch); upload our Python-known value.
-    b.densify_pre_count.copy_from_numpy(np.array([pre_count], dtype=np.uint32))
-    pipeline.dispatch(pipeline.k_split_and_clone, "split_and_clone",
-        thread_count=[pre_count, 1, 1],
-        gaussians=b.gaussians.storage,
-        adam_state=b.adam_state.storage,
-        num_gaussians_counter=b.num_gaussians_counter.storage,
-        action=b.action_buffer.storage,
-        pre_count_buf=b.densify_pre_count.storage,
-        max_splats=pipeline.max_splats,
-    )
-    pipeline.runtime.wait_for_idle()
-    post_split_count = int(b.num_gaussians_counter.to_numpy().view(np.uint32)[0])
-    post_split_count = min(post_split_count, pipeline.max_splats)
-
-    # Phases D/E: compact. Same upload-then-pass-buffer pattern.
-    b.densify_post_count.copy_from_numpy(np.array([post_split_count], dtype=np.uint32))
-    pipeline.dispatch(pipeline.k_build_prune_mask, "build_prune_mask",
-        thread_count=[pipeline.max_splats, 1, 1],
-        action=b.action_buffer.storage,
-        valid_mask=b.valid_mask_buffer.storage,
-        pre_count_buf=b.densify_pre_count.storage,
-        post_count_buf=b.densify_post_count.storage,
-        max_splats=pipeline.max_splats,
-    )
-    pipeline.scan_service.scan(pipeline.max_splats, b.valid_mask_buffer)
-    pipeline.dispatch(pipeline.k_scatter_compact, "scatter_compact",
-        thread_count=[pipeline.max_splats, 1, 1],
-        gaussians_in=b.gaussians.storage,
-        adam_state_in=b.adam_state.storage,
-        valid_mask=b.valid_mask_buffer.storage,
-        scan=b.scan_buffer.storage,
-        gaussians_out=b.gaussians_scratch.storage,
-        adam_state_out=b.adam_state_scratch.storage,
-        max_splats=pipeline.max_splats,
-    )
-
-    pipeline.runtime.wait_for_idle()
-    final_count = int(b.scan_total.to_numpy().view(np.uint32)[0])
-    b.num_gaussians_counter.copy_from_numpy(np.array([final_count], dtype=np.uint32))
-    b.swap_primitive_storage()
-
-    n_keep  = int((actions == ACTION_KEEP).sum())
-    n_split = int((actions == ACTION_SPLIT).sum())
-    n_clone = int((actions == ACTION_CLONE).sum())
-    n_prune = int((actions == ACTION_PRUNE).sum())
-
-    return {
-        "pre_count": pre_count,
-        "post_split_count": post_split_count,
-        "final_count": final_count,
-        "n_keep": n_keep,
-        "n_split": n_split,
-        "n_clone": n_clone,
-        "n_prune": n_prune,
-    }
 
 
 def densify_simple(pipeline: Pipeline, cfg: DensifyConfig,
@@ -630,7 +375,7 @@ def morton_sort(pipeline: Pipeline, world_min: np.ndarray,
     Pass roughly the AABB of the initial point cloud padded by 20%.
 
     Slot-indexed window accumulators (grad_mean_2d_mag_accum,
-    visibility_count_accum, importance_score_accum) are NOT permuted
+    visibility_count_accum) are NOT permuted
     here — the caller MUST clear them via :func:`clear_tracking` after
     this returns, or the next densify reads statistics for the wrong slot.
 

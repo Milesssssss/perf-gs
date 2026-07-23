@@ -72,7 +72,7 @@ def test_densify_configs_extent_scaling() -> None:
     extent = 3.0
     cfg, structure_cfg = build_densify_configs(args, extent)
     assert cfg.t_big_scale == args.t_big_scale * extent
-    assert cfg.n_scoring_views == args.n_scoring_views
+    assert structure_cfg.n_scoring_views == args.n_scoring_views
     assert structure_cfg.dense_scale == args.grow_scale3d * extent
     assert structure_cfg.t_opacity == args.sad_structure_min_opacity
 

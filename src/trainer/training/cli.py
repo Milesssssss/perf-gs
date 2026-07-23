@@ -94,7 +94,6 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--densify-to", type=int, default=1900)
     #ap.add_argument("--opacity-reset-iters", type=int, nargs="*", default=[3000])
     ap.add_argument("--n-scoring-views", type=int, default=10)
-    ap.add_argument("--loss-thresh", type=float, default=0.1)
     ap.add_argument("--t-opacity", type=float, default=0.005,
                     help="prune splats with sigmoid(opacity) below this. MUST stay BELOW "
                          "--opacity-reset-value (default 0.01): opacity reset clamps every "
@@ -107,7 +106,6 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--reset-every", type=int, default=1200,
                     help="opacity-reset interval (gsplat reset_every). Big-scale prune is "
                          "disabled until after the first reset.")
-    ap.add_argument("--opacity-cap", type=float, default=1.0)
     ap.add_argument("--opacity-reg", type=float, default=0.00)
     ap.add_argument("--scale-reg", type=float, default=0.00)
     ap.add_argument("--w-alpha", type=float, default=0.0,
@@ -143,12 +141,9 @@ def build_parser() -> argparse.ArgumentParser:
                     choices=[m.value for m in DensificationMode],
                     default=DensificationMode.STRUCTURE_AWARE.value,
                     help="densification strategy the loop runs on a densify tick "
-                         "(default: structure_aware). Replaces the former "
-                         "--simple-densify / --importance-score-densify / "
-                         "--structure-densify booleans, which had ambiguous "
-                         "precedence. Modes: 'none' = no densification; 'simple' "
+                         "(default: structure_aware). Modes: 'none' = no "
+                         "densification; 'simple' "
                          "= reference 3DGS threshold-based clone/split; "
-                         "'importance_score' = score-ranked (FastGS); "
                          "'structure_aware' = SAD-GS anisotropic grid-split "
                          "(arXiv 2604.28016) with an interleaved AbsGS gradient "
                          "filler on the non-structure densify ticks.")

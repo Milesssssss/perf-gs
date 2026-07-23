@@ -237,16 +237,6 @@ class GaussianBuffers:
     grad_2d_x_iter: spy.NDBuffer = field(init=False)          # int64[max_splats], fixed-point
     grad_2d_y_iter: spy.NDBuffer = field(init=False)          # int64[max_splats], fixed-point
 
-    # --- FastGS importance scoring ---
-    importance_score_accum: spy.NDBuffer = field(init=False)  # uint[max_splats]
-    growth_budget: spy.NDBuffer = field(init=False)           # int[1]
-    prune_budget: spy.NDBuffer = field(init=False)            # int[1]
-    error_mask: spy.Texture = field(init=False)               # r32_uint, WxH
-    l1_map: spy.Texture = field(init=False)                   # r32_float, WxH
-    l1_minmax: spy.NDBuffer = field(init=False)               # uint[2]
-
-    # --- v2 densification scratch + pipeline state ---
-    densify_score: spy.NDBuffer = field(init=False)       # float[max_splats]
     # --- densify_simple wait-free dispatch state ---
     # Snapshots of num_gaussians_counter[0] taken via snapshotCount so that
     # splitAndClone/buildPruneMask/scatterCompact can read the counts they
@@ -582,16 +572,7 @@ def allocate(
     buffers.primitive = PrimitiveStorage(primitive_values, active_count, filter_3d)
     buffers.adam = AdamResources(adam_state)
 
-    # --- FastGS importance scoring ---
-    buffers.importance_score_accum = allocator.uint_buffer(max_splats)
-    buffers.growth_budget = allocator.typed_buffer("int", 1)
-    buffers.prune_budget = allocator.typed_buffer("int", 1)
-    buffers.error_mask = allocator.tex(spy.Format.r32_uint, "error_mask")
-    buffers.l1_map = allocator.tex(spy.Format.r32_float, "l1_map")
-    buffers.l1_minmax = allocator.uint_buffer(2)
-
     # --- v2 densification scratch + pipeline state ---
-    buffers.densify_score = allocator.typed_buffer("float", max_splats)
     primitive_scratch = allocator.typed_buffer(types.gaussian, max_splats)
     adam_scratch = allocator.typed_buffer(types.adam, max_splats)
     actions = allocator.uint_buffer(max_splats)

@@ -62,7 +62,8 @@ def test_module_golden(it, expected) -> None:
 
 def _inline(it, k):
     """Authoritative replica of the ORIGINAL inline v2_train schedule logic."""
-    do_densify = (k["densify_from"] < it <= k["densify_to"]
+    do_densify = (k["densify_mode"] != DensificationMode.NONE
+                  and k["densify_from"] < it <= k["densify_to"]
                   and (it - k["densify_from"]) % k["densify_every"] == 0)
     do_reset = (k["reset_every"] > 0 and it % k["reset_every"] == 0
                 and k["densify_from"] <= it <= k["densify_to"])
@@ -106,6 +107,7 @@ EQUIV_CONFIGS = [
     {"log_every": 25},
     {"mip_enabled": False},
     {"densify_mode": DensificationMode.SIMPLE},
+    {"densify_mode": DensificationMode.NONE},
 ]
 
 

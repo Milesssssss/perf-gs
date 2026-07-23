@@ -59,17 +59,12 @@ KERNEL_SPECS: tuple[tuple[str, str, str], ...] = (
     # densify
     ("clear_tracking",       "densify/clear_tracking.slang",                   "clearTracking"),
     ("accumulate_iter",      "densify/accumulate_iter.slang",                  "accumulateIter"),
-    ("decide_actions",       "densify/decide_actions.slang",                   "decideActions"),
     ("decide_actions_simple", "densify/decide_actions_simple.slang",           "decideActionsSimple"),
     ("split_and_clone",      "densify/split_and_clone.slang",                  "splitAndClone"),
     ("build_prune_mask",     "densify/build_prune_mask.slang",                 "buildPruneMask"),
     ("scatter_compact",      "densify/scatter_compact.slang",                  "scatterCompact"),
     ("scatter_compact_eta",  "densify/scatter_compact.slang",                  "scatterCompactEta"),
     ("opacity_reset",        "densify/opacity_reset.slang",                    "resetOpacity"),
-    ("clear_importance",     "densify/clear_importance.slang",                 "clearImportance"),
-    ("compute_l1_minmax",    "densify/compute_error_mask.slang",               "computeL1MinMax"),
-    ("compute_error_mask",   "densify/compute_error_mask.slang",               "computeErrorMask"),
-    ("score_forward",        "densify/score_forward.slang",                    "scoreForward"),
     ("densify_snapshot",     "densify/densify_dispatch.slang",                 "snapshotCount"),
     ("densify_prepare_args", "densify/densify_dispatch.slang",                 "prepareDensifyArgs"),
     # structure-aware densification (SAD-GS)
@@ -98,7 +93,7 @@ KERNEL_SPECS: tuple[tuple[str, str, str], ...] = (
 # ``Pipeline._run_forward`` + ``_radix_sort_pairs`` + ``_scan``) actually
 # dispatches. Skipping the rest saves a chunk of shader compile time and
 # the associated program memory on ViewerPipeline construction — the viewer
-# never runs backward, loss, densify, adam, or importance kernels.
+# never runs backward, loss, densify, or Adam kernels.
 VIEWER_KERNEL_ATTRS: frozenset[str] = frozenset({
     "clear_textures",
     "clear_tile_ranges",

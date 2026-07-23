@@ -28,7 +28,6 @@ class DensificationMode(str, Enum):
     """Which densification strategy the loop runs on a densify tick."""
     NONE = "none"
     SIMPLE = "simple"
-    IMPORTANCE = "importance_score"
     STRUCTURE_AWARE = "structure_aware"
 
     @classmethod

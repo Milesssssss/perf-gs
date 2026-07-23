@@ -1,277 +1,1256 @@
-"""v2 training application: the full training loop + orchestration (``main()``).
+"""Hierarchical orchestration for the v2 training application.
 
-Extracted verbatim from ``scripts/v2_train.py``, which is now a thin entry that
-just calls :func:`main` here. Further decomposition of ``main()`` into
-``resources`` / ``outputs`` / ``evaluation`` / ``loop`` modules is a follow-up;
-behavior is currently identical to the pre-extraction script.
+The file is intentionally organized by level of abstraction:
 
-Adds to v1:
-- Periodic densification (split / clone / prune) on the GPU.
-- Periodic opacity reset.
-- Per-iter tracking accumulators cleared at the start of each window.
-
-Usage:
-    .venv/Scripts/python.exe scripts/v2_train.py [--iters 10000]
-                                                 [--scene datasets/synthetic/suzanne_blender]
-                                                 [--width 960] [--height 540]
-                                                 [--run-name my_v2_run]
-
-Output layout is identical to v1_train.py's (per-run folder with
-cams/cam_NN/iter_*.png + gt.png, final_psnr.json, log.txt, log.jsonl,
-config.json) plus a new ``densify_log.jsonl`` listing per-densify-step
-action counts and resulting gaussian counts.
+``main`` -> ``TrainingApplication`` -> ``TrainingLoop`` -> cohesive support
+objects. High-level lifecycle code does not expose texture formats, cache file
+keys, iteration logging schemas, or GPU setup mechanics.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-import sys
+import threading
 import time
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 from PIL import Image
 
 from trainer.colmap import load_colmap, load_image
-from trainer.device import create_device
-from trainer.color import linear_to_srgb, srgb_to_linear
+from trainer.color import srgb_to_linear
 from trainer.config import AdamLRs, RenderConfig
-from trainer.metrics import psnr as _psnr_image
-from trainer.pipeline import Pipeline
 from trainer.config_types import (
     DensificationMode,
     ScheduleConfig,
     validate_training_config,
 )
+from trainer.device import create_device
+from trainer.metrics import psnr
+from trainer.pipeline import Pipeline
 from trainer.training.cli import build_parser
-from trainer.training.lr_schedule import (
-    ExtinctionHardnessSchedule,
-    MeanLearningRateSchedule,
-)
-from trainer.training.queue_limiter import QueueLimiter
-from trainer.training.schedule import TrainingSchedule
 from trainer.training.densification import DensificationController
 from trainer.training.evaluation import (
     eval_test_psnr_srgb,
     render_all_cameras,
     run_eval_sweep,
 )
+from trainer.training.lr_schedule import (
+    ExtinctionHardnessSchedule,
+    MeanLearningRateSchedule,
+)
 from trainer.training.outputs import RunArtifacts
 from trainer.training.post_training import run_post_training
+from trainer.training.queue_limiter import QueueLimiter
 from trainer.training.resources import (
     build_densify_configs,
     compute_morton_bounds,
     resolve_holdout_split,
     resolve_loss_and_lrs,
 )
+from trainer.training.schedule import TrainingSchedule
 from trainer.training.viewer_control import ViewerSession
 
-# Sibling scripts (scripts/ is on sys.path[0] when v2_train is run directly).
-from _v2_profiling import Profiler
-from _v2_sampling import CameraSampler
+# The thin scripts/running/v2_train.py entrypoint installs scripts/running and
+# scripts/debug on sys.path before importing this module.
+from _v2_profiling import Profiler  # pyright: ignore[reportMissingImports]
+from _v2_sampling import CameraSampler  # pyright: ignore[reportMissingImports]
 
 
-def _srgb_to_linear(c: np.ndarray) -> np.ndarray:
-    return srgb_to_linear(c)
+# ---------------------------------------------------------------------------
+# Application data
+# ---------------------------------------------------------------------------
 
 
-def _linear_to_srgb(c: np.ndarray) -> np.ndarray:
-    # Clip to displayable [0, 1] before the OETF (preview PNGs + sRGB PSNR).
-    return linear_to_srgb(np.clip(c, 0.0, 1.0))
+@dataclass(frozen=True)
+class RunPaths:
+    root: Path
+    cameras: Path
+
+    @classmethod
+    def create(cls, run_name: str) -> "RunPaths":
+        root = Path("outputs/train") / run_name
+        cameras = root / "cams"
+        cameras.mkdir(parents=True, exist_ok=True)
+        return cls(root=root, cameras=cameras)
 
 
-# build_parser() was extracted to trainer.training.cli to thin this entry
-# script; imported at the top of this module. The CLI surface + defaults are
-# frozen by tests/test_cli_defaults.py.
+@dataclass(frozen=True)
+class SceneContext:
+    scene: Any
+    width: int
+    height: int
+    camera_count: int
+    initial_gaussian_count: int
+    extent: float
+    train_indices: list[int]
+    test_indices: list[int]
+    holdout_stride: int
+    morton_min: np.ndarray
+    morton_max: np.ndarray
 
 
-def main() -> None:
-    args = build_parser().parse_args()
+@dataclass(frozen=True)
+class IterationContext:
+    number: int
+    camera_index: int
+    camera_entry: Any
+    learning_rates: AdamLRs
+    events: Any
 
-    # All Nsight Graphics profiling lives in the Profiler (_v2_profiling.py):
-    # session tweaks, self-injection, the present window, and the capture loop.
-    # Every hook is a no-op unless --profile-run / --capture-* is set.
-    profiler = Profiler(args)
-    profiler.configure_session()   # profile runs disable the viewer + previews
-    profiler.inject()              # self-injection when --capture-iter
 
-    run_name = args.run_name or datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_dir = Path("outputs/train") / run_name
-    cams_dir = run_dir / "cams"
-    run_dir.mkdir(parents=True, exist_ok=True)
-    cams_dir.mkdir(parents=True, exist_ok=True)
+@dataclass(frozen=True)
+class TrainingResult:
+    iterations: int
+    wall_time_seconds: float
+    psnr_curve: list[dict]
+    started_at: float
 
-    scene = load_colmap(args.scene, width=args.width, height=args.height,
-                        downsample=args.downsample, init_opacity=args.init_opacity)
-    n_cams = len(scene.images)
-    n_init = scene.initial_points["means"].shape[0]
-    extent = scene.scene_extent
-    # Resolved width/height from the scene (may differ from args if args were None).
-    IMAGES_WIDTH, IMAGES_HEIGHT = scene.images[0].camera.image_size
-    print(f"loaded {n_cams} cameras, {n_init} init points, scene_extent={extent:.3f}")
 
-    # --- Train/test split (paper eval protocol) ---
-    stride, test_indices, train_indices = resolve_holdout_split(args, n_cams)
+@dataclass
+class TrainingRuntime:
+    pipeline: Pipeline
+    viewer: ViewerSession
+    profiler: Profiler
+    artifacts: RunArtifacts
+    queue_limiter: QueueLimiter
+    densifier: DensificationController
+    reporter: "TrainingReporter"
 
-    densify_mode = validate_training_config(
-        args, n_cams=n_cams, n_train=len(train_indices), n_test=len(test_indices))
 
-    morton_world_min, morton_world_max = compute_morton_bounds(
-        scene.initial_points["means"])
+# ---------------------------------------------------------------------------
+# Application lifecycle
+# ---------------------------------------------------------------------------
 
-    print(f"schedule: densify [{args.densify_from}, {args.densify_to}] every {args.densify_every}")
 
-    cfg, structure_cfg = build_densify_configs(args, extent)
+class TrainingApplication:
+    """Owns the prepare -> train -> finish lifecycle of one experiment."""
 
-    eff_lambda_l2, eff_lambda_ssim, base_lrs = resolve_loss_and_lrs(args)
+    def __init__(self, args: argparse.Namespace) -> None:
+        self.args = args
+        self.run_name = args.run_name or datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.paths = RunPaths.create(self.run_name)
+        self.profiler = Profiler(args)
 
-    # --- Resolved opacity-bundle settings (CLI -> config object) ---
-    # Printed at startup and at every structure pass so it is unambiguous whether
-    # the SADGS opacity bundle is actually active. The bundle is OFF by DEFAULT:
-    # structure_min_opacity=0.005 (not 0.1) and opacity_cap=0.0 (disabled), and
-    # relative_reset off. To match the reference structure pass, run with:
-    #   --sad-structure-min-opacity 0.1 --sad-opacity-cap 0.8
-    #   --sad-relative-reset --sad-reset-decay 0.1
-    def _opacity_bundle_settings() -> dict:
-        cap_on = bool(structure_cfg.opacity_cap and structure_cfg.opacity_cap > 0.0)
+        self.scene_context: SceneContext | None = None
+        self.targets: TargetDataset | None = None
+        self.runtime: TrainingRuntime | None = None
+        self.densify_mode: DensificationMode | None = None
+        self.densify_config: Any = None
+        self.structure_config: Any = None
+        self.base_lrs: AdamLRs | None = None
+        self.effective_lambda_l2 = 0.0
+        self.effective_lambda_ssim = 0.0
+
+        self.device: Any = None
+        self.gpu_lock: Any = None
+        self.pipeline: Pipeline | None = None
+        self.viewer: ViewerSession | None = None
+        self.mip_diagnostics: MipFilterDiagnostics | None = None
+        self.opacity_reporter: OpacityBundleReporter | None = None
+        self.target_textures: list[Any] = []
+        self.structure_textures: list[Any] = []
+        self.mean_lr: MeanLearningRateSchedule | None = None
+        self.extinction: ExtinctionHardnessSchedule | None = None
+
+    @classmethod
+    def from_cli(cls) -> "TrainingApplication":
+        return cls(build_parser().parse_args())
+
+    def run(self) -> None:
+        self.prepare()
+        result = self.train()
+        self.finish(result)
+
+    def prepare(self) -> None:
+        self._prepare_profiler()
+        self._load_and_validate_experiment()
+        self._prepare_targets()
+        self._create_rendering_system()
+        self._prepare_optional_features()
+        self._start_integrations()
+        self._create_training_services()
+
+    def train(self) -> TrainingResult:
+        loop = TrainingLoop(
+            args=self.args,
+            scene=self._scene,
+            targets=self._targets,
+            runtime=self._runtime,
+            densify_mode=self._densify_mode,
+            densify_config=self.densify_config,
+            base_lrs=self._base_lrs,
+            target_textures=self.target_textures,
+            structure_textures=self.structure_textures,
+            mip_diagnostics=self._mip_diagnostics,
+            mean_lr=self._mean_lr,
+            extinction=self._extinction,
+            paths=self.paths,
+        )
+        return loop.run()
+
+    def finish(self, result: TrainingResult) -> None:
+        runtime = self._runtime
+        runtime.pipeline.runtime.wait_for_idle()
+
+        self._write_final_test_psnr(result)
+        runtime.profiler.close()
+        runtime.viewer.hold_after_training(runtime.pipeline)
+        runtime.artifacts.close_all()
+
+        PsNRPlotWriter.write(
+            enabled=self.args.psnr_curve,
+            records=result.psnr_curve,
+            args=self.args,
+            paths=self.paths,
+            run_name=self.run_name,
+            scene=self._scene,
+        )
+
+        if self.args.profile_run:
+            print("[profile-run] finished; skipping final metrics / PLY export.")
+            return
+
+        scene = self._scene
+        run_post_training(
+            pipeline=runtime.pipeline,
+            scene=scene.scene,
+            args=self.args,
+            run_dir=self.paths.root,
+            cams_dir=self.paths.cameras,
+            targets_srgb=self._targets.srgb,
+            targets_linear=self._targets.linear,
+            test_indices=scene.test_indices,
+            stride=scene.holdout_stride,
+            n_cams=scene.camera_count,
+            train_wall_s=result.wall_time_seconds,
+            completed_iters=result.iterations,
+            t_start=result.started_at,
+        )
+
+    def _prepare_profiler(self) -> None:
+        # configure_session may force Vulkan, disable previews, and disable the
+        # viewer; it must run before config resolution and device creation.
+        self.profiler.configure_session()
+        self.profiler.inject()
+
+    def _load_and_validate_experiment(self) -> None:
+        self.scene_context = load_scene_context(self.args)
+        scene = self._scene
+
+        self.densify_mode = validate_training_config(
+            self.args,
+            n_cams=scene.camera_count,
+            n_train=len(scene.train_indices),
+            n_test=len(scene.test_indices),
+        )
+        self.densify_config, self.structure_config = build_densify_configs(
+            self.args, scene.extent)
+        (
+            self.effective_lambda_l2,
+            self.effective_lambda_ssim,
+            self.base_lrs,
+        ) = resolve_loss_and_lrs(self.args)
+
+        self.opacity_reporter = OpacityBundleReporter(
+            args=self.args,
+            densify_config=self.densify_config,
+            structure_config=self.structure_config,
+        )
+        self.opacity_reporter.report_startup(self._densify_mode)
+        self._write_resolved_config()
+
+    def _prepare_targets(self) -> None:
+        scene = self._scene
+        self.targets = TargetDataset(
+            scene=scene.scene,
+            width=scene.width,
+            height=scene.height,
+            use_alpha=self.args.w_alpha > 0,
+        )
+        self.targets.write_ground_truths(self.paths.cameras)
+
+    def _create_rendering_system(self) -> None:
+        scene = self._scene
+        self.device = create_training_device(self.args)
+        self.gpu_lock = create_gpu_queue_lock(viewer_enabled=not self.args.no_viewer)
+        self.pipeline = create_pipeline(
+            args=self.args,
+            device=self.device,
+            gpu_lock=self.gpu_lock,
+            scene=scene,
+            lambda_l2=self.effective_lambda_l2,
+            lambda_ssim=self.effective_lambda_ssim,
+        )
+        initialize_pipeline(
+            pipeline=self._pipeline,
+            initial_points=scene.scene.initial_points,
+            densify_mode=self._densify_mode,
+            use_flat_bucket_backward=self.args.flat_bucket_backward,
+        )
+
+        self.mip_diagnostics = MipFilterDiagnostics(
+            enabled=self.args.mip_splatting,
+            pipeline=self._pipeline,
+        )
+        train_cameras = [scene.scene.images[i].camera for i in scene.train_indices]
+        self.mip_diagnostics.initialize(
+            train_cameras=train_cameras,
+            kernel_size=self.args.mip_kernel_size,
+        )
+
+        self.viewer = ViewerSession.create(
+            enabled=not self.args.no_viewer,
+            device=self.device,
+            width=scene.width,
+            height=scene.height,
+            max_splats=self.args.max_splats,
+            fovy=getattr(self.args, "fovy", 45.0),
+            gpu_lock=self.gpu_lock,
+            pipeline=self._pipeline,
+        )
+
+    def _prepare_optional_features(self) -> None:
+        pipeline = self._pipeline
+        self.target_textures = [
+            pipeline.create_target_texture(target) for target in self._targets.srgb
+        ]
+        self.structure_textures = StructureTextureProvider(
+            args=self.args,
+            device=self.device,
+            scene=self._scene,
+            targets=self._targets.srgb,
+            densify_mode=self._densify_mode,
+        ).load()
+
+    def _start_integrations(self) -> None:
+        self._viewer.start()
+        self.profiler.open_window(
+            self._pipeline, self._scene.width, self._scene.height)
+
+    def _create_training_services(self) -> None:
+        scene = self._scene
+        artifacts = RunArtifacts.create(self.paths.root, self.args)
+        reporter = TrainingReporter(artifacts, self.args, scene)
+        reporter.write_header()
+
+        diag_module = None
+        diag_grad_internal = None
+        if artifacts.densify_diag_json is not None:
+            import densify_diag as diag_module  # pyright: ignore[reportMissingImports]
+            diag_grad_internal = (
+                self.args.sad_grad_threshold * scene.width * scene.height * 3.0)
+
+        self.mean_lr = MeanLearningRateSchedule(
+            lr_init=1.6e-4 * scene.extent,
+            lr_final=1.6e-6 * scene.extent,
+            max_steps=self.args.position_lr_max_steps,
+        )
+        self.extinction = ExtinctionHardnessSchedule(
+            target=self.args.extinction_hardness,
+            warmup=self.args.extinction_hardness_warmup,
+        )
+        queue_limiter = QueueLimiter(self._pipeline.runtime, max_depth=1)
+        densifier = DensificationController(
+            pipeline=self._pipeline,
+            args=self.args,
+            densify_mode=self._densify_mode,
+            densify_cfg=self.densify_config,
+            structure_cfg=self.structure_config,
+            extent=scene.extent,
+            image_width=scene.width,
+            image_height=scene.height,
+            morton_world_min=scene.morton_min,
+            morton_world_max=scene.morton_max,
+            extinction=self._extinction,
+            queue_limiter=queue_limiter,
+            artifacts=artifacts,
+            diag_module=diag_module,
+            diag_grad_internal=diag_grad_internal,
+            print_opacity_bundle=self._opacity_reporter.report,
+        )
+        self.runtime = TrainingRuntime(
+            pipeline=self._pipeline,
+            viewer=self._viewer,
+            profiler=self.profiler,
+            artifacts=artifacts,
+            queue_limiter=queue_limiter,
+            densifier=densifier,
+            reporter=reporter,
+        )
+
+    def _write_resolved_config(self) -> None:
+        scene = self._scene
+        base_lrs = self._base_lrs
+        config = {
+            "scene": self.args.scene,
+            "iters": self.args.iters,
+            "width": scene.width,
+            "height": scene.height,
+            "preview_every": self.args.preview_every,
+            "log_every": self.args.log_every,
+            "densify_every": self.args.densify_every,
+            "densify_from": self.args.densify_from,
+            "densify_to": self.args.densify_to,
+            "densify_config": {
+                "t_opacity": self.densify_config.t_opacity,
+                "t_big_scale": self.densify_config.t_big_scale,
+                "grow_scale3d": self.args.grow_scale3d,
+            },
+            "max_splats": self.args.max_splats,
+            "z_near_cull": self.args.z_near_cull,
+            "backend": self.args.backend,
+            "seed": self.args.seed,
+            "sample_mode": self.args.sample_mode,
+            "mip_enabled": bool(self.args.mip_splatting),
+            "mip_kernel_size": (
+                self.args.mip_kernel_size if self.args.mip_splatting else 0.3),
+            "run_name": self.run_name,
+            "n_cams": scene.camera_count,
+            "n_init_points": scene.initial_gaussian_count,
+            "cli_args": dict(vars(self.args)),
+            "resolved": {
+                "densify_mode": self._densify_mode.value,
+                "width": scene.width,
+                "height": scene.height,
+                "n_cams": scene.camera_count,
+                "n_init_points": scene.initial_gaussian_count,
+                "n_train": len(scene.train_indices),
+                "n_test": len(scene.test_indices),
+                "holdout_stride": scene.holdout_stride,
+                "eff_lambda_l2": self.effective_lambda_l2,
+                "eff_lambda_ssim": self.effective_lambda_ssim,
+                "base_lr_scale": base_lrs.scale,
+                "base_lr_rot": base_lrs.rot,
+                "base_lr_opacity": base_lrs.opacity,
+                "base_lr_color": base_lrs.color,
+            },
+        }
+        (self.paths.root / "config.json").write_text(json.dumps(config, indent=2))
+
+    def _write_final_test_psnr(self, result: TrainingResult) -> None:
+        if not self.args.final_test_psnr or self.args.profile_run:
+            return
+        scene = self._scene
+        psnr, count = eval_test_psnr_srgb(
+            self._pipeline, scene.scene, scene.test_indices, self._targets.srgb)
+        (self.paths.root / "test_psnr.json").write_text(json.dumps({
+            "psnr_srgb": psnr,
+            "n_gaussians": count,
+            "n_test_cams": len(scene.test_indices),
+            "train_wall_s": result.wall_time_seconds,
+            "iters": result.iterations,
+            "flat_bucket_backward": bool(self.args.flat_bucket_backward),
+        }, indent=2))
+        print(f"[final-test-psnr] TEST PSNR sRGB = {psnr:.3f} dB over "
+              f"{len(scene.test_indices)} held-out cams  (n_gaussians={count})")
+
+    @property
+    def _scene(self) -> SceneContext:
+        assert self.scene_context is not None
+        return self.scene_context
+
+    @property
+    def _targets(self) -> "TargetDataset":
+        assert self.targets is not None
+        return self.targets
+
+    @property
+    def _runtime(self) -> TrainingRuntime:
+        assert self.runtime is not None
+        return self.runtime
+
+    @property
+    def _densify_mode(self) -> DensificationMode:
+        assert self.densify_mode is not None
+        return self.densify_mode
+
+    @property
+    def _base_lrs(self) -> AdamLRs:
+        assert self.base_lrs is not None
+        return self.base_lrs
+
+    @property
+    def _pipeline(self) -> Pipeline:
+        assert self.pipeline is not None
+        return self.pipeline
+
+    @property
+    def _viewer(self) -> ViewerSession:
+        assert self.viewer is not None
+        return self.viewer
+
+    @property
+    def _mip_diagnostics(self) -> "MipFilterDiagnostics":
+        assert self.mip_diagnostics is not None
+        return self.mip_diagnostics
+
+    @property
+    def _opacity_reporter(self) -> "OpacityBundleReporter":
+        assert self.opacity_reporter is not None
+        return self.opacity_reporter
+
+    @property
+    def _mean_lr(self) -> MeanLearningRateSchedule:
+        assert self.mean_lr is not None
+        return self.mean_lr
+
+    @property
+    def _extinction(self) -> ExtinctionHardnessSchedule:
+        assert self.extinction is not None
+        return self.extinction
+
+
+# ---------------------------------------------------------------------------
+# Training-loop orchestration
+# ---------------------------------------------------------------------------
+
+
+class TrainingLoop:
+    """Executes optimizer steps, then scheduled mutations, then observations."""
+
+    def __init__(
+        self,
+        *,
+        args: argparse.Namespace,
+        scene: SceneContext,
+        targets: "TargetDataset",
+        runtime: TrainingRuntime,
+        densify_mode: DensificationMode,
+        densify_config: Any,
+        base_lrs: AdamLRs,
+        target_textures: list[Any],
+        structure_textures: list[Any],
+        mip_diagnostics: "MipFilterDiagnostics",
+        mean_lr: MeanLearningRateSchedule,
+        extinction: ExtinctionHardnessSchedule,
+        paths: RunPaths,
+    ) -> None:
+        self.args = args
+        self.scene = scene
+        self.targets = targets
+        self.runtime = runtime
+        self.densify_mode = densify_mode
+        self.densify_config = densify_config
+        self.base_lrs = base_lrs
+        self.target_textures = target_textures
+        self.structure_textures = structure_textures
+        self.mip_diagnostics = mip_diagnostics
+        self.mean_lr = mean_lr
+        self.extinction = extinction
+        self.paths = paths
+
+        rng = np.random.default_rng(args.seed)
+        self.sampler = CameraSampler(
+            args.sample_mode,
+            scene.train_indices,
+            scene.test_indices,
+            args.seed,
+            rng,
+        )
+        self.schedule = TrainingSchedule(ScheduleConfig.from_args(args))
+        self.iteration = 0
+        self.gaussian_count = scene.initial_gaussian_count
+        self.eval_time_total = 0.0
+        self.psnr_curve_records: list[dict] = []
+        self.started_at = 0.0
+
+    def run(self) -> TrainingResult:
+        self._begin()
+        while self._should_continue():
+            context = self._next_iteration()
+            self._prepare_iteration(context)
+            self._capture_if_requested(context)
+            self._execute_training_step(context)
+            self._apply_mutations(context)
+            if not self._produce_observations(context):
+                break
+        return self._complete()
+
+    def _begin(self) -> None:
+        if self.args.wait_for_viewer:
+            self.runtime.viewer.wait_for_start()
+        self.runtime.viewer.set_training_active(True)
+        self.started_at = time.time()
+        self.runtime.reporter.start(self.started_at)
+
+    def _should_continue(self) -> bool:
+        return (
+            self.iteration < self.args.iters
+            and not self.runtime.profiler.should_stop()
+        )
+
+    def _next_iteration(self) -> IterationContext:
+        self.iteration += 1
+        camera_index = self.sampler.next()
+        camera_entry = self.scene.scene.images[camera_index]
+        learning_rates = AdamLRs(
+            mean=self.mean_lr.at(self.iteration - 1),
+            scale=self.base_lrs.scale,
+            rot=self.base_lrs.rot,
+            opacity=self.base_lrs.opacity,
+            color=self.base_lrs.color,
+        )
+        return IterationContext(
+            number=self.iteration,
+            camera_index=camera_index,
+            camera_entry=camera_entry,
+            learning_rates=learning_rates,
+            events=self.schedule.events_at(self.iteration),
+        )
+
+    def _prepare_iteration(self, context: IterationContext) -> None:
+        self.runtime.pipeline.set_target_texture(
+            self.target_textures[context.camera_index])
+        if context.number == 1:
+            print(f"[determinism] iter 1 cam_idx={context.camera_index} "
+                  "(should match across same-seed runs)")
+        self.runtime.queue_limiter.before_submit()
+
+    def _capture_if_requested(self, context: IterationContext) -> None:
+        captured = self.runtime.profiler.run_capture_if_due(
+            self.runtime.pipeline,
+            context.number,
+            context.camera_entry,
+            context.camera_index,
+            self.runtime.queue_limiter,
+        )
+        if captured:
+            self.runtime.artifacts.close_all()
+            raise SystemExit(0)
+
+    def _execute_training_step(self, context: IterationContext) -> None:
+        structure_texture = None
+        structure_kwargs = None
+        if self._should_accumulate_structure(context):
+            structure_texture = self.structure_textures[context.camera_index]
+            structure_kwargs = {
+                "per_view_grad_thresh": (
+                    self.args.sad_freq_grad_threshold
+                    * self.scene.width * self.scene.height * 3.0),
+            }
+
+        pipeline = self.runtime.pipeline
+        pipeline.set_extinction_hardness(self.extinction.at(context.number))
+        pipeline.train_step(
+            context.camera_entry.camera,
+            lrs=context.learning_rates,
+            structure_tensor=structure_texture,
+            structure_kwargs=structure_kwargs,
+        )
+        self.runtime.queue_limiter.record(pipeline.last_submit_id)
+        self._present_profile_frame_if_enabled()
+        self._stream_viewer_snapshot_if_due(context)
+
+    def _apply_mutations(self, context: IterationContext) -> None:
+        events = context.events
+        pipeline = self.runtime.pipeline
+
+        if events.densify:
+            self.gaussian_count = self.runtime.densifier.run(
+                context.number, events, self.gaussian_count)
+
+        if events.opacity_reset:
+            pipeline.reset_opacity(self.densify_config)
+            self.runtime.reporter.report_opacity_reset(context.number)
+
+        if events.morton:
+            pipeline.morton_sort(
+                self.scene.morton_min,
+                self.scene.morton_max,
+                carry_eta=(self.densify_mode == DensificationMode.STRUCTURE_AWARE),
+            )
+            pipeline.clear_tracking()
+            if pipeline.last_submit_id:
+                self.runtime.queue_limiter.record(pipeline.last_submit_id)
+            self.runtime.reporter.report_morton_sort(context.number)
+
+        if events.mip_periodic:
+            self.mip_diagnostics.refresh("periodic", context.number)
+
+    def _produce_observations(self, context: IterationContext) -> bool:
+        self.runtime.reporter.report_throughput(context)
+
+        if context.number > 1 and (context.events.log or context.events.preview):
+            ok, self.gaussian_count = self.runtime.reporter.report_iteration(
+                context=context,
+                pipeline=self.runtime.pipeline,
+                target=self.targets.srgb[context.camera_index][..., :3],
+                current_count=self.gaussian_count,
+            )
+            if not ok:
+                return False
+
+        if context.number > 1 and context.events.render_all:
+            render_all_cameras(
+                self.runtime.pipeline,
+                self.scene.scene,
+                context.number,
+                self.paths.cameras,
+            )
+
+        self._record_psnr_curve_if_due(context)
+        self._run_evaluation_if_due(context)
+        return True
+
+    def _should_accumulate_structure(self, context: IterationContext) -> bool:
+        return (
+            self.densify_mode == DensificationMode.STRUCTURE_AWARE
+            and self.args.densify_from < context.number <= self.args.densify_to
+            and context.number % self.args.sad_accum_every == 0
+        )
+
+    def _present_profile_frame_if_enabled(self) -> None:
+        if self.args.profile_run:
+            self.runtime.profiler.present_frame()
+
+    def _stream_viewer_snapshot_if_due(self, context: IterationContext) -> None:
+        if context.number % self.args.stream_every == 0:
+            self.runtime.viewer.push_snapshot(self.runtime.pipeline)
+
+    def _record_psnr_curve_if_due(self, context: IterationContext) -> None:
+        stream = self.runtime.artifacts.psnr_curve_json
+        if stream is None or not context.events.psnr_curve:
+            return
+        started = time.time()
+        psnr, count = eval_test_psnr_srgb(
+            self.runtime.pipeline,
+            self.scene.scene,
+            self.scene.test_indices,
+            self.targets.srgb,
+        )
+        record = {
+            "iter": context.number,
+            "psnr_srgb": psnr,
+            "n_gaussians": count,
+        }
+        self.psnr_curve_records.append(record)
+        stream.write(json.dumps(record) + "\n")
+        self.eval_time_total += time.time() - started
+        print(f"[psnr-curve] iter {context.number:6d}  psnr_srgb={psnr:5.2f}  "
+              f"n_g={count} (pre-densify)")
+
+    def _run_evaluation_if_due(self, context: IterationContext) -> None:
+        stream = self.runtime.artifacts.eval_curve_json
+        if stream is None or not context.events.eval:
+            return
+        self.eval_time_total = run_eval_sweep(
+            pipeline=self.runtime.pipeline,
+            scene=self.scene.scene,
+            it=context.number,
+            test_indices=self.scene.test_indices,
+            targets_srgb=self.targets.srgb,
+            targets_linear=self.targets.linear,
+            cams_dir=self.paths.cameras,
+            eval_curve_json=stream,
+            bin_viz_json=self.runtime.artifacts.bin_viz_json,
+            t_start=self.started_at,
+            eval_time_total=self.eval_time_total,
+            eval_holdout=bool(self.args.eval_holdout),
+        )
+
+    def _complete(self) -> TrainingResult:
+        self.runtime.pipeline.runtime.wait_for_idle()
+        wall_time = time.time() - self.started_at
+        self.runtime.pipeline.set_extinction_hardness(self.extinction.target)
+        self.runtime.reporter.report_complete(self.iteration, wall_time)
+        return TrainingResult(
+            iterations=self.iteration,
+            wall_time_seconds=wall_time,
+            psnr_curve=self.psnr_curve_records,
+            started_at=self.started_at,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Cohesive setup/support objects
+# ---------------------------------------------------------------------------
+
+
+class TargetDataset:
+    """Owns target loading, lazy linear conversion, and ground-truth images."""
+
+    def __init__(self, scene: Any, width: int, height: int, use_alpha: bool) -> None:
+        self._scene = scene
+        self._width = width
+        self._height = height
+        self._use_alpha = use_alpha
+        self._srgb = [
+            load_image(
+                entry,
+                scene.image_dir,
+                width,
+                height,
+                load_alpha=use_alpha,
+            )
+            for entry in scene.images
+        ]
+        self._linear_cache: dict[int, np.ndarray] = {}
+
+    @property
+    def srgb(self) -> list[np.ndarray]:
+        return self._srgb
+
+    def linear(self, camera_index: int) -> np.ndarray:
+        target = self._linear_cache.get(camera_index)
+        if target is None:
+            target = srgb_to_linear(self._srgb[camera_index][..., :3])
+            self._linear_cache[camera_index] = target
+        return target
+
+    def write_ground_truths(self, cameras_dir: Path) -> None:
+        for camera_index, target in enumerate(self._srgb):
+            camera_dir = cameras_dir / f"cam_{camera_index:02d}"
+            camera_dir.mkdir(parents=True, exist_ok=True)
+            path = camera_dir / "gt.png"
+            if path.exists():
+                continue
+            if self._use_alpha and target.shape[-1] == 4:
+                pixels = (target * 255 + 0.5).clip(0, 255).astype(np.uint8)
+                Image.fromarray(pixels, mode="RGBA").save(path)
+            else:
+                pixels = (target[..., :3] * 255 + 0.5).clip(0, 255).astype(np.uint8)
+                Image.fromarray(pixels, mode="RGB").save(path)
+
+
+class OpacityBundleReporter:
+    """Resolves and reports the SAD-GS opacity persistence policy."""
+
+    def __init__(self, *, args: argparse.Namespace, densify_config: Any,
+                 structure_config: Any) -> None:
+        self._args = args
+        self._densify = densify_config
+        self._structure = structure_config
+
+    def settings(self) -> dict:
+        cap_enabled = bool(
+            self._structure.opacity_cap and self._structure.opacity_cap > 0.0)
         return {
-            "structure_min_opacity": structure_cfg.t_opacity,
-            "opacity_cap_enabled": cap_on,
-            "opacity_cap": structure_cfg.opacity_cap,
-            "relative_reset_enabled": bool(cfg.reset_relative),
-            "reset_decay": cfg.reset_decay,
-            "structure_grad_thresh": structure_cfg.grad_threshold,
-            "absgs_grad_thresh": args.grad_thresh,
+            "structure_min_opacity": self._structure.t_opacity,
+            "opacity_cap_enabled": cap_enabled,
+            "opacity_cap": self._structure.opacity_cap,
+            "relative_reset_enabled": bool(self._densify.reset_relative),
+            "reset_decay": self._densify.reset_decay,
+            "structure_grad_thresh": self._structure.grad_threshold,
+            "absgs_grad_thresh": self._args.grad_thresh,
         }
 
-    def _print_opacity_bundle(where: str) -> None:
-        s = _opacity_bundle_settings()
-        print(f"[opacity-bundle] resolved @ {where}: "
-              f"structure_min_opacity={s['structure_min_opacity']} "
-              f"opacity_cap_enabled={s['opacity_cap_enabled']} "
-              f"opacity_cap={s['opacity_cap']} "
-              f"relative_reset_enabled={s['relative_reset_enabled']} "
-              f"reset_decay={s['reset_decay']} "
-              f"structure_grad_thresh={s['structure_grad_thresh']} "
-              f"absgs_grad_thresh={s['absgs_grad_thresh']}", flush=True)
+    def report(self, where: str) -> None:
+        settings = self.settings()
+        print(
+            f"[opacity-bundle] resolved @ {where}: "
+            f"structure_min_opacity={settings['structure_min_opacity']} "
+            f"opacity_cap_enabled={settings['opacity_cap_enabled']} "
+            f"opacity_cap={settings['opacity_cap']} "
+            f"relative_reset_enabled={settings['relative_reset_enabled']} "
+            f"reset_decay={settings['reset_decay']} "
+            f"structure_grad_thresh={settings['structure_grad_thresh']} "
+            f"absgs_grad_thresh={settings['absgs_grad_thresh']}",
+            flush=True,
+        )
 
-    if densify_mode == DensificationMode.STRUCTURE_AWARE:
-        _print_opacity_bundle("startup")
-        _s0 = _opacity_bundle_settings()
-        if (not _s0["opacity_cap_enabled"]) or _s0["structure_min_opacity"] < 0.1:
-            print("[opacity-bundle] WARNING: bundle is INACTIVE at reference "
-                  "strength — the 0.8 cap and/or 0.1 floor will NOT run. To match "
-                  "SADGS pass: --sad-structure-min-opacity 0.1 --sad-opacity-cap 0.8 "
-                  "--sad-relative-reset. Running as configured.", flush=True)
+    def report_startup(self, mode: DensificationMode) -> None:
+        if mode != DensificationMode.STRUCTURE_AWARE:
+            return
+        self.report("startup")
+        settings = self.settings()
+        if (
+            not settings["opacity_cap_enabled"]
+            or settings["structure_min_opacity"] < 0.1
+        ):
+            print(
+                "[opacity-bundle] WARNING: bundle is INACTIVE at reference "
+                "strength — the 0.8 cap and/or 0.1 floor will NOT run. To match "
+                "SADGS pass: --sad-structure-min-opacity 0.1 --sad-opacity-cap "
+                "0.8 --sad-relative-reset. Running as configured.",
+                flush=True,
+            )
 
-    (run_dir / "config.json").write_text(json.dumps({
-        "scene": args.scene,
-        "iters": args.iters,
-        "width": IMAGES_WIDTH, "height": IMAGES_HEIGHT,
-        "preview_every": args.preview_every, "log_every": args.log_every,
-        "densify_every": args.densify_every,
-        "densify_from": args.densify_from, "densify_to": args.densify_to,
-        #"opacity_reset_iters": args.opacity_reset_iters,
-        "densify_config": {
-            "n_scoring_views": cfg.n_scoring_views,
-            "loss_thresh": cfg.loss_thresh,
-            "t_opacity": cfg.t_opacity,
-            "t_big_scale": cfg.t_big_scale,
-            "opacity_cap": cfg.opacity_cap,
-            "grow_scale3d": args.grow_scale3d
-        },
-        "max_splats": args.max_splats,
-        "z_near_cull": args.z_near_cull,
-        "backend": args.backend, "seed": args.seed,
-        "sample_mode": args.sample_mode,
-        "mip_enabled": bool(args.mip_splatting),
-        "mip_kernel_size": (args.mip_kernel_size if args.mip_splatting else 0.3),
-        "run_name": run_name, "n_cams": n_cams, "n_init_points": n_init,
-        # Complete resolved-config record (reproducibility): EVERY parsed CLI arg
-        # plus the values the frontend resolves from them. The raw args alone
-        # hide the --sad-match-loss-lrs override of lambda/LRs, the resolved
-        # densify mode, and the scene-derived image size.
-        "cli_args": {k: v for k, v in vars(args).items()},
-        "resolved": {
-            "densify_mode": densify_mode.value,
-            "width": IMAGES_WIDTH, "height": IMAGES_HEIGHT,
-            "n_cams": n_cams, "n_init_points": n_init,
-            "n_train": len(train_indices), "n_test": len(test_indices),
-            "holdout_stride": stride,
-            "eff_lambda_l2": eff_lambda_l2,
-            "eff_lambda_ssim": eff_lambda_ssim,
-            "base_lr_scale": base_lrs.scale, "base_lr_rot": base_lrs.rot,
-            "base_lr_opacity": base_lrs.opacity, "base_lr_color": base_lrs.color,
-        },
-    }, indent=2))
 
-    use_alpha = args.w_alpha > 0
-    targets_srgb = [load_image(e, scene.image_dir, IMAGES_WIDTH, IMAGES_HEIGHT,
-                               load_alpha=use_alpha)
-                    for e in scene.images]
+class MipFilterDiagnostics:
+    """Owns Mip-Splatting camera setup, refreshes, and buffer diagnostics."""
 
-    # Linear targets are only needed for the PSNR/MSE readback (current cam
-    # on log iters + all cams in the final metrics pass). Computing all N
-    # upfront wastes ~38ms/cam on scenes with hundreds of views; memoize
-    # each on first use instead.
-    _targets_linear_cache: dict[int, np.ndarray] = {}
-    def targets_linear(cam_i: int) -> np.ndarray:
-        t = _targets_linear_cache.get(cam_i)
-        if t is None:
-            t = _srgb_to_linear(targets_srgb[cam_i][..., :3])
-            _targets_linear_cache[cam_i] = t
-        return t
+    def __init__(self, *, enabled: bool, pipeline: Pipeline) -> None:
+        self._enabled = enabled
+        self._pipeline = pipeline
 
-    # gt.png is a debug/preview artifact, not used by training. Re-encoding
-    # and writing every GT costs ~100ms/cam; skip any that already exist.
-    for cam_i, (entry, tgt) in enumerate(zip(scene.images, targets_srgb)):
-        cam_dir = cams_dir / f"cam_{cam_i:02d}"
-        cam_dir.mkdir(parents=True, exist_ok=True)
-        gt_path = cam_dir / "gt.png"
-        if gt_path.exists():
-            continue
-        if use_alpha and tgt.shape[-1] == 4:
-            # Save RGBA so transparent background is visible in the GT.
-            gt_rgba = (tgt * 255 + 0.5).clip(0, 255).astype(np.uint8)
-            Image.fromarray(gt_rgba, mode="RGBA").save(gt_path)
+    def initialize(self, *, train_cameras: list[Any], kernel_size: float) -> None:
+        if not self._enabled:
+            return
+        self._pipeline.set_cameras(train_cameras)
+        self._pipeline.compute_3d_filter()
+        print(f"[mip] enabled: kernel_size={kernel_size}, 3D filter over "
+              f"{len(train_cameras)} train cameras", flush=True)
+        self.log("init")
+
+    def refresh(self, tag: str, iteration: int | None = None) -> None:
+        if not self._enabled:
+            return
+        self._pipeline.compute_3d_filter()
+        self.log(tag, iteration)
+
+    def log(self, tag: str, iteration: int | None = None) -> None:
+        if not self._enabled:
+            return
+        buffers = self._pipeline.buffers
+        count = int(
+            buffers.num_gaussians_counter.to_numpy().view(np.uint32)[0])
+        if count == 0:
+            print(f"[filter3d] {tag}: no active gaussians", flush=True)
+            return
+        values = np.frombuffer(
+            buffers.filter_3D.to_numpy().tobytes(), dtype=np.float32
+        )[:count].astype(np.float64)
+        iteration_text = f"it={iteration} " if iteration is not None else ""
+        print(
+            f"[filter3d] {tag} {iteration_text}n={count} "
+            f"min={values.min():.6g} mean={values.mean():.6g} "
+            f"max={values.max():.6g} "
+            f"nonzero={np.count_nonzero(values) / count:.3f} "
+            f"sum={values.sum():.6g}",
+            flush=True,
+        )
+
+
+class StructureTextureProvider:
+    """Hides structure cache loading, computation, packing, and GPU upload."""
+
+    def __init__(self, *, args: argparse.Namespace, device: Any,
+                 scene: SceneContext, targets: list[np.ndarray],
+                 densify_mode: DensificationMode) -> None:
+        self._args = args
+        self._device = device
+        self._scene = scene
+        self._targets = targets
+        self._densify_mode = densify_mode
+
+    def load(self) -> list[Any]:
+        if self._densify_mode != DensificationMode.STRUCTURE_AWARE:
+            return []
+
+        cached_fields = self._load_cache()
+        gpu_computer = None
+        if cached_fields is None:
+            gpu_computer = self._create_gpu_computer()
         else:
-            gt_rgb = (tgt[..., :3] * 255 + 0.5).clip(0, 255).astype(np.uint8)
-            Image.fromarray(gt_rgb, mode="RGB").save(gt_path)
+            print(f"[SAD] uploading {self._scene.camera_count} "
+                  "structure-tensor textures to GPU...", flush=True)
 
-    # Under --profile-run, compile shaders with source-level debug info so
-    # Nsight Graphics can map counters / SASS back to Slang source lines.
-    # (On Vulkan there are no PDBs; this embeds NonSemantic.Shader.DebugInfo in
-    # the SPIR-V.) Optimization stays at the default level so the profiled code
-    # is the real optimized code.
-    # Compile-time shader define for the backward pixel-subsampling stride.
-    # Omitted at the default so the shipped path stays bit-identical. (Extinction
-    # hardness is a runtime uniform via RenderConfig, not a define.)
-    _defines: dict[str, str] = {}
+        textures = []
+        started = time.time()
+        log_stride = max(1, self._scene.camera_count // 6)
+        for camera_index in range(self._scene.camera_count):
+            field = self._field_for(camera_index, cached_fields, gpu_computer)
+            textures.append(self._upload(field, f"structure_tensor_{camera_index}"))
+            if (
+                (camera_index + 1) % log_stride == 0
+                or camera_index == self._scene.camera_count - 1
+            ):
+                print(f"[SAD]   {camera_index + 1:3d}/{self._scene.camera_count} "
+                      f"({time.time() - started:.1f}s elapsed)", flush=True)
+
+        if cached_fields is None:
+            method = "GPU" if gpu_computer is not None else "CPU"
+            print(f"[SAD] computed {self._scene.camera_count} fields on {method} "
+                  f"in {time.time() - started:.1f}s", flush=True)
+        return textures
+
+    def _load_cache(self) -> np.ndarray | None:
+        from trainer.structure_analysis import cache_path
+
+        path = cache_path(
+            self._args.scene, self._scene.width, self._scene.height)
+        if not path.exists():
+            return None
+
+        size_mb = path.stat().st_size / (1024 * 1024)
+        print(f"[SAD] loading cache {path.name} ({size_mb:.0f} MB)...", flush=True)
+        started = time.time()
+        with np.load(path) as data:
+            camera_count = int(data["n_cams"])
+            shape = tuple(data["fields"].shape[1:3])
+            if (
+                camera_count != self._scene.camera_count
+                or shape != (self._scene.height, self._scene.width)
+            ):
+                print(f"[SAD] cache at {path} mismatches scene "
+                      f"(cached n_cams={camera_count}, shape={shape}); recomputing",
+                      flush=True)
+                return None
+            fields = np.array(data["fields"], copy=True)
+
+        print(f"[SAD] loaded {self._scene.camera_count} cached "
+              f"structure-tensor fields in {time.time() - started:.1f}s",
+              flush=True)
+        return fields
+
+    def _create_gpu_computer(self) -> Any | None:
+        try:
+            from trainer.structure_analysis_gpu import StructureTensorGPU
+            computer = StructureTensorGPU(
+                self._device, self._scene.width, self._scene.height)
+            print(f"[SAD] no cache; computing {self._scene.camera_count} fields "
+                  "on GPU...", flush=True)
+            return computer
+        except Exception as error:  # noqa: BLE001 - GPU failure selects CPU fallback
+            print(f"[SAD] GPU structure-tensor unavailable ({error}); computing "
+                  f"{self._scene.camera_count} fields on CPU (slow)...", flush=True)
+            return None
+
+    def _field_for(self, camera_index: int, cached: np.ndarray | None,
+                   gpu_computer: Any | None) -> np.ndarray:
+        if cached is not None:
+            return cached[camera_index]
+        rgb = self._targets[camera_index][..., :3]
+        if gpu_computer is not None:
+            return gpu_computer.compute(rgb)
+        from trainer.structure_analysis import compute_structure_tensor_field
+        return compute_structure_tensor_field(rgb)
+
+    def _upload(self, field: np.ndarray, label: str) -> Any:
+        import slangpy as spy
+
+        packed = np.zeros(
+            (self._scene.height, self._scene.width, 4), dtype=np.float32)
+        packed[..., :3] = field
+        texture = self._device.create_texture(
+            type=spy.TextureType.texture_2d,
+            format=spy.Format.rgba32_float,
+            width=self._scene.width,
+            height=self._scene.height,
+            usage=spy.TextureUsage.shader_resource | spy.TextureUsage.unordered_access,
+            label=label,
+        )
+        texture.copy_from_numpy(np.ascontiguousarray(packed))
+        return texture
+
+
+class TrainingReporter:
+    """Owns training log formatting and artifact schemas."""
+
+    def __init__(self, artifacts: RunArtifacts, args: argparse.Namespace,
+                 scene: SceneContext) -> None:
+        self._artifacts = artifacts
+        self._args = args
+        self._scene = scene
+        self._started_at = 0.0
+        self._last_time = 0.0
+        self._last_iteration = 0
+        self._rolling_loss: float | None = None
+
+    def write_header(self) -> None:
+        log = self._artifacts.log_txt
+        log.write(f"# v2 training log — scene={self._args.scene}, "
+                  f"backend={self._args.backend}\n")
+        log.write(f"# iters={self._args.iters}, "
+                  f"resolution={self._scene.width}x{self._scene.height}, "
+                  f"n_cams={self._scene.camera_count}\n")
+        log.write(f"# densify: every {self._args.densify_every} iters in "
+                  f"[{self._args.densify_from}, {self._args.densify_to}]\n")
+
+    def start(self, started_at: float) -> None:
+        self._started_at = started_at
+        self._last_time = started_at
+        self._last_iteration = 0
+
+    def report_throughput(self, context: IterationContext) -> None:
+        if context.number % 10 != 0:
+            return
+        now = time.time()
+        rate = ((context.number - self._last_iteration)
+                / max(now - self._last_time, 1e-9))
+        elapsed = now - self._started_at
+        print(f"iter {context.number}: train step done. It/s:{rate:.1f} "
+              f"total training time:{elapsed // 60:.0f}min {elapsed % 60:.1f}sec")
+        self._last_time = now
+        self._last_iteration = context.number
+
+    def report_iteration(self, *, context: IterationContext, pipeline: Pipeline,
+                         target: np.ndarray,
+                         current_count: int) -> tuple[bool, int]:
+        pipeline.render(context.camera_entry.camera)
+        count = int(
+            pipeline.buffers.num_gaussians_counter.to_numpy().view(np.uint32)[0])
+        rendered = pipeline.read_output_image()[..., :3]
+
+        if not np.all(np.isfinite(rendered)):
+            nonfinite = int(np.sum(~np.isfinite(rendered)))
+            message = (
+                f"iter {context.number}: rendered image has {nonfinite} "
+                f"non-finite pixels (out of {rendered.size}). Training aborted.")
+            print(message)
+            self._artifacts.log_txt.write(f"# ABORT: {message}\n")
+            return False, current_count
+
+        clipped = np.clip(rendered, 0.0, 1.0)
+        mse = float(np.mean((clipped - target) ** 2))
+        self._rolling_loss = (
+            mse if self._rolling_loss is None
+            else 0.98 * self._rolling_loss + 0.02 * mse)
+        psnr_value = psnr(clipped, target)
+        elapsed = time.time() - self._started_at
+        rate = context.number / max(elapsed, 1e-9)
+        line = (
+            f"iter {context.number:6d}  cam {context.camera_index:2d}  "
+            f"loss={self._rolling_loss:.5f}  psnr={psnr_value:5.2f} dB  "
+            f"lr_mean={context.learning_rates.mean:.2e}  n_g={count:6d}  "
+            f"{rate:5.1f} it/s")
+        print(line)
+        self._artifacts.log_txt.write(line + "\n")
+        self._artifacts.log_json.write(json.dumps({
+            "iter": context.number,
+            "cam_idx": context.camera_index,
+            "loss_rolling": self._rolling_loss,
+            "loss_instant": mse,
+            "psnr_instant": psnr_value,
+            "lr_mean": context.learning_rates.mean,
+            "n_gaussians": count,
+            "it_per_s": rate,
+            "elapsed_s": elapsed,
+        }) + "\n")
+        return True, count
+
+    def report_opacity_reset(self, iteration: int) -> None:
+        self._artifacts.densify_json.write(json.dumps({
+            "iter": iteration, "event": "opacity_reset"}) + "\n")
+        print(f"iter {iteration}: opacity reset")
+
+    def report_morton_sort(self, iteration: int) -> None:
+        self._artifacts.densify_json.write(json.dumps({
+            "iter": iteration, "event": "morton_sort"}) + "\n")
+
+    def report_complete(self, iterations: int, wall_time: float) -> None:
+        rate = iterations / max(wall_time, 1e-9)
+        print(f"[train] loop done: {iterations} iters in {wall_time:.1f}s "
+              f"({rate:.1f} it/s)")
+        self._artifacts.log_json.write(json.dumps({
+            "event": "train_complete",
+            "iters": iterations,
+            "train_wall_s": wall_time,
+            "it_per_s": rate,
+        }) + "\n")
+
+
+class PsNRPlotWriter:
+    """Writes the final PSNR-curve JSON and best-effort PNG."""
+
+    @staticmethod
+    def write(*, enabled: bool, records: list[dict], args: argparse.Namespace,
+              paths: RunPaths, run_name: str, scene: SceneContext) -> None:
+        if not enabled:
+            return
+        curve = {
+            "scene": args.scene,
+            "run_name": run_name,
+            "eval_holdout": bool(args.eval_holdout),
+            "eval_holdout_stride": scene.holdout_stride,
+            "n_eval_cams": len(scene.test_indices),
+            "psnr_curve_every": args.psnr_curve_every,
+            "iters": [record["iter"] for record in records],
+            "psnr_srgb": [record["psnr_srgb"] for record in records],
+            "n_gaussians": [record["n_gaussians"] for record in records],
+        }
+        (paths.root / "psnr_curve.json").write_text(json.dumps(curve, indent=2))
+        try:
+            import matplotlib
+            matplotlib.use("Agg")
+            import matplotlib.pyplot as plt
+
+            figure, axis = plt.subplots(figsize=(10, 6), dpi=120)
+            axis.plot(
+                curve["iters"], curve["psnr_srgb"], "-o",
+                ms=3, lw=1.6, color="#1f77b4")
+            axis.set_xlabel("iteration")
+            axis.set_ylabel("test PSNR sRGB (dB)")
+            scene_name = Path(args.scene).name or args.scene
+            axis.set_title(f"PSNR vs iteration — {scene_name} ({run_name})")
+            axis.grid(True, alpha=0.3)
+            figure.tight_layout()
+            figure.savefig(paths.root / "psnr_curve.png")
+            plt.close(figure)
+            print(f"[psnr-curve] wrote {paths.root / 'psnr_curve.json'} + "
+                  f"psnr_curve.png ({len(curve['iters'])} points)")
+        except Exception as error:  # noqa: BLE001 - plotting is best-effort
+            print(f"[psnr-curve] wrote psnr_curve.json but the PNG failed "
+                  f"({error}); `.venv/Scripts/python.exe -m pip install "
+                  "matplotlib` to enable it.")
+
+
+# ---------------------------------------------------------------------------
+# Small construction functions
+# ---------------------------------------------------------------------------
+
+
+def load_scene_context(args: argparse.Namespace) -> SceneContext:
+    scene = load_colmap(
+        args.scene,
+        width=args.width,
+        height=args.height,
+        downsample=args.downsample,
+        init_opacity=args.init_opacity,
+    )
+    camera_count = len(scene.images)
+    initial_count = scene.initial_points["means"].shape[0]
+    width, height = scene.images[0].camera.image_size
+    print(f"loaded {camera_count} cameras, {initial_count} init points, "
+          f"scene_extent={scene.scene_extent:.3f}")
+
+    stride, test_indices, train_indices = resolve_holdout_split(
+        args, camera_count)
+    morton_min, morton_max = compute_morton_bounds(
+        scene.initial_points["means"])
+    print(f"schedule: densify [{args.densify_from}, {args.densify_to}] "
+          f"every {args.densify_every}")
+    return SceneContext(
+        scene=scene,
+        width=width,
+        height=height,
+        camera_count=camera_count,
+        initial_gaussian_count=initial_count,
+        extent=scene.scene_extent,
+        train_indices=train_indices,
+        test_indices=test_indices,
+        holdout_stride=stride,
+        morton_min=morton_min,
+        morton_max=morton_max,
+    )
+
+
+def create_training_device(args: argparse.Namespace) -> Any:
+    defines = None
     if args.backward_pixel_stride != 1:
-        _defines["BACKWARD_PIXEL_STRIDE"] = f"{args.backward_pixel_stride}u"
-    device = create_device(backend=args.backend,
-                           shader_debug_info=args.profile_run,
-                           defines=_defines or None)
+        defines = {"BACKWARD_PIXEL_STRIDE": f"{args.backward_pixel_stride}u"}
+    device = create_device(
+        backend=args.backend,
+        shader_debug_info=args.profile_run,
+        defines=defines,
+    )
     if args.profile_run:
         print("[profile-run] shaders compiled with source-level debug info "
               "(SPIR-V NonSemantic.Shader.DebugInfo) for Nsight correlation.")
+    return device
 
-    # In-process live viewer runs its render loop on a background thread sharing
-    # this device's VkQueue, so training + viewer submits must be serialized by
-    # a shared lock (see Pipeline.gpu_lock). Only needed when the viewer is on.
-    import threading as _threading
-    # RLock, NOT Lock: training-thread paths legitimately nest gpu_lock. render()
-    # takes it coarsely, then the transient-encoder branch of _dispatch /
-    # _dispatch_indirect inside the forward (radix sort) takes it AGAIN per
-    # submit. A non-reentrant Lock self-deadlocks the training thread the first
-    # time render() runs (the densify+preview tick around iter 2000). RLock lets
-    # the same thread re-enter while still blocking the viewer thread.
-    gpu_lock = _threading.RLock() if not args.no_viewer else None
 
-    pipeline = Pipeline(
-        device=device, width=IMAGES_WIDTH, height=IMAGES_HEIGHT,
+def create_gpu_queue_lock(*, viewer_enabled: bool) -> Any:
+    """Return the reentrant queue lock shared by training and the viewer.
+
+    A reentrant lock is required because coarse training/viewer operations can
+    enter runtime code that acquires the same queue lock again.
+    """
+    return threading.RLock() if viewer_enabled else None
+
+
+def create_pipeline(*, args: argparse.Namespace, device: Any, gpu_lock: Any,
+                    scene: SceneContext, lambda_l2: float,
+                    lambda_ssim: float) -> Pipeline:
+    return Pipeline(
+        device=device,
+        width=scene.width,
+        height=scene.height,
         max_splats=args.max_splats,
         gpu_lock=gpu_lock,
         cfg=RenderConfig(
@@ -279,471 +1258,29 @@ def main() -> None:
             opacity_reg=args.opacity_reg,
             scale_reg=args.scale_reg,
             w_alpha=args.w_alpha,
-            lambda_ssim=eff_lambda_ssim,
-            lambda_l2=eff_lambda_l2,
+            lambda_ssim=lambda_ssim,
+            lambda_l2=lambda_l2,
             cluster_cull=args.cluster_cull,
             mip_enabled=args.mip_splatting,
             kernel_size=(args.mip_kernel_size if args.mip_splatting else 0.3),
             extinction_hardness=args.extinction_hardness,
         ),
     )
-    pipeline.set_gaussians_from_numpy(**scene.initial_points)
+
+
+def initialize_pipeline(*, pipeline: Pipeline, initial_points: dict,
+                        densify_mode: DensificationMode,
+                        use_flat_bucket_backward: bool) -> None:
+    pipeline.set_gaussians_from_numpy(**initial_points)
     pipeline.clear_tracking()
-    # Flat (warp-per-bucket) backward opt-in for A/B + tracing. Off by default.
-    pipeline.use_flat_bucket_backward = args.flat_bucket_backward
-    # One-time full grad clear. Seeds the "scalar grads are zero at start-of-
-    # iter" invariant that lets train_step's hot-path _clear_2d_grad_seeds skip
-    # the 14 scalar-grad clears every iter (adam zeros them per-thread at
-    # end-of-iter, so subsequent iters are already zero). NDBuffer contents
-    # aren't guaranteed zero on allocation, so this initial pass is required.
+    pipeline.use_flat_bucket_backward = use_flat_bucket_backward
     pipeline._clear_grads()
     if densify_mode == DensificationMode.STRUCTURE_AWARE:
-        # Zero the eta accumulators before the first online-accumulation window
-        # (NDBuffer contents are not guaranteed zeroed on allocation).
         pipeline.clear_structure_scores()
 
-    # Mip-Splatting filter-3D logging: summarize buffers.filter_3D over the
-    # ACTIVE gaussians so it's verifiable that the filter actually changes
-    # across recomputes (init / post-densify / periodic / final). The `sum`
-    # checksum catches any change even when min/mean/max round-print the same.
-    def _log_filter3d(tag: str, it_val: int | None = None) -> None:
-        if not args.mip_splatting:
-            return
-        n = int(pipeline.buffers.num_gaussians_counter.to_numpy().view(np.uint32)[0])
-        if n == 0:
-            print(f"[filter3d] {tag}: no active gaussians", flush=True)
-            return
-        f = np.frombuffer(pipeline.buffers.filter_3D.to_numpy().tobytes(),
-                          dtype=np.float32)[:n].astype(np.float64)
-        it_str = f"it={it_val} " if it_val is not None else ""
-        print(f"[filter3d] {tag} {it_str}n={n} min={f.min():.6g} "
-              f"mean={f.mean():.6g} max={f.max():.6g} "
-              f"nonzero={np.count_nonzero(f) / n:.3f} sum={f.sum():.6g}", flush=True)
 
-    # Mip-Splatting: upload the TRAIN cameras once and compute the initial
-    # per-gaussian 3D smoothing filter (recomputed after each densify, since
-    # the means move). Held-out test views are excluded to match mip-splatting
-    # / SADGS. Off unless --mip-splatting.
-    if args.mip_splatting:
-        train_cameras = [scene.images[i].camera for i in train_indices]
-        pipeline.set_cameras(train_cameras)
-        pipeline.compute_3d_filter()
-        print(f"[mip] enabled: kernel_size={args.mip_kernel_size}, 3D filter over "
-              f"{len(train_cameras)} train cameras", flush=True)
-        _log_filter3d("init")
-
-    # Live viewing is IN-PROCESS: a background-thread Viewer shares this
-    # device (serialized by gpu_lock). Streaming a snapshot is a zero-copy
-    # GPU->GPU buffer blit (viewer.update_gaussians) — no CPU readback, no
-    # numpy, no shared-memory re-upload — so it's cheap enough to run every
-    # few iters. Trade-off vs. the old shared-memory stream: the viewer shares
-    # the training queue, so a viewer crash can stall training.
-    viewer = ViewerSession.create(
-        enabled=not args.no_viewer, device=device,
-        width=IMAGES_WIDTH, height=IMAGES_HEIGHT,
-        max_splats=args.max_splats,
-        fovy=args.fovy if hasattr(args, "fovy") else 45.0,
-        gpu_lock=gpu_lock, pipeline=pipeline,
-    )
-
-    # Pre-upload every target image as its own GPU texture. Per-iter we
-    # just swap the active reference — no CPU→GPU upload in the hot loop.
-    target_textures = [pipeline.create_target_texture(t) for t in targets_srgb]
-
-    # Structure-aware densification: get the multi-scale structure-tensor field
-    # S̄ per view and upload each as an rgba32_float texture packing
-    # (Sxx, Sxy, Syy, 0). Prefer the on-disk cache built by
-    # scripts/preprocess_structure.py (fields take seconds/image to compute);
-    # fall back to computing on the fly (with a warning) if none is present.
-    structure_textures = []
-    if densify_mode == DensificationMode.STRUCTURE_AWARE:
-        import slangpy as spy
-        from trainer.structure_analysis import cache_path, compute_structure_tensor_field
-
-        def _make_structure_tex(sbar: np.ndarray, label: str):
-            packed = np.zeros((IMAGES_HEIGHT, IMAGES_WIDTH, 4), dtype=np.float32)
-            packed[..., :3] = sbar
-            tex = device.create_texture(
-                type=spy.TextureType.texture_2d, format=spy.Format.rgba32_float,
-                width=IMAGES_WIDTH, height=IMAGES_HEIGHT,
-                usage=spy.TextureUsage.shader_resource | spy.TextureUsage.unordered_access,
-                label=label)
-            tex.copy_from_numpy(np.ascontiguousarray(packed))
-            return tex
-
-        cpath = cache_path(args.scene, IMAGES_WIDTH, IMAGES_HEIGHT)
-        cached_fields = None
-        if cpath.exists():
-            size_mb = cpath.stat().st_size / (1024 * 1024)
-            print(f"[SAD] loading cache {cpath.name} ({size_mb:.0f} MB)...", flush=True)
-            _t_load = time.time()
-            data = np.load(cpath)
-            # Guard against a stale cache (resolution/count drift). The cache
-            # key already encodes resolution+params, but verify count too.
-            if int(data["n_cams"]) == n_cams and tuple(data["fields"].shape[1:3]) == (IMAGES_HEIGHT, IMAGES_WIDTH):
-                cached_fields = data["fields"]   # forces disk read here
-                print(f"[SAD] loaded {n_cams} cached structure-tensor fields "
-                      f"in {time.time() - _t_load:.1f}s", flush=True)
-            else:
-                print(f"[SAD] cache at {cpath} mismatches scene "
-                      f"(cached n_cams={int(data['n_cams'])}, "
-                      f"shape={data['fields'].shape[1:3]}); recomputing", flush=True)
-
-        # No cache: compute the fields on the GPU (default — fast enough that
-        # the preprocess/cache step is no longer required). Fall back to the CPU
-        # reference only if the GPU path can't be built.
-        st_gpu = None
-        if cached_fields is None:
-            try:
-                from trainer.structure_analysis_gpu import StructureTensorGPU
-                st_gpu = StructureTensorGPU(device, IMAGES_WIDTH, IMAGES_HEIGHT)
-                print(f"[SAD] no cache; computing {n_cams} fields on GPU...",
-                      flush=True)
-            except Exception as e:  # noqa: BLE001 - any GPU failure -> CPU path
-                print(f"[SAD] GPU structure-tensor unavailable ({e}); computing "
-                      f"{n_cams} fields on CPU (slow)...", flush=True)
-        else:
-            print(f"[SAD] uploading {n_cams} structure-tensor textures to GPU...",
-                  flush=True)
-        t_sad = time.time()
-        _log_stride = max(1, n_cams // 6)  # ~6 progress lines total
-        for cam_i in range(n_cams):
-            if cached_fields is not None:
-                sbar = cached_fields[cam_i]
-            elif st_gpu is not None:
-                # SADGS computes the structure tensor on the RAW sRGB image
-                # (train.py:184 feeds cam.original_image straight in), NOT on
-                # linearized RGB. The GPU kernels match the CPU reference.
-                sbar = st_gpu.compute(targets_srgb[cam_i][..., :3])
-            else:
-                sbar = compute_structure_tensor_field(targets_srgb[cam_i][..., :3])
-            structure_textures.append(_make_structure_tex(sbar, f"structure_tensor_{cam_i}"))
-            if (cam_i + 1) % _log_stride == 0 or cam_i == n_cams - 1:
-                print(f"[SAD]   {cam_i + 1:3d}/{n_cams} "
-                      f"({time.time() - t_sad:.1f}s elapsed)", flush=True)
-        if cached_fields is None:
-            _how = "GPU" if st_gpu is not None else "CPU"
-            print(f"[SAD] computed {n_cams} fields on {_how} in "
-                  f"{time.time() - t_sad:.1f}s", flush=True)
-
-    # All setup uploads (target textures + structure-tensor textures) are done;
-    # safe to start the viewer render thread now. See the deferred-start
-    # rationale at the viewer construction site above.
-    viewer.start()
-
-    # Nsight Graphics hooks the Vulkan device and delimits work by Present, so
-    # profiling needs a real windowed, presenting app; open one for
-    # --profile-run (no-op otherwise). Each presented frame is one train_step.
-    profiler.open_window(pipeline, IMAGES_WIDTH, IMAGES_HEIGHT)
-
-    artifacts = RunArtifacts.create(run_dir, args)
-    profile_json = artifacts.profile_json
-    log_txt = artifacts.log_txt
-    log_json = artifacts.log_json
-    densify_json = artifacts.densify_json
-    densify_diag_json = artifacts.densify_diag_json
-    eval_curve_json = artifacts.eval_curve_json
-    psnr_curve_json = artifacts.psnr_curve_json
-    bin_viz_json = artifacts.bin_viz_json
-    popstat = artifacts.popstat
-
-    _diag = None
-    _diag_grad_internal = None
-    if densify_diag_json is not None:
-        import densify_diag as _diag
-        # grad gate floor the structure decision uses internally (host pre-scales
-        # the SADGS mean-loss threshold by W*H*3 into our sum-of-abs convention).
-        _diag_grad_internal = args.sad_grad_threshold * (IMAGES_WIDTH * IMAGES_HEIGHT * 3.0)
-    psnr_curve_records: list[dict] = []
-    log_txt.write(f"# v2 training log — scene={args.scene}, backend={args.backend}\n")
-    log_txt.write(f"# iters={args.iters}, resolution={IMAGES_WIDTH}x{IMAGES_HEIGHT}, n_cams={n_cams}\n")
-    log_txt.write(f"# densify: every {args.densify_every} iters in "
-                  f"[{args.densify_from}, {args.densify_to}]\n")
-
-    rng = np.random.default_rng(args.seed)
-    # Per-iteration train-camera draw. 'ours' shares this rng so its stream
-    # stays interleaved with the densify view-scoring draws; 'sadgs' replicates
-    # the reference shuffle/pop (see scripts/_v2_sampling.py).
-    sampler = CameraSampler(args.sample_mode, train_indices, test_indices,
-                            args.seed, rng)
-
-    # Per-iteration event schedule (pure; extracted to trainer.training.schedule).
-    # Owns the densify/reset/structure/preview/render-all/log/eval/psnr/morton/
-    # mip timing so the loop just reads events_at(it).
-    schedule = TrainingSchedule(ScheduleConfig.from_args(args))
-
-    mean_lr = MeanLearningRateSchedule(
-        lr_init=1.6e-4 * extent, lr_final=1.6e-6 * extent,
-        max_steps=args.position_lr_max_steps)
-    extinction = ExtinctionHardnessSchedule(
-        target=args.extinction_hardness, warmup=args.extinction_hardness_warmup)
-
-    if args.wait_for_viewer:
-        viewer.wait_for_start()
-
-    viewer.set_training_active(True)
-
-    t_start = time.time()
-    t_last = t_start
-    it_last = 0
-    rolling_loss = None
-    # Total time spent inside the --eval-every sweeps. Subtracted from
-    # (now - t_start) to yield the pure-training elapsed reported to
-    # eval_curve.jsonl, so the convergence plot's X-axis is fair.
-    eval_time_total = 0.0
-    # Track the current live gaussian count Python-side to avoid a
-    # per-iter counter readback. Updated from densify() return values.
-    cur_n_gaussians = n_init
-
-    # Queue-depth backpressure (fence-based; trainer.training.queue_limiter).
-    # Nothing in the hot loop drains the GPU queue, so without this the CPU
-    # QueueLimiter keeps a rolling window of the last max_depth submit
-    # IDs and waits on the oldest before recording a new one, no wait_for_idle
-    # in the hot path.
-    queue_limiter = QueueLimiter(pipeline.runtime, max_depth=1)
-
-    # Densification subsystem (all four densify modes + eta-window carry, Morton
-    # re-sort, mip recompute, popstat + diagnostics). Constructed once with its
-    # dependencies; the loop calls densifier.run(it, ev, count) on densify ticks.
-    densifier = DensificationController(
-        pipeline=pipeline, args=args, densify_mode=densify_mode,
-        densify_cfg=cfg, structure_cfg=structure_cfg,
-        extent=extent, n_init=n_init, n_cams=n_cams, rng=rng, scene=scene,
-        target_textures=target_textures, image_width=IMAGES_WIDTH,
-        image_height=IMAGES_HEIGHT, morton_world_min=morton_world_min,
-        morton_world_max=morton_world_max, extinction=extinction,
-        queue_limiter=queue_limiter, artifacts=artifacts, diag_module=_diag,
-        diag_grad_internal=_diag_grad_internal,
-        print_opacity_bundle=_print_opacity_bundle,
-    )
-
-    it = 0
-    while it < args.iters:
-
-        if profiler.should_stop():
-            break
-        it += 1
-
-        cam_idx = sampler.next()
-        entry = scene.images[cam_idx]
-        pipeline.set_target_texture(target_textures[cam_idx])
-
-        if it == 1:
-            print(f"[determinism] iter 1 cam_idx={cam_idx} (should match "
-                  f"across same-seed runs)")
-
-        # Backpressure before submitting more work.
-        queue_limiter.before_submit()
-
-        lrs = AdamLRs(mean=mean_lr.at(it - 1), scale=base_lrs.scale,
-                      rot=base_lrs.rot, opacity=base_lrs.opacity, color=base_lrs.color)
-
-        if profiler.run_capture_if_due(pipeline, it, entry, cam_idx, queue_limiter):
-            artifacts.close_all()
-            sys.exit(0)
-
-        struct_tex = None
-        struct_kwargs = None
-        if (densify_mode == DensificationMode.STRUCTURE_AWARE
-                and args.densify_from < it <= args.densify_to
-                and it % args.sad_accum_every == 0):
-            struct_tex = structure_textures[cam_idx]
-            struct_kwargs = {
-                "per_view_grad_thresh": (args.sad_freq_grad_threshold
-                                         * IMAGES_WIDTH * IMAGES_HEIGHT * 3.0),
-            }
-
-        pipeline.set_extinction_hardness(extinction.at(it))
-
-        pipeline.train_step(entry.camera, lrs=lrs, structure_tensor=struct_tex,
-                            structure_kwargs=struct_kwargs)
-
-        queue_limiter.record(pipeline.last_submit_id)
-
-        #TODO: the intention is not well communicated. Profiler here is called regardless but if it happens or not is hidden behing the interface
-        profiler.present_frame()
-
-        if it % args.stream_every == 0:
-            viewer.push_snapshot(pipeline)
-
-        ev = schedule.events_at(it)
-        do_densify = ev.densify
-        do_opacity_reset = ev.opacity_reset
-        do_log = ev.log
-        do_preview = ev.preview
-        if do_densify:
-            cur_n_gaussians = densifier.run(it, ev, cur_n_gaussians)
-
-        if do_opacity_reset:
-            pipeline.reset_opacity(cfg)
-            densify_json.write(json.dumps({"iter": it, "event": "opacity_reset"}) + "\n")
-            print(f"iter {it}: opacity reset")
-
-        #On the SAD path the eta window must SURVIVE this
-        # sort (it's only reset at a structure tick), so we carry eta through
-        # the permutation instead of clearing it — otherwise enabling
-        # --morton-every would silently wipe the multiview window mid-interval.
-        if ev.morton:
-            pipeline.morton_sort(morton_world_min, morton_world_max,
-                                 carry_eta=(densify_mode == DensificationMode.STRUCTURE_AWARE))
-            pipeline.clear_tracking()
-            if pipeline.last_submit_id:
-                queue_limiter.record(pipeline.last_submit_id)
-            densify_json.write(json.dumps({"iter": it, "event": "morton_sort"}) + "\n")
-
-        # Mip-Splatting: keep the 3D filter fresh AFTER densification ends.
-        if ev.mip_periodic:
-            pipeline.compute_3d_filter()
-            _log_filter3d("periodic", it)
-
-
-        if it % 10 == 0:
-            print(f"iter {it}: train step done. It/s:" f"{(it - it_last) / max(time.time() - t_last, 1e-9):.1f}" " total training time:" f"{(time.time() - t_start) // 60:.0f}min {(time.time() - t_start) % 60:.1f}sec")
-            t_last = time.time()
-            it_last = it
-
-        if it > 1 and (do_log or do_preview):
-
-            pipeline.render(entry.camera)
-            cur_n_gaussians = int(
-                pipeline.buffers.num_gaussians_counter.to_numpy().view(np.uint32)[0]
-            )
-
-            rendered = pipeline.read_output_image()[..., :3]
-
-            if not np.all(np.isfinite(rendered)):
-                n_nan = int(np.sum(~np.isfinite(rendered)))
-                msg = (f"iter {it}: rendered image has {n_nan} non-finite pixels "
-                       f"(out of {rendered.size}). Training aborted.")
-                print(msg)
-                log_txt.write(f"# ABORT: {msg}\n")
-                break
-            # Render + target are both sRGB (INRIA/gsplat/SADGS convention);
-            # compare directly. This is the reported PSNR metric.
-            tgt = targets_srgb[cam_idx][..., :3]
-            rendered_clip = np.clip(rendered, 0.0, 1.0)
-            mse = float(np.mean((rendered_clip - tgt) ** 2))
-            rolling_loss = mse if rolling_loss is None else 0.98 * rolling_loss + 0.02 * mse
-            psnr = _psnr_image(rendered_clip, tgt)
-
-            elapsed = time.time() - t_start
-            it_per_s = it / elapsed
-            line = (f"iter {it:6d}  cam {cam_idx:2d}  "
-                    f"loss={rolling_loss:.5f}  psnr={psnr:5.2f} dB  "
-                    f"lr_mean={lrs.mean:.2e}  n_g={cur_n_gaussians:6d}  {it_per_s:5.1f} it/s")
-            print(line)
-            log_txt.write(line + "\n")
-            log_json.write(json.dumps({
-                "iter": it, "cam_idx": cam_idx,
-                "loss_rolling": rolling_loss, "loss_instant": mse,
-                "psnr_instant": psnr, "lr_mean": lrs.mean,
-                "n_gaussians": cur_n_gaussians, "it_per_s": it_per_s,
-                "elapsed_s": elapsed,
-            }) + "\n")
-
-        do_render_all = ev.render_all
-        if it > 1 and do_render_all:
-            render_all_cameras(pipeline, scene, it, cams_dir)
-
-        if psnr_curve_json is not None and ev.psnr_curve:
-            _pc_t0 = time.time()
-            _pc_psnr, _pc_ng = eval_test_psnr_srgb(pipeline, scene, test_indices, targets_srgb)
-            _pc_rec = {"iter": it, "psnr_srgb": _pc_psnr, "n_gaussians": _pc_ng}
-            psnr_curve_records.append(_pc_rec)
-            psnr_curve_json.write(json.dumps(_pc_rec) + "\n")
-            eval_time_total += time.time() - _pc_t0
-            print(f"[psnr-curve] iter {it:6d}  psnr_srgb={_pc_psnr:5.2f}  "
-                  f"n_g={_pc_ng} (pre-densify)")
-
-        if eval_curve_json is not None and ev.eval:
-            eval_time_total = run_eval_sweep(
-                pipeline=pipeline, scene=scene, it=it, test_indices=test_indices,
-                targets_srgb=targets_srgb, targets_linear=targets_linear,
-                cams_dir=cams_dir, eval_curve_json=eval_curve_json,
-                bin_viz_json=bin_viz_json, t_start=t_start,
-                eval_time_total=eval_time_total, eval_holdout=bool(args.eval_holdout),
-            )
-
-    pipeline.runtime.wait_for_idle()
-    train_wall_s = time.time() - t_start
-    completed_iters = it
-
-    # Post-training renders (final test PSNR, final metrics, viewer) use the
-    # run's TARGET hardness, not whatever mid-ramp value a short run left behind.
-    pipeline.set_extinction_hardness(extinction.target)
-
-    print(f"[train] loop done: {completed_iters} iters in {train_wall_s:.1f}s "
-          f"({completed_iters / max(train_wall_s, 1e-9):.1f} it/s)")
-    log_json.write(json.dumps({
-        "event": "train_complete",
-        "iters": completed_iters,
-        "train_wall_s": train_wall_s,
-        "it_per_s": completed_iters / max(train_wall_s, 1e-9),
-    }) + "\n")
-
-    if args.final_test_psnr and not args.profile_run:
-        _tp_psnr, _tp_ng = eval_test_psnr_srgb(pipeline, scene, test_indices, targets_srgb)
-        (run_dir / "test_psnr.json").write_text(json.dumps({
-            "psnr_srgb": _tp_psnr,
-            "n_gaussians": _tp_ng,
-            "n_test_cams": len(test_indices),
-            "train_wall_s": train_wall_s,
-            "iters": completed_iters,
-            "flat_bucket_backward": bool(args.flat_bucket_backward),
-        }, indent=2))
-        print(f"[final-test-psnr] TEST PSNR sRGB = {_tp_psnr:.3f} dB over "
-              f"{len(test_indices)} held-out cams  (n_gaussians={_tp_ng})")
-
-    profiler.close()
-
-    viewer.hold_after_training(pipeline)
-
-    artifacts.close_all()
-
-    if args.psnr_curve:
-        curve = {
-            "scene": args.scene,
-            "run_name": run_name,
-            "eval_holdout": bool(args.eval_holdout),
-            "eval_holdout_stride": stride,
-            "n_eval_cams": len(test_indices),
-            "psnr_curve_every": args.psnr_curve_every,
-            "iters": [r["iter"] for r in psnr_curve_records],
-            "psnr_srgb": [r["psnr_srgb"] for r in psnr_curve_records],
-            "n_gaussians": [r["n_gaussians"] for r in psnr_curve_records],
-        }
-        (run_dir / "psnr_curve.json").write_text(json.dumps(curve, indent=2))
-        try:
-            import matplotlib
-            matplotlib.use("Agg")  # headless: no display needed
-            import matplotlib.pyplot as plt
-            fig, ax = plt.subplots(figsize=(10, 6), dpi=120)
-            ax.plot(curve["iters"], curve["psnr_srgb"], "-o", ms=3, lw=1.6,
-                    color="#1f77b4")
-            ax.set_xlabel("iteration")
-            ax.set_ylabel("test PSNR sRGB (dB)")
-            _scene_name = Path(args.scene).name or args.scene
-            ax.set_title(f"PSNR vs iteration — {_scene_name} ({run_name})")
-            ax.grid(True, alpha=0.3)
-            fig.tight_layout()
-            fig.savefig(run_dir / "psnr_curve.png")
-            plt.close(fig)
-            print(f"[psnr-curve] wrote {run_dir / 'psnr_curve.json'} + psnr_curve.png "
-                  f"({len(curve['iters'])} points)")
-        except Exception as e:  # noqa: BLE001 - plotting is best-effort
-            print(f"[psnr-curve] wrote psnr_curve.json but the PNG failed ({e}); "
-                  f"`.venv/Scripts/python.exe -m pip install matplotlib` to enable it.")
-
-    if args.profile_run:
-        print("[profile-run] finished; skipping final metrics / PLY export.")
-        return
-
-    run_post_training(
-        pipeline=pipeline, scene=scene, args=args, run_dir=run_dir,
-        cams_dir=cams_dir, targets_srgb=targets_srgb, targets_linear=targets_linear,
-        test_indices=test_indices, stride=stride, n_cams=n_cams,
-        train_wall_s=train_wall_s, completed_iters=completed_iters, t_start=t_start,
-    )
+def main() -> None:
+    TrainingApplication.from_cli().run()
 
 
 if __name__ == "__main__":

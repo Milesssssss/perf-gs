@@ -26,7 +26,6 @@ def test_enum_values_frozen() -> None:
     assert SamplingMode.SADGS == "sadgs"
     assert DensificationMode.NONE == "none"
     assert DensificationMode.SIMPLE == "simple"
-    assert DensificationMode.IMPORTANCE == "importance_score"
     assert DensificationMode.STRUCTURE_AWARE == "structure_aware"
     assert PrimitiveKind.GAUSSIAN_3D == "gaussian_3d"
     assert PrimitiveKind.DISK_2D == "disk_2d"
@@ -36,7 +35,7 @@ def test_enum_values_frozen() -> None:
 
 
 def test_densify_mode_from_args_reads_cli_choice() -> None:
-    for choice in ("none", "simple", "importance_score", "structure_aware"):
+    for choice in ("none", "simple", "structure_aware"):
         args = build_parser().parse_args(["--densify-mode", choice])
         assert DensificationMode.from_args(args) == DensificationMode(choice)
 

@@ -111,20 +111,10 @@ class Pipeline:
         self.shared_data_module = _module_for_reflection(device)
         self.viewer_only = viewer_only
 
-        # --- kernels ---
-        # Compiled from the declarative KERNEL_SPECS table (kernels.py); each
-        # sets self.k_<attr>. Debug-marker names are passed explicitly at each
-        # _dispatch call site, so the returned label map is unused here.
-        # viewer_only mode compiles just the ~14 kernels the render path needs.
         load_kernels(device, self, viewer_only=viewer_only)
 
-        # --- buffers ---
-        # In viewer_only mode, skip the ~3.5 GB (@max_splats=7M) of training-
-        # only buffers: grads, adam state, densify scratch, loss textures,
-        # SSIM maps, importance state, eta accumulators, split factors.
-        # The shared _run_forward touches ONLY the resources allocate_viewer
-        # provides — reading anything else would raise AttributeError.
         allocate_fn = buffers.allocate_viewer if viewer_only else buffers.allocate
+
         self.buffers = allocate_fn(
             device=device, shared_data_module=self.shared_data_module,
             max_splats=max_splats, width=width, height=height,
@@ -197,94 +187,39 @@ class Pipeline:
             max_primitives=self.max_splats,
         ) if not viewer_only else None
 
-        # ID of the most recent submit_command_buffer call. Callers (the train
-        # loop) can wait on this via device.wait_for_submit(id) to bound queue
-        # depth without a full wait_for_idle. Kept up to date by every submit
-        # site in this file (train_step, densify_simple, _dispatch_indirect
-        # transient submits).
         self.last_submit_id: int = 0
 
         # Render/loss knobs (near-plane cull, regularization weights, alpha
         # loss weight, SSIM mix). Owned by the trainer and passed in; read deep
-        # in the dispatch path (bin/loss/regularization). Frozen — see
-        # trainer.config.RenderConfig for the fields and their defaults.
+        # in the dispatch path (bin/loss/regularization).
         self.cfg = cfg if cfg is not None else RenderConfig()
-        # The viewer pipeline deliberately does NOT support cluster-cull: it
-        # skips those kernels (see kernels.VIEWER_KERNEL_ATTRS) and never
-        # allocates the cluster AABB buffers (buffers.allocate_viewer seeds
-        # cluster_visible=all-ones only). If cfg leaves cluster_cull on (the
-        # RenderConfig default), _run_forward would dispatch the uncompiled
-        # k_build_cluster_aabb and raise AttributeError before Present, which
-        # then floods the swapchain with acquireNextImage errors. Force it off
-        # here so the render path takes the all-visible no-op branch.
+        # The viewer pipeline deliberately does NOT support cluster-cull
         if viewer_only and self.cfg.cluster_cull:
             import dataclasses
             self.cfg = dataclasses.replace(self.cfg, cluster_cull=False)
 
-        # Backward variant selector. True = transposed per-splat
-        # backward_persplat.slang (default; splat-parallel with checkpoint
-        # reconstruction, validated gradient-equivalent to the per-pixel
-        # kernel in tests/test_backward_persplat.py). False = the original
-        # per-pixel backward.slang, kept for side-by-side comparison / fallback.
         self.use_persplat_backward = True
-
-        # Flat (warp-per-bucket) backward selector. When True AND
-        # use_persplat_backward, the transposed backward is dispatched as ONE
-        # WARP PER BUCKET over a compacted live-bucket list (live_buckets.slang)
-        # instead of one 256-thread workgroup per tile. This removes the
-        # inter-tile straggler tail and the wasted warps on light tiles; the
-        # per-pixel constants are read inline (no tile-wide LDS staging) to lift
-        # occupancy. Gradient-equivalent to backward_persplat (parity-tested).
-        # Default off pending trace validation of the win.
         self.use_flat_bucket_backward = False
 
-        # Mip-Splatting requires the per-splat backward: only backward_persplat
-        # threads grad_comp (the opacity-compensation seed) back through project,
-        # so the compensation term's gradient to scale/rot/mean is DROPPED on the
-        # per-pixel fallback. Fail loudly rather than train a silently-wrong
-        # gradient (the per-pixel backward.slang passes literal comp seed 0.0).
         if self.cfg.mip_enabled and not self.use_persplat_backward:
             raise RuntimeError(
                 "mip_enabled requires use_persplat_backward=True: the per-pixel "
                 "backward does not propagate opacity-compensation gradients.")
 
-        # Extinction hardness (compositor) is honored only by the per-splat
-        # backward (per-tile + flat); the legacy per-pixel backward.slang is
-        # alpha-over only. Fail loudly rather than train a hardened forward
-        # against an alpha-over backward.
         if self.cfg.extinction_hardness != 1.0 and not self.use_persplat_backward:
             raise RuntimeError(
                 "extinction_hardness != 1 requires use_persplat_backward=True: "
                 "the per-pixel backward does not implement hardened extinction.")
 
-        # Rotating phase for the transposed backward's stochastic pixel
-        # subsampling (BACKWARD_PIXEL_STRIDE in backward_persplat.slang).
-        # Incremented each backward so the visited pixel subset alternates;
-        # a plain int is fine (the shader takes it mod STRIDE). Irrelevant
-        # when STRIDE == 1.
+        #starts at 0, increments after each bwd step
         self._backward_pixel_phase = 0
 
-        # Compositor extinction hardness ACTUALLY dispatched each forward /
-        # backward. cfg.extinction_hardness is the run TARGET; the trainer may
-        # SCHEDULE the live value over training (e.g. hold at 1.0 until the
-        # first densify, then ramp to the target) via set_extinction_hardness.
-        # Defaults to the target so an unscheduled run is bit-identical.
         self._extinction_hardness = float(self.cfg.extinction_hardness)
 
-        # Active loss target texture. Defaults to the pipeline's own
-        # target_image; set_target_image / set_target_texture swap it. Kept
-        # initialized here so _run_loss reads self._active_target directly.
-        # viewer_only skips: no loss path exists on this pipeline.
         self._active_target = None if viewer_only else self.buffers.target_image
 
-        # The radix ping-pong slot holding the sorted gaussian-id buffer after
-        # the forward pass. _run_forward caches the data-dependent winner here;
-        # the backward + scoring reads it. Defaults to slot A (the sort source).
         self._sorted_values = self.buffers.sort_values_a
 
-        # Mip-Splatting: static training-camera array + sqrt(0.2)/max_focal
-        # coefficient, uploaded once by set_cameras(); consumed by
-        # compute_3d_filter(). None until --mip-splatting calls set_cameras.
         self._mip_cameras_buffer: spy.Buffer | None = None
         self._mip_num_cameras: int = 0
         self._mip_filter_coef: float = 0.0
@@ -1127,16 +1062,11 @@ class Pipeline:
                 self._run_adam(lrs)
 
     # ------------------------------------------------------------------
-    # Densification (strategies + scoring live in trainer.densify; these
+    # Densification (structure/reset/Morton helpers live in trainer.densify;
+    # simple densification is an injected service. These
     # thin methods delegate, keeping the call surface on Pipeline while the
     # heavy logic sits next to the buffer/scan structures it orchestrates).
     # ------------------------------------------------------------------
-
-    def compute_importance_scores(self, cameras, target_textures, cfg) -> None:
-        return _densify.compute_importance_scores(self, cameras, target_textures, cfg)
-
-    def densify(self, cfg, densify_step, n_densify_steps, init_count) -> dict:
-        return _densify.densify(self, cfg, densify_step, n_densify_steps, init_count)
 
     def densify_simple(self, cfg, grad_thresh=0.0002, scale_thresh=None,
                        prune_big_scale=None, allow_scale_prune=True,

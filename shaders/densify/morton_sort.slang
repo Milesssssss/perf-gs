@@ -28,7 +28,7 @@
 //      buffers.adam_state <-> buffers.adam_state_scratch.
 //
 // Slot-indexed window accumulators (grad_mean_2d_mag_accum,
-// visibility_count_accum, eta_*, importance_score_accum) are NOT permuted
+// visibility_count_accum and eta_* are NOT permuted
 // by this kernel — the caller MUST zero them (clear_tracking, and
 // clear_structure_scores on the SAD path) immediately after the swap,
 // or the next densify reads window statistics for the wrong slot.
