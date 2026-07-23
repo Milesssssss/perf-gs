@@ -22,7 +22,7 @@ import numpy as np
 import pytest
 
 from _pipeline_testkit import TestPipeline
-from trainer.config import RenderConfig
+from trainer.config import LossConfig
 from trainer.dataset import simple_camera
 from trainer.device import create_device
 
@@ -76,7 +76,7 @@ def _setup_pipeline(backend: str, w: int, h: int) -> TestPipeline:
     except Exception as exc:
         pytest.skip(f"backend {backend!r} unavailable: {exc}")
     p = TestPipeline(device=device, width=w, height=h, max_splats=16,
-                     cfg=RenderConfig(lambda_ssim=0.0, w_alpha=0.0))
+                     loss_config=LossConfig(ssim_weight=0.0, alpha_weight=0.0))
     return p
 
 

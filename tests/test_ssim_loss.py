@@ -16,7 +16,7 @@ import numpy as np
 import pytest
 
 from _pipeline_testkit import TestPipeline
-from trainer.config import RenderConfig
+from trainer.config import LossConfig
 from trainer.dataset import simple_camera
 from trainer.device import create_device
 
@@ -134,8 +134,11 @@ def test_ssim_grad_matches_reference(backend: str):
 
     pipeline = TestPipeline(
         device=device, width=W, height=H, max_splats=16,
-        cfg=RenderConfig(lambda_ssim=LAMBDA_SSIM, w_alpha=W_ALPHA,
-                         lambda_l2=LAMBDA_L2),
+        loss_config=LossConfig(
+            ssim_weight=LAMBDA_SSIM,
+            alpha_weight=W_ALPHA,
+            l2_weight=LAMBDA_L2,
+        ),
     )
     pipeline.set_gaussians_from_numpy(**_scene())
     target = _target(H, W)

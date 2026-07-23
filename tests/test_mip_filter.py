@@ -79,12 +79,14 @@ def test_mip_on_gradients_finite_difference(backend: str) -> None:
         pytest.skip(f"backend {backend!r} unavailable: {exc}")
 
     from test_gradients import _scene, _target, PARAM_TABLE
-    from trainer.config import RenderConfig
+    from trainer.config import LossConfig, RasterConfig
 
     W = H = 16
-    pipeline = TestPipeline(device=device, width=W, height=H, max_splats=16,
-                            cfg=RenderConfig(lambda_ssim=0.0, w_alpha=0.0,
-                                             mip_enabled=True, kernel_size=0.1))
+    pipeline = TestPipeline(
+        device=device, width=W, height=H, max_splats=16,
+        loss_config=LossConfig(ssim_weight=0.0, alpha_weight=0.0),
+        raster_config=RasterConfig(mip_enabled=True, kernel_size=0.1),
+    )
     camera = simple_camera(width=W, height=H, eye=(0.0, 0.0, 0.0),
                            target=(0.0, 0.0, 1.0), up=(0.0, 1.0, 0.0),
                            fovy_degrees=60.0)

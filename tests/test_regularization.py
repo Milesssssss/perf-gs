@@ -17,7 +17,7 @@ import numpy as np
 import pytest
 
 from _pipeline_testkit import TestPipeline
-from trainer.config import RenderConfig
+from trainer.config import LossConfig, RegularizationConfig
 from trainer.device import create_device
 
 
@@ -45,9 +45,12 @@ def test_opacity_reg_gradient(backend: str):
         pytest.skip(f"backend {backend!r} unavailable: {exc}")
 
     W_OPACITY = 0.03
-    p = TestPipeline(device=device, width=16, height=16, max_splats=16,
-                     cfg=RenderConfig(opacity_reg=W_OPACITY, scale_reg=0.0,
-                                      lambda_ssim=0.0, w_alpha=0.0))
+    p = TestPipeline(
+        device=device, width=16, height=16, max_splats=16,
+        regularization_config=RegularizationConfig(
+            opacity_weight=W_OPACITY, scale_weight=0.0),
+        loss_config=LossConfig(ssim_weight=0.0, alpha_weight=0.0),
+    )
     scene = _scene()
     p.set_gaussians_from_numpy(**scene)
 
@@ -78,9 +81,11 @@ def test_opacity_reg_off_is_zero(backend: str):
         device = create_device(backend=backend)
     except Exception as exc:
         pytest.skip(f"backend {backend!r} unavailable: {exc}")
-    p = TestPipeline(device=device, width=16, height=16, max_splats=16,
-                     cfg=RenderConfig(opacity_reg=0.0, scale_reg=0.0,
-                                      lambda_ssim=0.0, w_alpha=0.0))
+    p = TestPipeline(
+        device=device, width=16, height=16, max_splats=16,
+        regularization_config=RegularizationConfig(),
+        loss_config=LossConfig(ssim_weight=0.0, alpha_weight=0.0),
+    )
     scene = _scene()
     p.set_gaussians_from_numpy(**scene)
     p._clear_grads()

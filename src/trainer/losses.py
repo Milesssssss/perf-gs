@@ -13,7 +13,7 @@ from dataclasses import dataclass
 
 import slangpy as spy
 
-from trainer.config import RenderConfig
+from trainer.config import LossConfig
 from trainer.gpu import CommandBatch, GpuRuntime
 
 
@@ -32,7 +32,8 @@ class ImageLoss:
 
     def __init__(self, *, ssim_maps_kernel, ssim_grad_kernel, loss_kernel,
                  ssim_m1, ssim_m2, ssim_m3, image_gradient: spy.Texture,
-                 width: int, height: int, runtime: GpuRuntime) -> None:
+                 width: int, height: int, runtime: GpuRuntime,
+                 config: LossConfig) -> None:
         self._k_ssim_maps = ssim_maps_kernel
         self._k_ssim_grad = ssim_grad_kernel
         self._k_loss = loss_kernel
@@ -43,6 +44,7 @@ class ImageLoss:
         self._width = width
         self._height = height
         self._runtime = runtime
+        self._config = config
 
     @staticmethod
     def _emit(batch: CommandBatch, kernel, marker: str, **kwargs) -> None:
@@ -52,12 +54,14 @@ class ImageLoss:
     def _group(batch: CommandBatch, label: str):
         return batch.marker_group(label)
 
-    def record(self, batch: CommandBatch | None, *, rendered: spy.Texture, target: spy.Texture, cfg: RenderConfig) -> LossResult:
+    def record(self, batch: CommandBatch | None, *, rendered: spy.Texture,
+               target: spy.Texture) -> LossResult:
         owned_batch = batch is None
         if batch is None:
             batch = self._runtime.command_batch("image_loss")
+        config = self._config
         dims = spy.uint2(self._width, self._height)
-        if cfg.lambda_ssim > 0:
+        if config.ssim_weight > 0:
             # Two-pass SSIM: pass 1 builds the m1/m2/m3 back-projection maps,
             # pass 2 convolves them and blends with the L1 + alpha gradient.
             with self._group(batch, "ssim_maps"):
@@ -80,9 +84,9 @@ class ImageLoss:
                     ssim_m3=self._ssim_m3,
                     dL_dC=self._image_gradient,
                     frame_dim=dims,
-                    lambda_ssim=cfg.lambda_ssim,
-                    w_alpha=cfg.w_alpha,
-                    lambda_l2=cfg.lambda_l2,
+                    lambda_ssim=config.ssim_weight,
+                    w_alpha=config.alpha_weight,
+                    lambda_l2=config.l2_weight,
                 )
         else:
             with self._group(batch, "l1_l2_loss"):
@@ -92,8 +96,8 @@ class ImageLoss:
                     target_image=target,
                     dL_dC=self._image_gradient,
                     frame_dim=dims,
-                    w_alpha=cfg.w_alpha,
-                    lambda_l2=cfg.lambda_l2,
+                    w_alpha=config.alpha_weight,
+                    lambda_l2=config.l2_weight,
                 )
         if owned_batch:
             self._runtime.submit(batch)

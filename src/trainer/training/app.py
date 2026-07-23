@@ -23,7 +23,13 @@ from PIL import Image
 
 from trainer.colmap import load_colmap, load_image
 from trainer.color import srgb_to_linear
-from trainer.config import AdamLRs, RenderConfig
+from trainer.config import (
+    AdamLRs,
+    CompositorConfig,
+    LossConfig,
+    RasterConfig,
+    RegularizationConfig,
+)
 from trainer.config_types import (
     DensificationMode,
     ScheduleConfig,
@@ -109,6 +115,30 @@ class TrainingResult:
     wall_time_seconds: float
     psnr_curve: list[dict]
     started_at: float
+
+
+@dataclass(frozen=True)
+class ShaderSpecialization:
+    """Compile-time shader policy resolved from training configuration.
+
+    Pixel stride must remain compile-time because the backward shader uses it
+    to size staged arrays and specialize loop/index arithmetic. The application
+    deals in the semantic value; only this adapter knows the Slang macro name
+    and unsigned-literal spelling.
+    """
+
+    backward_pixel_stride: int
+
+    @classmethod
+    def from_args(cls, args: argparse.Namespace) -> "ShaderSpecialization":
+        return cls(backward_pixel_stride=args.backward_pixel_stride)
+
+    def compiler_defines(self) -> dict[str, str] | None:
+        if self.backward_pixel_stride == 1:
+            return None
+        return {
+            "BACKWARD_PIXEL_STRIDE": f"{self.backward_pixel_stride}u",
+        }
 
 
 @dataclass
@@ -758,10 +788,6 @@ class TrainingLoop:
         )
 
 
-# ---------------------------------------------------------------------------
-# Cohesive setup/support objects
-# ---------------------------------------------------------------------------
-
 
 class TargetDataset:
     """Owns target loading, lazy linear conversion, and ground-truth images."""
@@ -1172,10 +1198,6 @@ class PsNRPlotWriter:
                   "matplotlib` to enable it.")
 
 
-# ---------------------------------------------------------------------------
-# Small construction functions
-# ---------------------------------------------------------------------------
-
 
 def load_scene_context(args: argparse.Namespace) -> SceneContext:
     scene = load_colmap(
@@ -1213,13 +1235,11 @@ def load_scene_context(args: argparse.Namespace) -> SceneContext:
 
 
 def create_training_device(args: argparse.Namespace) -> Any:
-    defines = None
-    if args.backward_pixel_stride != 1:
-        defines = {"BACKWARD_PIXEL_STRIDE": f"{args.backward_pixel_stride}u"}
+    specialization = ShaderSpecialization.from_args(args)
     device = create_device(
         backend=args.backend,
         shader_debug_info=args.profile_run,
-        defines=defines,
+        defines=specialization.compiler_defines(),
     )
     if args.profile_run:
         print("[profile-run] shaders compiled with source-level debug info "
@@ -1245,17 +1265,23 @@ def create_pipeline(*, args: argparse.Namespace, device: Any, gpu_lock: Any,
         height=scene.height,
         max_splats=args.max_splats,
         gpu_lock=gpu_lock,
-        cfg=RenderConfig(
+        raster_config=RasterConfig(
             z_near_cull=args.z_near_cull,
-            opacity_reg=args.opacity_reg,
-            scale_reg=args.scale_reg,
-            w_alpha=args.w_alpha,
-            lambda_ssim=lambda_ssim,
-            lambda_l2=lambda_l2,
             cluster_cull=args.cluster_cull,
             mip_enabled=args.mip_splatting,
             kernel_size=(args.mip_kernel_size if args.mip_splatting else 0.3),
+        ),
+        compositor_config=CompositorConfig(
             extinction_hardness=args.extinction_hardness,
+        ),
+        loss_config=LossConfig(
+            alpha_weight=args.w_alpha,
+            ssim_weight=lambda_ssim,
+            l2_weight=lambda_l2,
+        ),
+        regularization_config=RegularizationConfig(
+            opacity_weight=args.opacity_reg,
+            scale_weight=args.scale_reg,
         ),
     )
 

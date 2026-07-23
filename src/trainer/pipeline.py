@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import contextlib
 from collections.abc import Callable
+from dataclasses import replace
 
 import numpy as np
 import slangpy as spy
@@ -22,7 +23,13 @@ from trainer.buffers import (
     RADIX_GLOBAL_HIST_SIZE,
     RADIX_PART_SIZE,
 )
-from trainer.config import AdamLRs, RenderConfig
+from trainer.config import (
+    AdamLRs,
+    CompositorConfig,
+    LossConfig,
+    RasterConfig,
+    RegularizationConfig,
+)
 from trainer.dataset import Camera
 from trainer.densify import DensifyConfig
 from trainer.device import SHADERS_DIR
@@ -37,10 +44,9 @@ from trainer.simple_densifier import (
     SimpleDensifyKernels,
 )
 
-# DensifyConfig / AdamLRs / RenderConfig are imported (not defined) here and
-# re-exported for back-compat: existing callers do
-# ``from trainer.pipeline import DensifyConfig, AdamLRs``.
-__all__ = ["Pipeline", "DensifyConfig", "AdamLRs", "RenderConfig"]
+# DensifyConfig / AdamLRs are imported (not defined) here and re-exported for
+# back-compat: existing callers do ``from trainer.pipeline import ...``.
+__all__ = ["Pipeline", "DensifyConfig", "AdamLRs"]
 
 
 # DeviceRadixSort dispatch dims — must match shaders/sort/device_radix_sort.slang.
@@ -91,7 +97,10 @@ class Pipeline:
         max_splats: int = 500_000,
         max_sort_pairs: int | None = None,
         gpu_lock: "contextlib.AbstractContextManager | None" = None,
-        cfg: RenderConfig | None = None,
+        raster_config: RasterConfig | None = None,
+        compositor_config: CompositorConfig | None = None,
+        loss_config: LossConfig | None = None,
+        regularization_config: RegularizationConfig | None = None,
         viewer_only: bool = False,
     ) -> None:
         self.device = device
@@ -110,6 +119,13 @@ class Pipeline:
 
         self.shared_data_module = _module_for_reflection(device)
         self.viewer_only = viewer_only
+        self.raster_config = raster_config or RasterConfig()
+        if viewer_only and self.raster_config.cluster_cull:
+            self.raster_config = replace(self.raster_config, cluster_cull=False)
+        self.compositor_config = compositor_config or CompositorConfig()
+        self.regularization_config = (
+            regularization_config or RegularizationConfig())
+        resolved_loss_config = loss_config or LossConfig()
 
         load_kernels(device, self, viewer_only=viewer_only)
 
@@ -133,6 +149,7 @@ class Pipeline:
             ssim_m3=self.buffers.ssim_m3,
             image_gradient=self.buffers.dL_dC_texture,
             width=width, height=height, runtime=self.runtime,
+            config=resolved_loss_config,
         )
 
         # Camera buffer: raw 144-byte buffer (136 data + 8 padding to 16-byte align).
@@ -144,6 +161,7 @@ class Pipeline:
         )
 
         # Training step counter (Python-side, for Adam bias correction).
+        #TODO: should the iteration be part of the Pipeline? I doubt it
         self.iteration = 0
 
         # Active command batch during a recorded step. When set, _dispatch /
@@ -189,24 +207,16 @@ class Pipeline:
 
         self.last_submit_id: int = 0
 
-        # Render/loss knobs (near-plane cull, regularization weights, alpha
-        # loss weight, SSIM mix). Owned by the trainer and passed in; read deep
-        # in the dispatch path (bin/loss/regularization).
-        self.cfg = cfg if cfg is not None else RenderConfig()
-        # The viewer pipeline deliberately does NOT support cluster-cull
-        if viewer_only and self.cfg.cluster_cull:
-            import dataclasses
-            self.cfg = dataclasses.replace(self.cfg, cluster_cull=False)
-
         self.use_persplat_backward = True
         self.use_flat_bucket_backward = False
 
-        if self.cfg.mip_enabled and not self.use_persplat_backward:
+        if self.raster_config.mip_enabled and not self.use_persplat_backward:
             raise RuntimeError(
                 "mip_enabled requires use_persplat_backward=True: the per-pixel "
                 "backward does not propagate opacity-compensation gradients.")
 
-        if self.cfg.extinction_hardness != 1.0 and not self.use_persplat_backward:
+        if (self.compositor_config.extinction_hardness != 1.0
+                and not self.use_persplat_backward):
             raise RuntimeError(
                 "extinction_hardness != 1 requires use_persplat_backward=True: "
                 "the per-pixel backward does not implement hardened extinction.")
@@ -214,7 +224,8 @@ class Pipeline:
         #starts at 0, increments after each bwd step
         self._backward_pixel_phase = 0
 
-        self._extinction_hardness = float(self.cfg.extinction_hardness)
+        self._extinction_hardness = float(
+            self.compositor_config.extinction_hardness)
 
         self._active_target = None if viewer_only else self.buffers.target_image
 
@@ -543,7 +554,7 @@ class Pipeline:
         # cluster_visible stays seeded to all-ones (see buffers.allocate)
         # so bin_count's check is a no-op.
         #TODO: This should ideally also be gpu driven by an indirect dispatch
-        if self.cfg.cluster_cull:
+        if self.raster_config.cluster_cull:
             num_clusters = (self.max_splats + CLUSTER_SIZE - 1) // CLUSTER_SIZE
             with self._marker_group("cluster_cull"):
                 self._dispatch(self.k_build_cluster_aabb, "build_cluster_aabb",
@@ -576,9 +587,9 @@ class Pipeline:
                 tile_count_per_gaussian=b.tile_count_per_gaussian.storage,
                 cluster_visible=b.cluster_visible.storage,
                 filter_3D=b.filter_3D.storage,
-                mip_enabled=1 if self.cfg.mip_enabled else 0,
-                kernel_size=self.cfg.kernel_size,
-                z_near=self.cfg.z_near_cull,
+                mip_enabled=1 if self.raster_config.mip_enabled else 0,
+                kernel_size=self.raster_config.kernel_size,
+                z_near=self.raster_config.z_near_cull,
                 max_splats=self.max_splats,
             )
 
@@ -608,7 +619,7 @@ class Pipeline:
                 keys_hi=b.sort_keys_hi_a.storage,
                 values=b.sort_values_a.storage,
                 cluster_visible=b.cluster_visible.storage,
-                z_near=self.cfg.z_near_cull,
+                z_near=self.raster_config.z_near_cull,
                 max_sort_pairs=self.max_sort_pairs,
             )
 
@@ -676,8 +687,8 @@ class Pipeline:
         """Set the compositor extinction hardness used by subsequent forward /
         backward dispatches. Lets the trainer SCHEDULE k across training (e.g.
         hold at 1.0 until the first densify, then ramp to the target) without
-        rebuilding the frozen RenderConfig. cfg.extinction_hardness stays the
-        run TARGET; the construction guard already required the per-splat
+        rebuilding the frozen CompositorConfig. Its extinction_hardness stays
+        the run TARGET; the construction guard already required the per-splat
         backward for a target != 1, so any scheduled value in [1, target] is
         honored by that path."""
         self._extinction_hardness = float(hardness)
@@ -762,7 +773,6 @@ class Pipeline:
             self._batch,
             rendered=self.buffers.output_image,
             target=self._active_target,
-            cfg=self.cfg,
         )
 
     def _run_backward(self, context: "RasterizationContext | None" = None,
@@ -888,8 +898,8 @@ class Pipeline:
                         grad_rot_y=gb["rot_y"].storage,
                         grad_rot_z=gb["rot_z"].storage,
                         filter_3D=b.filter_3D.storage,
-                        mip_enabled=1 if self.cfg.mip_enabled else 0,
-                        kernel_size=self.cfg.kernel_size,
+                        mip_enabled=1 if self.raster_config.mip_enabled else 0,
+                        kernel_size=self.raster_config.kernel_size,
                         cluster_visible=b.cluster_visible.storage,
                         max_splats=self.max_splats,
                     )
@@ -934,7 +944,8 @@ class Pipeline:
             )
 
     def _run_regularization(self) -> None:
-        if self.cfg.opacity_reg <= 0 and self.cfg.scale_reg <= 0:
+        config = self.regularization_config
+        if config.opacity_weight <= 0 and config.scale_weight <= 0:
             return
         b = self.buffers
         gb = b.grad_buffers
@@ -947,8 +958,8 @@ class Pipeline:
             grad_log_scale_y=gb["log_scale_y"].storage,
             grad_log_scale_z=gb["log_scale_z"].storage,
             cluster_visible=b.cluster_visible.storage,
-            w_opacity=self.cfg.opacity_reg,
-            w_scale=self.cfg.scale_reg,
+            w_opacity=config.opacity_weight,
+            w_scale=config.scale_weight,
         )
 
     def clear_tracking(self) -> None:

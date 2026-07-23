@@ -23,7 +23,7 @@ import numpy as np
 import pytest
 
 from _pipeline_testkit import TestPipeline
-from trainer.config import RenderConfig
+from trainer.config import CompositorConfig, LossConfig
 from trainer.dataset import simple_camera
 from trainer.device import create_device
 
@@ -48,9 +48,11 @@ def _setup(backend: str, w: int, h: int, hardness: float):
         device = create_device(backend=backend)
     except Exception as exc:  # pragma: no cover - backend availability
         pytest.skip(f"backend {backend!r} unavailable: {exc}")
-    return TestPipeline(device=device, width=w, height=h, max_splats=16,
-                        cfg=RenderConfig(lambda_ssim=0.0, w_alpha=0.0,
-                                         extinction_hardness=hardness))
+    return TestPipeline(
+        device=device, width=w, height=h, max_splats=16,
+        loss_config=LossConfig(ssim_weight=0.0, alpha_weight=0.0),
+        compositor_config=CompositorConfig(extinction_hardness=hardness),
+    )
 
 
 def _loss_for(pipeline: TestPipeline, scene: dict, camera) -> float:

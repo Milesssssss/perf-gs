@@ -26,7 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from trainer.colmap import load_colmap
 from trainer.dataset import load_ply
 from trainer.device import create_device
-from trainer.config import RenderConfig
+from trainer.config import RasterConfig
 from trainer.pipeline import Pipeline
 
 
@@ -57,7 +57,7 @@ def main() -> None:
     pipeline = Pipeline(
         device=device, width=W, height=H,
         max_splats=max(n + 1, 8_000_000),
-        cfg=RenderConfig(cluster_cull=False),   # measure raw binning, no cull
+        raster_config=RasterConfig(cluster_cull=False),  # raw binning, no cull
     )
     pipeline.set_gaussians_from_numpy(**gauss)
 

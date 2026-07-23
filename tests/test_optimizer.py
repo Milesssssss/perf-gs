@@ -16,7 +16,7 @@ import numpy as np
 import pytest
 
 from _pipeline_testkit import TestPipeline
-from trainer.config import RenderConfig
+from trainer.config import LossConfig
 from trainer.device import create_device
 from trainer.buffers import GRAD_SCALAR_COMPONENTS
 
@@ -67,7 +67,7 @@ def test_adam_step_matches_reference(backend: str) -> None:
     max_splats = 16
     N = 3
     p = TestPipeline(device=device, width=W, height=H, max_splats=max_splats,
-                     cfg=RenderConfig(lambda_ssim=0.0, w_alpha=0.0))
+                     loss_config=LossConfig(ssim_weight=0.0, alpha_weight=0.0))
 
     means = np.array([[0.10, 0.20, 2.50],
                       [-0.30, 0.05, 3.10],

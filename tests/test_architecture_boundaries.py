@@ -5,7 +5,7 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-from trainer import buffers
+from trainer import buffers, config
 from trainer.config_types import DensificationMode
 from trainer.simple_densifier import SimpleDensifier
 
@@ -43,6 +43,18 @@ def test_capability_resources_are_real_dataclasses() -> None:
         buffers.EtaResources,
     ):
         assert hasattr(capability, "__dataclass_fields__")
+
+
+def test_pipeline_configuration_is_responsibility_scoped() -> None:
+    assert not hasattr(config, "RenderConfig")
+    assert tuple(config.RasterConfig.__dataclass_fields__) == (
+        "z_near_cull", "cluster_cull", "mip_enabled", "kernel_size")
+    assert tuple(config.CompositorConfig.__dataclass_fields__) == (
+        "extinction_hardness",)
+    assert tuple(config.LossConfig.__dataclass_fields__) == (
+        "alpha_weight", "ssim_weight", "l2_weight")
+    assert tuple(config.RegularizationConfig.__dataclass_fields__) == (
+        "opacity_weight", "scale_weight")
 
 
 def test_fastgs_importance_path_is_absent() -> None:

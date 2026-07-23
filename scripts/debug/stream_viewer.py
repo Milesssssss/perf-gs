@@ -35,7 +35,6 @@ import slangpy as spy
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from trainer.config import RenderConfig
 from trainer.dataset import Camera
 from trainer.device import create_device
 from trainer.pipeline import Pipeline
@@ -135,8 +134,7 @@ def main() -> None:
     fovy = scene_fovy if scene_fovy is not None else args.fovy
     pipeline = Pipeline(device=device, width=render_w, height=render_h,
                         max_splats=cap,
-                        # Render-only: no loss, so SSIM/alpha weights are moot.
-                        cfg=RenderConfig(lambda_ssim=0.0, w_alpha=0.0))
+                        viewer_only=True)
 
     window = spy.Window(width=render_w, height=render_h,
                         title=f"3DGS Live — {stream_name}")

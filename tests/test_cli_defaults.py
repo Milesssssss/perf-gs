@@ -21,7 +21,7 @@ from v2_train import build_parser
 # the three overlapping densify booleans (simple / importance / structure) were
 # replaced by the single --densify-mode choice (default "structure_aware").
 EXPECTED_DEFAULTS = {
-    "scene": "datasets/360_v2/bonsai",
+    "scene": "datasets/360_v2/bicycle",
     "iters": 3000,
     "position_lr_max_steps": 3000,
     "downsample": 4,

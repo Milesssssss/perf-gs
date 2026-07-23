@@ -11,7 +11,6 @@ import slangpy as spy
 
 from trainer.dataset import Camera
 from trainer.device import SHADERS_DIR
-from trainer.config import RenderConfig
 from trainer.gpu import GpuRuntime
 from trainer.pipeline import Pipeline
 
@@ -308,8 +307,6 @@ class Viewer:
             device=device, width=width, height=height, max_splats=max_splats,
             max_sort_pairs=max_sort_pairs,
             gpu_lock=self.gpu_lock,
-            # Render-only viewer: no loss, so SSIM/alpha weights are irrelevant.
-            cfg=RenderConfig(lambda_ssim=0.0, w_alpha=0.0),
             # Skip the ~3.5 GB of training-only buffers (grads/adam/densify
             # scratch/loss textures) — critical to avoid OOMing the device
             # when the viewer + trainer share it. Also skips compiling ~30

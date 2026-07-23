@@ -14,7 +14,7 @@ import numpy as np
 import pytest
 
 from _pipeline_testkit import TestPipeline
-from trainer.config import AdamLRs, RenderConfig
+from trainer.config import AdamLRs, LossConfig
 from trainer.dataset import simple_camera
 from trainer.device import create_device
 
@@ -26,8 +26,10 @@ def _setup(backend: str) -> TestPipeline:
         device = create_device(backend=backend)
     except Exception as exc:  # backend unavailable on host
         pytest.skip(f"backend {backend!r} unavailable: {exc}")
-    p = TestPipeline(device=device, width=16, height=16, max_splats=16,
-                     cfg=RenderConfig(lambda_ssim=0.0, w_alpha=0.0))
+    p = TestPipeline(
+        device=device, width=16, height=16, max_splats=16,
+        loss_config=LossConfig(ssim_weight=0.0, alpha_weight=0.0),
+    )
     means = np.array([[0.0, 0.0, 3.0], [0.2, 0.1, 2.5], [-0.15, -0.1, 2.0]],
                      dtype=np.float32)
     log_scales = np.log(np.full((3, 3), 0.3, dtype=np.float32))

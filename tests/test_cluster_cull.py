@@ -20,7 +20,7 @@ import pytest
 
 from _pipeline_testkit import TestPipeline
 from trainer.buffers import CLUSTER_SIZE
-from trainer.config import RenderConfig
+from trainer.config import RasterConfig
 from trainer.dataset import simple_camera
 from trainer.device import create_device
 
@@ -35,7 +35,7 @@ def _setup(backend: str, max_splats: int, cluster_cull: bool) -> TestPipeline:
         pytest.skip(f"backend {backend!r} unavailable: {exc}")
     return TestPipeline(
         device=device, width=128, height=128, max_splats=max_splats,
-        cfg=RenderConfig(cluster_cull=cluster_cull),
+        raster_config=RasterConfig(cluster_cull=cluster_cull),
     )
 
 

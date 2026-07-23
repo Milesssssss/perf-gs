@@ -15,7 +15,7 @@ import numpy as np
 import pytest
 
 from _pipeline_testkit import TestPipeline
-from trainer.config import RenderConfig
+from trainer.config import LossConfig
 from trainer.dataset import simple_camera
 from trainer.device import create_device
 
@@ -77,7 +77,7 @@ def test_persplat_matches_perpixel(backend: str) -> None:
     W = H = 64
     n = 100
     pipeline = TestPipeline(device=device, width=W, height=H, max_splats=128,
-                            cfg=RenderConfig(lambda_ssim=0.0, w_alpha=0.0))
+                            loss_config=LossConfig(ssim_weight=0.0, alpha_weight=0.0))
 
     scene = _deep_scene(n, seed=3)
     pipeline.set_target_image(_target(H, W))
@@ -128,7 +128,7 @@ def test_flat_bucket_matches_persplat(backend: str) -> None:
     W = H = 64
     n = 100
     pipeline = TestPipeline(device=device, width=W, height=H, max_splats=128,
-                            cfg=RenderConfig(lambda_ssim=0.0, w_alpha=0.0))
+                            loss_config=LossConfig(ssim_weight=0.0, alpha_weight=0.0))
 
     scene = _deep_scene(n, seed=3)
     pipeline.set_target_image(_target(H, W))
@@ -173,7 +173,7 @@ def test_warp_forward_backward_matches_baseline(backend: str) -> None:
     W = H = 64
     n = 100
     pipeline = TestPipeline(device=device, width=W, height=H, max_splats=128,
-                            cfg=RenderConfig(lambda_ssim=0.0, w_alpha=0.0))
+                            loss_config=LossConfig(ssim_weight=0.0, alpha_weight=0.0))
 
     scene = _deep_scene(n, seed=3)
     pipeline.set_target_image(_target(H, W))
