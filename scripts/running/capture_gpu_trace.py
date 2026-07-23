@@ -179,6 +179,10 @@ def main() -> int:
         "--max-duration-ms", str(args.max_duration_ms),
         "--auto-export",
         "--no-timeout",
+        # ngfx.exe does not reliably carry this project setting into a CLI
+        # launch. Without the explicit flag, reports contain shader rows but
+        # show Correlation=None and no Slang source.
+        "--real-time-shader-profiler",
     ]
     # Metric set drives which counters (and thus which Trace Analysis bottleneck
     # rules) are available; must be paired with --architecture. Empty name =

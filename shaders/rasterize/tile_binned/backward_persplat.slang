@@ -58,7 +58,7 @@ static const float ALPHA_MIN_TRACK = 1.0 / 255.0;
 //
 // See commit 6be3f5e ("wave op speedup") for the fusion history.
 #ifndef BACKWARD_BLEND_SCAN_MODE
-#define BACKWARD_BLEND_SCAN_MODE 1
+#define BACKWARD_BLEND_SCAN_MODE 0
 #endif
 
 // Fused exclusive prefix scan of the alpha-blend LINEAR recurrence across a
