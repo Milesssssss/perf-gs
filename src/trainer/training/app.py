@@ -122,11 +122,6 @@ class TrainingRuntime:
     reporter: "TrainingReporter"
 
 
-# ---------------------------------------------------------------------------
-# Application lifecycle
-# ---------------------------------------------------------------------------
-
-
 class TrainingApplication:
     """Owns the prepare -> train -> finish lifecycle of one experiment."""
 
@@ -248,19 +243,16 @@ class TrainingApplication:
             n_train=len(scene.train_indices),
             n_test=len(scene.test_indices),
         )
-        self.densify_config, self.structure_config = build_densify_configs(
-            self.args, scene.extent)
-        (
-            self.effective_lambda_l2,
-            self.effective_lambda_ssim,
-            self.base_lrs,
-        ) = resolve_loss_and_lrs(self.args)
+        
+        self.densify_config, self.structure_config = build_densify_configs(self.args, scene.extent)
+        self.effective_lambda_l2, self.effective_lambda_ssim, self.base_lrs = resolve_loss_and_lrs(self.args)
 
         self.opacity_reporter = OpacityBundleReporter(
             args=self.args,
             densify_config=self.densify_config,
             structure_config=self.structure_config,
         )
+        
         self.opacity_reporter.report_startup(self._densify_mode)
         self._write_resolved_config()
 

@@ -16,9 +16,9 @@ from trainer.config_types import DensificationMode
 
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser()
-    #ap.add_argument("--scene", type=str, default="datasets/360_v2/bicycle") V
+    ap.add_argument("--scene", type=str, default="datasets/360_v2/bicycle")
     #ap.add_argument("--scene", type=str, default="datasets/360_v2/counter") V
-    ap.add_argument("--scene", type=str, default="datasets/360_v2/bonsai")
+    #ap.add_argument("--scene", type=str, default="datasets/360_v2/bonsai")
     #ap.add_argument("--scene", type=str, default="datasets/360_v2/garden")
     #ap.add_argument("--scene", type=str, default="datasets/360_v2/kitchen")
     #ap.add_argument("--scene", type=str, default="datasets/360_v2/room")
