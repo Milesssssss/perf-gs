@@ -5,6 +5,7 @@ __pycache__/
 build/
 outputs/
 datasets/
+nsight/
 .*/
 !.github/
 !.github/workflows/
