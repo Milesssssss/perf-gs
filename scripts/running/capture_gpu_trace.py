@@ -15,11 +15,11 @@ no Open, nothing to crash.
 
 How it stays deterministic
 --------------------------
-In --profile-run the trainer Presents exactly one frame per train_step, so frame
-counts are predictable. This launcher runs v2_train.py in --capture-external
-mode: it trains normally up to --capture-iter, then Presents a *frozen*,
-bit-identical workload (all LRs = 0, camera pinned) for --capture-frames frames
-and exits. We tell ngfx.exe to:
+In --profile-run each Present is fence-aligned to a completed GPU iteration, so
+Nsight's CPU frame count cannot outrun the Vulkan context. This launcher runs
+v2_train.py in --capture-external mode: it trains normally up to
+--capture-iter, then Presents a *frozen*, bit-identical workload (all LRs = 0,
+camera pinned) for --capture-frames frames and exits. We tell ngfx.exe to:
     * start the trace after (capture_iter + WARMUP_MARGIN) presents  -> we are
       safely inside the frozen steady state,
     * stop after --max-duration-ms (and/or --limit-to-frames),
@@ -46,9 +46,9 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-# Frames the trainer presents (main loop) before the frozen loop reaches steady
-# state: iters 1..(capture_iter-1) present once each, then 8 warm-up presents in
-# the capture block => capture_iter + 7. Start the trace a bit past that.
+# Fence-completed frames before the frozen loop reaches steady state: main-loop
+# iterations 1..(capture_iter-1), then 8 warm-up frames in the capture block =>
+# capture_iter + 7. Start the trace a bit past that.
 _WARMUP_MARGIN = 15
 
 
@@ -200,7 +200,7 @@ def main() -> int:
           f"(capture-iter {args.capture_iter} + {_WARMUP_MARGIN} margin)")
     print(f"[capture] duration   : {args.max_duration_ms} ms"
           + (f", <= {args.limit_to_frames} frames" if args.limit_to_frames else ""))
-    print(f"[capture] metric set : "
+    print("[capture] metric set : "
           + (f"{args.architecture!r} / {args.metric_set_name!r}"
              if args.metric_set_name else "(project default)")
           + (", multi-pass" if args.multi_pass_metrics else ", single-pass"))

@@ -589,7 +589,9 @@ class TrainingLoop:
             self._capture_if_requested(context)
             self._execute_training_step(context)
             self._apply_mutations(context)
-            if not self._produce_observations(context):
+            should_continue = self._produce_observations(context)
+            self._present_profile_frame_if_enabled()
+            if not should_continue:
                 break
         return self._complete()
 
@@ -665,7 +667,6 @@ class TrainingLoop:
             structure_kwargs=structure_kwargs,
         )
         self.runtime.queue_limiter.record(pipeline.last_submit_id)
-        self._present_profile_frame_if_enabled()
         self._stream_viewer_snapshot_if_due(context)
 
     def _apply_mutations(self, context: IterationContext) -> None:
@@ -728,7 +729,8 @@ class TrainingLoop:
 
     def _present_profile_frame_if_enabled(self) -> None:
         if self.args.profile_run:
-            self.runtime.profiler.present_frame()
+            self.runtime.profiler.present_frame(
+                self.runtime.pipeline.last_submit_id)
 
     def _stream_viewer_snapshot_if_due(self, context: IterationContext) -> None:
         if context.number % self.args.stream_every == 0:

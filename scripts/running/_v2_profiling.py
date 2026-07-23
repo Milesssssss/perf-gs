@@ -5,10 +5,10 @@ reads as pure training. A ``Profiler`` owns: the profile-run session tweaks,
 self-injection of the Nsight capture, the present window Nsight needs as a
 frame boundary, and the deterministic GPU-Trace capture loop.
 
-It is a no-op unless ``--profile-run`` (or a ``--capture-*`` flag) is set:
-every hook guards on an unset window / injector and returns immediately, so the
-trainer can call ``should_stop`` / ``present_frame`` / ``run_capture_if_due``
-unconditionally each iteration.
+It is a no-op unless ``--profile-run`` (or a ``--capture-*`` flag) is set.
+Profile frames are intentionally serialized: each Present is issued only after
+the iteration's latest GPU submit completes, so Nsight cannot place a frame
+boundary halfway through an asynchronous command buffer.
 """
 
 from __future__ import annotations
@@ -82,22 +82,28 @@ class Profiler:
         """Open the present window Nsight delimits work by (``--profile-run``).
 
         Nsight Graphics hooks the Vulkan device and delimits work by Present, so
-        profiling needs a real windowed, presenting Vulkan app. Each presented
-        frame is one full ``train_step`` (clear_grads / forward / loss /
-        backward / regularization / adam), plus densify on schedule.
+        profiling needs a real windowed, presenting Vulkan app. Each regular
+        frame is one completed loop iteration: train_step, scheduled mutations,
+        and any scheduled observations. The deterministic capture loop emits a
+        narrower frozen frame containing only one train_step.
         """
         self.pipeline = pipeline
         if not self.args.profile_run:
             return
         import slangpy as spy
-        self.window = spy.Window(width=width, height=height,
-                                 title="3DGS profile (Nsight Graphics)")
+        self.window = spy.Window(
+            width=width,
+            height=height,
+            title="3DGS profile (Nsight Graphics)",
+        )
         self.surface = pipeline.device.create_surface(self.window)
         self.surface.configure(width=width, height=height)
-        print("[profile-run] presenting one frame per train_step for Nsight "
-              "Graphics. Launch this process as the ngfx target (or connect), "
-              "then capture a frame. Densify + logs still run on schedule; "
-              "close the window (or reach --iters) to quit.")
+        print(
+            "[profile-run] presenting one fence-completed iteration per "
+            "Nsight frame. Frame boundaries cannot run ahead of GPU passes. "
+            "Densify + observations remain inside their owning iteration; "
+            "close the window (or reach --iters) to quit."
+        )
 
     # -- per-iteration hooks ----------------------------------------------
 
@@ -106,8 +112,16 @@ class Profiler:
         can capture and quit cleanly)."""
         return self.window is not None and self.window.should_close()
 
-    def present(self) -> None:
-        """Best-effort present of the latest render (Nsight's frame boundary).
+    def present_completed_frame(self, submit_id: int) -> None:
+        """Present exactly one completed GPU iteration as an Nsight frame.
+
+        Nsight counts ``Present`` calls on the CPU while GPU submissions are
+        asynchronous. Without the pre-present fence, the CPU can announce
+        several frame boundaries while the GPU is still executing an earlier
+        pass, making a captured context begin/end halfway through iterations.
+        We therefore complete the iteration submit first, then submit the blit
+        and Present atomically through ``GpuRuntime``, and fence that blit before
+        allowing the next iteration to start.
 
         acquire_next_image can RAISE (not just return None) when the window is
         minimized/resized/loses the swapchain, so we catch it and reconfigure —
@@ -115,6 +129,8 @@ class Profiler:
         """
         if self.surface is None:
             return
+        if submit_id:
+            self.pipeline.runtime.wait_for_submit(submit_id)
         surf_tex = None
         try:
             surf_tex = self.surface.acquire_next_image()
@@ -123,24 +139,24 @@ class Profiler:
         if surf_tex is None:
             try:
                 w, h = max(self.window.width, 1), max(self.window.height, 1)
-                self.pipeline.device.wait_for_idle()
+                self.pipeline.runtime.wait_for_idle()
                 self.surface.unconfigure()
                 self.surface.configure(width=w, height=h)
             except Exception:
                 pass
             return
-        enc = self.pipeline.device.create_command_encoder()
-        enc.blit(surf_tex, self.pipeline.buffers.output_image)
-        self.pipeline.device.submit_command_buffer(enc.finish())
-        self.surface.present()
+        batch = self.pipeline.runtime.command_batch("profile_present")
+        batch.encoder.blit(surf_tex, self.pipeline.buffers.output_image)
+        present_submit = self.pipeline.runtime.submit(
+            batch, after_submit=self.surface.present)
+        self.pipeline.runtime.wait_for_submit(present_submit)
 
-    def present_frame(self) -> None:
-        """Loop hook: pump window events, then present the just-rendered frame
-        so Nsight has a fresh frame boundary. No-op outside a profile run."""
+    def present_frame(self, submit_id: int) -> None:
+        """Pump events and delimit one completed iteration. No-op normally."""
         if self.window is None:
             return
         self.window.process_events()
-        self.present()
+        self.present_completed_frame(submit_id)
 
     def close(self) -> None:
         """Close the profile window if one is open (idempotent)."""
@@ -180,7 +196,7 @@ class Profiler:
             return False
 
         print(f"[capture] draining queue at iter {it}...")
-        pipeline.device.wait_for_idle()
+        pipeline.runtime.wait_for_idle()
         queue_limiter.clear()
         try:
             n_g_capture = int(
@@ -203,8 +219,8 @@ class Profiler:
                 self.window.process_events()
             pipeline.train_step(pinned_camera, lrs=frozen_lrs)
             if self.window is not None:
-                self.present()
-        pipeline.device.wait_for_idle()
+                self.present_frame(pipeline.last_submit_id)
+        pipeline.runtime.wait_for_idle()
 
         if self.ngfx_cap is not None:
             print(f"[capture] triggering Nsight capture at iter {it}")
@@ -233,14 +249,14 @@ class Profiler:
                 self.window.process_events()
             pipeline.train_step(pinned_camera, lrs=frozen_lrs)
             if self.window is not None:
-                self.present()
+                self.present_frame(pipeline.last_submit_id)
             else:
                 time.sleep(0.01)
             frozen_i += 1
 
         # Drain so the last presented frames complete before teardown —
         # otherwise ngfx.exe may see an in-flight device at exit.
-        pipeline.device.wait_for_idle()
+        pipeline.runtime.wait_for_idle()
         self.close()
         print("[capture] window closed, exiting." if not args.capture_external
               else f"[capture] presented {args.capture_frames} frozen frames; "

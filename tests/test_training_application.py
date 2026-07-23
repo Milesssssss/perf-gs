@@ -12,6 +12,7 @@ from trainer.config import (
 )
 from trainer.training.app import (
     ShaderSpecialization,
+    TrainingLoop,
     create_pipeline,
     create_training_device,
 )
@@ -96,3 +97,27 @@ def test_pipeline_factory_separates_configuration_ownership(monkeypatch) -> None
         alpha_weight=0.4, ssim_weight=0.2, l2_weight=1.5)
     assert captured["regularization_config"] == RegularizationConfig(
         opacity_weight=0.03, scale_weight=0.07)
+
+
+def test_training_loop_presents_after_full_iteration() -> None:
+    events = []
+    loop = object.__new__(TrainingLoop)
+    states = iter((True, False))
+    context = object()
+
+    loop._begin = lambda: events.append("begin")
+    loop._should_continue = lambda: next(states)
+    loop._next_iteration = lambda: events.append("next") or context
+    loop._prepare_iteration = lambda ctx: events.append("prepare")
+    loop._capture_if_requested = lambda ctx: events.append("capture")
+    loop._execute_training_step = lambda ctx: events.append("train")
+    loop._apply_mutations = lambda ctx: events.append("mutations")
+    loop._produce_observations = lambda ctx: events.append("observations") or True
+    loop._present_profile_frame_if_enabled = lambda: events.append("present")
+    loop._complete = lambda: events.append("complete") or "result"
+
+    assert TrainingLoop.run(loop) == "result"
+    assert events == [
+        "begin", "next", "prepare", "capture", "train",
+        "mutations", "observations", "present", "complete",
+    ]
