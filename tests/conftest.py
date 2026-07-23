@@ -15,8 +15,11 @@ import sys
 from pathlib import Path
 
 _SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
-if _SCRIPTS_DIR.is_dir() and str(_SCRIPTS_DIR) not in sys.path:
-    # Append (not insert) so scripts/ never shadows an installed/stdlib module;
-    # the frontend helpers imported here (v2_train, _v2_sampling) are unique to
-    # scripts/, so being last on the path is sufficient to resolve them.
-    sys.path.append(str(_SCRIPTS_DIR))
+# The frontend helpers imported by the tests + trainer are split across
+# scripts/ subfolders (running/ = v2_train, _v2_sampling, _v2_profiling;
+# debug/ = bin_viz, densify_diag, popstat). Append each (not insert) so they
+# resolve by name without shadowing any installed/stdlib module.
+for _sub in ("running", "debug", "plots"):
+    _p = _SCRIPTS_DIR / _sub
+    if _p.is_dir() and str(_p) not in sys.path:
+        sys.path.append(str(_p))

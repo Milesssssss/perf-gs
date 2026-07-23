@@ -1,7 +1,10 @@
-# Timing + test-PSNR of the RESTORED flat-CSV runtime state (fat forwardRasterize,
-# commit 68a5d7f, blend/warp WIP stashed). Default CLI = flat backward on, warp
-# off — matches the `flat` column of timing_flat_vs_baseline.csv. Run dirs:
-# timing_<scene>_restored. Idempotent on test_psnr.json.
+# Timing for the NEW blend_data forwardRasterize (thread-per-pixel, warp OFF),
+# across all 9 Mip-NeRF 360 scenes. Run dirs: timing_<scene>_blendfwd.
+# Compare against timing_<scene>_threadfwd (the SAME kernel BEFORE the change,
+# when it gathered the fat Gaussian3D + Projected2DGaussian) via
+# plot_blendfwd_timing_compare.py. Identical flags, seed 0, flat backward, so
+# the ONLY difference vs threadfwd is the forwardRasterize gather (fat -> 36 B
+# BlendData). Idempotent: skips runs whose test_psnr.json already exists.
 $ErrorActionPreference = "Stop"
 $py = ".venv\Scripts\python.exe"
 
@@ -18,13 +21,14 @@ $scenes = @(
 )
 
 foreach ($s in $scenes) {
-    $runName = "timing_$($s.name)_restored"
+    $runName = "timing_$($s.name)_blendfwd"
     if (Test-Path "outputs/train/$runName/test_psnr.json") {
         Write-Host "==== SKIP $runName (already complete) ===="
         continue
     }
     Write-Host "==================== [$(Get-Date -Format HH:mm:ss)] $runName ===================="
-    & $py scripts/v2_train.py --scene $s.path --iters 3000 `
+    # No --warp-per-pixel-forward: exercises the (now blend_data) forwardRasterize.
+    & $py scripts/running/v2_train.py --scene $s.path --iters 3000 `
         --structure-densify --mip-splatting --mip-kernel-size 0.1 `
         --sample-mode sadgs --preview-every 0 --eval-every 0 `
         --final-test-psnr `
@@ -32,4 +36,4 @@ foreach ($s in $scenes) {
         Select-String -Pattern "loop done|final-test-psnr|Error|error|Traceback" |
         ForEach-Object { $_.Line }
 }
-Write-Host "==================== ALL RESTORED TIMING RUNS COMPLETE ===================="
+Write-Host "==================== ALL BLEND-FWD RUNS COMPLETE ===================="

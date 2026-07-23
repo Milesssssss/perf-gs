@@ -124,7 +124,7 @@ def main() -> int:
                     help="Args after `--` forwarded verbatim to v2_train.py.")
     args = ap.parse_args()
 
-    repo = Path(__file__).resolve().parent.parent
+    repo = Path(__file__).resolve().parent.parent.parent
     ngfx = _find_ngfx_exe()
     if ngfx is None:
         print("[capture] ngfx.exe not found. Set NGFX_EXE or install Nsight "
@@ -156,7 +156,7 @@ def main() -> int:
         fwd = fwd[1:]
 
     # Command line for the launched trainer (single string for ngfx --args).
-    trainer = repo / "scripts" / "v2_train.py"
+    trainer = Path(__file__).resolve().parent / "v2_train.py"
     app_argv = [
         str(trainer),
         "--capture-external",

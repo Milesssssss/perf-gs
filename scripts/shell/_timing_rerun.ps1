@@ -23,7 +23,7 @@ foreach ($s in $scenes) {
         continue
     }
     Write-Host "==================== [$(Get-Date -Format HH:mm:ss)] $runName ===================="
-    & $py scripts/v2_train.py --scene $s.path --iters 3000 `
+    & $py scripts/running/v2_train.py --scene $s.path --iters 3000 `
         --structure-densify --mip-splatting --mip-kernel-size 0.1 `
         --sample-mode sadgs --preview-every 0 --eval-every 0 `
         --final-test-psnr `
