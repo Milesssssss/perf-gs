@@ -165,6 +165,28 @@ pip install -e ".[dev]"
 
 Scenes use the Mip-NeRF 360 layout (a COLMAP `sparse/` folder plus `images/`). Point `--scene` at any such folder.
 
+## Datasets
+
+Fetch the [Mip-NeRF 360](https://jonbarron.info/mipnerf360/) dataset with the helper script (standard library only, no extra dependencies):
+
+```bash
+# The seven public scenes (bicycle, bonsai, counter, garden, kitchen, room, stump)
+# -> datasets/360_v2/
+python scripts/data/download_mipnerf360.py
+
+# Also fetch the extra scenes (flowers, treehill) -> datasets/360_extra_scenes/
+python scripts/data/download_mipnerf360.py --set all
+```
+
+The archives are large (~12 GB for the public scenes, ~4.5 GB more for the extras). The download streams to disk with a progress readout, is idempotent (re-running skips scenes already present), and extracts into place. Useful flags:
+
+- `--set {v2,extra,all}` — which scenes to fetch (default `v2`).
+- `--dest <dir>` — download somewhere other than the repo `datasets/` folder.
+- `--force` — re-download even if the scenes already exist.
+- `--keep-zip` — keep the downloaded `.zip` archives after extraction.
+
+The extra scenes (flowers, treehill) carry a redistribution caveat from the dataset authors; the script prints a notice before fetching them. See <https://jonbarron.info/mipnerf360/> for details.
+
 ## Quickstart
 
 ```bash
@@ -203,6 +225,7 @@ src/trainer/           device, buffers, pipeline, and the training/ frontend pac
 shaders/               all Slang kernels, grouped by stage
 scripts/
   running/             entry points (v2_train.py) + trainer-imported helpers
+  data/                dataset download helpers
   plots/               metrics and plotting tools
   debug/               diagnostics, viewers, measurement
   shell/               batch sweeps and reference runs
