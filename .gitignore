@@ -15,5 +15,6 @@ dist/
 .ruff_cache/
 .vscode/
 .claude/
-PLAN.md
-todos.txt
+./PLAN.md
+./todos.txt
+.github/
