@@ -1,3 +1,16 @@
+"""Per-run output-file lifecycle for the training frontend.
+
+Every training run writes a fixed set of JSONL/text streams (plus the optional
+SADGS-schema population-trajectory writer). Opening and closing them used to be
+spread across ``app.main()`` as nine ``open(...)`` calls and two divergent
+teardown blocks (the Nsight capture-exit path closed a different subset than the
+normal teardown).
+
+:class:`RunArtifacts` owns that lifecycle: :meth:`create` opens every stream
+(gating optional ones by their CLI flag and emitting the same console notices as
+before) and :meth:`close_all` closes whatever is open. Optional streams are
+``None`` when their flag is off; callers guard with the usual ``is not None``.
+"""
 from __future__ import annotations
 
 from pathlib import Path
@@ -5,6 +18,9 @@ from typing import TYPE_CHECKING, TextIO
 
 if TYPE_CHECKING:
     import argparse
+
+    from popstat import PopStat
+
 
 class RunArtifacts:
     """Owns all per-run output streams and their open/close lifecycle."""
@@ -20,6 +36,7 @@ class RunArtifacts:
         psnr_curve_json: "TextIO | None",
         bin_viz_json: "TextIO | None",
         profile_json: "TextIO | None",
+        popstat: "PopStat | None",
     ) -> None:
         self.log_txt = log_txt
         self.log_json = log_json
@@ -29,6 +46,7 @@ class RunArtifacts:
         self.psnr_curve_json = psnr_curve_json
         self.bin_viz_json = bin_viz_json
         self.profile_json = profile_json
+        self.popstat = popstat
 
     @classmethod
     def create(cls, run_dir: Path, args: "argparse.Namespace") -> "RunArtifacts":
@@ -36,15 +54,35 @@ class RunArtifacts:
         def _stream(name: str) -> TextIO:
             return (run_dir / name).open("w", buffering=1)
 
-        # Always-on streams
+        # Always-on streams.
         log_txt = _stream("log.txt")
         log_json = _stream("log.jsonl")
         densify_json = _stream("densify_log.jsonl")
-        profile_json = _stream("profile_log.jsonl") if args.profile_every > 0 else None
-        densify_diag_json = _stream("densify_diag.jsonl") if args.densify_diag else None
-        eval_curve_json = _stream("eval_curve.jsonl") if args.eval_every > 0 else None
-        psnr_curve_json = _stream("psnr_curve.jsonl") if args.psnr_curve else None
 
+        # Per-frame profile records, opened only under --profile-every.
+        profile_json = _stream("profile_log.jsonl") if args.profile_every > 0 else None
+        # Per-densify structure-decision diagnostics (--densify-diag).
+        densify_diag_json = _stream("densify_diag.jsonl") if args.densify_diag else None
+
+        # SADGS-schema population trajectory (--popstat): one pre/post snapshot
+        # per densify tick into ref_popstat.jsonl, directly diffable against the
+        # reference's outputs/sadgs/<run>/ref_popstat.jsonl.
+        popstat = None
+        if args.popstat:
+            from popstat import PopStat
+
+            popstat = PopStat(run_dir / "ref_popstat.jsonl")
+            print(f"[popstat] writing SADGS-schema population trajectory to "
+                  f"{popstat.path}")
+
+        # Full-dataset average-PSNR curve, opened only when --eval-every > 0.
+        # One JSON line per eval sweep for post-hoc convergence plotting.
+        eval_curve_json = _stream("eval_curve.jsonl") if args.eval_every > 0 else None
+        # Pre-densify PSNR curve (--psnr-curve): a focused TEST-set PSNR sample
+        # taken one iter before each densify step, streamed to psnr_curve.jsonl.
+        psnr_curve_json = _stream("psnr_curve.jsonl") if args.psnr_curve else None
+        # Binning/overlap debug viz (--debug-bin-viz): one JSONL line per
+        # rendered eval view. Only when both the flag and --eval-every are on.
         bin_viz_json = (
             _stream("binviz.jsonl")
             if (args.debug_bin_viz and args.eval_every > 0) else None
@@ -56,7 +94,7 @@ class RunArtifacts:
             log_txt=log_txt, log_json=log_json, densify_json=densify_json,
             densify_diag_json=densify_diag_json, eval_curve_json=eval_curve_json,
             psnr_curve_json=psnr_curve_json, bin_viz_json=bin_viz_json,
-            profile_json=profile_json
+            profile_json=profile_json, popstat=popstat,
         )
 
     def close_all(self) -> None:

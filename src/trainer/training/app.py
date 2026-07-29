@@ -38,7 +38,7 @@ from trainer.config_types import (
 from trainer.device import create_device
 from trainer.metrics import psnr
 from trainer.pipeline import Pipeline
-from trainer.frontend.cli import build_parser
+from trainer.training.cli import build_parser
 from trainer.training.densification import DensificationController
 from trainer.training.evaluation import (
     eval_test_psnr_srgb,

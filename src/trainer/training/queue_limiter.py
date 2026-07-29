@@ -1,3 +1,12 @@
+"""GPU submit-queue backpressure.
+
+Bounds how far the CPU runs ahead of the GPU: keep a rolling window of the last
+``max_depth`` submit IDs and wait on the oldest before recording a new one, so a
+later ``wait_for_idle`` never has to drain a huge backlog — without ever draining
+the queue in the hot path. Extracted from the training entry's nested
+``_bound_queue`` closure + ``submit_id_ring`` list.
+"""
+
 from __future__ import annotations
 
 from collections import deque
