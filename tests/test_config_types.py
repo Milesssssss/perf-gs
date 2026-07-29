@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from v2_train import build_parser
 
-from trainer.config_types import (
+from trainer.config.config_types import (
     BlendKind,
     DensificationMode,
     PrimitiveKind,

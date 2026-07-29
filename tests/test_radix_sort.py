@@ -11,8 +11,8 @@ import numpy as np
 import pytest
 import slangpy as spy
 
-from trainer.contracts import EXECUTION
-from trainer.device import SHADERS_DIR, create_device
+from trainer.contracts.codegen import EXECUTION
+from trainer.backend.compute.device import SHADERS_DIR, create_device
 
 
 BACKENDS = ["vulkan", "d3d12"]

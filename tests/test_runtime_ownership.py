@@ -5,7 +5,7 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-from trainer.gpu import CommandBatch, GpuRuntime
+from trainer.backend.compute.gpu import CommandBatch, GpuRuntime
 
 
 class _TrackingLock:

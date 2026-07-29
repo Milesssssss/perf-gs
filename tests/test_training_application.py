@@ -4,13 +4,13 @@ from __future__ import annotations
 
 from argparse import Namespace
 
-from trainer.config import (
+from trainer.config.config import (
     CompositorConfig,
     LossConfig,
     RasterConfig,
     RegularizationConfig,
 )
-from trainer.training.app import (
+from trainer.frontend.app import (
     ShaderSpecialization,
     TrainingLoop,
     create_pipeline,

@@ -9,13 +9,13 @@ from __future__ import annotations
 
 import pytest
 
-from trainer.buffers import (
+from trainer.backend.memory.buffers import (
     GAUSSIAN_FLOAT_COUNT,
     GRAD_2D_SEED_COMPONENTS,
     GRAD_SCALAR_COMPONENTS,
 )
-from trainer.config_types import BlendKind, PrimitiveKind
-from trainer.primitive_types import (
+from trainer.config.config_types import BlendKind, PrimitiveKind
+from trainer.backend.primitives.primitive_types import (
     DEFAULT_KEY,
     PrimitiveLayoutKey,
     default_specialization,

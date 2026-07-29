@@ -16,8 +16,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tests"))
 
 from _pipeline_testkit import TestPipeline
-from trainer.dataset import simple_camera
-from trainer.device import create_device
+from trainer.data.dataset import simple_camera
+from trainer.backend.compute.device import create_device
 
 BACKENDS = ["vulkan", "d3d12"]
 
@@ -79,7 +79,7 @@ def test_mip_on_gradients_finite_difference(backend: str) -> None:
         pytest.skip(f"backend {backend!r} unavailable: {exc}")
 
     from test_gradients import _scene, _target, PARAM_TABLE
-    from trainer.config import LossConfig, RasterConfig
+    from trainer.config.config import LossConfig, RasterConfig
 
     W = H = 16
     pipeline = TestPipeline(

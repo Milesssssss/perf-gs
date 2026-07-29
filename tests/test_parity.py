@@ -9,9 +9,9 @@ import numpy as np
 import pytest
 import slangpy as spy
 
-from trainer.dataset import simple_camera
-from trainer.device import create_device
-from trainer.pipeline import Pipeline
+from trainer.data.dataset import simple_camera
+from trainer.backend.compute.device import create_device
+from trainer.backend.render.pipeline import Pipeline
 
 
 def _render_scene(backend: str) -> np.ndarray:

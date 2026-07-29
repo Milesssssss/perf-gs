@@ -17,7 +17,7 @@ import time
 
 import numpy as np
 
-from trainer.config import AdamLRs
+from trainer.config.config import AdamLRs
 
 
 class Profiler:
@@ -67,7 +67,7 @@ class Profiler:
         if not args.profile_run:
             print("[capture] --capture-iter requires --profile-run. ignoring.")
             return
-        from trainer.ngfx_capture import NgfxCapture
+        from trainer.frontend.profiling.ngfx_capture import NgfxCapture
         cap = NgfxCapture()
         if not cap.inject(activity=args.capture_activity,
                           project_path=args.capture_project):

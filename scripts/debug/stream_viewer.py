@@ -35,11 +35,11 @@ import slangpy as spy
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from trainer.dataset import Camera
-from trainer.device import create_device
-from trainer.pipeline import Pipeline
-from trainer.splat_stream import SplatStreamReader, STREAM_LOCK_FILE_DEFAULT
-from trainer.viewer import FlyCamera
+from trainer.data.dataset import Camera
+from trainer.backend.compute.device import create_device
+from trainer.backend.render.pipeline import Pipeline
+from trainer.frontend.viewer.splat_stream import SplatStreamReader, STREAM_LOCK_FILE_DEFAULT
+from trainer.frontend.viewer.viewer import FlyCamera
 
 STREAM_LOCK_FILE = Path(STREAM_LOCK_FILE_DEFAULT)
 
@@ -96,7 +96,7 @@ def main() -> None:
     scene_fovy: float | None = None
     if args.scene:
         try:
-            from trainer.colmap import load_colmap
+            from trainer.data.colmap import load_colmap
             scene = load_colmap(args.scene, downsample=args.downsample)
             for i, e in enumerate(scene.images):
                 cam_names.append(f"camera {i}: " + e.image_name)

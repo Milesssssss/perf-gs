@@ -17,7 +17,7 @@ import numpy as np
 import pytest
 
 from _pipeline_testkit import TestPipeline
-from trainer.device import create_device
+from trainer.backend.compute.device import create_device
 
 
 BACKENDS = ["vulkan", "d3d12"]

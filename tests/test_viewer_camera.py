@@ -16,7 +16,7 @@ import math
 import numpy as np
 import pytest
 
-from trainer.viewer import FlyCamera
+from trainer.frontend.viewer.viewer import FlyCamera
 
 
 def _screen_response(roll_deg: float, dx: float, dy: float) -> tuple[float, float]:

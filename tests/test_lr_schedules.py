@@ -18,7 +18,7 @@ import math
 import numpy as np
 import pytest
 
-from trainer.training.lr_schedule import (
+from trainer.frontend.lr_schedule import (
     ExtinctionHardnessSchedule,
     MeanLearningRateSchedule,
 )

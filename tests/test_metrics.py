@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from trainer.metrics import psnr, ssim
+from trainer.common.metrics import psnr, ssim
 
 
 def test_psnr_identical_is_capped() -> None:

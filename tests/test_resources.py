@@ -11,8 +11,8 @@ from __future__ import annotations
 import numpy as np
 from v2_train import build_parser
 
-from trainer.config import AdamLRs
-from trainer.training.resources import (
+from trainer.config.config import AdamLRs
+from trainer.frontend.resources import (
     build_densify_configs,
     compute_morton_bounds,
     resolve_holdout_split,

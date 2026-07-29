@@ -14,8 +14,8 @@ from dataclasses import asdict
 
 import pytest
 
-from trainer.config_types import DensificationMode, ScheduleConfig
-from trainer.training.schedule import TrainingSchedule
+from trainer.config.config_types import DensificationMode, ScheduleConfig
+from trainer.frontend.schedule import TrainingSchedule
 
 # Schedule knobs at their CLI defaults.
 DEFAULT_KNOBS = dict(

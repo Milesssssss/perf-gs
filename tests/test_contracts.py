@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from trainer import contracts as C
+from trainer.contracts import codegen as C
 
 
 # --- CPU: derived layout is correct -----------------------------------------
@@ -108,7 +108,7 @@ def test_execution_constants() -> None:
 # --- CPU: the collapse kept every host name/value ---------------------------
 
 def test_buffers_reexports_match_contract() -> None:
-    from trainer import buffers as B
+    from trainer.backend.memory import buffers as B
     assert B.GAUSSIAN_FLOAT_COUNT == C.GAUSSIAN_FLOAT_COUNT
     assert B.GRAD_SCALAR_COMPONENTS == C.GRAD_SCALAR_COMPONENTS
     assert B.GRAD_2D_SEED_COMPONENTS == C.GRAD_2D_SEED_COMPONENTS
@@ -120,7 +120,7 @@ def test_buffers_reexports_match_contract() -> None:
 
 
 def test_splat_stream_floats_per_splat_from_contract() -> None:
-    from trainer import splat_stream
+    from trainer.frontend.viewer import splat_stream
     assert splat_stream.FLOATS_PER_SPLAT == C.GAUSSIAN_FLOAT_COUNT
 
 
@@ -209,9 +209,9 @@ def test_runtime_field_handlers_cover_schema() -> None:
 @pytest.mark.parametrize("backend", ["vulkan"])
 def test_gaussian_struct_size_matches_contract(backend) -> None:
     import slangpy as spy
-    from trainer import buffers as B
-    from trainer.device import create_device
-    from trainer.pipeline import _module_for_reflection
+    from trainer.backend.memory import buffers as B
+    from trainer.backend.compute.device import create_device
+    from trainer.backend.render.pipeline import _module_for_reflection
 
     device = create_device(backend=backend)
     module = _module_for_reflection(device)

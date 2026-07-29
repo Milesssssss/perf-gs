@@ -11,10 +11,10 @@ import argparse
 
 import numpy as np
 
-from trainer.dataset import load_ply
-from trainer.device import create_device
-from trainer.pipeline import Pipeline
-from trainer.viewer import Viewer
+from trainer.data.dataset import load_ply
+from trainer.backend.compute.device import create_device
+from trainer.backend.render.pipeline import Pipeline
+from trainer.frontend.viewer.viewer import Viewer
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="View a .ply gaussian splat file")

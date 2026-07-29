@@ -23,9 +23,9 @@ import numpy as np
 import pytest
 
 from _pipeline_testkit import TestPipeline
-from trainer.config import CompositorConfig, LossConfig
-from trainer.dataset import simple_camera
-from trainer.device import create_device
+from trainer.config.config import CompositorConfig, LossConfig
+from trainer.data.dataset import simple_camera
+from trainer.backend.compute.device import create_device
 
 # Reuse the exact scene / target / parameter table the alpha-over finite-diff
 # test uses, so this is a like-for-like check with only the compositor changed.
