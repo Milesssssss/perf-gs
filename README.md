@@ -203,13 +203,6 @@ python scripts/running/v2_train.py --scene datasets/360_v2/room --backend d3d12 
 
 Each run writes to `outputs/train/<run-name>/`: a `log.jsonl`, a `final_psnr.json` summary, an `output.ply`, and per-camera renders under `cams/`. The plot scripts in `scripts/plots/` turn those into convergence and comparison figures.
 
-## Extending it
-
-- **A new primitive.** Add a folder under `shaders/primitives/`, implement the small project / evaluate / covariance interface, and register a specialization. The rasterizer talks to primitives through that interface, not concrete types.
-- **A new loss.** Drop a kernel in `shaders/losses/` and add it to the image-loss pass; the Python side reads it back like the existing L2 and SSIM terms.
-- **A new densification strategy.** Extend the controller in `training/densification.py`; the structure-aware path, its AbsGS filler, and simple 3DGS mode show the shape.
-- **A new backend.** When slang-rhi gains one, add it to `create_device` and the backend smoke test. The shaders do not change.
-
 ## Testing
 
 ```bash
@@ -218,25 +211,22 @@ pytest -q
 
 The suite covers Slang math against known inputs, gradient checks against finite differences, the CLI contract, the training schedule, and a device-creation smoke test on each backend. GPU tests are skipped automatically where no device is available.
 
-## Repository layout
+## Status
 
-```
-src/trainer/           device, buffers, pipeline, and the training/ frontend package
-shaders/               all Slang kernels, grouped by stage
-scripts/
-  running/             entry points (v2_train.py) + trainer-imported helpers
-  data/                dataset download helpers
-  plots/               metrics and plotting tools
-  debug/               diagnostics, viewers, measurement
-  shell/               batch sweeps and reference runs
-tests/                 math, gradient, contract, and smoke tests
-assets/                images used by this README
-```
+This is a research trainer. The happy path (Mip-NeRF 360, SH0, structure-aware densification, Vulkan) is well travelled and gives the numbers above. 
 
-## Status and honesty
+### TODOs/next steps
 
-This is a research trainer, not a product. The happy path (Mip-NeRF 360, SH0, structure-aware densification, Vulkan) is well travelled and gives the numbers above. Corners are rougher: higher SH degrees, exotic camera models, and unusual scenes have had less mileage. The code favours being clear and correct over being maximally fast, and it fails fast at boundaries rather than clamping quietly. If something looks wrong, it probably is, and the diagnostics under `scripts/debug/` are there to help you see why.
+- [ ] Experiment with view dependant reconstruction (Spherical harmonics / Spherical gaussians)
+- [ ] Harden the primitive generalization
+- [ ] Improve Adam's generalization and refactor optimizer state, slightly confusing rn
+- [ ] Implement HYPERPARAM-free densification strategy. SADGS is great, but required a lot of manual tuning. MCMC is nice for that, but wont converge as fast. I need to find a middle ground between speed (hopefully maintaining the 3k/4k step range for convergence) while avoiding overparameterized training setup.
+- [ ] Include Glomap/Colmap preprocessing stage
+- [ ] Improve viewer, likely should move to separate queues on separate devices and have shared memory mapped that viewer reads from and trainer pushes too.
+- [ ] Include PPISP to improve training quality
+- [ ] Refactor to allow easier integration of neural backbone for primitive prediction
+- [ ] Ideally this becomes a fast and efficient differentiable blended-primitive renderer that allows rapid experimentation of NVS and/or generative 3D experiments
 
 ## Acknowledgements
 
-Built on the ideas in 3D Gaussian Splatting (Kerbl et al.), Mip-Splatting, AbsGS, and structure-aware densification (SAD-GS), and on the [Slang](https://shader-slang.org) and SlangPy toolchain from the shader-slang project. The Mip-NeRF 360 dataset is used for evaluation.
+Built on the ideas in 3D Gaussian Splatting (Kerbl et al.), FasterGS, Mip-Splatting, AbsGS, and Structure-Aware Densification (SAD-GS) + so many other papers that I will hopefully remember to reference all, and on the [Slang](https://shader-slang.org) and SlangPy toolchain from the shader-slang project. The Mip-NeRF 360 dataset is used for evaluation.

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import contextlib
 from collections.abc import Callable
-from dataclasses import replace
+from dataclasses import dataclass, replace
 
 import numpy as np
 import slangpy as spy
@@ -37,7 +37,6 @@ from trainer.backend.compute.gpu import CommandBatch, GpuRuntime
 from trainer.backend.compute.gpu_scan import GpuScan, ScanKernels
 from trainer.backend.render.kernels import load_kernels
 from trainer.backend.render.losses import ImageLoss
-from trainer.backend.render.rasterizer import RasterizationContext
 from trainer.backend.optimize.simple_densifier import (
     CommandInterface,
     SimpleDensifier,
@@ -55,6 +54,18 @@ __all__ = ["Pipeline", "DensifyConfig", "AdamLRs"]
 # thread_count computations here, not in allocation.)
 _RADIX_US_DIM = 128
 _RADIX_SCAN_DIM = 128
+
+
+@dataclass(frozen=True)
+class RasterizationContext:
+    """The non-stable forward output the backward must consume.
+
+    Today that is just the sorted (tile, depth) -> primitive-id buffer — the
+    radix ping-pong winner — since every other backward input (blend data, tile
+    ranges, bucket offsets, checkpoints, per-pixel counts, the rendered image)
+    lives in a stable buffer the backward reads directly.
+    """
+    sorted_ids: spy.NDBuffer
 
 
 class _RecordingTransaction:
