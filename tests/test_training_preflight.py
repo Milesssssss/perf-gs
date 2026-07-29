@@ -1,4 +1,4 @@
-"""Characterization + contract tests for trainer.frontend.resources.
+"""Characterization + contract tests for trainer.frontend.training_preflight.
 
 Pins the pure setup-phase derivations extracted from app.main() — the held-out
 eval split, the Morton normalization AABB, the densify/structure config objects
@@ -12,7 +12,7 @@ import numpy as np
 from v2_train import build_parser
 
 from trainer.config.config import AdamLRs
-from trainer.frontend.resources import (
+from trainer.frontend.training_preflight import (
     build_densify_configs,
     compute_morton_bounds,
     resolve_holdout_split,

@@ -167,7 +167,7 @@ def test_runtime_field_handlers_cover_schema() -> None:
         return (repo / path).read_text(encoding="utf-8")
 
     packing = source("src/trainer/backend/memory/buffer_io.py")
-    export = source("src/trainer/backend/export.py")
+    export = source("src/trainer/data/ply.py")
     bin_count = source("shaders/rasterize/tile_binned/bin_count.slang")
     projection_backward = source("shaders/rasterize/tile_binned/projection_backward.slang")
     blend_backward = source("shaders/rasterize/tile_binned/backward_persplat.slang")
@@ -189,7 +189,9 @@ def test_runtime_field_handlers_cover_schema() -> None:
     gradient_sources = projection_backward + blend_backward + regularization
     for field in C.GAUSSIAN_FIELDS:
         assert f'block["{field.name}"]' in packing
-        assert f'g["{field.name}"]' in export
+        # export path (data/ply.py) subscripts each field by name; the local
+        # variable name is irrelevant to "is every field serialized?".
+        assert f'["{field.name}"]' in export
         assert f"primitive.{field.name}" in parameters
         assert f"g.{field.name}" in adam
         if field.projection_role == "geometry":

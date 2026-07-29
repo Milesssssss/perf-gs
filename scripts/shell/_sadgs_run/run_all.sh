@@ -35,7 +35,6 @@ for sp in "${SCENES[@]}"; do
     continue
   fi
   echo "==================== [$(date +%H:%M:%S)] TRAIN $name ===================="
-  export REF_POP_OUT=$OUT/ref_popstat.jsonl
   export REF_EVAL_OUT=$OUT/ref_eval_inmem.json
   mkdir -p "$OUT"
   "$PY" train.py -s "$REPO/datasets/$sp" -i images_4 --eval \

@@ -1,8 +1,7 @@
-"""Dataset and camera helpers.
+"""Camera model and view/projection matrix helpers.
 
-v0 (M2 scope): ``Camera`` dataclass + helpers for building the view and
-projection matrices; ``load_ply`` for 3DGS-format point clouds. Image
-loading is a lazy stub per PLAN.md Q8.
+``Camera`` dataclass + builders for the view and projection matrices, plus the
+SH band-0 color constant. 3DGS ``.ply`` IO lives in :mod:`trainer.data.ply`.
 """
 
 from __future__ import annotations
@@ -11,7 +10,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
-from plyfile import PlyData
 
 
 @dataclass
@@ -99,28 +97,6 @@ def simple_camera(
     return Camera(view_matrix=view, proj_matrix=proj, image_size=(width, height))
 
 
-class Dataset:
-    """Lazy-per-call dataset stub (PLAN.md Q8).
-
-    v0 does not train, so image loading is unimplemented. The shape of the
-    API is frozen now so v1 can fill it in without restructuring callers.
-    """
-
-    def __init__(self, cameras: list[Camera]):
-        self.cameras = cameras
-
-    def load_image(self, idx: int) -> np.ndarray:
-        raise NotImplementedError("image loading arrives with v1 training")
-
-
-_PLY_REQUIRED_FIELDS = (
-    "x", "y", "z",
-    "scale_0", "scale_1", "scale_2",
-    "rot_0", "rot_1", "rot_2", "rot_3",
-    "opacity",
-    "f_dc_0", "f_dc_1", "f_dc_2",
-)
-
 # SH DC term -> linear RGB: the 3DGS format stores the zeroth SH coefficient
 # (constant term) which is related to the linear RGB color by a factor
 # derived from the spherical harmonic basis normalization:
@@ -130,77 +106,3 @@ _PLY_REQUIRED_FIELDS = (
 # the same affine map (color = 0.5 + SH_C0 * sh0), so f_dc maps to sh0 as an
 # identity — no sigmoid activation.
 _SH_C0 = 0.28209479177387814
-
-
-def load_ply(path: str | Path) -> dict[str, np.ndarray]:
-    """Load a 3DGS-format ``.ply`` into numpy arrays matching
-    :func:`trainer.buffers.write_gaussians` inputs.
-
-    The 3DGS convention:
-    - ``x, y, z`` — world position
-    - ``scale_0..2`` — log-scale per axis
-    - ``rot_0..3`` — quaternion (w, x, y, z)
-    - ``opacity`` — pre-sigmoid (inverse sigmoid applied at render)
-    - ``f_dc_0..2`` — SH zeroth-order coefficient (DC term)
-
-    We do not handle higher-order SH bands in v0 (PLAN.md Q14). The DC
-    term is converted to a plain-RGB color_logit so sigmoid(color_logit)
-    approximates the same linear RGB as ``0.5 + SH_C0 * f_dc``.
-
-    Opacity in the .ply is pre-sigmoid (i.e. ``sigmoid(opacity)`` is the
-    real [0,1] probability). This loader returns the probability; the
-    Python-side :func:`trainer.buffers.write_gaussians` converts back to
-    logit before writing to the GPU struct (which now stores logits).
-    The round-trip is free modulo a 1e-5 clip at the extremes.
-    """
-    path = Path(path)
-    if not path.exists():
-        raise FileNotFoundError(f"ply not found: {path}")
-
-    ply = PlyData.read(str(path))
-    if "vertex" not in [el.name for el in ply.elements]:
-        raise ValueError(f"ply {path} has no 'vertex' element")
-    verts = ply["vertex"].data
-
-    available = set(verts.dtype.names)
-    missing = [f for f in _PLY_REQUIRED_FIELDS if f not in available]
-    if missing:
-        raise ValueError(f"ply {path} missing required fields: {missing}")
-
-    n = len(verts)
-    means = np.stack([verts["x"], verts["y"], verts["z"]], axis=-1).astype(np.float32)
-    log_scales = np.stack(
-        [verts["scale_0"], verts["scale_1"], verts["scale_2"]], axis=-1
-    ).astype(np.float32)
-    rot_quats = np.stack(
-        [verts["rot_0"], verts["rot_1"], verts["rot_2"], verts["rot_3"]], axis=-1
-    ).astype(np.float32)
-
-    if not np.all(np.isfinite(means)):
-        raise ValueError(f"ply {path}: non-finite means")
-    if not np.all(np.isfinite(log_scales)):
-        raise ValueError(f"ply {path}: non-finite log_scales")
-    if not np.all(np.isfinite(rot_quats)):
-        raise ValueError(f"ply {path}: non-finite rot_quats")
-
-    quat_norms = np.linalg.norm(rot_quats, axis=-1)
-    if np.any(quat_norms < 1e-8):
-        raise ValueError(f"ply {path}: {(quat_norms < 1e-8).sum()} zero quaternions")
-
-    opacity_logit = np.asarray(verts["opacity"], dtype=np.float32)
-    opacity = 1.0 / (1.0 + np.exp(-opacity_logit))
-
-    # PLY stores the SH band-0 DC coefficient. Our renderer's color is
-    # linear = 0.5 + C0*sh0, the same mapping the DC term already uses, so
-    # sh0 = f_dc directly (no sigmoid-logit conversion; affine is unbounded).
-    f_dc = np.stack(
-        [verts["f_dc_0"], verts["f_dc_1"], verts["f_dc_2"]], axis=-1
-    ).astype(np.float32)
-
-    return {
-        "means": means,
-        "log_scales": log_scales,
-        "rot_quats": rot_quats,
-        "opacities": opacity.astype(np.float32),
-        "color_logits": f_dc.astype(np.float32),
-    }

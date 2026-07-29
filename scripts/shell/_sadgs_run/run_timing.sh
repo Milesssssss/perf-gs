@@ -1,17 +1,3 @@
-#!/usr/bin/env bash
-# SADGS reference (SH0) TIMING run on all Mip-NeRF 360 scenes.
-#
-# Measures the PURE training-loop wall time (iter 0 -> 3000), EXCLUDING data load
-# and structure-tensor precompute, so it is apples-to-apples with the Slang
-# trainer's train_wall_s (outputs/train/timing_<scene>/log.jsonl).
-#
-# Same config/resolution as run_all.sh, but:
-#   * REF_NO_POPSTAT=1  -> disable CPU-readback population snapshots (the Slang
-#     timed loop had no equivalent instrumentation).
-#   * --save_iterations 4000 -> never save inside the timed loop (no I/O stall).
-#   * train.py ONLY (no render/metrics; PSNR already collected separately).
-# Idempotent: skips any scene whose timing.json already exists.
-# Output -> outputs/sadgs_timing/<scene>/timing.json
 set -uo pipefail
 
 REPO=/mnt/c/Users/sscolari/Desktop/slang_3dgs_trainer
@@ -21,7 +7,6 @@ export LD_LIBRARY_PATH=$HOME/mm/envs/sadgs/lib/python3.11/site-packages/torch/li
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export REF_ST_BATCH=16
 export REF_PIN_SH0=1
-export REF_NO_POPSTAT=1
 PY=$HOME/mm/envs/sadgs/bin/python
 cd "$REPO/SADGS/SADGS"
 

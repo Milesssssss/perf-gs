@@ -5,11 +5,11 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
-from plyfile import PlyData, PlyElement
 from PIL import Image
 
 from trainer.backend.render.pipeline import Pipeline
-from trainer.data.dataset import Camera, _SH_C0
+from trainer.data.dataset import Camera
+from trainer.data.ply import write_gaussian_ply
 from trainer.contracts.codegen import gaussian_numpy_dtype
 
 
@@ -36,60 +36,14 @@ def render_to_png(pipeline: Pipeline, camera: Camera, path: str | Path) -> None:
 def save_ply(pipeline: Pipeline, path: str | Path) -> None:
     """Export the pipeline's current gaussians as a 3DGS-format .ply.
 
-    Inverse of :func:`trainer.dataset.load_ply`:
-    - The GPU stores opacity as a pre-sigmoid logit; the .ply format
-      also stores pre-sigmoid opacity, so we write it directly.
-    - ``sh0`` is the SH band-0 DC coeff: color = 0.5 + C0*sh0. With the sRGB
-      migration this color IS sRGB (matches the 3DGS PLY convention: viewers
-      render SH_C0*f_dc + 0.5 as sRGB), so f_dc == sh0 directly — no round-trip.
-
-    Only the 14 fields M1/M2 produce are written; higher-order SH bands
-    land in a later milestone when they matter.
+    Reads the GPU buffers, then delegates the format serialization to
+    :func:`trainer.data.ply.write_gaussian_ply` (inverse of
+    :func:`trainer.data.ply.load_ply`).
     """
     n = int(pipeline.buffers.num_gaussians_counter.to_numpy().view(np.uint32)[0])
     if n == 0:
         raise ValueError("pipeline has 0 gaussians; nothing to save")
 
     raw = pipeline.buffers.gaussians.to_numpy()
-    g = np.frombuffer(raw.tobytes(), dtype=gaussian_numpy_dtype())[:n]
-
-    mean = g["mean"]
-    log_scale = g["log_scale"]
-    rot_quat = g["rot_quat"]
-    opacity_logit = g["opacity"].astype(np.float32)   # stored as logit already
-    sh0 = g["sh0"]
-
-    # Our renderer now composites in sRGB: color = 0.5 + SH_C0 * sh0 IS sRGB,
-    # matching the 3DGS PLY convention (viewers render SH_C0*f_dc + 0.5 as sRGB),
-    # so f_dc = sh0 directly — no linear<->sRGB round-trip.
-    f_dc = sh0.astype(np.float32)
-
-    dtype = [
-        ("x", "f4"), ("y", "f4"), ("z", "f4"),
-        ("nx", "f4"), ("ny", "f4"), ("nz", "f4"),
-        ("f_dc_0", "f4"), ("f_dc_1", "f4"), ("f_dc_2", "f4"),
-        ("opacity", "f4"),
-        ("scale_0", "f4"), ("scale_1", "f4"), ("scale_2", "f4"),
-        ("rot_0", "f4"), ("rot_1", "f4"), ("rot_2", "f4"), ("rot_3", "f4"),
-    ]
-    records = np.empty(n, dtype=dtype)
-    records["x"] = mean[:, 0]
-    records["y"] = mean[:, 1]
-    records["z"] = mean[:, 2]
-    records["nx"] = 0.0
-    records["ny"] = 0.0
-    records["nz"] = 0.0
-    records["f_dc_0"] = f_dc[:, 0]
-    records["f_dc_1"] = f_dc[:, 1]
-    records["f_dc_2"] = f_dc[:, 2]
-    records["opacity"] = opacity_logit
-    records["scale_0"] = log_scale[:, 0]
-    records["scale_1"] = log_scale[:, 1]
-    records["scale_2"] = log_scale[:, 2]
-    records["rot_0"] = rot_quat[:, 0]
-    records["rot_1"] = rot_quat[:, 1]
-    records["rot_2"] = rot_quat[:, 2]
-    records["rot_3"] = rot_quat[:, 3]
-
-    elem = PlyElement.describe(records, "vertex")
-    PlyData([elem], text=False).write(str(path))
+    gaussians = np.frombuffer(raw.tobytes(), dtype=gaussian_numpy_dtype())[:n]
+    write_gaussian_ply(gaussians, path)

@@ -89,7 +89,6 @@ class DensificationController:
         queue_limiter = self._queue_limiter
         densify_json = self._artifacts.densify_json
         densify_diag_json = self._artifacts.densify_diag_json
-        popstat = self._artifacts.popstat
         _diag = self._diag
         _diag_grad_internal = self._diag_grad_internal
         _print_opacity_bundle = self._print_opacity_bundle
@@ -113,37 +112,13 @@ class DensificationController:
                 grad_thresh_internal=_diag_grad_internal,
                 dense_scale=structure_cfg.dense_scale)
 
-        # POPSTAT pre-densify snapshot (SADGS schema). kind mirrors the
-        # reference: 'structure' on a SAD structure tick, 'warmup' on the
-        # gradient/AbsGS filler ticks. Taken BEFORE densify mutates the
-        # buffers, while the eta accumulators are still live.
-        _popstat_kind = "structure" if do_structure_step else "warmup"
-        if popstat is not None:
-            popstat.snapshot(pipeline, it, "pre", _popstat_kind,
-                             extent=extent, structure_cfg=structure_cfg,
-                             split_ratio_threshold=args.sad_tau_split)
-
-        # SAD-GS eta window: a FILLER (AbsGS) tick carries the eta
-        # accumulators through its slot permutations (scatterCompactEta +
-        # mortonScatterEta) so the multiview frequency window accumulates
-        # over the whole structure interval (~50 samples) instead of being
-        # reset every filler tick (~10). A STRUCTURE tick instead clears eta
-        # afterward to start a fresh window (SADGS zeroes eta right after a
-        # normal/structure densification). Non-SAD paths never touch eta.
         sad_carry_eta = (mode == DensificationMode.STRUCTURE_AWARE
                          and not do_structure_step)
 
         if do_structure_step:
-            # Print the resolved bundle settings at every structure pass so
-            # it is provable, per-pass, whether the 0.1 floor / 0.8 cap are
-            # active (they are OFF unless the flags were passed).
             _print_opacity_bundle(f"structure pass @ iter {it}")
             stats = pipeline.densify_structure_aware(structure_cfg)
         elif mode == DensificationMode.STRUCTURE_AWARE:
-            # Interleaved AbsGS gradient densify (dual-schedule filler). Same
-            # gentle gradient clone/split as --densify-mode simple; scale prune
-            # gated on step > reset_every so kNN-init blobs aren't culled
-            # before structure densify can subdivide them.
             allow_scale_prune = it > args.reset_every
             stats = pipeline.densify_simple(
                 densify_cfg,
@@ -154,8 +129,6 @@ class DensificationController:
                 carry_eta=True,
             )
         elif mode == DensificationMode.SIMPLE:
-            # we gate the too-big prune on step > reset_every: don't delete large kNN-init blobs before densification can split them
-            #And normalize the prune threshold by scene extent
             allow_scale_prune = it > args.reset_every
             stats = pipeline.densify_simple(
                 densify_cfg,
@@ -164,48 +137,23 @@ class DensificationController:
                 prune_big_scale=extent * args.prune_scale3d,
                 allow_scale_prune=allow_scale_prune,
             )
-        # densify_simple did its own submit_command_buffer inside
-        # (one encoder for the whole pass). Add its submit to the
-        # backpressure ring so it's subject to the same queue-depth cap.
         if pipeline.last_submit_id:
             queue_limiter.record(pipeline.last_submit_id)
         pipeline.clear_tracking()
-        # SAD-GS eta window handling. clear_tracking above only zeros the
-        # grad/visibility window (never eta), so the eta buffers are intact
-        # here regardless of the branch.
-        #   STRUCTURE tick: densify_structure_aware used the plain scatter
-        #     (eta NOT carried), so eta is now stale on the new slot set.
-        #     Zero it to open a fresh window (SADGS zeroes eta right after a
-        #     normal densification).
-        #   FILLER tick (sad_carry_eta): densify_simple(carry_eta=True)
-        #     already permuted eta through the compaction, so DON'T clear —
-        #     the window keeps accumulating across the whole structure
-        #     interval. The Morton sort below must then also carry eta.
+
         if mode == DensificationMode.STRUCTURE_AWARE and not sad_carry_eta:
             pipeline.clear_structure_scores()
-        # Morton re-sort after every densify: the fresh gaussians live at
-        # the tail of the buffer (appended by split_and_clone), so a
-        # Z-order pass restores spatial locality before the next window
-        # of forwards. Order matters: it MUST follow the clears above,
-        # since Morton permutes slots and any non-zero slot-indexed
-        # accumulator (grad/visibility) would then reference the wrong
-        # gaussian. On a filler tick we carry eta through the sort too so
-        # the just-preserved window isn't scrambled.
+
+        # Morton re-sort after every densify
         if True:
             pipeline.morton_sort(morton_world_min, morton_world_max,
                                  carry_eta=sad_carry_eta)
             if pipeline.last_submit_id:
                 queue_limiter.record(pipeline.last_submit_id)
-        # Mip-Splatting: recompute the 3D smoothing filter now that the means
-        # + count changed (mip-splatting recomputes ~every 100 iters). New
-        # children get a valid filter for the next window's forwards.
+
         if ev.mip_after_densify:
             pipeline.compute_3d_filter()
-            #_log_filter3d("post-densify", it)
-        # densify_simple runs wait-free and returns None for counts
-        # (they live GPU-side); the log-every branch below reads the
-        # counter on its own cadence. densify()'s stats are still
-        # populated synchronously.
+
         if stats.get("final_count") is not None:
             cur_n_gaussians = stats["final_count"]
         kind = "structure" if do_structure_step else (
@@ -213,14 +161,7 @@ class DensificationController:
         densify_json.write(json.dumps(
             {"iter": it, "event": "densify", "kind": kind, **stats}) + "\n")
 
-        # POPSTAT post-densify snapshot (after densify + morton settled).
-        if popstat is not None:
-            popstat.snapshot(pipeline, it, "post", _popstat_kind,
-                             extent=extent, structure_cfg=structure_cfg,
-                             split_ratio_threshold=args.sad_tau_split)
-
-        # DIAGNOSTIC post-capture: realized growth + post-densify spatial
-        # concentration, after densify + morton have settled.
+        # DIAGNOSTIC post-capture: realized growth + post-densify spatial concentration, after densify + morton have settled.
         if _diag_rec is not None:
             _diag_rec = _diag.capture_post(pipeline, _diag_rec,
                                            structure=(mode == DensificationMode.STRUCTURE_AWARE))

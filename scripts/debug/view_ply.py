@@ -11,7 +11,7 @@ import argparse
 
 import numpy as np
 
-from trainer.data.dataset import load_ply
+from trainer.data.ply import load_ply
 from trainer.backend.compute.device import create_device
 from trainer.backend.render.pipeline import Pipeline
 from trainer.frontend.viewer.viewer import Viewer

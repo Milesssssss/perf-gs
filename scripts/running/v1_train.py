@@ -38,7 +38,7 @@ import numpy as np
 from PIL import Image
 
 from trainer.common.color import srgb_to_linear
-from trainer.data.colmap import load_colmap, load_image
+from trainer.data.colmap import load_colmap, load_colmap_image
 from trainer.backend.compute.device import create_device
 from trainer.backend.export import render_to_png
 from trainer.backend.render.pipeline import AdamLRs, Pipeline
@@ -115,7 +115,7 @@ def main() -> None:
     }, indent=2))
 
     # Pre-cache target images + ground-truth PNGs per camera.
-    targets_srgb = [load_image(e, scene.image_dir, args.width, args.height)
+    targets_srgb = [load_colmap_image(e, scene.image_dir, args.width, args.height)
                     for e in scene.images]
     targets_linear = [_srgb_to_linear(t) for t in targets_srgb]
     for cam_i, (entry, tgt) in enumerate(zip(scene.images, targets_srgb)):

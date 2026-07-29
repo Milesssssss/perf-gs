@@ -451,7 +451,7 @@ def load_colmap(
     )
 
 
-def load_image(entry: ColmapImageEntry, image_dir: Path, width: int, height: int,
+def load_colmap_image(entry: ColmapImageEntry, image_dir: Path, width: int, height: int,
                load_alpha: bool = False) -> np.ndarray:
     """Read a PNG/JPG from disk and downsample to float32.
 

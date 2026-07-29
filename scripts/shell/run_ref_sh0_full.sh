@@ -20,7 +20,6 @@ export LD_LIBRARY_PATH=$HOME/mm/envs/sadgs/lib/python3.11/site-packages/torch/li
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export REF_ST_BATCH=16
 export REF_PIN_SH0=1
-export REF_POP_OUT=$OUT/ref_popstat.jsonl        # trajectory alongside the model
 export REF_EVAL_OUT=$OUT/ref_eval_inmem.json     # my in-memory eval (cross-check)
 
 PY=$HOME/mm/envs/sadgs/bin/python

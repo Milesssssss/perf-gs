@@ -29,7 +29,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from trainer.data.colmap import load_colmap, load_image
+from trainer.data.colmap import load_colmap, load_colmap_image
 from trainer.backend.optimize.structure_analysis import (
     GAMMA,
     NUM_LEVELS,
@@ -80,7 +80,7 @@ def main() -> None:
     names = []
     t0 = time.time()
     for i, entry in enumerate(scene.images):
-        srgb = load_image(entry, scene.image_dir, W, H)
+        srgb = load_colmap_image(entry, scene.image_dir, W, H)
         # SADGS computes the structure tensor on the RAW sRGB image
         # (train.py:184 feeds cam.original_image straight in), NOT on linearized
         # RGB — match that so the cached field agrees with the reference.

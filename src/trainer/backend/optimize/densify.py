@@ -59,19 +59,10 @@ class StructureConfig:
     # choice paired with the sqrt(12) child spacing in split_anisotropic.slang);
     # 1.2 for Tanks & Temples / Deep Blending (SADGS ks_scale_power=1.2).
     ks_scale_power: float = 1.0
-    # Structure-pass opacity prune floor. SADGS hardcodes min_opacity=0.1 at the
-    # structure densify (train.py:364) — 20x the warmup 0.005 — and prunes the
-    # whole post-split population below it. Our decision emits ACTION_PRUNE for
-    # opacity < t_opacity; split children/clones inherit parent opacity, so
-    # pruning low-opacity parents here is ~equivalent to the reference's
-    # prune-after-split. Measured (ref_popstat_bicycle.jsonl): the reference's
-    # it500-post opacity p10=0.134 (everything below 0.1 culled).
     t_opacity: float = 0.005
     # Post-densify opacity cap (SADGS gaussian_model.py:1046:
     # inverse_sigmoid(min(get_opacity, 0.8)) applied to ALL survivors after the
-    # structure prune). Measured ref it500-post opacity p90=p99=max=0.8 — the cap
-    # is real and universal. 0 disables (no cap). Applied via resetOpacity's
-    # clamp-to-logit(cap), which is exactly min(logit, logit(0.8)).
+    # structure prune)
     opacity_cap: float = 0.8
     # Scale threshold separating clone (small) from split (large), = SADGS
     # args.dense * scene_extent. A triggered gaussian with max world-space scale

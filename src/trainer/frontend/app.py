@@ -21,7 +21,7 @@ from typing import Any
 import numpy as np
 from PIL import Image
 
-from trainer.data.colmap import load_colmap, load_image
+from trainer.data.colmap import load_colmap, load_colmap_image
 from trainer.common.color import srgb_to_linear
 from trainer.config.config import (
     AdamLRs,
@@ -52,7 +52,7 @@ from trainer.frontend.lr_schedule import (
 from trainer.frontend.reporting.outputs import RunArtifacts
 from trainer.frontend.evaluation.post_training import run_post_training
 from trainer.frontend.queue_limiter import QueueLimiter
-from trainer.frontend.resources import (
+from trainer.frontend.training_preflight import (
     build_densify_configs,
     compute_morton_bounds,
     resolve_holdout_split,
@@ -800,7 +800,7 @@ class TargetDataset:
         self._height = height
         self._use_alpha = use_alpha
         self._srgb = [
-            load_image(
+            load_colmap_image(
                 entry,
                 scene.image_dir,
                 width,

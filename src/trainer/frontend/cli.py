@@ -260,15 +260,6 @@ def build_parser() -> argparse.ArgumentParser:
                          "order, then random.shuffle on every refill (epoch cycling, "
                          "without replacement), batch_size=1. Use for a like-for-like "
                          "PSNR comparison that isolates the renderer from the data order.")
-    ap.add_argument("--popstat", action="store_true",
-                    help="write outputs/train/<run>/ref_popstat.jsonl with a pre/post "
-                         "population snapshot around every densify tick, in the EXACT "
-                         "schema of the SADGS reference's ref_popstat.jsonl (count, "
-                         "world_max_scale + opacity percentiles, and for structure "
-                         "ticks the eta_max/high_ratio/fanout stats). Lets us diff our "
-                         "population trajectory line-for-line against "
-                         "outputs/sadgs/<run>/ref_popstat.jsonl to locate the gap. "
-                         "Reads back GPU buffers on each densify tick (opt-in).")
     ap.add_argument("--run-name", type=str, default=None)
     ap.add_argument("--init-opacity", type=float, default=0.1, help="initial opacity for all splats")
     ap.add_argument("--grow-scale3d", type=float, default=0.001,

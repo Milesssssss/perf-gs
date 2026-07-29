@@ -32,7 +32,6 @@ export REF_PIN_SH0=1
 RUN_NAME="${RUN_NAME:-bicycle_sh0}"
 OUT="$REPO/outputs/sadgs/$RUN_NAME"
 mkdir -p "$OUT"
-export REF_POP_OUT=$OUT/ref_popstat.jsonl
 export REF_EVAL_OUT=$OUT/ref_eval.json
 
 PY="$HOME/mm/envs/sadgs/bin/python"

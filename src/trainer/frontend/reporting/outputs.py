@@ -19,8 +19,6 @@ from typing import TYPE_CHECKING, TextIO
 if TYPE_CHECKING:
     import argparse
 
-    from popstat import PopStat
-
 
 class RunArtifacts:
     """Owns all per-run output streams and their open/close lifecycle."""
@@ -36,7 +34,6 @@ class RunArtifacts:
         psnr_curve_json: "TextIO | None",
         bin_viz_json: "TextIO | None",
         profile_json: "TextIO | None",
-        popstat: "PopStat | None",
     ) -> None:
         self.log_txt = log_txt
         self.log_json = log_json
@@ -46,7 +43,6 @@ class RunArtifacts:
         self.psnr_curve_json = psnr_curve_json
         self.bin_viz_json = bin_viz_json
         self.profile_json = profile_json
-        self.popstat = popstat
 
     @classmethod
     def create(cls, run_dir: Path, args: "argparse.Namespace") -> "RunArtifacts":
@@ -63,17 +59,6 @@ class RunArtifacts:
         profile_json = _stream("profile_log.jsonl") if args.profile_every > 0 else None
         # Per-densify structure-decision diagnostics (--densify-diag).
         densify_diag_json = _stream("densify_diag.jsonl") if args.densify_diag else None
-
-        # SADGS-schema population trajectory (--popstat): one pre/post snapshot
-        # per densify tick into ref_popstat.jsonl, directly diffable against the
-        # reference's outputs/sadgs/<run>/ref_popstat.jsonl.
-        popstat = None
-        if args.popstat:
-            from popstat import PopStat
-
-            popstat = PopStat(run_dir / "ref_popstat.jsonl")
-            print(f"[popstat] writing SADGS-schema population trajectory to "
-                  f"{popstat.path}")
 
         # Full-dataset average-PSNR curve, opened only when --eval-every > 0.
         # One JSON line per eval sweep for post-hoc convergence plotting.
@@ -94,7 +79,7 @@ class RunArtifacts:
             log_txt=log_txt, log_json=log_json, densify_json=densify_json,
             densify_diag_json=densify_diag_json, eval_curve_json=eval_curve_json,
             psnr_curve_json=psnr_curve_json, bin_viz_json=bin_viz_json,
-            profile_json=profile_json, popstat=popstat,
+            profile_json=profile_json,
         )
 
     def close_all(self) -> None:
@@ -107,7 +92,7 @@ class RunArtifacts:
         for stream in (
             self.log_txt, self.log_json, self.densify_json,
             self.densify_diag_json, self.eval_curve_json, self.psnr_curve_json,
-            self.bin_viz_json, self.profile_json, self.popstat,
+            self.bin_viz_json, self.profile_json
         ):
             if stream is not None:
                 stream.close()
