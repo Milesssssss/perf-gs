@@ -17,8 +17,8 @@ import numpy as np
 import pytest
 
 from _pipeline_testkit import TestPipeline
-from trainer.dataset import simple_camera
-from trainer.device import create_device
+from trainer.data.dataset import simple_camera
+from trainer.backend.compute.device import create_device
 
 
 BACKENDS = ["vulkan", "d3d12"]

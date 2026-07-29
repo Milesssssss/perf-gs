@@ -12,9 +12,9 @@ import dataclasses
 
 import pytest
 
-from trainer.buffers import GRAD_SCALAR_COMPONENTS
-from trainer.primitive_types import DEFAULT_KEY
-from trainer.primitive_views import (
+from trainer.backend.memory.buffers import GRAD_SCALAR_COMPONENTS
+from trainer.backend.primitives.primitive_types import DEFAULT_KEY
+from trainer.backend.primitives.primitive_views import (
     PrimitiveGradientView,
     PrimitiveSetView,
     gaussian_gradient_view,

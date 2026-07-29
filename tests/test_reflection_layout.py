@@ -14,8 +14,8 @@ from __future__ import annotations
 import pytest
 import slangpy as spy
 
-from trainer.buffers import _reflect_types
-from trainer.device import SHADERS_DIR, create_device
+from trainer.backend.memory.buffers import _reflect_types
+from trainer.backend.compute.device import SHADERS_DIR, create_device
 
 BACKENDS = ["vulkan", "d3d12"]
 

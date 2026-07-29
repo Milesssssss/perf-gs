@@ -6,8 +6,8 @@ import numpy as np
 import pytest
 
 from _pipeline_testkit import TestPipeline
-from trainer.contracts import gaussian_numpy_dtype
-from trainer.device import create_device
+from trainer.contracts.codegen import gaussian_numpy_dtype
+from trainer.backend.compute.device import create_device
 
 
 @pytest.mark.parametrize("backend", ["vulkan", "d3d12"])

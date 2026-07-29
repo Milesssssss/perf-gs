@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from trainer.structure_analysis import (
+from trainer.backend.optimize.structure_analysis import (
     EPS,
     compute_structure_tensor_field,
     principal_eigenvalue,

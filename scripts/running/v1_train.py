@@ -37,11 +37,11 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-from trainer.color import srgb_to_linear
-from trainer.colmap import load_colmap, load_image
-from trainer.device import create_device
-from trainer.export import render_to_png
-from trainer.pipeline import AdamLRs, Pipeline
+from trainer.common.color import srgb_to_linear
+from trainer.data.colmap import load_colmap, load_image
+from trainer.backend.compute.device import create_device
+from trainer.backend.export import render_to_png
+from trainer.backend.render.pipeline import AdamLRs, Pipeline
 
 
 def _srgb_to_linear(c: np.ndarray) -> np.ndarray:

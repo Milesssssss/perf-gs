@@ -11,9 +11,9 @@ from __future__ import annotations
 
 import numpy as np
 
-from trainer.buffers import GRAD_SCALAR_COMPONENTS
-from trainer.dataset import Camera
-from trainer.pipeline import Pipeline
+from trainer.backend.memory.buffers import GRAD_SCALAR_COMPONENTS
+from trainer.data.dataset import Camera
+from trainer.backend.render.pipeline import Pipeline
 
 
 class TestPipeline(Pipeline):

@@ -23,11 +23,11 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from trainer.colmap import load_colmap
-from trainer.dataset import load_ply
-from trainer.device import create_device
-from trainer.config import RasterConfig
-from trainer.pipeline import Pipeline
+from trainer.data.colmap import load_colmap
+from trainer.data.dataset import load_ply
+from trainer.backend.compute.device import create_device
+from trainer.config.config import RasterConfig
+from trainer.backend.render.pipeline import Pipeline
 
 
 def _pct(a: np.ndarray, q: float) -> float:

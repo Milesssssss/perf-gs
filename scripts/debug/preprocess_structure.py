@@ -29,8 +29,8 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from trainer.colmap import load_colmap, load_image
-from trainer.structure_analysis import (
+from trainer.data.colmap import load_colmap, load_image
+from trainer.backend.optimize.structure_analysis import (
     GAMMA,
     NUM_LEVELS,
     RHO_FACTOR,

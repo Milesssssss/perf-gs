@@ -19,7 +19,7 @@ import numpy as np
 import pytest
 import slangpy as spy
 
-from trainer.device import SHADERS_DIR, create_device
+from trainer.backend.compute.device import SHADERS_DIR, create_device
 
 BACKENDS = ["vulkan", "d3d12"]
 SPIKE = str(SHADERS_DIR / "_spike" / "generic_spike.slang")

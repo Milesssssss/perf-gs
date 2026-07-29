@@ -16,7 +16,7 @@ dependencies = [
 ]
 
 [project.scripts]
-generate-contracts = "trainer.contracts:main"
+generate-contracts = "trainer.contracts.codegen:main"
 
 [project.optional-dependencies]
 dev = [

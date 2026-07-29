@@ -10,8 +10,8 @@ from __future__ import annotations
 
 import pytest
 
-from trainer.gpu import SubmitHandle
-from trainer.pipeline import Pipeline
+from trainer.backend.compute.gpu import SubmitHandle
+from trainer.backend.render.pipeline import Pipeline
 
 
 class _StubRuntime:

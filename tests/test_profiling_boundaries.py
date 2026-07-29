@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import numpy as np
 
 from _v2_profiling import Profiler
-from trainer.gpu import SubmitHandle
+from trainer.backend.compute.gpu import SubmitHandle
 
 
 class _FakeEncoder:

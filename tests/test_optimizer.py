@@ -16,9 +16,9 @@ import numpy as np
 import pytest
 
 from _pipeline_testkit import TestPipeline
-from trainer.config import LossConfig
-from trainer.device import create_device
-from trainer.buffers import GRAD_SCALAR_COMPONENTS
+from trainer.config.config import LossConfig
+from trainer.backend.compute.device import create_device
+from trainer.backend.memory.buffers import GRAD_SCALAR_COMPONENTS
 
 
 BACKENDS = ["vulkan", "d3d12"]

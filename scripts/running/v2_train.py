@@ -1,6 +1,6 @@
 """Thin entry point for the v2 trainer.
 
-All training logic lives in :mod:`trainer.training.app` (extracted from this
+All training logic lives in :mod:`trainer.frontend.app` (extracted from this
 script). This entry is kept so ``python scripts/running/v2_train.py ...`` keeps
 working.
 
@@ -26,8 +26,8 @@ for _sub in ("running", "debug", "plots"):
     if _p not in sys.path:
         sys.path.append(_p)
 
-from trainer.training.app import main  # noqa: E402
-from trainer.training.cli import build_parser  # noqa: E402
+from trainer.frontend.app import main  # noqa: E402
+from trainer.frontend.cli import build_parser  # noqa: E402
 
 __all__ = ["main", "build_parser"]
 

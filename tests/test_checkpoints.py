@@ -19,10 +19,10 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from trainer.dataset import simple_camera
-from trainer.contracts import RASTER_BUCKET_SIZE, TILE_SIZE
-from trainer.device import create_device
-from trainer.pipeline import Pipeline
+from trainer.data.dataset import simple_camera
+from trainer.contracts.codegen import RASTER_BUCKET_SIZE, TILE_SIZE
+from trainer.backend.compute.device import create_device
+from trainer.backend.render.pipeline import Pipeline
 
 
 BUCKET = RASTER_BUCKET_SIZE

@@ -4,9 +4,8 @@ Adds the repo ``scripts/`` directory to ``sys.path`` so the characterization
 tests can import the training-frontend helpers (``build_parser``,
 ``CameraSampler``, ...) that currently live under ``scripts/`` rather than the
 installed ``trainer`` package. This is TEST-ONLY path setup — it changes no
-shipped behavior. As the frontend is extracted into the ``trainer.training``
-package (later refactor slices), these imports move to the package and this
-shim shrinks / disappears.
+shipped behavior. The frontend now lives in the ``trainer.frontend`` package;
+these imports move to the package and this shim shrinks / disappears.
 """
 
 from __future__ import annotations

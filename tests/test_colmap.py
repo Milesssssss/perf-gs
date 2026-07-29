@@ -33,7 +33,7 @@ SCENE_DIR = Path(__file__).resolve().parent.parent / "datasets" / "synthetic" / 
 def _load_scene_or_skip(width: int = 960, height: int = 540):
     if not SCENE_DIR.exists():
         pytest.skip(f"suzanne_blender scene not present at {SCENE_DIR}")
-    from trainer.colmap import load_colmap
+    from trainer.data.colmap import load_colmap
     return load_colmap(SCENE_DIR, width=width, height=height)
 
 

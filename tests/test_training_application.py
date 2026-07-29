@@ -4,13 +4,13 @@ from __future__ import annotations
 
 from argparse import Namespace
 
-from trainer.config import (
+from trainer.config.config import (
     CompositorConfig,
     LossConfig,
     RasterConfig,
     RegularizationConfig,
 )
-from trainer.training.app import (
+from trainer.frontend.app import (
     ShaderSpecialization,
     TrainingLoop,
     create_pipeline,
@@ -38,7 +38,7 @@ def test_device_factory_passes_resolved_specialization(monkeypatch) -> None:
         captured.update(kwargs)
         return sentinel
 
-    monkeypatch.setattr("trainer.training.app.create_device", fake_create_device)
+    monkeypatch.setattr("trainer.frontend.app.create_device", fake_create_device)
     args = Namespace(
         backend="vulkan",
         profile_run=False,
@@ -61,7 +61,7 @@ def test_pipeline_factory_separates_configuration_ownership(monkeypatch) -> None
         captured.update(kwargs)
         return sentinel
 
-    monkeypatch.setattr("trainer.training.app.Pipeline", fake_pipeline)
+    monkeypatch.setattr("trainer.frontend.app.Pipeline", fake_pipeline)
     args = Namespace(
         max_splats=123,
         z_near_cull=0.25,

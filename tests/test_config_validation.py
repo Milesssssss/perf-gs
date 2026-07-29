@@ -13,13 +13,13 @@ from __future__ import annotations
 import pytest
 from v2_train import build_parser
 
-from trainer.config_types import (
+from trainer.config.config_types import (
     ConfigError,
     DensificationMode,
     ScheduleConfig,
     validate_training_config,
 )
-from trainer.training.schedule import TrainingSchedule
+from trainer.frontend.schedule import TrainingSchedule
 
 
 def _args(**overrides):

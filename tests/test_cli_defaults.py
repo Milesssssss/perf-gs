@@ -5,7 +5,7 @@ defaults" as NON-NEGOTIABLE. This asserts the FULL parsed-default namespace of
 ``build_parser()``, so any added / removed / renamed flag or changed default
 fails loudly and forces a conscious update.
 
-When the parser is extracted into ``trainer.training.cli`` (a later slice),
+When the parser moves into ``trainer.frontend.cli`` (from the scripts shim),
 repoint the import below; ``EXPECTED_DEFAULTS`` stays the contract the extracted
 parser must reproduce byte-for-byte.
 """
