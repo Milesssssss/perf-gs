@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from argparse import Namespace
 
-from trainer.config import (
+from trainer.config.config import (
     CompositorConfig,
     LossConfig,
     RasterConfig,

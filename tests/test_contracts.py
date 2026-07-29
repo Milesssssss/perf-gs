@@ -166,8 +166,8 @@ def test_runtime_field_handlers_cover_schema() -> None:
     def source(path: str) -> str:
         return (repo / path).read_text(encoding="utf-8")
 
-    packing = source("src/trainer/buffer_io.py")
-    export = source("src/trainer/export.py")
+    packing = source("src/trainer/backend/memory/buffer_io.py")
+    export = source("src/trainer/backend/export.py")
     bin_count = source("shaders/rasterize/tile_binned/bin_count.slang")
     projection_backward = source("shaders/rasterize/tile_binned/projection_backward.slang")
     blend_backward = source("shaders/rasterize/tile_binned/backward_persplat.slang")
