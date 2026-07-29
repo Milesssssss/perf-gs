@@ -1,6 +1,6 @@
 """Thin entry point for the v2 trainer.
 
-All training logic lives in :mod:`trainer.training.app` (extracted from this
+All training logic lives in :mod:`trainer.frontend.app` (extracted from this
 script). This entry is kept so ``python scripts/running/v2_train.py ...`` keeps
 working.
 

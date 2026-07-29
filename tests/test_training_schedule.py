@@ -1,7 +1,7 @@
 """Contract test: TrainingSchedule reproduces the frozen inline loop logic.
 
 Slice 3 extracts the v2 loop's inline per-iteration timing into
-``trainer.training.schedule.TrainingSchedule``. This proves the extracted module
+``trainer.frontend.schedule.TrainingSchedule``. This proves the extracted module
 matches the ORIGINAL inline logic EXACTLY — both at the hand-verified golden
 iterations and EXHAUSTIVELY across the full run for several configs that
 exercise preview buffering, the standalone morton / periodic-mip sites, the
@@ -14,7 +14,7 @@ from dataclasses import asdict
 
 import pytest
 
-from trainer.config.config_types import DensificationMode, ScheduleConfig
+from trainer.config_types import DensificationMode, ScheduleConfig
 from trainer.frontend.schedule import TrainingSchedule
 
 # Schedule knobs at their CLI defaults.
