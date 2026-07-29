@@ -1,11 +1,3 @@
-"""Per-step training schedules: mean/position LR + extinction hardness.
-
-Both were nested closures inside the training entry (with a mutable
-``first_densify_it`` closure variable). Extracting them into small classes
-removes that mutable closure state and makes the schedules independently
-unit-testable. Pure — no GPU, no I/O.
-"""
-
 from __future__ import annotations
 
 import numpy as np

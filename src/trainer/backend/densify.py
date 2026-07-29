@@ -393,8 +393,7 @@ def morton_sort(pipeline: Pipeline, world_min: np.ndarray,
     extent = np.maximum(world_max - world_min, 1e-6)
     inv_extent = (1.0 / extent).astype(np.float32)
 
-    with pipeline.recording("morton_sort") as recording, \
-            pipeline.marker_group("morton_sort"):
+    with pipeline.recording("morton_sort") as recording, pipeline.marker_group("morton_sort"):
         # 1. Publish n GPU-side: scan_total[0] = num_gaussians_counter[0].
         pipeline.dispatch(pipeline.k_densify_snapshot, "morton_snapshot",
             thread_count=[1, 1, 1],

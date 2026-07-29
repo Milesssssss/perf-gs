@@ -141,9 +141,7 @@ def run_post_training(
             "train_ssim_srgb": mean_metric(train_cams, "ssim_srgb"),
             "all_psnr_srgb": mean_metric(per_cam, "psnr_srgb"),
             "all_ssim_srgb": mean_metric(per_cam, "ssim_srgb"),
-            # Legacy dB-of-mean-MSE (pessimistic pooling) — NOT the paper metric,
-            # kept only for continuity with old runs. Suffixed so it can't be
-            # mistaken for the headline.
+            # Legacy dB-of-mean-MSE (pessimistic pooling)
             "test_psnr_srgb_db_of_mean_mse": db_of_mean_mse(
                 sum(c["mse_srgb"] for c in test_cams), len(test_cams)),
             "all_psnr_srgb_db_of_mean_mse": db_of_mean_mse(total_mse_srgb, n_cams),

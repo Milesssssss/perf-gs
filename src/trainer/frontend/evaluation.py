@@ -1,13 +1,3 @@
-"""Evaluation renders and metrics for the training frontend.
-
-Groups the "measure the model" responsibility into one place: full-scene camera
-dumps and the held-out TEST-split sRGB PSNR used by the ``--psnr-curve`` capture.
-
-These were previously a module-level helper plus a closure inside ``app.main()``
-that implicitly captured ``pipeline``/``scene``/``test_indices``/``targets_srgb``
-from the enclosing scope; here they take those as explicit parameters so the
-evaluation path is self-contained and testable in isolation.
-"""
 from __future__ import annotations
 
 import json
@@ -85,15 +75,12 @@ def run_eval_sweep(
     ``bin_viz_json`` is active.
     """
     eval_t0 = time.time()
-    # Drain GPU queue so num_gaussians_counter is accurate and no in-flight
-    # work skews the per-cam renders.
+    # Drain GPU queue so num_gaussians_counter is accurate and no in-flight work skews the per-cam renders.
     pipeline.runtime.wait_for_idle()
     eval_n_g = int(
         pipeline.buffers.num_gaussians_counter.to_numpy().view(np.uint32)[0]
     )
-    # Accumulate PER-IMAGE PSNR (dB) and average the dB values — the paper's
-    # mean-of-per-image metric. Scored on the held-out TEST split (all cams
-    # when holdout is off, since test_indices == all).
+    # Accumulate PER-IMAGE PSNR (dB) and average the dB values
     psnr_srgb_frames = []
     psnr_lin_frames = []
     psnr_srgb_mask_frames = []
