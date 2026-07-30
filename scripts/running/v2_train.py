@@ -15,8 +15,8 @@ for _sub in ("running", "debug", "plots"):
     if _p not in sys.path:
         sys.path.append(_p)
 
-from trainer.frontend.app import main  # noqa: E402
-from trainer.frontend.cli import build_parser as build_parser  # noqa: E402
+from trainer.frontend.app import main 
+from trainer.frontend.cli import build_parser as build_parser
 
 
 if __name__ == "__main__":

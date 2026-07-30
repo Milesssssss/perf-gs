@@ -45,15 +45,6 @@ from trainer.backend.densify.simple_densifier import (
     SimpleDensifyKernels,
 )
 
-# DensifyConfig / AdamLRs are imported (not defined) here and re-exported for
-# back-compat: existing callers do ``from trainer.backend.render.pipeline import ...``.
-
-
-# DeviceRadixSort dispatch dims — must match shaders/sort/device_radix_sort.slang.
-# (The layout-sizing constants RADIX_PART_SIZE / RADIX_GLOBAL_HIST_SIZE /
-# SCAN_BLOCK_SIZE are imported from buffers.py; these two are used only in
-# thread_count computations here, not in allocation.)
-_RADIX_US_DIM = 128
 _RADIX_SCAN_DIM = 128
 
 
