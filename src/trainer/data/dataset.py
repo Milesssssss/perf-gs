@@ -95,14 +95,3 @@ def simple_camera(
         np.deg2rad(fovy_degrees), width / height, z_near, z_far
     )
     return Camera(view_matrix=view, proj_matrix=proj, image_size=(width, height))
-
-
-# SH DC term -> linear RGB: the 3DGS format stores the zeroth SH coefficient
-# (constant term) which is related to the linear RGB color by a factor
-# derived from the spherical harmonic basis normalization:
-#   SH_C0 = 0.5 * sqrt(1 / pi) ≈ 0.28209479
-# The linear RGB from just the DC term is: rgb = 0.5 + SH_C0 * f_dc.
-# The trainer's color param IS this band-0 coefficient (sh0), rendered with
-# the same affine map (color = 0.5 + SH_C0 * sh0), so f_dc maps to sh0 as an
-# identity — no sigmoid activation.
-_SH_C0 = 0.28209479177387814

@@ -109,35 +109,7 @@ The loop keeps the GPU queue shallow with fence-based backpressure instead of dr
 
 ## Architecture
 
-Two halves: Slang shaders that do the GPU work, and a Python package that orchestrates them.
 
-**Shaders (`shaders/`)**, organized by responsibility so each stage is easy to find and swap:
-
-| Folder | Role |
-|---|---|
-| `common/`, `core/` | shared types, math, interfaces |
-| `primitives/` | the gaussian primitive (project, evaluate, covariance) |
-| `rasterize/` | tile-binned forward and backward passes |
-| `sort/` | depth sort and global radix / Morton ordering |
-| `densify/` | clone, split, and prune kernels |
-| `structure/` | structure-tensor analysis for structure-aware densification |
-| `mip/` | the Mip-Splatting 3D filter |
-| `losses/` | L2 and SSIM image losses |
-| `optimizers/` | Adam |
-
-**Python (`src/trainer/`)**. The device and pipeline wrap slang-rhi; the training frontend lives in `trainer/training/` split by layer:
-
-| Module | Responsibility |
-|---|---|
-| `training/app.py` | wires setup, loop, and post-training together |
-| `training/cli.py` | the single argparse boundary |
-| `training/resources.py` | scene load, eval split, config resolution |
-| `training/densification.py` | the densification subsystem controller |
-| `training/evaluation.py` | held-out renders and metrics |
-| `training/outputs.py` | per-run file lifecycle |
-| `training/post_training.py` | final metrics, summary, PLY export |
-| `training/viewer_control.py` | the live viewer lifecycle |
-| `training/schedule.py`, `lr_schedule.py`, `queue_limiter.py` | timing, LR, GPU backpressure |
 
 ## Backends and portability
 

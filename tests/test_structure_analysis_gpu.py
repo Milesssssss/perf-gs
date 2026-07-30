@@ -18,11 +18,11 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from trainer.backend.compute.device import create_device
-from trainer.backend.optimize.structure_analysis import (
+from trainer.backend.densify.structure_analysis import (
     compute_structure_tensor_field,
     principal_eigenvalue,
 )
-from trainer.backend.optimize.structure_analysis_gpu import StructureTensorGPU
+from trainer.backend.densify.structure_analysis_gpu import StructureTensorGPU
 
 BACKENDS = ["vulkan", "d3d12"]
 

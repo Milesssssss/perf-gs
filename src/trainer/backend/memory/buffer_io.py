@@ -5,9 +5,6 @@ the :class:`~trainer.buffers.GaussianBuffers` container): this module is the
 host-side plumbing that packs numpy arrays into the packed Gaussian3D layout,
 converts opacity probabilities to logits, and uploads. The dependency is
 one-way — this module depends on ``GaussianBuffers``, not the reverse.
-
-``buffers.py`` re-exports these functions for back-compat, so existing callers
-can keep using ``buffers.write_gaussians(...)``.
 """
 
 from __future__ import annotations

@@ -39,7 +39,7 @@ from trainer.backend.compute.device import create_device
 from trainer.common.metrics import psnr
 from trainer.backend.render.pipeline import Pipeline
 from trainer.frontend.cli import build_parser
-from trainer.frontend.densification import DensificationController
+from trainer.frontend.densification import DensificationController, DensifyOutcome
 from trainer.frontend.evaluation.evaluation import (
     eval_test_psnr_srgb,
     render_all_cameras,
@@ -390,7 +390,7 @@ class TrainingApplication:
             morton_world_max=scene.morton_max,
             extinction=self._extinction,
             queue_limiter=queue_limiter,
-            artifacts=artifacts,
+            collect_diagnostics=artifacts.densify_diag_json is not None,
             diag_module=diag_module,
             diag_grad_internal=diag_grad_internal,
             print_opacity_bundle=self._opacity_reporter.report,
@@ -674,8 +674,10 @@ class TrainingLoop:
         pipeline = self.runtime.pipeline
 
         if events.densify:
-            self.gaussian_count = self.runtime.densifier.run(
+            outcome = self.runtime.densifier.run(
                 context.number, events, self.gaussian_count)
+            self.gaussian_count = outcome.count
+            self.runtime.reporter.report_densify(outcome)
 
         if events.opacity_reset:
             pipeline.reset_opacity(self.densify_config)
@@ -980,7 +982,7 @@ class StructureTextureProvider:
         return textures
 
     def _load_cache(self) -> np.ndarray | None:
-        from trainer.backend.optimize.structure_analysis import cache_path
+        from trainer.backend.densify.structure_analysis import cache_path
 
         path = cache_path(
             self._args.scene, self._scene.width, self._scene.height)
@@ -1010,7 +1012,7 @@ class StructureTextureProvider:
 
     def _create_gpu_computer(self) -> Any | None:
         try:
-            from trainer.backend.optimize.structure_analysis_gpu import StructureTensorGPU
+            from trainer.backend.densify.structure_analysis_gpu import StructureTensorGPU
             computer = StructureTensorGPU(
                 self._device, self._scene.width, self._scene.height)
             print(f"[SAD] no cache; computing {self._scene.camera_count} fields "
@@ -1028,7 +1030,7 @@ class StructureTextureProvider:
         rgb = self._targets[camera_index][..., :3]
         if gpu_computer is not None:
             return gpu_computer.compute(rgb)
-        from trainer.backend.optimize.structure_analysis import compute_structure_tensor_field
+        from trainer.backend.densify.structure_analysis import compute_structure_tensor_field
         return compute_structure_tensor_field(rgb)
 
     def _upload(self, field: np.ndarray, label: str) -> Any:
@@ -1133,6 +1135,36 @@ class TrainingReporter:
             "elapsed_s": elapsed,
         }) + "\n")
         return True, count
+
+    def report_densify(self, outcome: DensifyOutcome) -> None:
+        """Serialize one densify tick's JSON + console diagnostics. Owns the
+        densify artifact schema; the controller only produces the data."""
+        self._artifacts.densify_json.write(json.dumps({
+            "iter": outcome.iteration, "event": "densify",
+            "kind": outcome.kind, **outcome.stats}) + "\n")
+
+        rec = outcome.diag_record
+        if rec is not None:
+            self._artifacts.densify_diag_json.write(json.dumps(rec) + "\n")
+            fo = rec.get("fanout", {})
+            gate = rec.get("eta_gate", {})
+            sp = rec.get("spatial_post", {})
+            print(f"  [diag] {outcome.kind:9s} {rec['pre_count']}->{rec['post_count']} "
+                  f"(x{rec['growth_factor']}) | "
+                  f"trig={gate.get('frac_triggered_of_seen')} "
+                  f"prune={gate.get('frac_prune_of_seen')} "
+                  f"prod_p90={fo.get('prod_p90')} prod_max={fo.get('prod_max')} "
+                  f"| gini={sp.get('gini')} top1%={sp.get('top1pct_cell_share')}")
+            if outcome.opacity_assert is not None:
+                amin, amax, msgs = outcome.opacity_assert
+                print(f"  [opacity-bundle assert] iter {outcome.iteration}: "
+                      f"min={amin:.4f} max={amax:.4f} | " + " | ".join(msgs))
+
+        pre_s = outcome.stats.get("pre_count")
+        final_s = outcome.stats.get("final_count")
+        if pre_s is not None and final_s is not None:
+            print(f"iter {outcome.iteration}: {outcome.kind:9s}| "
+                  f"pre={pre_s} -> post={final_s}")
 
     def report_opacity_reset(self, iteration: int) -> None:
         self._artifacts.densify_json.write(json.dumps({

@@ -20,7 +20,7 @@ import numpy as np
 
 from trainer.config.config import AdamLRs
 from trainer.config.config_types import DensificationMode
-from trainer.backend.optimize.densify import StructureConfig
+from trainer.backend.densify.densify import StructureConfig
 from trainer.backend.render.pipeline import DensifyConfig
 
 if TYPE_CHECKING:

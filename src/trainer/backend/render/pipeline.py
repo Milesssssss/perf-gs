@@ -16,7 +16,8 @@ import numpy as np
 import slangpy as spy
 
 from trainer.backend.memory import buffers
-from trainer.backend.optimize import densify as _densify
+from trainer.backend.memory import buffer_io
+from trainer.backend.densify import densify as _densify
 from trainer.backend.memory.buffers import (
     CLUSTER_SIZE,
     GRAD_SCALAR_COMPONENTS,
@@ -31,21 +32,21 @@ from trainer.config.config import (
     RegularizationConfig,
 )
 from trainer.data.dataset import Camera
-from trainer.backend.optimize.densify import DensifyConfig
+from trainer.backend.densify.densify import DensifyConfig
 from trainer.backend.compute.device import SHADERS_DIR
 from trainer.backend.compute.gpu import CommandBatch, GpuRuntime
 from trainer.backend.compute.gpu_scan import GpuScan, ScanKernels
 from trainer.backend.render.kernels import load_kernels
 from trainer.backend.render.losses import ImageLoss
-from trainer.backend.optimize.simple_densifier import (
+from trainer.backend.optimize.adam import AdamOptimizer
+from trainer.backend.densify.simple_densifier import (
     CommandInterface,
     SimpleDensifier,
     SimpleDensifyKernels,
 )
 
 # DensifyConfig / AdamLRs are imported (not defined) here and re-exported for
-# back-compat: existing callers do ``from trainer.pipeline import ...``.
-__all__ = ["Pipeline", "DensifyConfig", "AdamLRs"]
+# back-compat: existing callers do ``from trainer.backend.render.pipeline import ...``.
 
 
 # DeviceRadixSort dispatch dims — must match shaders/sort/device_radix_sort.slang.
@@ -171,9 +172,18 @@ class Pipeline:
             label="camera_data",
         )
 
-        # Training step counter (Python-side, for Adam bias correction).
-        #TODO: should the iteration be part of the Pipeline? I doubt it
-        self.iteration = 0
+        # The Adam parameter-update step and its bias-correction counter live in
+        # their own optimizer object, not inline on the Pipeline.
+        self._adam = AdamOptimizer(
+            dispatch=self._dispatch,
+            dispatch_indirect=self._dispatch_indirect,
+            prepare_args_kernel=self.k_densify_prepare_args,
+            adam_kernel=self.k_adam,
+            buffers=self.buffers,
+            max_splats=max_splats,
+            width=width,
+            height=height,
+        )
 
         # Active command batch during a recorded step. When set, _dispatch /
         # _marker_group record into it; None => immediate dispatch. External
@@ -263,6 +273,12 @@ class Pipeline:
     @_encoder.setter
     def _encoder(self, encoder: "spy.CommandEncoder | None") -> None:
         self._batch = CommandBatch(encoder) if encoder is not None else None
+
+    @property
+    def iteration(self) -> int:
+        """Adam bias-correction step count; densification reads it as a
+        decorrelation seed. The counter itself lives in the optimizer."""
+        return self._adam.step_count
 
     def _dispatch(self, kernel, marker: str, **kwargs):
         """Dispatch a kernel, tagging it with a flat debug marker ``marker`` when
@@ -358,7 +374,7 @@ class Pipeline:
         opacities: np.ndarray,
         color_logits: np.ndarray,
     ) -> None:
-        buffers.write_gaussians(
+        buffer_io.write_gaussians(
             self.buffers,
             means=means, log_scales=log_scales, rot_quats=rot_quats,
             opacities=opacities, color_logits=color_logits,
@@ -370,12 +386,12 @@ class Pipeline:
             thread_count=[self.max_splats, 1, 1],
             adam_state=self.buffers.adam_state.storage,
             max_splats=self.max_splats)
-        self.iteration = 0
+        self._adam.reset()
 
     def set_gaussians_raw(self, floats: np.ndarray, count: int) -> None:
         """Upload a snapshot already in the packed 14-float layout (from the
         splat stream). Render-only path — does not touch Adam state."""
-        buffers.write_gaussians_raw(self.buffers, floats, count)
+        buffer_io.write_gaussians_raw(self.buffers, floats, count)
 
     def set_target_image(self, rgb: np.ndarray) -> None:
         """Upload a target image into the pipeline's owned texture. Call
@@ -998,46 +1014,6 @@ class Pipeline:
             "visibility_count": vis.astype(np.int64),
         }
 
-    def _run_adam(self, lrs: AdamLRs) -> None:
-        self.iteration += 1
-        step = float(self.iteration)
-        bc1 = 1.0 - 0.9 ** step
-        bc2 = 1.0 - 0.999 ** step
-
-        b = self.buffers
-
-        # Populate adam_dispatch_args from num_gaussians_counter so we dispatch
-        # only ceil(count/256) workgroups instead of ceil(max_splats/256).
-        # Reuses the existing prepareDensifyArgs shader (same math).
-        self._dispatch(self.k_densify_prepare_args, "adam_prepare_args",
-            thread_count=[1, 1, 1],
-            count_buf=b.num_gaussians_counter.storage,
-            dispatch_args=b.adam_dispatch_args.storage,
-            max_splats=self.max_splats,
-        )
-
-        # Indirect: the driver reads (groups_x, 1, 1) from adam_dispatch_args
-        # at submit time — so if densify grows the count between iters, next
-        # iter's dispatch automatically covers the new range without any
-        # host-side count read.
-        self._dispatch_indirect(self.k_adam, "adam", b.adam_dispatch_args,
-            gaussians=b.gaussians.storage,
-            adam_state=b.adam_state.storage,
-            num_gaussians_counter=b.num_gaussians_counter.storage,
-            **b.grad_kwargs(),
-            cluster_visible=b.cluster_visible.storage,
-            cfg={
-                "lr_mean": lrs.mean,
-                "lr_scale": lrs.scale,
-                "lr_rot": lrs.rot,
-                "lr_opacity": lrs.opacity,
-                "lr_color": lrs.color,
-                "bias_correction1": bc1,
-                "bias_correction2": bc2,
-            },
-            pixels_per_step=float(self.width * self.height),
-        )
-
     def train_step(self, camera: Camera, lrs: AdamLRs | None = None,
                    structure_tensor=None, structure_kwargs: dict | None = None) -> None:
         """Run one training step: forward -> loss -> backward -> regularization -> adam.
@@ -1081,7 +1057,7 @@ class Pipeline:
             with self._marker_group("regularization"):
                 self._run_regularization()
             with self._marker_group("adam"):
-                self._run_adam(lrs)
+                self._adam.step(lrs)
 
     # ------------------------------------------------------------------
     # Densification (structure/reset/Morton helpers live in trainer.densify;

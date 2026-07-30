@@ -28,7 +28,7 @@ import slangpy as spy
 
 from trainer.backend.compute.device import SHADERS_DIR
 from trainer.backend.compute.gpu import GpuRuntime
-from trainer.backend.optimize.structure_analysis import (
+from trainer.backend.densify.structure_analysis import (
     GAMMA,
     MIN_ENERGY,
     NUM_LEVELS,

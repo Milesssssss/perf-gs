@@ -27,8 +27,9 @@ from pathlib import Path
 
 import numpy as np
 
-from trainer.data.dataset import Camera, _SH_C0
+from trainer.data.dataset import Camera
 
+_SH_C0 = 0.28209479177387814
 
 @dataclass
 class ColmapImageEntry:

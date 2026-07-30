@@ -15,7 +15,7 @@ import numpy as np
 import pytest
 
 from _pipeline_testkit import TestPipeline
-from trainer.backend.optimize.densify import DensifyConfig, StructureConfig
+from trainer.backend.densify.densify import DensifyConfig, StructureConfig
 from trainer.data.dataset import simple_camera
 from trainer.backend.compute.device import create_device
 

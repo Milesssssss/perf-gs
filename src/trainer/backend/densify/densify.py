@@ -101,10 +101,6 @@ def reset_opacity(pipeline: Pipeline, cfg: DensifyConfig) -> None:
     )
 
 
-# ----------------------------------------------------------------------
-# Structure-aware densification (SAD-GS, arXiv 2604.28016)
-# ----------------------------------------------------------------------
-
 def clear_structure_scores(pipeline: Pipeline) -> None:
     """Zero the per-axis eta accumulators. Call at the start of each
     accumulation window (right after a densify reorders gaussian slots), so

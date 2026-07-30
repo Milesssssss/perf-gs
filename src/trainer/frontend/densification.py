@@ -16,7 +16,7 @@ change) are exactly as they were in ``app.main()``.
 """
 from __future__ import annotations
 
-import json
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Callable
 
 from trainer.config.config_types import DensificationMode
@@ -26,9 +26,22 @@ if TYPE_CHECKING:
 
     from trainer.backend.render.pipeline import Pipeline
     from trainer.frontend.lr_schedule import ExtinctionHardnessSchedule
-    from trainer.frontend.reporting.outputs import RunArtifacts
     from trainer.frontend.queue_limiter import QueueLimiter
     from trainer.frontend.schedule import IterationEvents
+
+
+@dataclass
+class DensifyOutcome:
+    """Result of one densify tick. The controller produces this; the reporting
+    layer (:meth:`TrainingReporter.report_densify`) turns it into JSON + console
+    lines, so orchestration and reporting stay separate."""
+
+    iteration: int
+    count: int
+    kind: str
+    stats: dict
+    diag_record: dict | None = None
+    opacity_assert: tuple[float, float, list[str]] | None = None
 
 
 class DensificationController:
@@ -49,7 +62,7 @@ class DensificationController:
         morton_world_max,
         extinction: "ExtinctionHardnessSchedule",
         queue_limiter: "QueueLimiter",
-        artifacts: "RunArtifacts",
+        collect_diagnostics: bool,
         diag_module,
         diag_grad_internal,
         print_opacity_bundle: Callable[[str], None],
@@ -66,13 +79,15 @@ class DensificationController:
         self._morton_world_max = morton_world_max
         self._extinction = extinction
         self._queue_limiter = queue_limiter
-        self._artifacts = artifacts
+        self._collect_diagnostics = collect_diagnostics
         self._diag = diag_module
         self._diag_grad_internal = diag_grad_internal
         self._print_opacity_bundle = print_opacity_bundle
 
-    def run(self, it: int, ev: "IterationEvents", cur_n_gaussians: int) -> int:
-        """Execute one densify tick and return the (possibly updated) count."""
+    def run(self, it: int, ev: "IterationEvents", cur_n_gaussians: int) -> DensifyOutcome:
+        """Execute one densify tick and return its outcome (updated count,
+        stats, and any diagnostics). Reporting/IO is the caller's job — see
+        :meth:`TrainingReporter.report_densify`."""
         # Re-bind loop-local names from instance state so the body below is a
         # verbatim lift of the original inline ``if do_densify:`` block.
         pipeline = self._pipeline
@@ -87,8 +102,6 @@ class DensificationController:
         morton_world_max = self._morton_world_max
         extinction = self._extinction
         queue_limiter = self._queue_limiter
-        densify_json = self._artifacts.densify_json
-        densify_diag_json = self._artifacts.densify_diag_json
         _diag = self._diag
         _diag_grad_internal = self._diag_grad_internal
         _print_opacity_bundle = self._print_opacity_bundle
@@ -104,7 +117,7 @@ class DensificationController:
         # BEFORE the densify mutates anything, so gate selectivity and
         # fan-out reflect the decision this tick actually made.
         _diag_rec = None
-        if densify_diag_json is not None:
+        if self._collect_diagnostics:
             _diag_rec = _diag.capture_pre(
                 pipeline, structure=(mode == DensificationMode.STRUCTURE_AWARE),
                 width=IMAGES_WIDTH, height=IMAGES_HEIGHT,
@@ -144,12 +157,11 @@ class DensificationController:
         if mode == DensificationMode.STRUCTURE_AWARE and not sad_carry_eta:
             pipeline.clear_structure_scores()
 
-        # Morton re-sort after every densify
-        if True:
-            pipeline.morton_sort(morton_world_min, morton_world_max,
-                                 carry_eta=sad_carry_eta)
-            if pipeline.last_submit_id:
-                queue_limiter.record(pipeline.last_submit_id)
+        # Morton re-sort after every densify.
+        pipeline.morton_sort(morton_world_min, morton_world_max,
+                             carry_eta=sad_carry_eta)
+        if pipeline.last_submit_id:
+            queue_limiter.record(pipeline.last_submit_id)
 
         if ev.mip_after_densify:
             pipeline.compute_3d_filter()
@@ -158,47 +170,26 @@ class DensificationController:
             cur_n_gaussians = stats["final_count"]
         kind = "structure" if do_structure_step else (
             "absgs" if mode == DensificationMode.STRUCTURE_AWARE else "densify")
-        densify_json.write(json.dumps(
-            {"iter": it, "event": "densify", "kind": kind, **stats}) + "\n")
 
-        # DIAGNOSTIC post-capture: realized growth + post-densify spatial concentration, after densify + morton have settled.
+        # DIAGNOSTIC post-capture: realized growth + post-densify spatial
+        # concentration, after densify + morton have settled. The record and the
+        # opacity-bundle assert (a GPU read-back) travel out in the outcome for
+        # the reporter to serialize.
+        opacity_assert = None
         if _diag_rec is not None:
-            _diag_rec = _diag.capture_post(pipeline, _diag_rec,
-                                           structure=(mode == DensificationMode.STRUCTURE_AWARE))
+            _diag_rec = _diag.capture_post(
+                pipeline, _diag_rec,
+                structure=(mode == DensificationMode.STRUCTURE_AWARE))
             _diag_rec["iter"] = it
             _diag_rec["kind"] = kind
-            densify_diag_json.write(json.dumps(_diag_rec) + "\n")
-            fo = _diag_rec.get("fanout", {})
-            gate = _diag_rec.get("eta_gate", {})
-            sp = _diag_rec.get("spatial_post", {})
-            print(f"  [diag] {kind:9s} {_diag_rec['pre_count']}->{_diag_rec['post_count']} "
-                  f"(x{_diag_rec['growth_factor']}) | "
-                  f"trig={gate.get('frac_triggered_of_seen')} "
-                  f"prune={gate.get('frac_prune_of_seen')} "
-                  f"prod_p90={fo.get('prod_p90')} prod_max={fo.get('prod_max')} "
-                  f"| gini={sp.get('gini')} top1%={sp.get('top1pct_cell_share')}")
-            # Opacity-bundle assertions (diagnostic mode only): verify the
-            # shader actually honored the RESOLVED floor/cap on THIS pass.
-            # Asserted against the configured values (not the reference
-            # 0.1/0.8), so a default run (floor 0.005, cap off) never
-            # false-fails; the assert only bites if the bundle was
-            # configured but did not apply on the compacted (active) buffer.
             if kind == "structure":
-                _amin, _amax, _abmsgs = _diag.assert_opacity_bundle(
+                opacity_assert = _diag.assert_opacity_bundle(
                     pipeline,
                     floor=structure_cfg.t_opacity,
                     cap_enabled=bool(structure_cfg.opacity_cap
                                      and structure_cfg.opacity_cap > 0.0),
                     cap=structure_cfg.opacity_cap)
-                print(f"  [opacity-bundle assert] iter {it}: min={_amin:.4f} "
-                      f"max={_amax:.4f} | " + " | ".join(_abmsgs))
-        # Only print a per-densify line when we have real counts — i.e. the
-        # synchronous score-ranked densify() path. Wait-free paths (AbsGS
-        # + structure) report None and read the counter on log ticks
-        # instead, matching densify_simple's discipline.
-        pre_s = stats.get("pre_count")
-        final_s = stats.get("final_count")
-        if pre_s is not None and final_s is not None:
-            print(f"iter {it}: {kind:9s}| pre={pre_s} -> post={final_s}")
 
-        return cur_n_gaussians
+        return DensifyOutcome(
+            iteration=it, count=cur_n_gaussians, kind=kind, stats=stats,
+            diag_record=_diag_rec, opacity_assert=opacity_assert)

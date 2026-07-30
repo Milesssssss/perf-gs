@@ -8,14 +8,14 @@ from pathlib import Path
 from trainer.backend.memory import buffers
 from trainer.config import config
 from trainer.config.config_types import DensificationMode
-from trainer.backend.optimize.simple_densifier import SimpleDensifier
+from trainer.backend.densify.simple_densifier import SimpleDensifier
 
 
 ROOT = Path(__file__).resolve().parent.parent
 
 
 def test_densify_module_does_not_reach_into_pipeline_privates() -> None:
-    path = ROOT / "src/trainer/backend/optimize/densify.py"
+    path = ROOT / "src/trainer/backend/densify/densify.py"
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     private_uses = []
     for node in ast.walk(tree):

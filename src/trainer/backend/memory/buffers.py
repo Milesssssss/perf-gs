@@ -744,33 +744,3 @@ def allocate_viewer(
 
     buffers.num_gaussians_counter.copy_from_numpy(np.zeros(1, dtype=np.uint32))
     return buffers
-
-
-# CPU-side data marshalling lives in buffer_io.py (a different axis of change
-# from GPU resource allocation). Re-exported here so existing callers can keep
-# using ``buffers.write_gaussians(...)`` etc. The import is at the bottom to
-# avoid a circular import — buffer_io imports GaussianBuffers from this module.
-from trainer.backend.memory.buffer_io import (  # noqa: E402
-    set_num_gaussians,
-    write_gaussians,
-    write_gaussians_raw,
-)
-
-__all__ = [
-    "TILE_SIZE",
-    "CLUSTER_SIZE",
-    "RADIX_PART_SIZE",
-    "RADIX_GLOBAL_HIST_SIZE",
-    "SCAN_BLOCK_SIZE",
-    "RASTER_BUCKET_SIZE",
-    "GAUSSIAN_FLOAT_COUNT",
-    "DEFAULT_MAX_SORT_PAIRS",
-    "GRAD_SCALAR_COMPONENTS",
-    "GRAD_2D_SEED_COMPONENTS",
-    "GaussianBuffers",
-    "allocate",
-    "allocate_viewer",
-    "set_num_gaussians",
-    "write_gaussians",
-    "write_gaussians_raw",
-]
