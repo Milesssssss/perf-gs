@@ -13,7 +13,8 @@
 ![No CUDA required](https://img.shields.io/badge/CUDA-not%20required-2ea44f)
 ![Status](https://img.shields.io/badge/status-research-F5A623)
 
-A 3D Gaussian Splatting trainer written in [Slang](https://shader-slang.org) and driven from Python through [SlangPy](https://slangpy.shader-slang.org). It trains real scenes end to end (forward, backward, Adam, densification) and runs on Vulkan and D3D12 rather than a CUDA-only path, so it is not tied to one vendor's GPU stack.
+A 3D Gaussian Splatting trainer written in [Slang](https://shader-slang.org) and driven from Python through [SlangPy](https://slangpy.shader-slang.org).<br>
+It achieves convergence in ~72s on the Mip-NeRF 360 dataset on an RTX 3090. The codebase has no CUDA dependencies, is directly integratable with pytorch frontend and all shaders are dispatched via SlangPy.
 
 <p align="center">
   <img src="assets/teaser.jpg" alt="Mip-NeRF 360 bicycle scene trained by this pipeline, rendered from a held-out view" width="80%">
@@ -22,26 +23,22 @@ A 3D Gaussian Splatting trainer written in [Slang](https://shader-slang.org) and
 
 ## Why this exists
 
-Most open 3DGS trainers are welded to CUDA. That is great if you have an NVIDIA card and never plan to leave it, and awkward for everyone else. This project takes the other bet: write the math once in Slang, compile it to whatever backend the runtime supports, and keep the training loop in plain, readable Python.
-
-Three ideas shape the design.
+Most open 3DGS trainers are welded to CUDA.<br>
+By writing the kernels in Slang and having the whole system driven by slangpy, we aim to allow distributing this trainer on any system and any backend. 
 
 **Portability first.** The rasterizer, the gradients, the optimizer, and the densification kernels are all Slang. The same source compiles to SPIR-V for Vulkan and DXIL for D3D12 today, with room for more backends as slang-rhi grows. There are no `.cu` files anywhere and nothing that assumes a specific vendor.
 
-**Readable by a human.** The Python frontend is organized in layers you can follow top to bottom: setup, the training loop, evaluation, post-training. Each concern (learning-rate schedules, densification, output files, the live viewer) sits in its own small module with a clear API instead of one enormous `main()`.
+**Modular codebase.** Most 3DGS trainer usually live on a performance-readability spectrum, we aimed to have both, while also having flexible portability.
 
-**Built to be extended.** Primitives, losses, and densification strategies are separate shader units behind small interfaces, so adding a new primitive kind or a new loss is a local change rather than surgery across the whole pipeline.
+**Built to be extended.** Primitives, losses, and densification strategies are separate shader units behind small interfaces, so adding a new primitive kind or a new loss should be a rather local change rather than surgery across the whole pipeline.
 
-It is research code and it is honest about that. It also trains Mip-NeRF 360 scenes to quality that matches a solid reference, so it is a genuinely fun place to try ideas.
 
 ## What it does
 
 - Full training from COLMAP scenes: tile-binned forward rasterization, a hand-written backward pass, Adam, and a held-out evaluation split.
 - Densification you choose per run: a gradient (AbsGS-style) path, and a structure-aware (SAD-GS-style) path that grid-splits gaussians which under-resolve local image structure.
 - Mip-Splatting 3D smoothing filter for scale-correct, anti-aliased rendering.
-- A live, in-process viewer that shares the training device, so you watch a scene converge with a zero-copy GPU-to-GPU blit and no second process.
-- Deterministic Nsight GPU Trace capture hooks for profiling the real, optimized kernels.
-- Reproducible metrics: per-image PSNR and SSIM on a held-out split, written as JSON per run so a plot script can pick them up later.
+- Deterministic Nsight GPU Trace capture hooks for profiling the real, optimized kernels (this is Nvidia specific, but I want to allow integrating profiling also on AMD Radeon GPU Profiler (RGP)).
 
 <p align="center">
   <img src="assets/examples_strip.jpg" alt="Three novel views rendered from a scene trained by this pipeline" width="95%">
