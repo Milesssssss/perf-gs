@@ -1160,12 +1160,6 @@ class Pipeline:
             with self._marker_group("adam"):
                 self._adam.step(lrs)
 
-    # ------------------------------------------------------------------
-    # Densification (structure/reset/Morton helpers live in trainer.densify;
-    # simple densification is an injected service. These
-    # thin methods delegate, keeping the call surface on Pipeline while the
-    # heavy logic sits next to the buffer/scan structures it orchestrates).
-    # ------------------------------------------------------------------
 
     def densify_simple(self, cfg, grad_thresh=0.0002, scale_thresh=None,
                        prune_big_scale=None, allow_scale_prune=True,

@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import numpy as np
 
-from _v2_profiling import Profiler
+from trainer.frontend.profiling.profiler import Profiler
 from trainer.backend.compute.gpu import SubmitHandle
 
 

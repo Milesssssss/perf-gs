@@ -110,7 +110,7 @@ def test_training_loop_presents_after_full_iteration() -> None:
     states = iter((True, False))
     context = object()
 
-    loop._begin = lambda: events.append("begin")
+    loop._begin_training_loop = lambda: events.append("begin")
     loop._should_continue = lambda: next(states)
     loop._next_iteration = lambda: events.append("next") or context
     loop._prepare_iteration = lambda ctx: events.append("prepare")
@@ -119,9 +119,9 @@ def test_training_loop_presents_after_full_iteration() -> None:
     loop._apply_mutations = lambda ctx: events.append("mutations")
     loop._produce_observations = lambda ctx: events.append("observations") or True
     loop._present_profile_frame_if_enabled = lambda: events.append("present")
-    loop._complete = lambda: events.append("complete") or "result"
+    loop._complete_training_loop = lambda: events.append("complete") or "result"
 
-    assert TrainingLoop.run(loop) == "result"
+    assert TrainingLoop.launch_training_loop(loop) == "result"
     assert events == [
         "begin", "next", "prepare", "capture", "train",
         "mutations", "observations", "present", "complete",

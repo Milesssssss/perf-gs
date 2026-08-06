@@ -245,7 +245,7 @@ def build_parser() -> argparse.ArgumentParser:
                          "original bit-identical path. 1-3 enables higher bands, stored in "
                          "a separate features_rest buffer allocated only when >0, activated "
                          "one band every --sh-band-interval iters (oneupSHdegree).")
-    ap.add_argument("--sh-band-interval", type=int, default=1000,
+    ap.add_argument("--sh-band-interval", type=int, default=500,
                     help="Iterations between activating successive SH bands (classic 3DGS "
                          "oneupSHdegree). Only used with --sh-degree > 0.")
     ap.add_argument("--sample-mode", type=str, default="sadgs", choices=["ours", "sadgs"],
@@ -271,22 +271,12 @@ def build_parser() -> argparse.ArgumentParser:
                          "viewer stream (a second device pollutes the capture) and the "
                          "final I/O-heavy metrics pass.")
     ap.add_argument("--capture-iter", type=int, default=0,
-                    help="Programmatic Nsight Graphics capture: trigger a capture at "
-                         "this iteration for apples-to-apples before/after comparisons. "
-                         "Requires --profile-run and the Nsight Graphics SDK. Launch "
-                         "this process DIRECTLY (from terminal / VSCode) - NOT from "
-                         "Nsight UI - because self-injection is the only API path that "
-                         "supports programmatic triggering. Set to 0 (default) to "
-                         "disable. See src/trainer/ngfx_capture.py for details.")
-    ap.add_argument("--capture-activity", type=str, default="trace",
-                    choices=["trace", "frame"],
-                    help="Which Nsight activity to inject: 'trace' = GPU Trace (HW "
-                         "counters, SM/L2/VRAM throughputs); 'frame' = Frame Debugger "
-                         "(API-call tree + per-dispatch timings, no HW counters).")
-    ap.add_argument("--capture-project", type=str, default=None,
-                    help="Path to an .ngfx-proj file saved from Nsight UI "
-                         "(File > Save Project As). REQUIRED for 'trace' to "
-                         "record any metrics; optional for 'frame'.")
+                    help="Iteration at which scripts/running/capture_gpu_trace.py "
+                         "freezes the workload for the GPU-Trace collection window "
+                         "(external capture, see --capture-external). Presents a "
+                         "bit-identical frozen frame from here so ngfx.exe can sample "
+                         "HW counters over a stable steady state. 0 (default) = no "
+                         "capture.")
     ap.add_argument("--capture-external", action="store_true", default=False,
                     help="Headless capture driven by the Nsight CLI launcher "
                          "(ngfx.exe), NOT by self-injection. In this mode we do "

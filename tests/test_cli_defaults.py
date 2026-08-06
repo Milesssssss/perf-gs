@@ -90,8 +90,6 @@ EXPECTED_DEFAULTS = {
     "opacity_reset_value": 0.01,
     "profile_run": False,
     "capture_iter": 0,
-    "capture_activity": "trace",
-    "capture_project": None,
     "capture_external": False,
     "capture_frames": 240,
     "flat_bucket_backward": True,

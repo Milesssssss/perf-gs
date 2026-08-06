@@ -21,15 +21,6 @@ from trainer.config.config import AdamLRs
 
 
 def apply_profile_session_overrides(args) -> bool:
-    """Resolve whether this run profiles and, if so, force the clean presenting
-    Vulkan session a capture needs. Returns True when profiling is active.
-
-    A profile run keeps a normal training loop (densify + logs still run) but
-    disables the viewer stream (a second device/window pollutes the capture) and
-    previews (frame-boundary I/O breaks Nsight's step-per-frame cadence), and
-    pins the backend to Vulkan (the only one Nsight hooks). Headless CLI-driven
-    capture (``--capture-external``) implies a profile run.
-    """
     enabled = bool(args.profile_run or args.capture_external)
     if enabled:
         args.profile_run = True

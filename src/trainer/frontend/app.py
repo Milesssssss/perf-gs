@@ -66,7 +66,10 @@ from trainer.data.colmap import ColmapDataset
 
 # The thin scripts/running/v2_train.py entrypoint installs scripts/running and
 # scripts/debug on sys.path before importing this module.
-from _v2_profiling import Profiler  # pyright: ignore[reportMissingImports]
+from trainer.frontend.profiling.profiler import (
+    Profiler,
+    apply_profile_session_overrides,
+)
 from _v2_sampling import CameraSampler  # pyright: ignore[reportMissingImports]
 
 
@@ -105,7 +108,7 @@ class SceneContext:
 
 @dataclass(frozen=True)
 class IterationContext:
-    number: int
+    step_number: int
     camera_index: int
     camera_entry: Any
     learning_rates: AdamLRs
@@ -148,7 +151,7 @@ class ShaderSpecialization:
 class TrainingRuntime:
     pipeline: Pipeline
     viewer: ViewerSession
-    profiler: Profiler
+    profiler: Profiler | None
     artifacts: RunArtifacts
     queue_limiter: QueueLimiter
     densifier: DensificationController
@@ -162,7 +165,8 @@ class TrainingApplication:
         self.args = args
         self.run_name = args.run_name or datetime.now().strftime("%Y%m%d_%H%M%S")
         self.paths = RunPaths.create(self.run_name)
-        self.profiler = Profiler(args)
+        self.profiler: Profiler | None = None
+        self.profiling_enabled = False
 
         self.scene_context: SceneContext | None = None
         self.targets: TargetDataset | None = None
@@ -190,8 +194,17 @@ class TrainingApplication:
 
     def launch_training(self) -> None:
         # prepare for training
-        self._prepare_profiler()
-        self._load_scene_and_validate_experiment()
+        self.profiling_enabled = apply_profile_session_overrides(self.args)
+        self._load_scene_and_validate_config()
+
+        self.scene_context = load_scene_context(self.args)
+
+        self.densify_mode = validate_training_config(
+            self.args,
+            n_cams=sceneContext.camera_count,
+            n_train=len(sceneContext.train_indices),
+            n_test=len(sceneContext.test_indices),
+        )
 
         self.densify_config, self.structure_config = build_densify_configs(self.args, self._sceneContext.extent)
 
@@ -223,12 +236,14 @@ class TrainingApplication:
             mean_lr=self._mean_lr,
             extinction=self._extinction,
             paths=self.paths,
-        ).run()
+        ).launch_training_loop()
 
+        # Post-training
         self._write_final_test_psnr(result)
 
         trainingRuntime: TrainingRuntime = self._training_runtime
-        trainingRuntime.profiler.close()
+        if trainingRuntime.profiler is not None:
+            trainingRuntime.profiler.close()
         trainingRuntime.viewer.hold_after_training(trainingRuntime.pipeline)
         trainingRuntime.artifacts.close_all()
 
@@ -260,21 +275,6 @@ class TrainingApplication:
             train_wall_s=result.wall_time_seconds,
             completed_iters=result.iterations,
             t_start=result.started_at,
-        )
-
-    def _prepare_profiler(self) -> None:
-        self.profiler.configure_session()
-        self.profiler.inject()     
-
-    def _load_scene_and_validate_experiment(self) -> None:
-        self.scene_context = load_scene_context(self.args)
-        sceneContext = self._sceneContext
-
-        self.densify_mode = validate_training_config(
-            self.args,
-            n_cams=sceneContext.camera_count,
-            n_train=len(sceneContext.train_indices),
-            n_test=len(sceneContext.test_indices),
         )
 
     def _prepare_targets(self) -> None:
@@ -345,8 +345,11 @@ class TrainingApplication:
 
     def _start_integrations(self) -> None:
         self._viewer.start()
-        self.profiler.open_window(
-            self._pipeline, self._sceneContext.width, self._sceneContext.height)
+        if self.profiling_enabled:
+            self.profiler = Profiler(self.args)
+            self.profiler.open_window(
+                self._pipeline, self._sceneContext.width,
+                self._sceneContext.height)
 
     def _create_training_services(self) -> None:
         scene = self._sceneContext
@@ -558,27 +561,31 @@ class TrainingLoop:
             rng,
         )
         self.schedule = TrainingSchedule(ScheduleConfig.from_args(args))
-        self.iteration = 0
+        self.training_step = 0
         self.gaussian_count = scene.initial_gaussian_count
         self.eval_time_total = 0.0
         self.psnr_curve_records: list[dict] = []
         self.started_at = 0.0
 
-    def run(self) -> TrainingResult:
-        self._begin()
+    def launch_training_loop(self) -> TrainingResult:
+        self._begin_training_loop()
         while self._should_continue():
             context = self._next_iteration()
             self._prepare_iteration(context)
             self._capture_if_requested(context)
+
             self._execute_training_step(context)
+
             self._apply_mutations(context)
             should_continue = self._produce_observations(context)
             self._present_profile_frame_if_enabled()
+
             if not should_continue:
                 break
-        return self._complete()
 
-    def _begin(self) -> None:
+        return self._complete_training_loop()
+
+    def _begin_training_loop(self) -> None:
         if self.args.wait_for_viewer:
             self.runtime.viewer.wait_for_start()
         self.runtime.viewer.set_training_active(True)
@@ -586,42 +593,46 @@ class TrainingLoop:
         self.runtime.reporter.start(self.started_at)
 
     def _should_continue(self) -> bool:
+        profiler = self.runtime.profiler
         return (
-            self.iteration < self.args.iters
-            and not self.runtime.profiler.should_stop()
+            self.training_step < self.args.iters
+            and (profiler is None or not profiler.should_stop())
         )
 
     def _next_iteration(self) -> IterationContext:
-        self.iteration += 1
+        self.training_step += 1
         camera_index = self.sampler.next()
         camera_entry = self.scene.colmapScene.images[camera_index]
         learning_rates = AdamLRs(
-            mean=self.mean_lr.at(self.iteration - 1),
+            mean=self.mean_lr.at(self.training_step - 1),
             scale=self.base_lrs.scale,
             rot=self.base_lrs.rot,
             opacity=self.base_lrs.opacity,
             color=self.base_lrs.color,
+            sh_rest=self.base_lrs.sh_rest,
         )
         return IterationContext(
-            number=self.iteration,
+            step_number=self.training_step,
             camera_index=camera_index,
             camera_entry=camera_entry,
             learning_rates=learning_rates,
-            events=self.schedule.events_at(self.iteration),
+            events=self.schedule.events_at(self.training_step),
         )
 
     def _prepare_iteration(self, context: IterationContext) -> None:
         self.runtime.pipeline.set_target_texture(
             self.target_textures[context.camera_index])
-        if context.number == 1:
+        if context.step_number == 1:
             print(f"[determinism] iter 1 cam_idx={context.camera_index} "
                   "(should match across same-seed runs)")
         self.runtime.queue_limiter.before_submit()
 
     def _capture_if_requested(self, context: IterationContext) -> None:
+        if self.runtime.profiler is None:
+            return
         captured = self.runtime.profiler.run_capture_if_due(
             self.runtime.pipeline,
-            context.number,
+            context.step_number,
             context.camera_entry,
             context.camera_index,
             self.runtime.queue_limiter,
@@ -642,8 +653,8 @@ class TrainingLoop:
             }
 
         pipeline = self.runtime.pipeline
-        pipeline.set_extinction_hardness(self.extinction.at(context.number))
-        pipeline.update_sh_degree(context.number)
+        pipeline.set_extinction_hardness(self.extinction.at(context.step_number))
+        pipeline.update_sh_degree(context.step_number)
         pipeline.train_step(
             context.camera_entry.camera,
             lrs=context.learning_rates,
@@ -659,13 +670,13 @@ class TrainingLoop:
 
         if events.densify:
             outcome = self.runtime.densifier.run(
-                context.number, events, self.gaussian_count)
+                context.step_number, events, self.gaussian_count)
             self.gaussian_count = outcome.count
             self.runtime.reporter.report_densify(outcome)
 
         if events.opacity_reset:
             pipeline.reset_opacity(self.densify_config)
-            self.runtime.reporter.report_opacity_reset(context.number)
+            self.runtime.reporter.report_opacity_reset(context.step_number)
 
         if events.morton:
             pipeline.morton_sort(
@@ -676,15 +687,15 @@ class TrainingLoop:
             pipeline.clear_tracking()
             if pipeline.last_submit_id:
                 self.runtime.queue_limiter.record(pipeline.last_submit_id)
-            self.runtime.reporter.report_morton_sort(context.number)
+            self.runtime.reporter.report_morton_sort(context.step_number)
 
         if events.mip_periodic:
-            self.mip_diagnostics.refresh("periodic", context.number)
+            self.mip_diagnostics.refresh("periodic", context.step_number)
 
     def _produce_observations(self, context: IterationContext) -> bool:
         self.runtime.reporter.report_throughput(context)
 
-        if context.number > 1 and (context.events.log or context.events.preview):
+        if context.step_number > 1 and (context.events.log or context.events.preview):
             ok, self.gaussian_count = self.runtime.reporter.report_iteration(
                 context=context,
                 pipeline=self.runtime.pipeline,
@@ -694,11 +705,11 @@ class TrainingLoop:
             if not ok:
                 return False
 
-        if context.number > 1 and context.events.render_all:
+        if context.step_number > 1 and context.events.render_all:
             render_all_cameras(
                 self.runtime.pipeline,
                 self.scene.colmapScene,
-                context.number,
+                context.step_number,
                 self.paths.cameras,
             )
 
@@ -709,17 +720,17 @@ class TrainingLoop:
     def _should_accumulate_structure(self, context: IterationContext) -> bool:
         return (
             self.densify_mode == DensificationMode.STRUCTURE_AWARE
-            and self.args.densify_from < context.number <= self.args.densify_to
-            and context.number % self.args.sad_accum_every == 0
+            and self.args.densify_from < context.step_number <= self.args.densify_to
+            and context.step_number % self.args.sad_accum_every == 0
         )
 
     def _present_profile_frame_if_enabled(self) -> None:
-        if self.args.profile_run:
+        if self.runtime.profiler is not None:
             self.runtime.profiler.present_frame(
                 self.runtime.pipeline.last_submit_id)
 
     def _stream_viewer_snapshot_if_due(self, context: IterationContext) -> None:
-        if context.number % self.args.stream_every == 0:
+        if context.step_number % self.args.stream_every == 0:
             self.runtime.viewer.push_snapshot(self.runtime.pipeline)
 
     def _record_psnr_curve_if_due(self, context: IterationContext) -> None:
@@ -734,14 +745,14 @@ class TrainingLoop:
             self.targets.srgb,
         )
         record = {
-            "iter": context.number,
+            "iter": context.step_number,
             "psnr_srgb": psnr,
             "n_gaussians": count,
         }
         self.psnr_curve_records.append(record)
         stream.write(json.dumps(record) + "\n")
         self.eval_time_total += time.time() - started
-        print(f"[psnr-curve] iter {context.number:6d}  psnr_srgb={psnr:5.2f}  "
+        print(f"[psnr-curve] iter {context.step_number:6d}  psnr_srgb={psnr:5.2f}  "
               f"n_g={count} (pre-densify)")
 
     def _run_evaluation_if_due(self, context: IterationContext) -> None:
@@ -751,30 +762,28 @@ class TrainingLoop:
         self.eval_time_total = run_eval_sweep(
             pipeline=self.runtime.pipeline,
             scene=self.scene.colmapScene,
-            it=context.number,
+            it=context.step_number,
             test_indices=self.scene.test_indices,
             targets_srgb=self.targets.srgb,
             targets_linear=self.targets.linear,
             cams_dir=self.paths.cameras,
             eval_curve_json=stream,
-            bin_viz_json=self.runtime.artifacts.bin_viz_json,
             t_start=self.started_at,
             eval_time_total=self.eval_time_total,
             eval_holdout=bool(self.args.eval_holdout),
         )
 
-    def _complete(self) -> TrainingResult:
+    def _complete_training_loop(self) -> TrainingResult:
         self.runtime.pipeline.runtime.wait_for_idle()
         wall_time = time.time() - self.started_at
         self.runtime.pipeline.set_extinction_hardness(self.extinction.target)
-        self.runtime.reporter.report_complete(self.iteration, wall_time)
+        self.runtime.reporter.report_complete(self.training_step, wall_time)
         return TrainingResult(
-            iterations=self.iteration,
+            iterations=self.training_step,
             wall_time_seconds=wall_time,
             psnr_curve=self.psnr_curve_records,
             started_at=self.started_at,
         )
-
 
 
 class TargetDataset:
@@ -1047,16 +1056,16 @@ class TrainingReporter:
         self._last_iteration = 0
 
     def report_throughput(self, context: IterationContext) -> None:
-        if context.number % 10 != 0:
+        if context.step_number % 10 != 0:
             return
         now = time.time()
-        rate = ((context.number - self._last_iteration)
+        rate = ((context.step_number - self._last_iteration)
                 / max(now - self._last_time, 1e-9))
         elapsed = now - self._started_at
-        print(f"iter {context.number}: train step done. It/s:{rate:.1f} "
+        print(f"iter {context.step_number}: train step done. It/s:{rate:.1f} "
               f"total training time:{elapsed // 60:.0f}min {elapsed % 60:.1f}sec")
         self._last_time = now
-        self._last_iteration = context.number
+        self._last_iteration = context.step_number
 
     def report_iteration(self, *, context: IterationContext, pipeline: Pipeline,
                          target: np.ndarray,
@@ -1069,7 +1078,7 @@ class TrainingReporter:
         if not np.all(np.isfinite(rendered)):
             nonfinite = int(np.sum(~np.isfinite(rendered)))
             message = (
-                f"iter {context.number}: rendered image has {nonfinite} "
+                f"iter {context.step_number}: rendered image has {nonfinite} "
                 f"non-finite pixels (out of {rendered.size}). Training aborted.")
             print(message)
             self._artifacts.log_txt.write(f"# ABORT: {message}\n")
@@ -1082,16 +1091,16 @@ class TrainingReporter:
             else 0.98 * self._rolling_loss + 0.02 * mse)
         psnr_value = psnr(clipped, target)
         elapsed = time.time() - self._started_at
-        rate = context.number / max(elapsed, 1e-9)
+        rate = context.step_number / max(elapsed, 1e-9)
         line = (
-            f"iter {context.number:6d}  cam {context.camera_index:2d}  "
+            f"iter {context.step_number:6d}  cam {context.camera_index:2d}  "
             f"loss={self._rolling_loss:.5f}  psnr={psnr_value:5.2f} dB  "
             f"lr_mean={context.learning_rates.mean:.2e}  n_g={count:6d}  "
             f"{rate:5.1f} it/s")
         print(line)
         self._artifacts.log_txt.write(line + "\n")
         self._artifacts.log_json.write(json.dumps({
-            "iter": context.number,
+            "iter": context.step_number,
             "cam_idx": context.camera_index,
             "loss_rolling": self._rolling_loss,
             "loss_instant": mse,
