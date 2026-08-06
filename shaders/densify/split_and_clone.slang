@@ -19,6 +19,7 @@
 
 #include "../common/types.slang"
 #include "../common/math.slang"
+#include "sh_carry.slang"
 
 static const uint ACTION_KEEP  = 0;
 static const uint ACTION_SPLIT = 1;
@@ -152,6 +153,66 @@ void splitAndClone(
         {
             gaussians[tail] = clone;
             adam_state[tail] = _zero_adam();
+        }
+    }
+}
+
+// SH variant of splitAndClone: identical gaussian/Adam behavior PLUS carrying
+// the optional features_rest coefficients (children inherit the parent's, fresh
+// rest-Adam). Dispatched INSTEAD of splitAndClone on the SH path (it owns the
+// same atomic append, so it must replace, not run alongside).
+[shader("compute")]
+[numthreads(256, 1, 1)]
+void splitAndCloneSH(
+    uint3 dtid: SV_DispatchThreadID,
+    RWStructuredBuffer<Gaussian3D> gaussians,
+    RWStructuredBuffer<AdamState> adam_state,
+    RWStructuredBuffer<uint> num_gaussians_counter,
+    StructuredBuffer<uint> action,
+    StructuredBuffer<uint> pre_count_buf,
+    RWStructuredBuffer<float> features_rest,
+    RWStructuredBuffer<float> adam_rest,
+    uniform uint rest_floats,
+    uniform uint max_splats)
+{
+    uint i = dtid.x;
+    uint pre_count = pre_count_buf[0];
+    if (i >= pre_count) return;
+
+    uint a = action[i];
+    if (a == ACTION_KEEP || a == ACTION_PRUNE) return;
+
+    Gaussian3D parent = gaussians[i];
+
+    if (a == ACTION_SPLIT)
+    {
+        Gaussian3D c1 = _child_for_split(parent, i * 2u);
+        Gaussian3D c2 = _child_for_split(parent, i * 2u + 1u);
+
+        uint tail;
+        InterlockedAdd(num_gaussians_counter[0], 1u, tail);
+        if (tail < max_splats)
+        {
+            gaussians[tail] = c2;
+            adam_state[tail] = _zero_adam();
+            shInheritRest(tail, i, rest_floats, features_rest, adam_rest);
+        }
+        // Child-1 overwrites the parent slot: keep its features_rest, fresh Adam.
+        gaussians[i] = c1;
+        adam_state[i] = _zero_adam();
+        shZeroRestAdam(i, rest_floats, adam_rest);
+    }
+    else if (a == ACTION_CLONE)
+    {
+        Gaussian3D clone = parent;
+
+        uint tail;
+        InterlockedAdd(num_gaussians_counter[0], 1u, tail);
+        if (tail < max_splats)
+        {
+            gaussians[tail] = clone;
+            adam_state[tail] = _zero_adam();
+            shInheritRest(tail, i, rest_floats, features_rest, adam_rest);
         }
     }
 }

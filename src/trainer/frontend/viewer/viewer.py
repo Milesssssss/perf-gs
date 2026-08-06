@@ -13,6 +13,7 @@ from trainer.data.dataset import Camera
 from trainer.backend.compute.device import SHADERS_DIR
 from trainer.backend.compute.gpu import GpuRuntime
 from trainer.backend.render.pipeline import Pipeline
+from trainer.config.config import AppearanceConfig
 
 
 def _build_view_matrix(eye: np.ndarray, forward: np.ndarray, up: np.ndarray) -> np.ndarray:
@@ -252,13 +253,14 @@ class Viewer:
     def __init__(self, device: spy.Device, width: int = 960, height: int = 540,
                  max_splats: int = 500_000, fovy: float = 45.0,
                  hot_reload: bool = False, max_sort_pairs: int | None = None,
-                 gpu_lock=None):
+                 gpu_lock=None, sh_degree: int = 0):
         self.device = device
         self.width = width
         self.height = height
         self.max_splats = max_splats
         self.fovy = fovy
         self.hot_reload = hot_reload
+        self.sh_degree = sh_degree
         # Shared GPU-queue lock (see Pipeline.gpu_lock). The viewer render loop
         # runs on a background thread and MUST hold this lock around every
         # queue operation (submit / present / wait_for_idle / acquire) so it
@@ -277,13 +279,6 @@ class Viewer:
         # Reflects the trainer's state so the panel can show "training" vs
         # "inspecting init". The trainer sets this True once it starts looping.
         self._training_active = False
-        # The viewer only RENDERS a single static view (never trains/densifies),
-        # so a splat covers far fewer tiles than the training pipeline's
-        # max_splats*16 headroom assumes. Sizing the viewer's sort-pair buffers
-        # at that headroom doubles the whole allocation (~2.5 GB of sort buffers
-        # alone at 6.5M splats) and OOMs the device on top of the training
-        # pipeline — surfacing as a generic "Vulkan returned a failure" at
-        # startup. So we cap below max_splats*16.
         #
         # NOTE ON OVERFLOW SAFETY: bin_emit now hard-guards its writes against
         # this cap and prepareDispatchArgs clamps scan_total to it, so a
@@ -307,21 +302,17 @@ class Viewer:
             device=device, width=width, height=height, max_splats=max_splats,
             max_sort_pairs=max_sort_pairs,
             gpu_lock=self.gpu_lock,
-            # Skip the ~3.5 GB of training-only buffers (grads/adam/densify
-            # scratch/loss textures) — critical to avoid OOMing the device
-            # when the viewer + trainer share it. Also skips compiling ~30
-            # training-only kernels, speeding up viewer startup.
             viewer_only=True,
+            appearance_config=AppearanceConfig(sh_degree=sh_degree),
         )
+        # View-dependent color at the trained degree (higher bands are ~0 early
+        # in training, so full-degree evaluation matches the trainer's render).
+        if sh_degree > 0:
+            self._pipeline.set_active_sh_degree(sh_degree)
         self._has_data = False
         self._update_pending = False
 
     def update_gaussians(self, train_pipeline: Pipeline):
-        """GPU blit gaussian data from training pipeline to viewer pipeline.
-
-        Both pipelines share the same device, so this is a fast GPU→GPU
-        copy with no CPU round-trip. Called from training thread.
-        """
         src_g = train_pipeline.buffers.gaussians.storage
         dst_g = self._pipeline.buffers.gaussians.storage
         src_n = train_pipeline.buffers.num_gaussians_counter.storage
@@ -330,6 +321,12 @@ class Viewer:
         encoder = batch.encoder
         encoder.copy_buffer(dst_g, 0, src_g, 0, src_g.size)
         encoder.copy_buffer(dst_n, 0, src_n, 0, src_n.size)
+        # View-dependent SH: mirror the higher-band coefficients so the viewer
+        # evaluates the same view-dependent color as the trainer.
+        if train_pipeline.buffers.sh_enabled and self._pipeline.buffers.sh_enabled:
+            src_r = train_pipeline.buffers.features_rest.storage
+            dst_r = self._pipeline.buffers.features_rest.storage
+            encoder.copy_buffer(dst_r, 0, src_r, 0, min(src_r.size, dst_r.size))
         self.runtime.submit(batch)
         self._has_data = True
 
@@ -449,6 +446,7 @@ class Viewer:
             if watcher:
                 watcher.poll()
 
+            #TODO: aspect ratio is fucked, we should be able to rescale only with a correct ratio
             if needs_reconfigure:
                 needs_reconfigure = False
                 configured = False
@@ -495,7 +493,7 @@ class Viewer:
                             self.runtime.submit(batch, after_submit=surface.present)
                 except Exception:
                     pass
-                time.sleep(0.016)
+                time.sleep(0.016) #TODO: this is bullshit
                 continue
 
             camera = cam.get_camera(self.width, self.height, self.fovy)

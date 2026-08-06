@@ -46,4 +46,12 @@ def save_ply(pipeline: Pipeline, path: str | Path) -> None:
 
     raw = pipeline.buffers.gaussians.to_numpy()
     gaussians = np.frombuffer(raw.tobytes(), dtype=gaussian_numpy_dtype())[:n]
-    write_gaussian_ply(gaussians, path)
+
+    # Optional view-dependent SH: export the higher-band coefficients as f_rest_*.
+    features_rest = None
+    if pipeline.buffers.sh_enabled:
+        rest_floats = pipeline.buffers.sh.rest_floats
+        rest_raw = pipeline.buffers.features_rest.to_numpy()
+        features_rest = np.frombuffer(rest_raw.tobytes(), dtype=np.float32)[
+            : n * rest_floats].reshape(n, rest_floats)
+    write_gaussian_ply(gaussians, path, features_rest=features_rest)

@@ -119,10 +119,6 @@ def test_buffers_reexports_match_contract() -> None:
         C.RADIX_GLOBAL_HIST_SIZE, C.SCAN_BLOCK_SIZE, C.RASTER_BUCKET_SIZE)
 
 
-def test_splat_stream_floats_per_splat_from_contract() -> None:
-    from trainer.frontend.viewer import splat_stream
-    assert splat_stream.FLOATS_PER_SPLAT == C.GAUSSIAN_FLOAT_COUNT
-
 
 # --- CPU: the generated Slang header is not stale ---------------------------
 

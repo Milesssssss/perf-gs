@@ -136,6 +136,39 @@ DISK_GRAD_SCALAR_COMPONENTS: tuple[str, ...] = tuple(
 )
 
 
+# --- Spherical-harmonics appearance (optional view-dependent color) ---------
+#
+# The band-0 DC coefficient is the always-present ``Gaussian3D.sh0`` field. The
+# higher bands (the "rest") are stored SEPARATELY, in their own buffer allocated
+# only when ``sh_degree > 0``, so the default SH0 path keeps Gaussian3D at its
+# 14-float ABI with zero extra storage or bandwidth. Degree d carries
+# ``(d+1)**2 - 1`` rest coefficients per channel (x3 for RGB), activated one
+# band at a time (classic 3DGS ``oneupSHdegree``).
+SH_MAX_DEGREE: int = 3
+
+
+def sh_rest_coeffs(degree: int) -> int:
+    """Rest SH coefficients PER channel (excludes the DC term) at ``degree``."""
+    if not 0 <= degree <= SH_MAX_DEGREE:
+        raise ValueError(f"sh degree {degree} out of range [0, {SH_MAX_DEGREE}]")
+    return (degree + 1) * (degree + 1) - 1
+
+
+SH_REST_COEFFS_MAX: int = sh_rest_coeffs(SH_MAX_DEGREE)   # 15 per channel
+SH_REST_FLOATS_MAX: int = SH_REST_COEFFS_MAX * 3          # 45 total
+
+
+def sh_degree_from_rest_floats(rest_floats: int) -> int:
+    """Infer the SH degree from a features_rest width (inverse of
+    ``sh_rest_coeffs(d) * 3``): ``rest_floats == 3 * ((d+1)**2 - 1)``. Used to
+    render an SH ``.ply`` at the degree it was trained with."""
+    if rest_floats <= 0:
+        return 0
+    total = rest_floats // 3 + 1              # (d + 1) ** 2
+    degree = int(round(total ** 0.5)) - 1
+    return max(0, min(degree, SH_MAX_DEGREE))
+
+
 def gaussian_field_offsets() -> dict[str, int]:
     offsets: dict[str, int] = {}
     offset = 0

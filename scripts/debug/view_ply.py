@@ -12,6 +12,8 @@ import argparse
 import numpy as np
 
 from trainer.data.ply import load_ply
+from trainer.contracts.codegen import sh_degree_from_rest_floats
+from trainer.config.config import AppearanceConfig
 from trainer.backend.compute.device import create_device
 from trainer.backend.render.pipeline import Pipeline
 from trainer.frontend.viewer.viewer import Viewer
@@ -29,13 +31,23 @@ def main() -> None:
     n = data["means"].shape[0]
     print(f"loaded {n} gaussians from {args.ply}")
 
+    # View-dependent SH: if the PLY carries f_rest, render at its trained degree.
+    rest = data.get("features_rest")
+    sh_degree = sh_degree_from_rest_floats(rest.shape[1]) if rest is not None else 0
+    if sh_degree > 0:
+        print(f"  SH degree {sh_degree} ({rest.shape[1]} f_rest coeffs) -> view-dependent")
+
     device = create_device(backend=args.backend)
     pipeline = Pipeline(device=device, width=args.width, height=args.height,
-                        max_splats=max(args.max_splats, n))
+                        max_splats=max(args.max_splats, n),
+                        appearance_config=AppearanceConfig(sh_degree=sh_degree))
     pipeline.set_gaussians_from_numpy(**data)
+    if sh_degree > 0:
+        pipeline.set_active_sh_degree(sh_degree)
 
     viewer = Viewer(device, width=args.width, height=args.height,
-                    max_splats=max(args.max_splats, n), hot_reload=True)
+                    max_splats=max(args.max_splats, n), hot_reload=True,
+                    sh_degree=sh_degree)
     viewer.update_gaussians(pipeline)
     # Static PLY view — there's no training to start; suppress the panel's
     # "press Start Training" hint (the Start button is harmless if clicked).

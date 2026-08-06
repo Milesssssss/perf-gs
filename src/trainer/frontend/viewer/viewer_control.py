@@ -49,7 +49,6 @@ class ViewerSession:
     def create(
         cls,
         *,
-        enabled: bool,
         device: "spy.Device",
         width: int,
         height: int,
@@ -65,13 +64,12 @@ class ViewerSession:
         WITHOUT ``gpu_lock``; a running render thread would race those on the
         shared VkQueue. The caller must invoke :meth:`start` once setup is done.
         """
-        if not enabled:
-            return cls(None)
         from trainer.frontend.viewer.viewer import Viewer
 
         viewer = Viewer(
             device=device, width=width, height=height,
             max_splats=max_splats, fovy=fovy, gpu_lock=gpu_lock,
+            sh_degree=pipeline.appearance_config.sh_degree,
         )
         viewer.update_gaussians(pipeline)  # show the initialized gaussians
         print("[viewer] created (render thread starts after setup completes).")

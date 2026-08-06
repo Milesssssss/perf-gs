@@ -270,9 +270,10 @@ def densify_structure_aware(pipeline: Pipeline, cfg: StructureConfig) -> dict:
             max_splats=pipeline.max_splats,
         )
 
-        # P6: split_anisotropic — indirect, self-bounds on pre_count_buf.
-        pipeline.dispatch_indirect(pipeline.k_split_anisotropic, "split_anisotropic",
-            b.densify_dispatch_args,
+        # P6: split_anisotropic — indirect, self-bounds on pre_count_buf. The SH
+        # variant additionally carries features_rest (children inherit) when
+        # view-dependent color is enabled.
+        split_kwargs = dict(
             gaussians=b.gaussians.storage,
             adam_state=b.adam_state.storage,
             num_gaussians_counter=b.num_gaussians_counter.storage,
@@ -284,6 +285,16 @@ def densify_structure_aware(pipeline: Pipeline, cfg: StructureConfig) -> dict:
             ks_scale_power=float(cfg.ks_scale_power),
             max_splats=pipeline.max_splats,
         )
+        if b.sh_enabled:
+            split_kwargs.update(
+                features_rest=b.features_rest.storage,
+                adam_rest=b.adam_rest_state.storage,
+                rest_floats=b.sh.rest_floats,
+            )
+        pipeline.dispatch_indirect(
+            pipeline.k_split_anisotropic_sh if b.sh_enabled
+            else pipeline.k_split_anisotropic,
+            "split_anisotropic", b.densify_dispatch_args, **split_kwargs)
 
         # P7: snapshot post_count.
         pipeline.dispatch(pipeline.k_densify_snapshot, "densify_snapshot",
@@ -312,6 +323,19 @@ def densify_structure_aware(pipeline: Pipeline, cfg: StructureConfig) -> dict:
             adam_state_out=b.adam_state_scratch.storage,
             max_splats=pipeline.max_splats,
         )
+        # SH: carry features_rest + its Adam moments through the SAME compaction.
+        if b.sh_enabled:
+            pipeline.dispatch(pipeline.k_scatter_compact_sh, "scatter_compact_sh",
+                thread_count=[pipeline.max_splats, 1, 1],
+                features_rest_in=b.features_rest.storage,
+                adam_rest_in=b.adam_rest_state.storage,
+                valid_mask=b.valid_mask_buffer.storage,
+                scan=b.scan_buffer.storage,
+                features_rest_out=b.sh.features_rest_scratch.storage,
+                adam_rest_out=b.sh.adam_rest_scratch.storage,
+                rest_floats=b.sh.rest_floats,
+                max_splats=pipeline.max_splats,
+            )
         # P9: final count = scan_total (GPU copy — no readback).
         pipeline.dispatch(pipeline.k_densify_snapshot, "densify_snapshot",
             thread_count=[1, 1, 1],
@@ -334,7 +358,8 @@ def densify_structure_aware(pipeline: Pipeline, cfg: StructureConfig) -> dict:
                 reset_value=float(cfg.opacity_cap),
                 mode=0,   # CLAMP: min(logit, logit(0.8)) == inverse_sigmoid(min(a,0.8))
             )
-            recording.after_submit(b.swap_primitive_storage)
+            recording.after_submit(
+                lambda: b.swap_primitive_storage(carry_sh=b.sh_enabled))
 
     # Wait-free: return None counts. The caller reads num_gaussians_counter on
     # its own cadence (log-every ticks).
@@ -429,5 +454,21 @@ def morton_sort(pipeline: Pipeline, world_min: np.ndarray,
                 **b.eta_scatter_kwargs(),
                 max_splats=pipeline.max_splats,
             )
+
+        # 4c. (SH) Permute features_rest + its Adam moments by the SAME
+        # sorted_values into the SH scratch, committed by the carry_sh swap.
+        if b.sh_enabled:
+            pipeline.dispatch(pipeline.k_morton_scatter_sh, "morton_scatter_sh",
+                thread_count=[pipeline.max_splats, 1, 1],
+                features_rest_in=b.features_rest.storage,
+                adam_rest_in=b.adam_rest_state.storage,
+                sorted_values=b.sort_values_a.storage,
+                count_buf=b.scan_total.storage,
+                features_rest_out=b.sh.features_rest_scratch.storage,
+                adam_rest_out=b.sh.adam_rest_scratch.storage,
+                rest_floats=b.sh.rest_floats,
+                max_splats=pipeline.max_splats,
+            )
         recording.after_submit(
-            lambda: b.swap_primitive_storage(carry_eta=carry_eta))
+            lambda: b.swap_primitive_storage(carry_eta=carry_eta,
+                                             carry_sh=b.sh_enabled))

@@ -95,12 +95,15 @@ class DensificationResources:
         primitive: PrimitiveStorage,
         adam: AdamResources,
         eta: "EtaResources | None" = None,
+        sh: "SphericalHarmonicsResources | None" = None,
     ) -> None:
         primitive.values, self.primitive_scratch = \
             self.primitive_scratch, primitive.values
         adam.state, self.adam_scratch = self.adam_scratch, adam.state
         if eta is not None:
             eta.swap()
+        if sh is not None:
+            sh.swap()
 
 
 @dataclass
@@ -122,6 +125,31 @@ class EtaResources:
         self.n_total, self.scratch_n_total = self.scratch_n_total, self.n_total
         self.components, self.scratch_components = \
             self.scratch_components, self.components
+
+
+@dataclass
+class SphericalHarmonicsResources:
+    """Optional view-dependent SH 'rest' coefficients (bands 1..sh_degree).
+
+    Stored SEPARATELY from Gaussian3D so the default SH0 path allocates nothing.
+    Primary + scratch mirror the Eta swap idiom so the coefficients and their
+    Adam moments survive a Morton re-sort and a densify compaction. Flat layout
+    ``features_rest[gid * rest_floats + c]``, where ``rest_floats == 3 *`` the
+    per-channel rest-coefficient count at the configured max degree.
+    """
+
+    rest_floats: int
+    features_rest: spy.NDBuffer
+    features_rest_scratch: spy.NDBuffer
+    features_rest_grad: spy.NDBuffer
+    adam_rest: spy.NDBuffer
+    adam_rest_scratch: spy.NDBuffer
+
+    def swap(self) -> None:
+        self.features_rest, self.features_rest_scratch = \
+            self.features_rest_scratch, self.features_rest
+        self.adam_rest, self.adam_rest_scratch = \
+            self.adam_rest_scratch, self.adam_rest
 
 
 @dataclass
@@ -149,6 +177,8 @@ class GaussianBuffers:
     adam: AdamResources | None = field(init=False, default=None)
     densification: DensificationResources | None = field(init=False, default=None)
     eta: EtaResources | None = field(init=False, default=None)
+    # Optional view-dependent SH rest coefficients; None => SH0-only (default).
+    sh: "SphericalHarmonicsResources | None" = field(init=False, default=None)
 
     # --- per-frame forward scratch / output ---
     projected_2d: spy.NDBuffer = field(init=False)
@@ -311,6 +341,15 @@ class GaussianBuffers:
             raise RuntimeError("eta resources are unavailable in viewer-only mode")
         return self.eta
 
+    def _require_sh(self) -> "SphericalHarmonicsResources":
+        if self.sh is None:
+            raise RuntimeError("SH resources are unavailable (sh_degree == 0)")
+        return self.sh
+
+    @property
+    def sh_enabled(self) -> bool:
+        return self.sh is not None
+
     # Transitional compatibility aliases for paths not yet migrated to nested
     # capabilities. New components receive the capability objects directly.
     gaussians = property(lambda self: self.primitive.values)
@@ -338,6 +377,9 @@ class GaussianBuffers:
     eta_n_total = property(lambda self: self._require_eta().n_total)
     eta_buffers_scratch = property(lambda self: self._require_eta().scratch_components)
     eta_n_total_scratch = property(lambda self: self._require_eta().scratch_n_total)
+    features_rest = property(lambda self: self._require_sh().features_rest)
+    features_rest_grad = property(lambda self: self._require_sh().features_rest_grad)
+    adam_rest_state = property(lambda self: self._require_sh().adam_rest)
 
     def grad_kwargs(self) -> dict[str, spy.NDBuffer]:
         """Dispatch bindings for the 14 SoA scalar gradients:
@@ -377,17 +419,19 @@ class GaussianBuffers:
         scratch becomes the live buffer set."""
         self._require_eta().swap()
 
-    def swap_primitive_storage(self, *, carry_eta: bool = False) -> None:
+    def swap_primitive_storage(self, *, carry_eta: bool = False,
+                               carry_sh: bool = False) -> None:
         """Commit a completed scatter/permutation as the new live storage.
 
         Call only after the command buffer that wrote the scratch resources was
         submitted successfully. Keeping Gaussian values, Adam moments, and
-        optional eta accumulators in one operation prevents partial ownership
-        transitions.
+        optional eta / SH accumulators in one operation prevents partial
+        ownership transitions.
         """
         eta = self._require_eta() if carry_eta else None
+        sh = self._require_sh() if carry_sh else None
         self._require_densification().commit_compaction(
-            self.primitive, self._require_adam(), eta)
+            self.primitive, self._require_adam(), eta, sh)
 
 #TODO_refactor: same thing here, the _ShaderTypes has a hard contract with the Slang module.
 @dataclass
@@ -472,6 +516,7 @@ def allocate(
     width: int,
     height: int,
     max_sort_pairs: int = DEFAULT_MAX_SORT_PAIRS,
+    sh_rest_floats: int = 0,
 ) -> GaussianBuffers:
     """Allocate all GPU resources needed by forward + backward + Adam.
 
@@ -479,6 +524,9 @@ def allocate(
     then assigns each resource via the :class:`_Alloc` factory. Every buffer
     is declared exactly twice — once as a typed_buffer field on the dataclass, once
     here — which is the minimum that preserves typed_buffer attribute access.
+
+    ``sh_rest_floats`` > 0 additionally allocates the optional view-dependent SH
+    'rest' coefficient storage (bands 1..sh_degree); 0 (default) allocates none.
     """
     types = _reflect_types(shared_data_module)
     allocator = _Alloc(device, width, height)
@@ -618,6 +666,23 @@ def allocate(
     buffers.densify_fanout_hist = allocator.uint_buffer(513)
     buffers.densify_fanout_threshold = allocator.uint_buffer(1)
 
+    # --- optional view-dependent SH rest coefficients ---
+    # Allocated only when sh_degree > 0 (sh_rest_floats == 3 * per-channel rest
+    # coeffs at the configured max degree). Sized for the MAX degree; not-yet-
+    # activated bands stay zero until the progressive schedule enables them.
+    # features_rest for the initial set is uploaded by buffer_io; adam_rest is
+    # zeroed by the clear-adam kernel — so no costly host zero-fill here (the
+    # buffer can be 1.8 GB at max_splats=10M).
+    if sh_rest_floats > 0:
+        buffers.sh = SphericalHarmonicsResources(
+            rest_floats=sh_rest_floats,
+            features_rest=allocator.typed_buffer("float", max_splats * sh_rest_floats),
+            features_rest_scratch=allocator.typed_buffer("float", max_splats * sh_rest_floats),
+            features_rest_grad=allocator.typed_buffer("float", max_splats * sh_rest_floats),
+            adam_rest=allocator.typed_buffer("float", max_splats * sh_rest_floats * 2),
+            adam_rest_scratch=allocator.typed_buffer("float", max_splats * sh_rest_floats * 2),
+        )
+
     # --- Cluster-Cull-Compact scratch ---
     max_clusters = _ceil_div(max_splats, CLUSTER_SIZE)
     buffers.cluster_aabb_min = allocator.typed_buffer("float4", max_clusters)
@@ -643,6 +708,7 @@ def allocate_viewer(
     width: int,
     height: int,
     max_sort_pairs: int = DEFAULT_MAX_SORT_PAIRS,
+    sh_rest_floats: int = 0,
 ) -> GaussianBuffers:
     """Allocate ONLY the resources the viewer's ``_run_forward`` touches.
 
@@ -741,6 +807,18 @@ def allocate_viewer(
     buffers.cluster_visible = allocator.uint_buffer(max_clusters_v)
     buffers.cluster_visible.copy_from_numpy(
         np.ones(max_clusters_v, dtype=np.uint32))
+
+    # Optional view-dependent SH: the viewer forward reads features_rest (blit
+    # target from the trainer stream) + writes clamp_mask. No grad/Adam/scratch.
+    if sh_rest_floats > 0:
+        buffers.sh = SphericalHarmonicsResources(
+            rest_floats=sh_rest_floats,
+            features_rest=allocator.typed_buffer("float", max_splats * sh_rest_floats),
+            features_rest_scratch=allocator.typed_buffer("float", 1),
+            features_rest_grad=allocator.typed_buffer("float", 1),
+            adam_rest=allocator.typed_buffer("float", 1),
+            adam_rest_scratch=allocator.typed_buffer("float", 1),
+        )
 
     buffers.num_gaussians_counter.copy_from_numpy(np.zeros(1, dtype=np.uint32))
     return buffers

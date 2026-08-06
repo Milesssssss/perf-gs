@@ -16,6 +16,7 @@ from trainer.backend.memory.buffers import (
     DensificationResources,
     EtaResources,
     PrimitiveStorage,
+    SphericalHarmonicsResources,
 )
 from trainer.backend.compute.gpu_scan import GpuScan
 
@@ -29,6 +30,8 @@ class SimpleDensifyKernels:
     build_prune_mask: Any
     scatter_compact: Any
     scatter_compact_eta: Any
+    split_and_clone_sh: Any = None
+    scatter_compact_sh: Any = None
 
 
 @dataclass(frozen=True)
@@ -53,6 +56,7 @@ class SimpleDensifier:
         width: int,
         height: int,
         max_primitives: int,
+        sh: SphericalHarmonicsResources | None = None,
     ) -> None:
         self.primitive = primitive
         self.adam = adam
@@ -64,6 +68,7 @@ class SimpleDensifier:
         self.width = width
         self.height = height
         self.max_primitives = max_primitives
+        self.sh = sh
 
     def run(
         self,
@@ -119,8 +124,7 @@ class SimpleDensifier:
                 dispatch_args=resources.dispatch_args.storage,
                 max_splats=self.max_primitives,
             )
-            commands.dispatch_indirect(
-                kernels.split_and_clone, "split_and_clone", resources.dispatch_args,
+            split_kwargs = dict(
                 gaussians=primitive.values.storage,
                 adam_state=adam.state.storage,
                 num_gaussians_counter=primitive.active_count.storage,
@@ -128,6 +132,16 @@ class SimpleDensifier:
                 pre_count_buf=resources.pre_count.storage,
                 max_splats=self.max_primitives,
             )
+            if self.sh is not None:
+                split_kwargs.update(
+                    features_rest=self.sh.features_rest.storage,
+                    adam_rest=self.sh.adam_rest.storage,
+                    rest_floats=self.sh.rest_floats,
+                )
+            commands.dispatch_indirect(
+                kernels.split_and_clone_sh if self.sh is not None
+                else kernels.split_and_clone,
+                "split_and_clone", resources.dispatch_args, **split_kwargs)
             commands.dispatch(
                 kernels.snapshot_count, "densify_snapshot",
                 thread_count=[1, 1, 1],
@@ -177,6 +191,21 @@ class SimpleDensifier:
                     max_splats=self.max_primitives,
                 )
 
+            # SH: carry features_rest + its Adam moments through the same compaction.
+            if self.sh is not None:
+                commands.dispatch(
+                    kernels.scatter_compact_sh, "scatter_compact_sh",
+                    thread_count=[self.max_primitives, 1, 1],
+                    features_rest_in=self.sh.features_rest.storage,
+                    adam_rest_in=self.sh.adam_rest.storage,
+                    valid_mask=resources.valid_mask.storage,
+                    scan=self.scan.resources.work.storage,
+                    features_rest_out=self.sh.features_rest_scratch.storage,
+                    adam_rest_out=self.sh.adam_rest_scratch.storage,
+                    rest_floats=self.sh.rest_floats,
+                    max_splats=self.max_primitives,
+                )
+
             commands.dispatch(
                 kernels.snapshot_count, "densify_snapshot",
                 thread_count=[1, 1, 1],
@@ -185,6 +214,6 @@ class SimpleDensifier:
             )
             commit_eta = self.eta if carry_eta else None
             recording.after_submit(
-                lambda: resources.commit_compaction(primitive, adam, commit_eta))
+                lambda: resources.commit_compaction(primitive, adam, commit_eta, self.sh))
 
         return {"pre_count": None, "post_split_count": None, "final_count": None}

@@ -17,17 +17,6 @@ from trainer.config.config_types import DensificationMode
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser()
     ap.add_argument("--scene", type=str, default="datasets/360_v2/bicycle")
-    #ap.add_argument("--scene", type=str, default="datasets/360_v2/counter") V
-    #ap.add_argument("--scene", type=str, default="datasets/360_v2/bonsai")
-    #ap.add_argument("--scene", type=str, default="datasets/360_v2/garden")
-    #ap.add_argument("--scene", type=str, default="datasets/360_v2/kitchen")
-    #ap.add_argument("--scene", type=str, default="datasets/360_v2/room")
-    #ap.add_argument("--scene", type=str, default="datasets/360_v2/stump")
-    #ap.add_argument("--scene", type=str, default="datasets/360_extra_scenes/flowers")
-    #ap.add_argument("--scene", type=str, default="datasets/360_extra_scenes/treehill")
-
-    #ap.add_argument("--scene", type=str, default="datasets/synthetic/suzanne_blender")
-
     ap.add_argument("--iters", type=int, default=3000)
     ap.add_argument("--position-lr-max-steps", type=int, default=3000,
                     help="horizon for the exponential mean-LR decay (3DGS "
@@ -250,6 +239,15 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--mip-kernel-size", type=float, default=0.1,
                     help="Mip-Splatting 2D low-pass dilation (mip canonical 0.1). Only used "
                          "with --mip-splatting; vanilla uses 0.3 with no compensation.")
+    ap.add_argument("--sh-degree", type=int, default=3, choices=[0, 1, 2, 3],
+                    help="Spherical-harmonics degree for view-dependent color (classic "
+                         "3DGS). 0 (default) = view-independent SH band-0 (DC) only, the "
+                         "original bit-identical path. 1-3 enables higher bands, stored in "
+                         "a separate features_rest buffer allocated only when >0, activated "
+                         "one band every --sh-band-interval iters (oneupSHdegree).")
+    ap.add_argument("--sh-band-interval", type=int, default=1000,
+                    help="Iterations between activating successive SH bands (classic 3DGS "
+                         "oneupSHdegree). Only used with --sh-degree > 0.")
     ap.add_argument("--sample-mode", type=str, default="sadgs", choices=["ours", "sadgs"],
                     help="per-iteration train-camera draw. 'ours' (default): "
                          "np.random.default_rng(seed).integers over the name-sorted "

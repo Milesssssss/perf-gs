@@ -69,7 +69,6 @@ def run_eval_sweep(
     targets_linear: Callable[[int], np.ndarray],
     cams_dir: Path,
     eval_curve_json,
-    bin_viz_json,
     t_start: float,
     eval_time_total: float,
     eval_holdout: bool,
@@ -81,8 +80,7 @@ def run_eval_sweep(
     MSE) — over the held-out test cameras (all cams when holdout is off). Sweep
     time is folded into ``eval_time_total`` and subtracted from the reported
     training-elapsed clock so the convergence-vs-time plot compares training
-    speed fairly. Optionally dumps per-view binning/overlap heatmaps when
-    ``bin_viz_json`` is active.
+    speed fairly.
     """
     eval_t0 = time.time()
     # Drain GPU queue so num_gaussians_counter is accurate and no in-flight
@@ -98,25 +96,14 @@ def run_eval_sweep(
     psnr_lin_frames = []
     psnr_srgb_mask_frames = []
     ssim_srgb_frames = []
-    if bin_viz_json is not None:
-        from bin_viz import write_bin_viz
+
     for cam_i in test_indices:
         entry = scene.images[cam_i]
         pipeline.render(entry.camera)
         # Binning/overlap debug viz: read the buffers this forward just filled
         # (tile ranges + per-pixel blended count) and dump the per-view heatmaps
         # + histogram. render() already drained the queue, so buffers are ready.
-        if bin_viz_json is not None:
-            tile_counts, overlap, ntx, nty = pipeline.read_bin_debug()
-            write_bin_viz(
-                cam_dir=cams_dir / f"cam_{cam_i:02d}",
-                iter_idx=it, cam_idx=cam_i,
-                image_name=entry.image_name,
-                tile_counts=tile_counts,
-                num_tiles_x=ntx, num_tiles_y=nty,
-                overlap=overlap,
-                jsonl_handle=bin_viz_json,
-            )
+
         r_srgb = np.clip(pipeline.read_output_image()[..., :3], 0.0, 1.0)
         t_srgb = targets_srgb[cam_i][..., :3]
         psnr_srgb_frames.append(psnr_image(r_srgb, t_srgb))

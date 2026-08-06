@@ -20,6 +20,7 @@
 
 #include "../common/types.slang"
 #include "../common/math.slang"
+#include "sh_carry.slang"
 
 static const uint ACTION_KEEP  = 0;
 static const uint ACTION_SPLIT = 1;
@@ -153,6 +154,89 @@ void splitAnisotropic(
         }
         gaussians[dst] = c;
         adam_state[dst] = _zero_adam();
+        child_ordinal++;
+    }
+}
+
+// SH variant of splitAnisotropic: identical grid split/clone behavior PLUS
+// carrying the optional features_rest coefficients (children inherit the
+// parent's, fresh rest-Adam). Dispatched INSTEAD of splitAnisotropic on the SH
+// path (it owns the same atomic append).
+[shader("compute")]
+[numthreads(256, 1, 1)]
+void splitAnisotropicSH(
+    uint3 dtid: SV_DispatchThreadID,
+    RWStructuredBuffer<Gaussian3D> gaussians,
+    RWStructuredBuffer<AdamState> adam_state,
+    RWStructuredBuffer<uint> num_gaussians_counter,
+    StructuredBuffer<uint> action,
+    StructuredBuffer<uint> split_factor_x,
+    StructuredBuffer<uint> split_factor_y,
+    StructuredBuffer<uint> split_factor_z,
+    StructuredBuffer<uint> pre_count_buf,
+    RWStructuredBuffer<float> features_rest,
+    RWStructuredBuffer<float> adam_rest,
+    uniform float ks_scale_power,
+    uniform uint rest_floats,
+    uniform uint max_splats)
+{
+    uint i = dtid.x;
+    uint pre_count = pre_count_buf[0];
+    if (i >= pre_count) return;
+    uint act = action[i];
+    if (act != ACTION_SPLIT && act != ACTION_CLONE) return;
+
+    Gaussian3D parent = gaussians[i];
+
+    if (act == ACTION_CLONE)
+    {
+        uint tail;
+        InterlockedAdd(num_gaussians_counter[0], 1u, tail);
+        if (tail < max_splats)
+        {
+            gaussians[tail] = parent;
+            adam_state[tail] = _zero_adam();
+            shInheritRest(tail, i, rest_floats, features_rest, adam_rest);
+        }
+        return;
+    }
+
+    uint3 n = uint3(max(split_factor_x[i], 1u),
+                    max(split_factor_y[i], 1u),
+                    max(split_factor_z[i], 1u));
+    uint total = n.x * n.y * n.z;
+    if (total <= 1u) return;
+
+    uint tail_base = 0u;
+    if (total > 1u)
+        InterlockedAdd(num_gaussians_counter[0], total - 1u, tail_base);
+
+    uint child_ordinal = 0u;
+    for (uint iz = 0u; iz < n.z; ++iz)
+    for (uint iy = 0u; iy < n.y; ++iy)
+    for (uint ix = 0u; ix < n.x; ++ix)
+    {
+        Gaussian3D c = _grid_child(parent, uint3(ix, iy, iz), n, ks_scale_power);
+        uint dst;
+        if (child_ordinal == 0u)
+        {
+            dst = i;   // child-0 overwrites parent slot: keep features_rest, fresh Adam.
+            gaussians[dst] = c;
+            adam_state[dst] = _zero_adam();
+            shZeroRestAdam(dst, rest_floats, adam_rest);
+        }
+        else
+        {
+            dst = tail_base + (child_ordinal - 1u);
+            if (dst >= max_splats)
+            {
+                child_ordinal++;
+                continue;
+            }
+            gaussians[dst] = c;
+            adam_state[dst] = _zero_adam();
+            shInheritRest(dst, i, rest_floats, features_rest, adam_rest);
+        }
         child_ordinal++;
     }
 }

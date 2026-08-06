@@ -163,3 +163,48 @@ void adamStep(
     grad_color_r[idx] = int64_t(0); grad_color_g[idx] = int64_t(0); grad_color_b[idx] = int64_t(0);
 }
 
+// Adam step for the optional view-dependent SH 'rest' coefficients. One thread
+// per gaussian; loops over the rest_floats scalars (up to 45) of its separate
+// features_rest buffer. features_rest_grad is a plain float written fresh each
+// iter by sh_backward (not accumulated), so it needs no fixed-point decode and
+// no post-step zeroing. Same cluster-visible gate as adamStep so a culled
+// gaussian's stale grad is never applied.
+#include "generated/sh_types.slang"
+
+[shader("compute")]
+[numthreads(256, 1, 1)]
+void adamStepRest(
+    uint3 dtid: SV_DispatchThreadID,
+    RWStructuredBuffer<float> features_rest,
+    StructuredBuffer<float> features_rest_grad,
+    RWStructuredBuffer<float> adam_rest,
+    StructuredBuffer<uint> num_gaussians_counter,
+    StructuredBuffer<uint> cluster_visible,
+    uniform float lr_rest,
+    uniform float bias_correction1,
+    uniform float bias_correction2,
+    uniform float pixels_per_step,
+    uniform uint rest_floats)
+{
+    uint idx = dtid.x;
+    if (idx >= num_gaussians_counter[0]) return;
+    if (cluster_visible[idx / CLUSTER_SIZE] == 0u) return;
+
+    float inv_pixels = 1.0 / max(pixels_per_step, 1.0);
+    uint pbase = idx * rest_floats;
+    uint abase = idx * rest_floats * 2u;
+
+    for (uint c = 0u; c < rest_floats; ++c)
+    {
+        float g = features_rest_grad[pbase + c] * inv_pixels;
+        if (isnan(g) || isinf(g)) continue;
+        float m = adam_rest[abase + c * 2u + 0u];
+        float v = adam_rest[abase + c * 2u + 1u];
+        float p = features_rest[pbase + c];
+        p = adam_scalar(p, g, m, v, lr_rest, bias_correction1, bias_correction2);
+        features_rest[pbase + c] = p;
+        adam_rest[abase + c * 2u + 0u] = m;
+        adam_rest[abase + c * 2u + 1u] = v;
+    }
+}
+

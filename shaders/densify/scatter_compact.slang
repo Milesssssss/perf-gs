@@ -117,3 +117,34 @@ void scatterCompactEta(
         eta_max_z_out[dst]   = 0u;
     }
 }
+
+// Additive SH-carry for compaction: move the optional features_rest coeffs +
+// their Adam moments through the SAME valid_mask / scan the gaussian compaction
+// used, so they land on the compacted slot. Dispatched only when SH is enabled,
+// after scatterCompact / scatterCompactEta (whichever moved the gaussians).
+[shader("compute")]
+[numthreads(256, 1, 1)]
+void scatterCompactSH(
+    uint3 dtid: SV_DispatchThreadID,
+    StructuredBuffer<float> features_rest_in,
+    StructuredBuffer<float> adam_rest_in,
+    StructuredBuffer<uint>  valid_mask,
+    StructuredBuffer<uint>  scan,
+    RWStructuredBuffer<float> features_rest_out,
+    RWStructuredBuffer<float> adam_rest_out,
+    uniform uint rest_floats,
+    uniform uint max_splats)
+{
+    uint i = dtid.x;
+    if (i >= max_splats) return;
+    if (valid_mask[i] == 0u) return;
+    uint dst = scan[i];
+    uint pd = dst * rest_floats, ps = i * rest_floats;
+    uint ad = dst * rest_floats * 2u, asrc = i * rest_floats * 2u;
+    for (uint c = 0u; c < rest_floats; ++c)
+    {
+        features_rest_out[pd + c] = features_rest_in[ps + c];
+        adam_rest_out[ad + c * 2u + 0u] = adam_rest_in[asrc + c * 2u + 0u];
+        adam_rest_out[ad + c * 2u + 1u] = adam_rest_in[asrc + c * 2u + 1u];
+    }
+}

@@ -16,6 +16,24 @@ class RasterConfig:
 
 
 @dataclass(frozen=True)
+class AppearanceConfig:
+    """View-dependent color (spherical-harmonics) policy.
+
+    ``sh_degree == 0`` (default) is the original view-independent SH band-0 (DC)
+    color: no rest coefficients are allocated and the render path is unchanged.
+    ``1..3`` enables view-dependent bands (classic 3DGS), activated progressively
+    one band every ``band_interval`` iterations (``oneupSHdegree``).
+    """
+
+    sh_degree: int = 0
+    band_interval: int = 1000
+
+    @property
+    def enabled(self) -> bool:
+        return self.sh_degree > 0
+
+
+@dataclass(frozen=True)
 class CompositorConfig:
     """Front-to-back extinction/compositing policy."""
 
@@ -54,3 +72,9 @@ class AdamLRs:
     rot: float = 1e-3
     opacity: float = 2.5e-2
     color: float = 2.5e-3  # in reality this is the SH0 LR
+    # Higher-band SH LR. None => color / 20 (INRIA features_rest = features_dc/20).
+    sh_rest: float | None = None
+
+    @property
+    def sh_rest_lr(self) -> float:
+        return self.sh_rest if self.sh_rest is not None else self.color / 20.0

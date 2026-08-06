@@ -26,11 +26,13 @@ from trainer.backend.memory.buffers import (
 )
 from trainer.config.config import (
     AdamLRs,
+    AppearanceConfig,
     CompositorConfig,
     LossConfig,
     RasterConfig,
     RegularizationConfig,
 )
+from trainer.contracts.codegen import sh_rest_coeffs
 from trainer.data.dataset import Camera
 from trainer.backend.densify.densify import DensifyConfig
 from trainer.backend.compute.device import SHADERS_DIR
@@ -104,6 +106,7 @@ class Pipeline:
         compositor_config: CompositorConfig | None = None,
         loss_config: LossConfig | None = None,
         regularization_config: RegularizationConfig | None = None,
+        appearance_config: AppearanceConfig | None = None,
         viewer_only: bool = False,
     ) -> None:
         self.device = device
@@ -130,6 +133,13 @@ class Pipeline:
             regularization_config or RegularizationConfig())
         resolved_loss_config = loss_config or LossConfig()
 
+        # View-dependent SH policy. sh_degree 0 (default) => rest storage is not
+        # allocated and every SH path below is a no-op. active_sh_degree starts
+        # at 0 and is raised by the progressive schedule during training.
+        self.appearance_config = appearance_config or AppearanceConfig()
+        self._sh_rest_floats = sh_rest_coeffs(self.appearance_config.sh_degree) * 3
+        self._active_sh_degree = 0
+
         load_kernels(device, self, viewer_only=viewer_only)
 
         allocate_fn = buffers.allocate_viewer if viewer_only else buffers.allocate
@@ -138,6 +148,7 @@ class Pipeline:
             device=device, shared_data_module=self.shared_data_module,
             max_splats=max_splats, width=width, height=height,
             max_sort_pairs=max_sort_pairs,
+            sh_rest_floats=self._sh_rest_floats,
         )
 
         # Image-space loss (SSIM / L1+L2), recorded independently of how the
@@ -164,12 +175,14 @@ class Pipeline:
         )
 
         # The Adam parameter-update step and its bias-correction counter live in
-        # their own optimizer object, not inline on the Pipeline.
-        self._adam = AdamOptimizer(
+        # their own optimizer object, not inline on the Pipeline. Training-only:
+        # viewer_only omits it (its densify/adam kernels aren't compiled).
+        self._adam = None if viewer_only else AdamOptimizer(
             dispatch=self._dispatch,
             dispatch_indirect=self._dispatch_indirect,
             prepare_args_kernel=self.k_densify_prepare_args,
             adam_kernel=self.k_adam,
+            adam_rest_kernel=getattr(self, "k_adam_rest", None),
             buffers=self.buffers,
             max_splats=max_splats,
             width=width,
@@ -205,6 +218,8 @@ class Pipeline:
                 build_prune_mask=self.k_build_prune_mask,
                 scatter_compact=self.k_scatter_compact,
                 scatter_compact_eta=self.k_scatter_compact_eta,
+                split_and_clone_sh=self.k_split_and_clone_sh,
+                scatter_compact_sh=self.k_scatter_compact_sh,
             ),
             commands=CommandInterface(
                 dispatch=self.dispatch,
@@ -215,6 +230,7 @@ class Pipeline:
             width=self.width,
             height=self.height,
             max_primitives=self.max_splats,
+            sh=self.buffers.sh,
         ) if not viewer_only else None
 
         self.last_submit_id: int = 0
@@ -253,6 +269,18 @@ class Pipeline:
         reference needs refreshing (for any code that uses reflected types)."""
         self.shared_data_module = _module_for_reflection(self.device)
 
+    def set_active_sh_degree(self, degree: int) -> None:
+        """Set the active SH band count for the progressive schedule, clamped to
+        the configured max degree. No effect on the SH-off path (max == 0)."""
+        self._active_sh_degree = max(0, min(int(degree), self.appearance_config.sh_degree))
+
+    def update_sh_degree(self, iteration: int) -> None:
+        """Progressive SH activation (classic 3DGS oneupSHdegree): raise the
+        active band count by one every band_interval iterations, up to the
+        configured max. No-op on the SH-off path."""
+        interval = max(1, self.appearance_config.band_interval)
+        self.set_active_sh_degree(iteration // interval)
+
     @property
     def _encoder(self) -> "spy.CommandEncoder | None":
         """Compat view of the active command batch's raw encoder. External
@@ -269,7 +297,7 @@ class Pipeline:
     def iteration(self) -> int:
         """Adam bias-correction step count; densification reads it as a
         decorrelation seed. The counter itself lives in the optimizer."""
-        return self._adam.step_count
+        return self._adam.step_count if self._adam is not None else 0
 
     def _dispatch(self, kernel, marker: str, **kwargs):
         """Dispatch a kernel, tagging it with a flat debug marker ``marker`` when
@@ -364,6 +392,7 @@ class Pipeline:
         rot_quats: np.ndarray,
         opacities: np.ndarray,
         color_logits: np.ndarray,
+        features_rest: np.ndarray | None = None,
     ) -> None:
         buffer_io.write_gaussians(
             self.buffers,
@@ -379,10 +408,45 @@ class Pipeline:
             max_splats=self.max_splats)
         self._adam.reset()
 
+        # Optional SH: zero the rest coefficients (INRIA features_rest init) and
+        # their Adam moments device-side, then upload any provided coefficients
+        # (e.g. from an SH .ply). ``features_rest`` is ignored on the SH-off path.
+        if self.buffers.sh_enabled:
+            self._clear_sh_state()
+            self.set_features_rest(features_rest)
+
+    def _clear_sh_state(self) -> None:
+        """Zero features_rest + its Adam moments (device-side; buffers are far
+        too large to host-fill at a big --max-splats)."""
+        sh = self.buffers.sh
+        rest_count = self.max_splats * sh.rest_floats
+        self._dispatch(self.k_clear_float_buffer, "clear_features_rest",
+            thread_count=[rest_count, 1, 1],
+            buffer=sh.features_rest.storage, count=rest_count)
+        self._dispatch(self.k_clear_float_buffer, "clear_adam_rest",
+            thread_count=[rest_count * 2, 1, 1],
+            buffer=sh.adam_rest.storage, count=rest_count * 2)
+
     def set_gaussians_raw(self, floats: np.ndarray, count: int) -> None:
         """Upload a snapshot already in the packed 14-float layout (from the
         splat stream). Render-only path — does not touch Adam state."""
         buffer_io.write_gaussians_raw(self.buffers, floats, count)
+
+    def set_features_rest(self, features_rest: np.ndarray | None) -> None:
+        """Upload initial SH rest coefficients ``(N, rest_floats)`` (coeff-major
+        ``[coeff*3 + channel]``) into the separate features_rest buffer, e.g.
+        when initializing from an SH ``.ply``. Call AFTER set_gaussians_from_numpy
+        (which zero-clears it). No-op when SH is off or no coefficients given."""
+        if (not self.buffers.sh_enabled or features_rest is None
+                or features_rest.size == 0):
+            return
+        rest_floats = self.buffers.sh.rest_floats
+        assert features_rest.shape[1] == rest_floats, (
+            f"features_rest width {features_rest.shape[1]} != rest_floats {rest_floats}")
+        # Partial upload: writes the first N*rest_floats floats; the tail stays
+        # zero from _clear_sh_state (no full max_splats-sized host array).
+        self.buffers.features_rest.copy_from_numpy(
+            np.ascontiguousarray(features_rest, dtype=np.float32).reshape(-1))
 
     def set_target_image(self, rgb: np.ndarray) -> None:
         """Upload a target image into the pipeline's owned texture. Call
@@ -610,6 +674,23 @@ class Pipeline:
                 z_near=self.raster_config.z_near_cull,
                 max_splats=self.max_splats,
             )
+
+        # Optional view-dependent SH: overwrite each gaussian's packed blend
+        # color with the SH-evaluated (view-dependent) color. Runs only when SH
+        # is enabled; bin_count already packed the SH0 DC color for the SH-off
+        # path, which skips this dispatch entirely.
+        if b.sh_enabled:
+            with self._marker_group("sh_forward"):
+                self._dispatch(self.k_sh_forward, "sh_forward",
+                    thread_count=[self.max_splats, 1, 1],
+                    gaussians=b.gaussians.storage,
+                    num_gaussians_counter=b.num_gaussians_counter.storage,
+                    camera=self._camera_buffer,
+                    features_rest=b.features_rest.storage,
+                    blend_data=b.blend_data.storage,
+                    active_sh_degree=self._active_sh_degree,
+                    max_splats=self.max_splats,
+                )
 
         # Phase 2: exclusive scan → tile_offset_per_gaussian + total count.
         # scan_total[0] holds the total pair count on the GPU; no readback.
@@ -937,6 +1018,31 @@ class Pipeline:
                     grad_2d_x_iter=b.grad_2d_x_iter.storage,
                     grad_2d_y_iter=b.grad_2d_y_iter.storage,
                 )
+
+        # Optional view-dependent SH backward: turn the accumulated per-gaussian
+        # color gradient into higher-band coefficient gradients + the
+        # direction->mean term. Runs after projection_backward (it ADDS to
+        # grad_mean) and before regularization. SH-off path skips it.
+        if b.sh_enabled:
+            with self._marker_group("sh_backward"):
+                self._dispatch(self.k_sh_backward, "sh_backward",
+                    thread_count=[self.max_splats, 1, 1],
+                    gaussians=b.gaussians.storage,
+                    num_gaussians_counter=b.num_gaussians_counter.storage,
+                    camera=self._camera_buffer,
+                    features_rest=b.features_rest.storage,
+                    features_rest_grad=b.features_rest_grad.storage,
+                    grad_color_r=gb["color_r"].storage,
+                    grad_color_g=gb["color_g"].storage,
+                    grad_color_b=gb["color_b"].storage,
+                    grad_mean_x=gb["mean_x"].storage,
+                    grad_mean_y=gb["mean_y"].storage,
+                    grad_mean_z=gb["mean_z"].storage,
+                    cluster_visible=b.cluster_visible.storage,
+                    active_sh_degree=self._active_sh_degree,
+                    max_splats=self.max_splats,
+                )
+
         # SAD-GS online eta accumulation (must be HERE: after backward filled
         # grad_2d_*_iter, before accumulate_iter clears them, so the per-view
         # grad gate in score_structure_aware sees this view's gradient).

@@ -30,6 +30,11 @@ DISK_FLOAT_COUNT = _schema.DISK_FLOAT_COUNT
 GRAD_SCALAR_COMPONENTS = _schema.GRAD_SCALAR_COMPONENTS
 DISK_GRAD_SCALAR_COMPONENTS = _schema.DISK_GRAD_SCALAR_COMPONENTS
 ADAM_STATE_FLOAT_COUNT = _schema.ADAM_STATE_FLOAT_COUNT
+SH_MAX_DEGREE = _schema.SH_MAX_DEGREE
+SH_REST_COEFFS_MAX = _schema.SH_REST_COEFFS_MAX
+SH_REST_FLOATS_MAX = _schema.SH_REST_FLOATS_MAX
+sh_rest_coeffs = _schema.sh_rest_coeffs
+sh_degree_from_rest_floats = _schema.sh_degree_from_rest_floats
 GRAD_2D_SEED_COMPONENTS = _schema.GRAD_2D_SEED_COMPONENTS
 ETA_ACCUM_COMPONENTS = _schema.ETA_ACCUM_COMPONENTS
 EXECUTION = _schema.EXECUTION
@@ -76,6 +81,7 @@ def gaussian_field_matrix() -> tuple[dict[str, object], ...]:
 GENERATED_SLANG_PATH = "shaders/generated/execution_contract.slang"
 GENERATED_PRIMITIVE_SLANG_PATH = "shaders/generated/gaussian_types.slang"
 GENERATED_DISK_SLANG_PATH = "shaders/generated/disk_types.slang"
+GENERATED_SH_SLANG_PATH = "shaders/generated/sh_types.slang"
 
 _SLANG_BANNER = (
     "// DO NOT EDIT. Generated from src/trainer/contracts.py.\n"
@@ -163,12 +169,29 @@ def generate_disk_slang() -> str:
     return "\n".join(lines)
 
 
+def generate_sh_slang() -> str:
+    """Emit the optional view-dependent SH appearance layout constants. The DC
+    term is ``Gaussian3D.sh0``; these are the higher-band 'rest' coefficients,
+    stored in a SEPARATE buffer allocated only when ``sh_degree > 0`` so the
+    default SH0 path keeps the 14-float Gaussian3D ABI."""
+    lines = [_SLANG_BANNER, "#ifndef TRAINER_SH_TYPES",
+             "#define TRAINER_SH_TYPES", "",
+             f"static const int SH_MAX_DEGREE = {SH_MAX_DEGREE};",
+             f"static const int SH_REST_COEFFS = {SH_REST_COEFFS_MAX};"
+             "  // per channel, excludes the DC term",
+             f"static const int SH_REST_FLOATS = {SH_REST_FLOATS_MAX};"
+             "  // SH_REST_COEFFS * 3 (RGB)",
+             "", "#endif // TRAINER_SH_TYPES", ""]
+    return "\n".join(lines)
+
+
 def generated_artifacts() -> dict[str, str]:
     """Repository-relative generated path -> expected file content."""
     return {
         GENERATED_SLANG_PATH: generate_execution_slang(),
         GENERATED_PRIMITIVE_SLANG_PATH: generate_primitive_slang(),
         GENERATED_DISK_SLANG_PATH: generate_disk_slang(),
+        GENERATED_SH_SLANG_PATH: generate_sh_slang(),
     }
 
 

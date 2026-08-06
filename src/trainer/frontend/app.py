@@ -25,6 +25,7 @@ from trainer.data.colmap import load_colmap, load_colmap_image
 from trainer.common.color import srgb_to_linear
 from trainer.config.config import (
     AdamLRs,
+    AppearanceConfig,
     CompositorConfig,
     LossConfig,
     RasterConfig,
@@ -176,7 +177,6 @@ class TrainingApplication:
         self.pipeline: Pipeline | None = None
         self.viewer: ViewerSession | None = None
         self.mip_diagnostics: MipFilterDiagnostics | None = None
-        self.opacity_reporter: OpacityBundleReporter | None = None
         self.target_textures: list[Any] = []
         self.structure_textures: list[Any] = []
         self.mean_lr: MeanLearningRateSchedule | None = None
@@ -186,9 +186,9 @@ class TrainingApplication:
     def from_cli(cls) -> "TrainingApplication":
         return cls(build_parser().parse_args())
 
-    def run(self) -> None:
+    def launch_training(self) -> None:
         self.prepare()
-        result = self.train()
+        result = self.launch_training_loop()
         self.finish(result)
 
     def prepare(self) -> None:
@@ -200,7 +200,7 @@ class TrainingApplication:
         self._start_integrations()
         self._create_training_services()
 
-    def train(self) -> TrainingResult:
+    def launch_training_loop(self) -> TrainingResult:
         loop = TrainingLoop(
             args=self.args,
             scene=self._scene,
@@ -258,10 +258,14 @@ class TrainingApplication:
         )
 
     def _prepare_profiler(self) -> None:
-        # configure_session may force Vulkan, disable previews, and disable the
-        # viewer; it must run before config resolution and device creation.
         self.profiler.configure_session()
         self.profiler.inject()
+
+    def _resolve_loss_lambdas_and_lrs(self) -> None:
+        self.effective_lambda_l2, self.effective_lambda_ssim, self.base_lrs = resolve_loss_and_lrs(self.args)
+
+    def _build_densify_configs(self) -> None:
+        self.densify_config, self.structure_config = build_densify_configs(self.args, self._scene.extent)
 
     def _load_and_validate_experiment(self) -> None:
         self.scene_context = load_scene_context(self.args)
@@ -274,16 +278,6 @@ class TrainingApplication:
             n_test=len(scene.test_indices),
         )
         
-        self.densify_config, self.structure_config = build_densify_configs(self.args, scene.extent)
-        self.effective_lambda_l2, self.effective_lambda_ssim, self.base_lrs = resolve_loss_and_lrs(self.args)
-
-        self.opacity_reporter = OpacityBundleReporter(
-            args=self.args,
-            densify_config=self.densify_config,
-            structure_config=self.structure_config,
-        )
-        
-        self.opacity_reporter.report_startup(self._densify_mode)
         self._write_resolved_config()
 
     def _prepare_targets(self) -> None:
@@ -325,16 +319,16 @@ class TrainingApplication:
             kernel_size=self.args.mip_kernel_size,
         )
 
-        self.viewer = ViewerSession.create(
-            enabled=not self.args.no_viewer,
-            device=self.device,
-            width=scene.width,
-            height=scene.height,
-            max_splats=self.args.max_splats,
-            fovy=getattr(self.args, "fovy", 45.0),
-            gpu_lock=self.gpu_lock,
-            pipeline=self._pipeline,
-        )
+        if self.args.no_viewer:
+            self.viewer = ViewerSession.create(
+                device=self.device,
+                width=scene.width,
+                height=scene.height,
+                max_splats=self.args.max_splats,
+                fovy=getattr(self.args, "fovy", 45.0),
+                gpu_lock=self.gpu_lock,
+                pipeline=self._pipeline,
+            )
 
     def _prepare_optional_features(self) -> None:
         pipeline = self._pipeline
@@ -392,8 +386,7 @@ class TrainingApplication:
             queue_limiter=queue_limiter,
             collect_diagnostics=artifacts.densify_diag_json is not None,
             diag_module=diag_module,
-            diag_grad_internal=diag_grad_internal,
-            print_opacity_bundle=self._opacity_reporter.report,
+            diag_grad_internal=diag_grad_internal
         )
         self.runtime = TrainingRuntime(
             pipeline=self._pipeline,
@@ -512,11 +505,6 @@ class TrainingApplication:
         return self.mip_diagnostics
 
     @property
-    def _opacity_reporter(self) -> "OpacityBundleReporter":
-        assert self.opacity_reporter is not None
-        return self.opacity_reporter
-
-    @property
     def _mean_lr(self) -> MeanLearningRateSchedule:
         assert self.mean_lr is not None
         return self.mean_lr
@@ -525,11 +513,6 @@ class TrainingApplication:
     def _extinction(self) -> ExtinctionHardnessSchedule:
         assert self.extinction is not None
         return self.extinction
-
-
-# ---------------------------------------------------------------------------
-# Training-loop orchestration
-# ---------------------------------------------------------------------------
 
 
 class TrainingLoop:
@@ -660,6 +643,7 @@ class TrainingLoop:
 
         pipeline = self.runtime.pipeline
         pipeline.set_extinction_hardness(self.extinction.at(context.number))
+        pipeline.update_sh_degree(context.number)
         pipeline.train_step(
             context.camera_entry.camera,
             lrs=context.learning_rates,
@@ -874,23 +858,6 @@ class OpacityBundleReporter:
             f"absgs_grad_thresh={settings['absgs_grad_thresh']}",
             flush=True,
         )
-
-    def report_startup(self, mode: DensificationMode) -> None:
-        if mode != DensificationMode.STRUCTURE_AWARE:
-            return
-        self.report("startup")
-        settings = self.settings()
-        if (
-            not settings["opacity_cap_enabled"]
-            or settings["structure_min_opacity"] < 0.1
-        ):
-            print(
-                "[opacity-bundle] WARNING: bundle is INACTIVE at reference "
-                "strength — the 0.8 cap and/or 0.1 floor will NOT run. To match "
-                "SADGS pass: --sad-structure-min-opacity 0.1 --sad-opacity-cap "
-                "0.8 --sad-relative-reset. Running as configured.",
-                flush=True,
-            )
 
 
 class MipFilterDiagnostics:
@@ -1317,6 +1284,10 @@ def create_pipeline(*, args: argparse.Namespace, device: Any, gpu_lock: Any,
             opacity_weight=args.opacity_reg,
             scale_weight=args.scale_reg,
         ),
+        appearance_config=AppearanceConfig(
+            sh_degree=args.sh_degree,
+            band_interval=args.sh_band_interval,
+        ),
     )
 
 
@@ -1332,7 +1303,7 @@ def initialize_pipeline(*, pipeline: Pipeline, initial_points: dict,
 
 
 def main() -> None:
-    TrainingApplication.from_cli().run()
+    TrainingApplication.from_cli().launch_training()
 
 
 if __name__ == "__main__":

@@ -27,11 +27,13 @@ class AdamOptimizer:
     """
 
     def __init__(self, *, dispatch, dispatch_indirect, prepare_args_kernel,
-                 adam_kernel, buffers, max_splats: int, width: int, height: int) -> None:
+                 adam_kernel, buffers, max_splats: int, width: int, height: int,
+                 adam_rest_kernel=None) -> None:
         self._dispatch = dispatch
         self._dispatch_indirect = dispatch_indirect
         self._k_prepare_args = prepare_args_kernel
         self._k_adam = adam_kernel
+        self._k_adam_rest = adam_rest_kernel
         self._buffers = buffers
         self._max_splats = max_splats
         self._width = width
@@ -81,3 +83,20 @@ class AdamOptimizer:
             },
             pixels_per_step=float(self._width * self._height),
         )
+
+        # Optional view-dependent SH rest coefficients: their own Adam step over
+        # the separate features_rest buffer (LR = color/20, INRIA). Same indirect
+        # active-gaussian dispatch; skipped entirely on the SH-off path.
+        if self._k_adam_rest is not None and b.sh_enabled:
+            self._dispatch_indirect(self._k_adam_rest, "adam_rest", b.adam_dispatch_args,
+                features_rest=b.features_rest.storage,
+                features_rest_grad=b.features_rest_grad.storage,
+                adam_rest=b.adam_rest_state.storage,
+                num_gaussians_counter=b.num_gaussians_counter.storage,
+                cluster_visible=b.cluster_visible.storage,
+                lr_rest=lrs.sh_rest_lr,
+                bias_correction1=bc1,
+                bias_correction2=bc2,
+                pixels_per_step=float(self._width * self._height),
+                rest_floats=b.sh.rest_floats,
+            )

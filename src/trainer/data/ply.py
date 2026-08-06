@@ -79,23 +79,42 @@ def load_ply(path: str | Path) -> dict[str, np.ndarray]:
         [verts["f_dc_0"], verts["f_dc_1"], verts["f_dc_2"]], axis=-1
     ).astype(np.float32)
 
+    # Optional higher SH bands. INRIA writes f_rest channel-major (all coeffs of
+    # R, then G, then B); convert back to our coeff-major [coeff*3 + channel].
+    rest_names = sorted(
+        (nm for nm in available if nm.startswith("f_rest_")),
+        key=lambda s: int(s.rsplit("_", 1)[-1]))
+    features_rest = None
+    if rest_names:
+        fr = np.stack([verts[nm] for nm in rest_names], axis=-1).astype(np.float32)
+        n, rest_floats = fr.shape
+        features_rest = (fr.reshape(n, 3, rest_floats // 3)
+                         .transpose(0, 2, 1).reshape(n, rest_floats))
+
     return {
         "means": means,
         "log_scales": log_scales,
         "rot_quats": rot_quats,
         "opacities": opacity.astype(np.float32),
         "color_logits": f_dc.astype(np.float32),
+        "features_rest": features_rest,
     }
 
 
-def write_gaussian_ply(gaussians: np.ndarray, path: str | Path) -> None:
+def write_gaussian_ply(gaussians: np.ndarray, path: str | Path,
+                       features_rest: np.ndarray | None = None) -> None:
     """Write a structured Gaussian array (``gaussian_numpy_dtype``) as a
     3DGS-format ``.ply``. Inverse of :func:`load_ply`.
 
     Opacity is written as the pre-sigmoid logit (as the GPU holds it), and
     ``sh0`` is written directly as ``f_dc`` (color = 0.5 + C0*sh0 IS sRGB,
-    matching the 3DGS PLY convention), so no color round-trip. Only the 14
-    fields M1/M2 produce are written; higher-order SH bands land later.
+    matching the 3DGS PLY convention), so no color round-trip.
+
+    ``features_rest`` (optional, shape ``(N, rest_floats)`` in our coeff-major
+    ``[coeff*3 + channel]`` layout) adds the higher SH bands as ``f_rest_*``,
+    written in the INRIA channel-major order (all coeffs of R, then G, then B)
+    so standard 3DGS viewers infer the degree from the count. Omitted for the
+    SH0 model (14-field PLY, unchanged).
     """
     mean = gaussians["mean"]
     log_scale = gaussians["log_scale"]
@@ -103,10 +122,22 @@ def write_gaussian_ply(gaussians: np.ndarray, path: str | Path) -> None:
     opacity_logit = gaussians["opacity"].astype(np.float32)
     f_dc = gaussians["sh0"].astype(np.float32)
 
+    n = len(gaussians)
+    f_rest = None
+    if features_rest is not None and features_rest.size > 0:
+        rest_floats = features_rest.shape[1]
+        # coeff-major [coeff*3 + channel] -> channel-major [channel, coeff].
+        f_rest = (features_rest.reshape(n, rest_floats // 3, 3)
+                  .transpose(0, 2, 1).reshape(n, rest_floats).astype(np.float32))
+
     dtype = [
         ("x", "f4"), ("y", "f4"), ("z", "f4"),
         ("nx", "f4"), ("ny", "f4"), ("nz", "f4"),
         ("f_dc_0", "f4"), ("f_dc_1", "f4"), ("f_dc_2", "f4"),
+    ]
+    if f_rest is not None:
+        dtype += [(f"f_rest_{i}", "f4") for i in range(f_rest.shape[1])]
+    dtype += [
         ("opacity", "f4"),
         ("scale_0", "f4"), ("scale_1", "f4"), ("scale_2", "f4"),
         ("rot_0", "f4"), ("rot_1", "f4"), ("rot_2", "f4"), ("rot_3", "f4"),
@@ -121,6 +152,9 @@ def write_gaussian_ply(gaussians: np.ndarray, path: str | Path) -> None:
     records["f_dc_0"] = f_dc[:, 0]
     records["f_dc_1"] = f_dc[:, 1]
     records["f_dc_2"] = f_dc[:, 2]
+    if f_rest is not None:
+        for i in range(f_rest.shape[1]):
+            records[f"f_rest_{i}"] = f_rest[:, i]
     records["opacity"] = opacity_logit
     records["scale_0"] = log_scale[:, 0]
     records["scale_1"] = log_scale[:, 1]

@@ -5,6 +5,7 @@ from __future__ import annotations
 from argparse import Namespace
 
 from trainer.config.config import (
+    AppearanceConfig,
     CompositorConfig,
     LossConfig,
     RasterConfig,
@@ -68,6 +69,8 @@ def test_pipeline_factory_separates_configuration_ownership(monkeypatch) -> None
         cluster_cull=False,
         mip_splatting=True,
         mip_kernel_size=0.1,
+        sh_degree=0,
+        sh_band_interval=1000,
         extinction_hardness=2.0,
         w_alpha=0.4,
         opacity_reg=0.03,
@@ -97,6 +100,8 @@ def test_pipeline_factory_separates_configuration_ownership(monkeypatch) -> None
         alpha_weight=0.4, ssim_weight=0.2, l2_weight=1.5)
     assert captured["regularization_config"] == RegularizationConfig(
         opacity_weight=0.03, scale_weight=0.07)
+    assert captured["appearance_config"] == AppearanceConfig(
+        sh_degree=0, band_interval=1000)
 
 
 def test_training_loop_presents_after_full_iteration() -> None:

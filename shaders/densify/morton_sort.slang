@@ -179,3 +179,35 @@ void mortonScatterEta(
     eta_max_y_out[i]   = eta_max_y_in[src];
     eta_max_z_out[i]   = eta_max_z_in[src];
 }
+
+// Permute the optional SH rest coefficients + their Adam moments by the SAME
+// sorted_values permutation mortonScatter applies to the gaussians, so the
+// coefficients survive a Morton re-sort. Additive: dispatched only when SH is
+// enabled, reading the identical sorted_values slot for a consistent permute.
+[shader("compute")]
+[numthreads(256, 1, 1)]
+void mortonScatterSH(
+    uint3 dtid: SV_DispatchThreadID,
+    StructuredBuffer<float> features_rest_in,
+    StructuredBuffer<float> adam_rest_in,
+    StructuredBuffer<uint> sorted_values,
+    StructuredBuffer<uint> count_buf,
+    RWStructuredBuffer<float> features_rest_out,
+    RWStructuredBuffer<float> adam_rest_out,
+    uniform uint rest_floats,
+    uniform uint max_splats)
+{
+    uint i = dtid.x;
+    if (i >= max_splats) return;
+    uint n = count_buf[0];
+    if (i >= n) return;
+    uint src = sorted_values[i];
+    uint pd = i * rest_floats, ps = src * rest_floats;
+    uint ad = i * rest_floats * 2u, asrc = src * rest_floats * 2u;
+    for (uint c = 0u; c < rest_floats; ++c)
+    {
+        features_rest_out[pd + c] = features_rest_in[ps + c];
+        adam_rest_out[ad + c * 2u + 0u] = adam_rest_in[asrc + c * 2u + 0u];
+        adam_rest_out[ad + c * 2u + 1u] = adam_rest_in[asrc + c * 2u + 1u];
+    }
+}

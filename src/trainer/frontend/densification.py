@@ -65,7 +65,6 @@ class DensificationController:
         collect_diagnostics: bool,
         diag_module,
         diag_grad_internal,
-        print_opacity_bundle: Callable[[str], None],
     ) -> None:
         self._pipeline = pipeline
         self._args = args
@@ -82,7 +81,6 @@ class DensificationController:
         self._collect_diagnostics = collect_diagnostics
         self._diag = diag_module
         self._diag_grad_internal = diag_grad_internal
-        self._print_opacity_bundle = print_opacity_bundle
 
     def run(self, it: int, ev: "IterationEvents", cur_n_gaussians: int) -> DensifyOutcome:
         """Execute one densify tick and return its outcome (updated count,
@@ -104,7 +102,6 @@ class DensificationController:
         queue_limiter = self._queue_limiter
         _diag = self._diag
         _diag_grad_internal = self._diag_grad_internal
-        _print_opacity_bundle = self._print_opacity_bundle
         do_structure_step = ev.structure
 
         # First densify starts the extinction-hardness ramp (held at 1.0 up
@@ -129,7 +126,6 @@ class DensificationController:
                          and not do_structure_step)
 
         if do_structure_step:
-            _print_opacity_bundle(f"structure pass @ iter {it}")
             stats = pipeline.densify_structure_aware(structure_cfg)
         elif mode == DensificationMode.STRUCTURE_AWARE:
             allow_scale_prune = it > args.reset_every

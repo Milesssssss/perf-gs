@@ -13,6 +13,20 @@ void clearGradBuffer(
     grad_buffer[i] = int64_t(0);
 }
 
+// Zero a plain float buffer (SH features_rest / adam_rest init). count is the
+// TOTAL scalar length, not a gaussian count.
+[shader("compute")]
+[numthreads(256, 1, 1)]
+void clearFloatBuffer(
+    uint3 dtid: SV_DispatchThreadID,
+    RWStructuredBuffer<float> buffer,
+    uniform uint count)
+{
+    uint i = dtid.x;
+    if (i >= count) return;
+    buffer[i] = 0.0;
+}
+
 // Zero all per-gaussian Adam first/second moments device-side. Replaces a host
 // round-trip (readback-to-size + host zero upload) at set-gaussians time. Uses
 // Slang's zero-init cast so it never enumerates AdamState's fields (which are
