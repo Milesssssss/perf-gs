@@ -56,7 +56,7 @@ def _setup(backend: str, w: int, h: int, hardness: float):
 
 
 def _loss_for(pipeline: TestPipeline, scene: dict, camera) -> float:
-    pipeline.set_gaussians_from_numpy(**scene)
+    pipeline.set_primitive_from_numpy(**scene)
     pipeline.forward_and_loss(camera)
     return pipeline.read_loss()
 
@@ -70,7 +70,7 @@ def test_hardened_gradients_finite_difference(backend: str) -> None:
     scene = _scene()
     n = scene["means"].shape[0]
 
-    pipeline.set_gaussians_from_numpy(**scene)
+    pipeline.set_primitive_from_numpy(**scene)
     pipeline.forward_and_loss(camera)
     pipeline._clear_grads()
     pipeline.backward()
@@ -124,14 +124,14 @@ def test_hardness_increases_extinction(backend: str) -> None:
 
     base = _setup(backend, W, H, 1.0)
     base.set_target_image(target)
-    base.set_gaussians_from_numpy(**scene)
+    base.set_primitive_from_numpy(**scene)
     base.forward_and_loss(camera)
     base.device.wait_for_idle()
     a_base = base.buffers.output_image.to_numpy()[..., 3].astype(np.float64)
 
     hard = _setup(backend, W, H, K)
     hard.set_target_image(target)
-    hard.set_gaussians_from_numpy(**scene)
+    hard.set_primitive_from_numpy(**scene)
     hard.forward_and_loss(camera)
     hard.device.wait_for_idle()
     a_hard = hard.buffers.output_image.to_numpy()[..., 3].astype(np.float64)

@@ -68,7 +68,7 @@ def _one_gaussian(p: TestPipeline, sh0_rgb: np.ndarray) -> None:
     log_scales = np.log(np.full((1, 3), 0.6, dtype=np.float32))
     rot_quats = np.array([[1.0, 0.0, 0.0, 0.0]], dtype=np.float32)
     opacities = np.array([0.99], dtype=np.float32)
-    p.set_gaussians_from_numpy(
+    p.set_primitive_from_numpy(
         means=means, log_scales=log_scales, rot_quats=rot_quats,
         opacities=opacities, color_logits=sh0_rgb.reshape(1, 3).astype(np.float32))
 
@@ -150,7 +150,7 @@ def test_sh_rest_gradient_finite_difference(backend: str) -> None:
         log_scales = np.log(np.full((1, 3), 0.5, np.float32))
         rot = np.array([[1.0, 0.0, 0.0, 0.0]], np.float32)
         opac = np.array([0.99], np.float32)
-        p.set_gaussians_from_numpy(means=means, log_scales=log_scales,
+        p.set_primitive_from_numpy(means=means, log_scales=log_scales,
                                    rot_quats=rot, opacities=opac,
                                    color_logits=sh0.reshape(1, 3))
 
@@ -216,7 +216,7 @@ def test_sh_mean_gradient_includes_view_term(backend: str) -> None:
     p.set_target_image(target)
 
     def place(mean: np.ndarray) -> None:
-        p.set_gaussians_from_numpy(means=mean.astype(np.float32),
+        p.set_primitive_from_numpy(means=mean.astype(np.float32),
                                    log_scales=log_scales, rot_quats=rot,
                                    opacities=opac, color_logits=sh0.reshape(1, 3))
         _upload_rest(p, rest0)
@@ -254,7 +254,7 @@ def test_sh_training_updates_rest_and_reduces_loss(backend: str) -> None:
     log_scales = np.log(np.full((1, 3), 0.7, np.float32))
     rot = np.array([[1.0, 0.0, 0.0, 0.0]], np.float32)
     opac = np.array([0.99], np.float32)
-    p.set_gaussians_from_numpy(means=means, log_scales=log_scales, rot_quats=rot,
+    p.set_primitive_from_numpy(means=means, log_scales=log_scales, rot_quats=rot,
                                opacities=opac,
                                color_logits=np.zeros((1, 3), np.float32))
     p.set_active_sh_degree(3)
@@ -304,7 +304,7 @@ def test_sh_features_rest_survives_morton_sort(backend: str) -> None:
     opac = np.linspace(0.1, 0.9, n).astype(np.float32)
     # sh0.r = slot index fingerprint (survives the permute via the gaussian move).
     color = np.stack([np.arange(n, dtype=np.float32)] * 3, axis=1)
-    p.set_gaussians_from_numpy(means=means, log_scales=log_scales, rot_quats=rot,
+    p.set_primitive_from_numpy(means=means, log_scales=log_scales, rot_quats=rot,
                                opacities=opac, color_logits=color)
 
     # Fingerprint coeff-0 of features_rest and adam_rest (m) with the slot index
@@ -372,7 +372,7 @@ def test_sh_densify_clone_inherits_rest(backend: str) -> None:
                      loss_config=LossConfig(ssim_weight=0.0),
                      appearance_config=AppearanceConfig(sh_degree=3))
 
-    p.set_gaussians_from_numpy(
+    p.set_primitive_from_numpy(
         means=np.array([[0.0, 0.0, 3.0]], np.float32),
         log_scales=np.log(np.full((1, 3), 0.1, np.float32)),
         rot_quats=np.array([[1.0, 0.0, 0.0, 0.0]], np.float32),
@@ -453,7 +453,7 @@ def test_sh_viewer_mirrors_view_dependent_color(backend: str) -> None:
     train = TestPipeline(device=device, width=48, height=48, max_splats=4,
                          loss_config=LossConfig(ssim_weight=0.0),
                          appearance_config=AppearanceConfig(sh_degree=1))
-    train.set_gaussians_from_numpy(
+    train.set_primitive_from_numpy(
         means=np.array([[0.0, 0.0, 0.0]], np.float32),
         log_scales=np.log(np.full((1, 3), 0.6, np.float32)),
         rot_quats=np.array([[1.0, 0.0, 0.0, 0.0]], np.float32),

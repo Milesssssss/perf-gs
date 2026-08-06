@@ -78,7 +78,7 @@ def test_morton_sort_permutes_gaussians(backend: str) -> None:
                              np.arange(n, dtype=np.float32) * 2.0,
                              np.arange(n, dtype=np.float32) * 3.0], axis=1)
 
-    pipeline.set_gaussians_from_numpy(
+    pipeline.set_primitive_from_numpy(
         means=means, log_scales=log_scales, rot_quats=rot_quats,
         opacities=opacities, color_logits=color_logits,
     )

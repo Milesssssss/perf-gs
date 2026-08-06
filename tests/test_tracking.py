@@ -41,7 +41,7 @@ def test_tracking_populates_and_clears(backend: str) -> None:
     #  0 — at origin, in frustum, will contribute
     #  1 — off to the side but still in frustum, will contribute
     #  2 — way off-screen (view-space z negative, behind camera), will NOT contribute
-    pipeline.set_gaussians_from_numpy(
+    pipeline.set_primitive_from_numpy(
         means=np.array([
             [0.0, 0.0, 2.0],
             [0.3, -0.2, 2.5],
@@ -111,7 +111,7 @@ def test_tracking_accumulates_across_iters(backend: str) -> None:
     W = H = 32
     pipeline = _setup(backend, W, H, max_splats=4)
 
-    pipeline.set_gaussians_from_numpy(
+    pipeline.set_primitive_from_numpy(
         means=np.array([[0.0, 0.0, 2.0]], dtype=np.float32),
         log_scales=np.log(np.array([[0.2, 0.2, 0.2]], dtype=np.float32)),
         rot_quats=np.array([[1.0, 0.0, 0.0, 0.0]], dtype=np.float32),

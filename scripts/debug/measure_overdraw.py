@@ -58,8 +58,8 @@ def main() -> None:
         device=device, width=W, height=H,
         max_splats=max(n + 1, 8_000_000),
         raster_config=RasterConfig(cluster_cull=False),  # raw binning, no cull
+        initial_state=gauss,
     )
-    pipeline.set_gaussians_from_numpy(**gauss)
 
     # Test split = every stride-th camera (same as eval holdout).
     test_idx = [i for i in range(len(scene.images)) if i % args.stride == 0]

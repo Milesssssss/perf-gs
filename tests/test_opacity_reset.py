@@ -19,7 +19,7 @@ def test_opacity_cap_clamps_only_values_above_cap(backend: str) -> None:
 
     pipeline = TestPipeline(device=device, width=32, height=32, max_splats=32)
     probabilities = np.array([0.9, 0.5, 0.01], dtype=np.float32)
-    pipeline.set_gaussians_from_numpy(
+    pipeline.set_primitive_from_numpy(
         means=np.zeros((3, 3), dtype=np.float32),
         log_scales=np.log(np.full((3, 3), 0.01, dtype=np.float32)),
         rot_quats=np.tile(np.array([1, 0, 0, 0], dtype=np.float32), (3, 1)),

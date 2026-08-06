@@ -130,11 +130,8 @@ def main() -> None:
         device=device,
         width=args.width, height=args.height,
         max_splats=max(n_init, 1024),
+        initial_state=scene.initial_points,
     )
-    pipeline.set_gaussians_from_numpy(**scene.initial_points)
-    # One-time full grad clear — seeds the scalar-grad-zero invariant that
-    # train_step relies on (see Pipeline._clear_2d_grad_seeds).
-    pipeline._clear_grads()
 
     # Iter-0 preview: render all cams before any training step runs.
     _render_all_cameras(pipeline, scene, 0, cams_dir)

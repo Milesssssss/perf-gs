@@ -54,7 +54,7 @@ def _target(h: int, w: int) -> np.ndarray:
 
 def _grads_with(pipeline: TestPipeline, scene, camera, use_persplat: bool,
                 use_flat: bool = False, use_warp_forward: bool = False):
-    pipeline.set_gaussians_from_numpy(**scene)
+    pipeline.set_primitive_from_numpy(**scene)
     pipeline.use_persplat_backward = use_persplat
     pipeline.use_flat_bucket_backward = use_flat
     pipeline.use_warp_per_pixel_forward = use_warp_forward

@@ -40,8 +40,8 @@ def main() -> None:
     device = create_device(backend=args.backend)
     pipeline = Pipeline(device=device, width=args.width, height=args.height,
                         max_splats=max(args.max_splats, n),
-                        appearance_config=AppearanceConfig(sh_degree=sh_degree))
-    pipeline.set_gaussians_from_numpy(**data)
+                        appearance_config=AppearanceConfig(sh_degree=sh_degree),
+                        initial_state=data)
     if sh_degree > 0:
         pipeline.set_active_sh_degree(sh_degree)
 

@@ -41,7 +41,6 @@ class AdamOptimizer:
         self.step_count = 0
 
     def reset(self) -> None:
-        """Zero the bias-correction step counter (fresh gaussians / new run)."""
         self.step_count = 0
 
     def step(self, lrs: "AdamLRs") -> None:
@@ -94,7 +93,7 @@ class AdamOptimizer:
                 adam_rest=b.adam_rest_state.storage,
                 num_gaussians_counter=b.num_gaussians_counter.storage,
                 cluster_visible=b.cluster_visible.storage,
-                lr_rest=lrs.sh_rest_lr,
+                lr_rest=lrs.sh_rest,
                 bias_correction1=bc1,
                 bias_correction2=bc2,
                 pixels_per_step=float(self._width * self._height),

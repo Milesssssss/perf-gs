@@ -106,7 +106,7 @@ def _analytic_grads(backend: str) -> tuple[np.ndarray, dict[str, np.ndarray], fl
     pipeline = _setup_pipeline(backend, W, H)
 
     scene = _scene()
-    pipeline.set_gaussians_from_numpy(**scene)
+    pipeline.set_primitive_from_numpy(**scene)
     target = _target(H, W)
     pipeline.set_target_image(target)
 
@@ -127,7 +127,7 @@ def _analytic_grads(backend: str) -> tuple[np.ndarray, dict[str, np.ndarray], fl
 
 
 def _loss_for(pipeline: TestPipeline, scene: dict, camera) -> float:
-    pipeline.set_gaussians_from_numpy(**scene)
+    pipeline.set_primitive_from_numpy(**scene)
     pipeline.forward_and_loss(camera)
     return pipeline.read_loss()
 
@@ -148,7 +148,7 @@ def test_gradients_finite_difference(backend: str) -> None:
     n = scene["means"].shape[0]
 
     # Analytic grads from backward.
-    pipeline.set_gaussians_from_numpy(**scene)
+    pipeline.set_primitive_from_numpy(**scene)
     pipeline.forward_and_loss(camera)
     pipeline._clear_grads()
     pipeline.backward()
@@ -166,7 +166,7 @@ def test_gradients_finite_difference(backend: str) -> None:
             scene_minus = {k: v.copy() for k, v in scene.items()}
 
             if grad_name == "opacity":
-                # The GPU stores a pre-sigmoid logit; ``set_gaussians_from_numpy``
+                # The GPU stores a pre-sigmoid logit; ``set_primitive_from_numpy``
                 # receives a probability and applies logit() internally. To
                 # perturb the logit by ±eps we must convert the probability,
                 # perturb in logit space, then sigmoid back before writing.

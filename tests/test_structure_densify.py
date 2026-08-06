@@ -85,7 +85,7 @@ def _set_eta(p: TestPipeline, idx: int, *, n_total: int,
 
 
 def _one_gaussian(p: TestPipeline, scale=0.1, opacity=0.9) -> None:
-    p.set_gaussians_from_numpy(
+    p.set_primitive_from_numpy(
         means=np.array([[0.0, 0.0, 3.0]], dtype=np.float32),
         log_scales=np.log(np.full((1, 3), scale, dtype=np.float32)),
         rot_quats=np.array([[1.0, 0.0, 0.0, 0.0]], dtype=np.float32),
@@ -238,7 +238,7 @@ def test_anisotropic_split_preserves_covariance(backend: str) -> None:
     # Anisotropic parent scale + a real (non-identity) rotation.
     scale = np.array([0.30, 0.20, 0.12], dtype=np.float64)
     quat = np.array([0.9, 0.1, 0.2, 0.3], dtype=np.float32)   # (w, x, y, z), unnormalized
-    p.set_gaussians_from_numpy(
+    p.set_primitive_from_numpy(
         means=np.array([[0.1, -0.2, 3.0]], dtype=np.float32),
         log_scales=np.log(scale.astype(np.float32))[None, :],
         rot_quats=quat[None, :],
@@ -412,7 +412,7 @@ def test_eta_carried_through_filler_densify(backend: str) -> None:
     scales = np.array([0.01, 0.01, 0.30, 0.01], dtype=np.float32)
     opac = np.array([0.9, 0.9, 0.9, 1e-4], dtype=np.float32)
     means = np.stack([xs, np.zeros(4, np.float32), np.full(4, 5.0, np.float32)], axis=1)
-    p.set_gaussians_from_numpy(
+    p.set_primitive_from_numpy(
         means=means,
         log_scales=np.log(np.repeat(scales[:, None], 3, axis=1)),
         rot_quats=np.tile(np.array([1.0, 0, 0, 0], np.float32), (4, 1)),
@@ -521,7 +521,7 @@ def test_eta_carried_through_morton_sort(backend: str) -> None:
     k = 5
     xs = np.array([4.0, 3.0, 2.0, 1.0, 0.0], dtype=np.float32)
     means = np.stack([xs, np.zeros(k, np.float32), np.zeros(k, np.float32)], axis=1)
-    p.set_gaussians_from_numpy(
+    p.set_primitive_from_numpy(
         means=means,
         log_scales=np.log(np.full((k, 3), 0.05, dtype=np.float32)),
         rot_quats=np.tile(np.array([1.0, 0, 0, 0], np.float32), (k, 1)),

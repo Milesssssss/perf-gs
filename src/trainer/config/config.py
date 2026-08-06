@@ -72,5 +72,4 @@ class AdamLRs:
     rot: float = 1e-3
     opacity: float = 2.5e-2
     color: float = 2.5e-3  # in reality this is the SH0 LR
-    # Higher-band SH LR. None => color / 20 (INRIA features_rest = features_dc/20).
-    sh_rest: float = 2.5e-3 / 20.0
+    sh_rest: float = 2.5e-3 / 10.0

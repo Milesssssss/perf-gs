@@ -32,9 +32,6 @@ class DensificationMode(str, Enum):
 
     @classmethod
     def from_args(cls, args) -> "DensificationMode":
-        """Resolve the CLI ``--densify-mode`` choice into the typed mode. The
-        single boundary that reads the raw ``args.densify_mode`` string, so the
-        enum (not a scatter of booleans) owns which strategy a run uses."""
         return cls(args.densify_mode)
 
 

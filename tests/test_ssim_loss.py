@@ -140,7 +140,7 @@ def test_ssim_grad_matches_reference(backend: str):
             l2_weight=LAMBDA_L2,
         ),
     )
-    pipeline.set_gaussians_from_numpy(**_scene())
+    pipeline.set_primitive_from_numpy(**_scene())
     target = _target(H, W)
     pipeline.set_target_image(target)
     camera = simple_camera(

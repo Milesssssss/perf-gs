@@ -52,7 +52,7 @@ def test_opacity_reg_gradient(backend: str):
         loss_config=LossConfig(ssim_weight=0.0, alpha_weight=0.0),
     )
     scene = _scene()
-    p.set_gaussians_from_numpy(**scene)
+    p.set_primitive_from_numpy(**scene)
 
     # Isolate the reg gradient: clear all grads, then run ONLY regularization.
     p._clear_grads()
@@ -63,7 +63,7 @@ def test_opacity_reg_gradient(backend: str):
     n = scene["opacities"].shape[0]
 
     # Expected: w * sigmoid(o)*(1-sigmoid(o)) / n. The GPU stores the pre-sigmoid
-    # LOGIT; set_gaussians_from_numpy took probabilities, so sigmoid(logit) == p.
+    # LOGIT; set_primitive_from_numpy took probabilities, so sigmoid(logit) == p.
     prob = scene["opacities"].astype(np.float64)
     expected = W_OPACITY * prob * (1.0 - prob) / n
 
@@ -87,7 +87,7 @@ def test_opacity_reg_off_is_zero(backend: str):
         loss_config=LossConfig(ssim_weight=0.0, alpha_weight=0.0),
     )
     scene = _scene()
-    p.set_gaussians_from_numpy(**scene)
+    p.set_primitive_from_numpy(**scene)
     p._clear_grads()
     p.regularize()
     device.wait_for_idle()

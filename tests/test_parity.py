@@ -11,7 +11,7 @@ import slangpy as spy
 
 from trainer.data.dataset import simple_camera
 from trainer.backend.compute.device import create_device
-from trainer.backend.render.pipeline import Pipeline
+from _pipeline_testkit import TestPipeline
 
 
 def _render_scene(backend: str) -> np.ndarray:
@@ -21,8 +21,8 @@ def _render_scene(backend: str) -> np.ndarray:
         pytest.skip(f"backend {backend!r} unavailable: {exc}")
 
     W, H = 128, 128
-    pipeline = Pipeline(device=device, width=W, height=H, max_splats=32)
-    pipeline.set_gaussians_from_numpy(
+    pipeline = TestPipeline(device=device, width=W, height=H, max_splats=32)
+    pipeline.set_primitive_from_numpy(
         means=np.array([
             [0.0, 0.0, 3.0],
             [0.3, 0.0, 2.5],
@@ -85,9 +85,9 @@ def _render_dense(backend: str, warp_forward: bool) -> np.ndarray:
     opacities = rng.uniform(0.2, 0.9, n).astype(np.float32)
     colors = rng.normal(0.0, 3.0, size=(n, 3)).astype(np.float32)
 
-    pipeline = Pipeline(device=device, width=W, height=H, max_splats=n)
+    pipeline = TestPipeline(device=device, width=W, height=H, max_splats=n)
     pipeline.use_warp_per_pixel_forward = warp_forward
-    pipeline.set_gaussians_from_numpy(
+    pipeline.set_primitive_from_numpy(
         means=means, log_scales=log_scales, rot_quats=rot,
         opacities=opacities, color_logits=colors,
     )

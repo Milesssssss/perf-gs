@@ -23,6 +23,14 @@ class TestPipeline(Pipeline):
     # subclass. Tells pytest's collector to skip it (avoids a collection warning).
     __test__ = False
 
+    def set_primitive_from_numpy(self, **snapshot) -> None:
+        """Re-load a primitive snapshot into an already-built pipeline (resets
+        Adam + SH state). Production primes once at construction
+        (``Pipeline(initial_state=...)``); this in-place re-prime is a TEST-ONLY
+        affordance so one pipeline can be reused across many finite-difference
+        perturbations without rebuilding the device + kernels each time."""
+        self._load_snapshot(**snapshot)
+
     def forward_and_loss(self, camera: Camera) -> None:
         """Run forward + loss only. Used by tests that read ``dL_dC``
         before the backward pass runs.

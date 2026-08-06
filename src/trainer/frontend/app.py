@@ -193,20 +193,22 @@ class TrainingApplication:
         return cls(build_parser().parse_args())
 
     def launch_training(self) -> None:
-        # prepare for training
+        # ------ prepare for training -------------------------
         self.profiling_enabled = apply_profile_session_overrides(self.args)
-        self._load_scene_and_validate_config()
 
         self.scene_context = load_scene_context(self.args)
 
         self.densify_mode = validate_training_config(
             self.args,
-            n_cams=sceneContext.camera_count,
-            n_train=len(sceneContext.train_indices),
-            n_test=len(sceneContext.test_indices),
+            n_cams=self._sceneContext.camera_count,
+            n_train=len(self._sceneContext.train_indices),
+            n_test=len(self._sceneContext.test_indices),
         )
 
-        self.densify_config, self.structure_config = build_densify_configs(self.args, self._sceneContext.extent)
+        (
+            self.densify_config,
+            self.structure_config
+        ) = build_densify_configs(self.args, self._sceneContext.extent)
 
         (
             self.effective_lambda_l2,
@@ -221,7 +223,7 @@ class TrainingApplication:
         self._start_integrations()
         self._create_training_services()
 
-        # launch training loop
+        # ---- launch training loop --------------------
         result = TrainingLoop(
             args=self.args,
             scene=self._sceneContext,
@@ -238,7 +240,7 @@ class TrainingApplication:
             paths=self.paths,
         ).launch_training_loop()
 
-        # Post-training
+        # -----Post-training----------------------------------------
         self._write_final_test_psnr(result)
 
         trainingRuntime: TrainingRuntime = self._training_runtime
@@ -260,18 +262,17 @@ class TrainingApplication:
             print("[profile-run] finished; skipping final metrics / PLY export.")
             return
 
-        sceneContext = self._sceneContext
         run_post_training(
             pipeline=trainingRuntime.pipeline,
-            scene=sceneContext.colmapScene,
+            scene=self._sceneContext.colmapScene,
             args=self.args,
             run_dir=self.paths.root,
             cams_dir=self.paths.cameras,
             targets_srgb=self._targets.srgb,
             targets_linear=self._targets.linear,
-            test_indices=sceneContext.test_indices,
-            stride=sceneContext.holdout_stride,
-            n_cams=sceneContext.camera_count,
+            test_indices=self._sceneContext.test_indices,
+            stride=self._sceneContext.holdout_stride,
+            n_cams=self._sceneContext.camera_count,
             train_wall_s=result.wall_time_seconds,
             completed_iters=result.iterations,
             t_start=result.started_at,
@@ -299,18 +300,17 @@ class TrainingApplication:
             scene=scene,
             lambda_l2=self.effective_lambda_l2,
             lambda_ssim=self.effective_lambda_ssim,
+            initial_state=scene.colmapScene.initial_points,
         )
-        initialize_pipeline(
-            pipeline=self._pipeline,
-            initial_points=scene.colmapScene.initial_points,
-            densify_mode=self._densify_mode,
-            use_flat_bucket_backward=self.args.flat_bucket_backward,
-        )
+        
+        if self._densify_mode == DensificationMode.STRUCTURE_AWARE:
+            self._pipeline.clear_structure_scores()
 
         self.mip_diagnostics = MipFilterDiagnostics(
             enabled=self.args.mip_splatting,
             pipeline=self._pipeline,
         )
+
         train_cameras = [scene.colmapScene.images[i].camera for i in scene.train_indices]
         self.mip_diagnostics.initialize(
             train_cameras=train_cameras,
@@ -569,6 +569,7 @@ class TrainingLoop:
 
     def launch_training_loop(self) -> TrainingResult:
         self._begin_training_loop()
+
         while self._should_continue():
             context = self._next_iteration()
             self._prepare_iteration(context)
@@ -1258,7 +1259,8 @@ def create_gpu_queue_lock(*, viewer_enabled: bool) -> Any:
 
 def create_pipeline(*, args: argparse.Namespace, device: Any, gpu_lock: Any,
                     scene: SceneContext, lambda_l2: float,
-                    lambda_ssim: float) -> Pipeline:
+                    lambda_ssim: float,
+                    initial_state: dict | None = None) -> Pipeline:
     return Pipeline(
         device=device,
         width=scene.width,
@@ -1287,18 +1289,8 @@ def create_pipeline(*, args: argparse.Namespace, device: Any, gpu_lock: Any,
             sh_degree=args.sh_degree,
             band_interval=args.sh_band_interval,
         ),
+        initial_state=initial_state,
     )
-
-
-def initialize_pipeline(*, pipeline: Pipeline, initial_points: dict,
-                        densify_mode: DensificationMode,
-                        use_flat_bucket_backward: bool) -> None:
-    pipeline.set_gaussians_from_numpy(**initial_points)
-    pipeline.clear_tracking()
-    pipeline.use_flat_bucket_backward = use_flat_bucket_backward
-    pipeline._clear_grads()
-    if densify_mode == DensificationMode.STRUCTURE_AWARE:
-        pipeline.clear_structure_scores()
 
 
 def main() -> None:

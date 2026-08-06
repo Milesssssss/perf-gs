@@ -35,7 +35,7 @@ def test_compute_3d_filter_basic(backend: str) -> None:
     p = _setup(backend)
     # Two gaussians in front of a camera at z=0 looking toward +z.
     means = np.array([[0.0, 0.0, 3.0], [0.5, -0.3, 4.0]], dtype=np.float32)
-    p.set_gaussians_from_numpy(
+    p.set_primitive_from_numpy(
         means=means,
         log_scales=np.log(np.full((2, 3), 0.1, dtype=np.float32)),
         rot_quats=np.tile(np.array([1.0, 0.0, 0.0, 0.0], np.float32), (2, 1)),
@@ -96,7 +96,7 @@ def test_mip_on_gradients_finite_difference(backend: str) -> None:
     n = scene["means"].shape[0]
 
     # Upload base params, then compute the 3D filter ONCE and freeze it.
-    pipeline.set_gaussians_from_numpy(**scene)
+    pipeline.set_primitive_from_numpy(**scene)
     pipeline.set_cameras([camera])
     pipeline.compute_3d_filter()
     f = np.frombuffer(pipeline.buffers.filter_3D.to_numpy().tobytes(), dtype=np.float32)[:n]
@@ -111,7 +111,7 @@ def test_mip_on_gradients_finite_difference(backend: str) -> None:
     def _loss(scn: dict) -> float:
         # set_gaussians uploads params but does NOT touch filter_3D (no
         # recompute), so the FD holds the filter fixed at its base value.
-        pipeline.set_gaussians_from_numpy(**scn)
+        pipeline.set_primitive_from_numpy(**scn)
         pipeline.forward_and_loss(camera)
         return pipeline.read_loss()
 

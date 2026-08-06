@@ -22,7 +22,7 @@ import pytest
 from trainer.data.dataset import simple_camera
 from trainer.contracts.codegen import RASTER_BUCKET_SIZE, TILE_SIZE
 from trainer.backend.compute.device import create_device
-from trainer.backend.render.pipeline import Pipeline
+from _pipeline_testkit import TestPipeline
 
 
 BUCKET = RASTER_BUCKET_SIZE
@@ -68,7 +68,7 @@ def test_forward_checkpoints_reconstruct(backend: str) -> None:
 
     W = H = 64
     n = 80  # > 2 buckets of overlap in the central tile
-    pipeline = Pipeline(device=device, width=W, height=H, max_splats=128)
+    pipeline = TestPipeline(device=device, width=W, height=H, max_splats=128)
 
     rng = np.random.default_rng(0)
     # Cluster many overlapping splats near the optical axis so the central
@@ -82,7 +82,7 @@ def test_forward_checkpoints_reconstruct(backend: str) -> None:
     opac = np.full(n, 0.5, dtype=np.float32)
     colors = rng.uniform(-2.0, 2.0, (n, 3)).astype(np.float32)
 
-    pipeline.set_gaussians_from_numpy(
+    pipeline.set_primitive_from_numpy(
         means=means, log_scales=log_scales, rot_quats=rot,
         opacities=opac, color_logits=colors,
     )

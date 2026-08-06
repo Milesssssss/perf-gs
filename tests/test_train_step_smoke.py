@@ -14,6 +14,7 @@ import numpy as np
 import pytest
 
 from _pipeline_testkit import TestPipeline
+from trainer.backend.render.pipeline import Pipeline
 from trainer.config.config import AdamLRs, LossConfig
 from trainer.data.dataset import simple_camera
 from trainer.backend.compute.device import create_device
@@ -37,7 +38,7 @@ def _setup(backend: str) -> TestPipeline:
     opacities = np.array([0.8, 0.6, 0.7], dtype=np.float32)
     color_logits = np.array([[1.5, -1.5, -1.5], [-1.5, 1.5, -1.5], [-1.5, -1.5, 1.5]],
                             dtype=np.float32)
-    p.set_gaussians_from_numpy(means=means, log_scales=log_scales, rot_quats=rot_quats,
+    p.set_primitive_from_numpy(means=means, log_scales=log_scales, rot_quats=rot_quats,
                                opacities=opacities, color_logits=color_logits)
     target = np.zeros((16, 16, 3), np.float32)
     target[..., 0] = 0.5   # non-matching target => non-zero gradients
@@ -68,6 +69,52 @@ def test_train_step_records_one_batch_and_updates(backend: str) -> None:
     # Adam moved parameters (non-matching target => non-zero grads => update).
     after = p.buffers.gaussians.to_numpy()
     assert not np.array_equal(before, after)
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_construction_with_initial_state_primes_pipeline(backend: str) -> None:
+    """``Pipeline(initial_state=...)`` uploads the snapshot and zeros the derived
+    state (Adam, grads, tracking) in ``__init__``, so the pipeline is born ready
+    to render + train with no separate priming call. Production path used by
+    create_pipeline / v1_train."""
+    try:
+        device = create_device(backend=backend)
+    except Exception as exc:
+        pytest.skip(f"backend {backend!r} unavailable: {exc}")
+    state = dict(
+        means=np.array([[0.0, 0.0, 3.0], [0.2, 0.1, 2.5], [-0.15, -0.1, 2.0]],
+                       dtype=np.float32),
+        log_scales=np.log(np.full((3, 3), 0.3, dtype=np.float32)),
+        rot_quats=np.tile(np.array([1.0, 0.0, 0.0, 0.0], np.float32), (3, 1)),
+        opacities=np.array([0.8, 0.6, 0.7], dtype=np.float32),
+        color_logits=np.array([[1.5, -1.5, -1.5], [-1.5, 1.5, -1.5],
+                               [-1.5, -1.5, 1.5]], dtype=np.float32),
+    )
+    p = Pipeline(device=device, width=16, height=16, max_splats=16,
+                 loss_config=LossConfig(ssim_weight=0.0, alpha_weight=0.0),
+                 initial_state=state)
+    cam = simple_camera(width=16, height=16, eye=(0.0, 0.0, 0.0),
+                        target=(0.0, 0.0, 1.0), up=(0.0, 1.0, 0.0),
+                        fovy_degrees=60.0)
+
+    # Born valid: the ctor-uploaded snapshot renders content and the optimizer
+    # state is reset (step count 0) — no separate priming call was made.
+    assert p.iteration == 0
+    p.render(cam)
+    rendered = p.read_output_image()[..., :3]
+    assert np.isfinite(rendered).all()
+    assert float(np.abs(rendered).sum()) > 0.0
+
+    # And it trains end-to-end straight from construction (the ctor priming
+    # seeded the scalar-grad-zero invariant train_step relies on).
+    target = np.zeros((16, 16, 3), np.float32)
+    target[..., 0] = 0.5
+    p.set_target_image(target)
+    before = p.buffers.gaussians.to_numpy().copy()
+    p.train_step(cam, lrs=AdamLRs(mean=1e-2, scale=1e-2, rot=1e-3,
+                                  opacity=1e-2, color=1e-2))
+    p.device.wait_for_idle()
+    assert not np.array_equal(before, p.buffers.gaussians.to_numpy())
 
 
 @pytest.mark.parametrize("backend", BACKENDS)

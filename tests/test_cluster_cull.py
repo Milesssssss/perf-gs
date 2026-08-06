@@ -59,7 +59,7 @@ def test_cluster_cull_kills_offscreen_cluster(backend: str) -> None:
     opacities = np.full(n, 0.5, dtype=np.float32)
     color_logits = np.zeros((n, 3), dtype=np.float32)
 
-    pipeline.set_gaussians_from_numpy(
+    pipeline.set_primitive_from_numpy(
         means=means, log_scales=log_scales, rot_quats=rot_quats,
         opacities=opacities, color_logits=color_logits,
     )
@@ -106,7 +106,7 @@ def test_cluster_cull_off_is_noop(backend: str) -> None:
     opacities = np.full(n, 0.5, dtype=np.float32)
     color_logits = np.zeros((n, 3), dtype=np.float32)
 
-    pipeline.set_gaussians_from_numpy(
+    pipeline.set_primitive_from_numpy(
         means=means, log_scales=log_scales, rot_quats=rot_quats,
         opacities=opacities, color_logits=color_logits,
     )

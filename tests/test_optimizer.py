@@ -82,7 +82,7 @@ def test_adam_step_matches_reference(backend: str) -> None:
     color_logits = np.array([[0.30, -0.50, 0.80],
                              [-0.20, 0.40, -0.60],
                              [0.10, 0.10, -0.10]], dtype=np.float32)
-    p.set_gaussians_from_numpy(means=means, log_scales=log_scales,
+    p.set_primitive_from_numpy(means=means, log_scales=log_scales,
                                rot_quats=rot_quats, opacities=opacities,
                                color_logits=color_logits)
 

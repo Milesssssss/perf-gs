@@ -108,6 +108,9 @@ class Pipeline:
         regularization_config: RegularizationConfig | None = None,
         appearance_config: AppearanceConfig | None = None,
         viewer_only: bool = False,
+        initial_state: dict | None = None,
+        use_persplat_backward: bool = False,
+        use_flat_bucket_backward: bool = True,
     ) -> None:
         self.device = device
         # Serializes GPU queue access (submit/present/wait_for_idle) against
@@ -235,16 +238,17 @@ class Pipeline:
 
         self.last_submit_id: int = 0
 
-        self.use_persplat_backward = True
-        self.use_flat_bucket_backward = False
+        assert use_persplat_backward or use_flat_bucket_backward and not (use_persplat_backward and use_flat_bucket_backward), "At least one backward mode must be enabled, but not both"
+
+        self.use_persplat_backward      = use_persplat_backward
+        self.use_flat_bucket_backward   = use_flat_bucket_backward
 
         if self.raster_config.mip_enabled and not self.use_persplat_backward:
             raise RuntimeError(
                 "mip_enabled requires use_persplat_backward=True: the per-pixel "
                 "backward does not propagate opacity-compensation gradients.")
 
-        if (self.compositor_config.extinction_hardness != 1.0
-                and not self.use_persplat_backward):
+        if (self.compositor_config.extinction_hardness != 1.0 and not self.use_persplat_backward):
             raise RuntimeError(
                 "extinction_hardness != 1 requires use_persplat_backward=True: "
                 "the per-pixel backward does not implement hardened extinction.")
@@ -252,8 +256,7 @@ class Pipeline:
         #starts at 0, increments after each bwd step
         self._backward_pixel_phase = 0
 
-        self._extinction_hardness = float(
-            self.compositor_config.extinction_hardness)
+        self._extinction_hardness = float(self.compositor_config.extinction_hardness)
 
         self._active_target = None if viewer_only else self.buffers.target_image
 
@@ -262,6 +265,11 @@ class Pipeline:
         self._mip_cameras_buffer: spy.Buffer | None = None
         self._mip_num_cameras: int = 0
         self._mip_filter_coef: float = 0.0
+
+        if initial_state is not None:
+            self._load_snapshot(**initial_state)
+            self._clear_grads()
+            self.clear_tracking()
 
     def on_hot_reload(self) -> None:
         """Refresh reflection-dependent objects after device.reload_all_programs().
@@ -381,11 +389,7 @@ class Pipeline:
         finally:
             self._batch = None
 
-    # ------------------------------------------------------------------
-    # Data loading
-    # ------------------------------------------------------------------
-
-    def set_gaussians_from_numpy(
+    def _load_snapshot(
         self,
         means: np.ndarray,
         log_scales: np.ndarray,
@@ -394,6 +398,10 @@ class Pipeline:
         color_logits: np.ndarray,
         features_rest: np.ndarray | None = None,
     ) -> None:
+        """Upload one primitive snapshot and reset the state it invalidates
+        (Adam moments; SH coefficients + their moments). Internal: the pipeline
+        is primed once at construction via ``initial_state``. A fresh snapshot
+        wholesale-replaces the parameters, so the stale moments MUST reset too."""
         buffer_io.write_gaussians(
             self.buffers,
             means=means, log_scales=log_scales, rot_quats=rot_quats,
@@ -436,8 +444,8 @@ class Pipeline:
     def set_features_rest(self, features_rest: np.ndarray | None) -> None:
         """Upload initial SH rest coefficients ``(N, rest_floats)`` (coeff-major
         ``[coeff*3 + channel]``) into the separate features_rest buffer, e.g.
-        when initializing from an SH ``.ply``. Call AFTER set_gaussians_from_numpy
-        (which zero-clears it). No-op when SH is off or no coefficients given."""
+        when initializing from an SH ``.ply``. Runs as part of the snapshot load
+        (which zero-clears it first). No-op when SH is off or none given."""
         if (not self.buffers.sh_enabled or features_rest is None
                 or features_rest.size == 0):
             return
