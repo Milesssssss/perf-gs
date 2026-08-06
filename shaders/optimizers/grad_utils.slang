@@ -27,6 +27,20 @@ void clearFloatBuffer(
     buffer[i] = 0.0;
 }
 
+// Zero a plain uint buffer (fp16-packed SH features_rest / adam_rest init). A
+// zero uint unpacks to two 0.0 fp16 halves. count is the TOTAL uint length.
+[shader("compute")]
+[numthreads(256, 1, 1)]
+void clearUintBuffer(
+    uint3 dtid: SV_DispatchThreadID,
+    RWStructuredBuffer<uint> buffer,
+    uniform uint count)
+{
+    uint i = dtid.x;
+    if (i >= count) return;
+    buffer[i] = 0u;
+}
+
 // Zero all per-gaussian Adam first/second moments device-side. Replaces a host
 // round-trip (readback-to-size + host zero upload) at set-gaussians time. Uses
 // Slang's zero-init cast so it never enumerates AdamState's fields (which are

@@ -170,8 +170,8 @@ void splitAndCloneSH(
     RWStructuredBuffer<uint> num_gaussians_counter,
     StructuredBuffer<uint> action,
     StructuredBuffer<uint> pre_count_buf,
-    RWStructuredBuffer<float> features_rest,
-    RWStructuredBuffer<float> adam_rest,
+    RWStructuredBuffer<uint> features_rest,
+    RWStructuredBuffer<uint> adam_rest,
     uniform uint rest_floats,
     uniform uint max_splats)
 {

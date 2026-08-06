@@ -34,6 +34,7 @@
 // or the next densify reads window statistics for the wrong slot.
 
 #include "../common/types.slang"
+#include "../common/half_pack.slang"
 
 // Split a 21-bit integer into every third bit (positions 0, 3, 6, ...).
 // Classic magic-bit-spread for a 3-way Morton interleave; returns a
@@ -184,16 +185,18 @@ void mortonScatterEta(
 // sorted_values permutation mortonScatter applies to the gaussians, so the
 // coefficients survive a Morton re-sort. Additive: dispatched only when SH is
 // enabled, reading the identical sorted_values slot for a consistent permute.
+// All SH buffers are fp16-packed uint32 (features: (rest_floats+1)/2 uints per
+// gaussian; adam: rest_floats uints); this raw-copies uints, no unpack.
 [shader("compute")]
 [numthreads(256, 1, 1)]
 void mortonScatterSH(
     uint3 dtid: SV_DispatchThreadID,
-    StructuredBuffer<float> features_rest_in,
-    StructuredBuffer<float> adam_rest_in,
+    StructuredBuffer<uint> features_rest_in,
+    StructuredBuffer<uint> adam_rest_in,
     StructuredBuffer<uint> sorted_values,
     StructuredBuffer<uint> count_buf,
-    RWStructuredBuffer<float> features_rest_out,
-    RWStructuredBuffer<float> adam_rest_out,
+    RWStructuredBuffer<uint> features_rest_out,
+    RWStructuredBuffer<uint> adam_rest_out,
     uniform uint rest_floats,
     uniform uint max_splats)
 {
@@ -202,12 +205,11 @@ void mortonScatterSH(
     uint n = count_buf[0];
     if (i >= n) return;
     uint src = sorted_values[i];
-    uint pd = i * rest_floats, ps = src * rest_floats;
-    uint ad = i * rest_floats * 2u, asrc = src * rest_floats * 2u;
+    uint fu = halfFeatUints(rest_floats);
+    uint fd = i * fu, fs = src * fu;
+    for (uint c = 0u; c < fu; ++c)
+        features_rest_out[fd + c] = features_rest_in[fs + c];
+    uint ad = i * rest_floats, asrc = src * rest_floats;
     for (uint c = 0u; c < rest_floats; ++c)
-    {
-        features_rest_out[pd + c] = features_rest_in[ps + c];
-        adam_rest_out[ad + c * 2u + 0u] = adam_rest_in[asrc + c * 2u + 0u];
-        adam_rest_out[ad + c * 2u + 1u] = adam_rest_in[asrc + c * 2u + 1u];
-    }
+        adam_rest_out[ad + c] = adam_rest_in[asrc + c];
 }

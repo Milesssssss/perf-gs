@@ -139,6 +139,7 @@ class SphericalHarmonicsResources:
     """
 
     rest_floats: int
+    feat_uints: int
     features_rest: spy.NDBuffer
     features_rest_scratch: spy.NDBuffer
     features_rest_grad: spy.NDBuffer
@@ -667,20 +668,20 @@ def allocate(
     buffers.densify_fanout_threshold = allocator.uint_buffer(1)
 
     # --- optional view-dependent SH rest coefficients ---
-    # Allocated only when sh_degree > 0 (sh_rest_floats == 3 * per-channel rest
-    # coeffs at the configured max degree). Sized for the MAX degree; not-yet-
-    # activated bands stay zero until the progressive schedule enables them.
-    # features_rest for the initial set is uploaded by buffer_io; adam_rest is
-    # zeroed by the clear-adam kernel — so no costly host zero-fill here (the
-    # buffer can be 1.8 GB at max_splats=10M).
+    # Allocated only when sh_degree > 0. All SH buffers are fp16-packed into
+    # uint32 (2 coeffs/uint for features + grad; one (m, v) pair/uint for adam),
+    # halving the footprint vs float32. features_rest for the initial set is
+    # uploaded by buffer_io; adam_rest is zeroed by the clear kernel.
     if sh_rest_floats > 0:
+        feat_uints = (sh_rest_floats + 1) // 2
         buffers.sh = SphericalHarmonicsResources(
             rest_floats=sh_rest_floats,
-            features_rest=allocator.typed_buffer("float", max_splats * sh_rest_floats),
-            features_rest_scratch=allocator.typed_buffer("float", max_splats * sh_rest_floats),
-            features_rest_grad=allocator.typed_buffer("float", max_splats * sh_rest_floats),
-            adam_rest=allocator.typed_buffer("float", max_splats * sh_rest_floats * 2),
-            adam_rest_scratch=allocator.typed_buffer("float", max_splats * sh_rest_floats * 2),
+            feat_uints=feat_uints,
+            features_rest=allocator.uint_buffer(max_splats * feat_uints),
+            features_rest_scratch=allocator.uint_buffer(max_splats * feat_uints),
+            features_rest_grad=allocator.uint_buffer(max_splats * feat_uints),
+            adam_rest=allocator.uint_buffer(max_splats * sh_rest_floats),
+            adam_rest_scratch=allocator.uint_buffer(max_splats * sh_rest_floats),
         )
 
     # --- Cluster-Cull-Compact scratch ---
@@ -811,13 +812,15 @@ def allocate_viewer(
     # Optional view-dependent SH: the viewer forward reads features_rest (blit
     # target from the trainer stream) + writes clamp_mask. No grad/Adam/scratch.
     if sh_rest_floats > 0:
+        feat_uints = (sh_rest_floats + 1) // 2
         buffers.sh = SphericalHarmonicsResources(
             rest_floats=sh_rest_floats,
-            features_rest=allocator.typed_buffer("float", max_splats * sh_rest_floats),
-            features_rest_scratch=allocator.typed_buffer("float", 1),
-            features_rest_grad=allocator.typed_buffer("float", 1),
-            adam_rest=allocator.typed_buffer("float", 1),
-            adam_rest_scratch=allocator.typed_buffer("float", 1),
+            feat_uints=feat_uints,
+            features_rest=allocator.uint_buffer(max_splats * feat_uints),
+            features_rest_scratch=allocator.uint_buffer(1),
+            features_rest_grad=allocator.uint_buffer(1),
+            adam_rest=allocator.uint_buffer(1),
+            adam_rest_scratch=allocator.uint_buffer(1),
         )
 
     buffers.num_gaussians_counter.copy_from_numpy(np.zeros(1, dtype=np.uint32))

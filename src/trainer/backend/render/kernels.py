@@ -60,6 +60,7 @@ KERNEL_SPECS: tuple[tuple[str, str, str], ...] = (
     ("grad_clear",           "optimizers/grad_utils.slang",                    "clearGradBuffer"),
     ("clear_adam_state",     "optimizers/grad_utils.slang",                    "clearAdamState"),
     ("clear_float_buffer",   "optimizers/grad_utils.slang",                    "clearFloatBuffer"),
+    ("clear_uint_buffer",    "optimizers/grad_utils.slang",                    "clearUintBuffer"),
     # densify
     ("clear_tracking",       "densify/clear_tracking.slang",                   "clearTracking"),
     ("accumulate_iter",      "densify/accumulate_iter.slang",                  "accumulateIter"),

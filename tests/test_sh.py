@@ -16,8 +16,38 @@ from _pipeline_testkit import TestPipeline
 from trainer.config.config import AdamLRs, AppearanceConfig, LossConfig
 from trainer.data.dataset import simple_camera
 from trainer.backend.compute.device import create_device
+from trainer.backend.memory import buffer_io
 
 BACKENDS = ["vulkan", "d3d12"]
+
+
+def _read_features_rest(p: TestPipeline, n: int) -> np.ndarray:
+    """Read + unpack the fp16-packed features_rest for the first n gaussians."""
+    sh = p.buffers.sh
+    packed = np.frombuffer(p.buffers.features_rest.to_numpy().tobytes(),
+                           dtype=np.uint32)[: n * sh.feat_uints]
+    return buffer_io.unpack_features_rest(packed, n, sh.rest_floats)
+
+
+def _read_features_grad(p: TestPipeline, n: int) -> np.ndarray:
+    sh = p.buffers.sh
+    packed = np.frombuffer(p.buffers.features_rest_grad.to_numpy().tobytes(),
+                           dtype=np.uint32)[: n * sh.feat_uints]
+    return buffer_io.unpack_features_rest(packed, n, sh.rest_floats)
+
+
+def _pack_adam_mv(m: np.ndarray, v: np.ndarray) -> np.ndarray:
+    """(N, rest_floats) m/v float -> (N*rest_floats,) uint32, one (m, v)/uint."""
+    mh = m.astype(np.float16).view(np.uint16).astype(np.uint32)
+    vh = v.astype(np.float16).view(np.uint16).astype(np.uint32)
+    return (mh | (vh << 16)).reshape(-1)
+
+
+def _read_adam_m(p: TestPipeline, n: int) -> np.ndarray:
+    rf = p.buffers.sh.rest_floats
+    raw = np.frombuffer(p.buffers.adam_rest_state.to_numpy().tobytes(),
+                        dtype=np.uint32)[: n * rf].reshape(n, rf)
+    return (raw & 0xFFFF).astype(np.uint16).view(np.float16).astype(np.float32)
 
 
 def _make_pipeline(backend: str, sh_degree: int, width: int = 48,
@@ -60,7 +90,7 @@ def test_sh_forward_is_view_dependent(backend: str) -> None:
     # Band-1 z-term on the R channel: rest coeff index 1, channel 0.
     rest = np.zeros(p.buffers.sh.rest_floats, np.float32)
     rest[1 * 3 + 0] = 5.0
-    p.buffers.features_rest.copy_from_numpy(rest)
+    p.set_features_rest(rest.reshape(1, -1))
     p.set_active_sh_degree(1)
 
     # Both cameras look at the gaussian (centered), from +z-behind vs +x-side,
@@ -89,8 +119,7 @@ def test_sh_zero_rest_matches_sh0(backend: str) -> None:
 
     sh_on = _make_pipeline(backend, sh_degree=3)
     _one_gaussian(sh_on, sh0)
-    sh_on.buffers.features_rest.copy_from_numpy(
-        np.zeros(sh_on.buffers.sh.rest_floats, np.float32))
+    # features_rest is already zero (set_gaussians clears it).
     sh_on.set_active_sh_degree(3)
     got = _center_rgb(sh_on, cam)
 
@@ -99,9 +128,7 @@ def test_sh_zero_rest_matches_sh0(backend: str) -> None:
 
 def _upload_rest(p: TestPipeline, gid0_rest: np.ndarray) -> None:
     """Upload gaussian 0's rest coefficients (rest is zero for other slots)."""
-    full = np.zeros(p.buffers.max_splats * p.buffers.sh.rest_floats, np.float32)
-    full[: gid0_rest.size] = gid0_rest
-    p.buffers.features_rest.copy_from_numpy(full)
+    p.set_features_rest(gid0_rest.reshape(1, -1))
 
 
 @pytest.mark.parametrize("backend", BACKENDS)
@@ -150,8 +177,7 @@ def test_sh_rest_gradient_finite_difference(backend: str) -> None:
     p.forward_and_loss(cam)
     p._clear_grads()
     p.backward()
-    analytic = p.buffers.features_rest_grad.to_numpy().reshape(-1)[
-        : p.buffers.sh.rest_floats].astype(np.float64)
+    analytic = _read_features_grad(p, 1)[0].astype(np.float64)
 
     eps = 2e-3
     # Flat indices spanning band 1 (0..8), band 2 (9..23), band 3 (24..44),
@@ -239,7 +265,7 @@ def test_sh_training_updates_rest_and_reduces_loss(backend: str) -> None:
 
     rest_floats = p.buffers.sh.rest_floats
     # features_rest starts at zero (set_gaussians clears it).
-    assert np.abs(p.buffers.features_rest.to_numpy().reshape(-1)[:rest_floats]).max() == 0.0
+    assert np.abs(_read_features_rest(p, 1)).max() == 0.0
 
     p.forward_and_loss(cam)
     loss0 = p.read_loss()
@@ -250,7 +276,7 @@ def test_sh_training_updates_rest_and_reduces_loss(backend: str) -> None:
 
     p.forward_and_loss(cam)
     loss1 = p.read_loss()
-    rest = p.buffers.features_rest.to_numpy().reshape(-1)[:rest_floats]
+    rest = _read_features_rest(p, 1)[0]
 
     assert np.abs(rest).max() > 1e-4, "rest coefficients never moved off zero"
     assert loss1 < loss0, f"loss did not decrease: {loss0:.3f} -> {loss1:.3f}"
@@ -281,15 +307,16 @@ def test_sh_features_rest_survives_morton_sort(backend: str) -> None:
     p.set_gaussians_from_numpy(means=means, log_scales=log_scales, rot_quats=rot,
                                opacities=opac, color_logits=color)
 
-    # Fingerprint coeff-0 of features_rest and adam_rest with the slot index
-    # (set AFTER set_gaussians, which zero-clears both).
+    # Fingerprint coeff-0 of features_rest and adam_rest (m) with the slot index
+    # (set AFTER set_gaussians, which zero-clears both). fp16(0..15) is exact.
     rest_floats = p.buffers.sh.rest_floats
     rest = np.zeros((max_splats, rest_floats), np.float32)
     rest[:n, 0] = np.arange(n)
-    p.buffers.features_rest.copy_from_numpy(rest.reshape(-1))
-    arest = np.zeros((max_splats, rest_floats * 2), np.float32)
-    arest[:n, 0] = np.arange(n)
-    p.buffers.adam_rest_state.copy_from_numpy(arest.reshape(-1))
+    p.buffers.features_rest.copy_from_numpy(buffer_io.pack_features_rest(rest))
+    m = np.zeros((max_splats, rest_floats), np.float32)
+    m[:n, 0] = np.arange(n)
+    p.buffers.adam_rest_state.copy_from_numpy(
+        _pack_adam_mv(m, np.zeros_like(m)))
 
     world_min = means.min(axis=0) - 1.0
     world_max = means.max(axis=0) + 1.0
@@ -300,10 +327,8 @@ def test_sh_features_rest_survives_morton_sort(backend: str) -> None:
                            dtype=np.float32).reshape(-1, 14)
     sorted_sh0_r = floats[:n, 11]   # original slot index carried in sh0.r
 
-    rest_out = np.frombuffer(p.buffers.features_rest.to_numpy().tobytes(),
-                             dtype=np.float32).reshape(max_splats, rest_floats)[:n, 0]
-    arest_out = np.frombuffer(p.buffers.adam_rest_state.to_numpy().tobytes(),
-                              dtype=np.float32).reshape(max_splats, rest_floats * 2)[:n, 0]
+    rest_out = _read_features_rest(p, n)[:, 0]
+    arest_out = _read_adam_m(p, n)[:, 0]
 
     assert np.allclose(rest_out, sorted_sh0_r), (
         "features_rest not permuted in lockstep with gaussians")
@@ -358,11 +383,11 @@ def test_sh_densify_clone_inherits_rest(backend: str) -> None:
     rest = np.zeros((64, rest_floats), np.float32)
     parent_rest = (np.arange(rest_floats, dtype=np.float32) + 1.0) * 0.01
     rest[0] = parent_rest
-    p.buffers.features_rest.copy_from_numpy(rest.reshape(-1))
+    p.buffers.features_rest.copy_from_numpy(buffer_io.pack_features_rest(rest))
     # Stamp the parent's rest-Adam non-zero so we can prove the child gets fresh.
-    arest = np.zeros((64, rest_floats * 2), np.float32)
-    arest[0] = 7.0
-    p.buffers.adam_rest_state.copy_from_numpy(arest.reshape(-1))
+    m = np.zeros((64, rest_floats), np.float32)
+    m[0] = 7.0
+    p.buffers.adam_rest_state.copy_from_numpy(_pack_adam_mv(m, m))
 
     _force_clone_eta(p, 0)
     cfg = StructureConfig(tau_split=0.8, tau_prune=0.8, split_power=0.5,
@@ -373,14 +398,14 @@ def test_sh_densify_clone_inherits_rest(backend: str) -> None:
     count = int(p.buffers.num_gaussians_counter.to_numpy().view(np.uint32)[0])
     assert count == 2, f"expected 1 clone (count 2), got {count}"
 
-    rest_out = np.frombuffer(p.buffers.features_rest.to_numpy().tobytes(),
-                             dtype=np.float32).reshape(64, rest_floats)
-    arest_out = np.frombuffer(p.buffers.adam_rest_state.to_numpy().tobytes(),
-                              dtype=np.float32).reshape(64, rest_floats * 2)
+    rest_out = _read_features_rest(p, 2)
+    arest_m = _read_adam_m(p, 2)
 
-    np.testing.assert_allclose(rest_out[1], parent_rest, rtol=0, atol=1e-6)
-    np.testing.assert_allclose(rest_out[0], parent_rest, rtol=0, atol=1e-6)
-    assert np.all(arest_out[1] == 0.0), "cloned child's rest-Adam must be fresh (zero)"
+    # Child (index 1) is a bit-exact fp16 copy of the parent's coefficients;
+    # the parent matches the input within fp16 quantization.
+    np.testing.assert_array_equal(rest_out[1], rest_out[0])
+    np.testing.assert_allclose(rest_out[0], parent_rest, rtol=1e-2, atol=2e-3)
+    assert np.all(arest_m[1] == 0.0), "cloned child's rest-Adam must be fresh (zero)"
 
 
 def test_sh_ply_roundtrip_features_rest(tmp_path) -> None:

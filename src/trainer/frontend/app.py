@@ -62,6 +62,8 @@ from trainer.frontend.training_preflight import (
 from trainer.frontend.schedule import TrainingSchedule
 from trainer.frontend.viewer.viewer_control import ViewerSession
 
+from trainer.data.colmap import ColmapDataset
+
 # The thin scripts/running/v2_train.py entrypoint installs scripts/running and
 # scripts/debug on sys.path before importing this module.
 from _v2_profiling import Profiler  # pyright: ignore[reportMissingImports]
@@ -88,7 +90,7 @@ class RunPaths:
 
 @dataclass(frozen=True)
 class SceneContext:
-    scene: Any
+    colmapScene: Any
     width: int
     height: int
     camera_count: int
@@ -187,25 +189,31 @@ class TrainingApplication:
         return cls(build_parser().parse_args())
 
     def launch_training(self) -> None:
-        self.prepare()
-        result = self.launch_training_loop()
-        self.finish(result)
-
-    def prepare(self) -> None:
+        # prepare for training
         self._prepare_profiler()
-        self._load_and_validate_experiment()
+        self._load_scene_and_validate_experiment()
+
+        self.densify_config, self.structure_config = build_densify_configs(self.args, self._sceneContext.extent)
+
+        (
+            self.effective_lambda_l2,
+            self.effective_lambda_ssim,
+            self.base_lrs
+         ) = resolve_loss_and_lrs(self.args)
+
+        self._write_resolved_config()
         self._prepare_targets()
         self._create_rendering_system()
         self._prepare_optional_features()
         self._start_integrations()
         self._create_training_services()
 
-    def launch_training_loop(self) -> TrainingResult:
-        loop = TrainingLoop(
+        # launch training loop
+        result = TrainingLoop(
             args=self.args,
-            scene=self._scene,
+            scene=self._sceneContext,
             targets=self._targets,
-            runtime=self._runtime,
+            runtime=self._training_runtime,
             densify_mode=self._densify_mode,
             densify_config=self.densify_config,
             base_lrs=self._base_lrs,
@@ -215,17 +223,14 @@ class TrainingApplication:
             mean_lr=self._mean_lr,
             extinction=self._extinction,
             paths=self.paths,
-        )
-        return loop.run()
-
-    def finish(self, result: TrainingResult) -> None:
-        runtime = self._runtime
-        runtime.pipeline.runtime.wait_for_idle()
+        ).run()
 
         self._write_final_test_psnr(result)
-        runtime.profiler.close()
-        runtime.viewer.hold_after_training(runtime.pipeline)
-        runtime.artifacts.close_all()
+
+        trainingRuntime: TrainingRuntime = self._training_runtime
+        trainingRuntime.profiler.close()
+        trainingRuntime.viewer.hold_after_training(trainingRuntime.pipeline)
+        trainingRuntime.artifacts.close_all()
 
         PsNRPlotWriter.write(
             enabled=self.args.psnr_curve,
@@ -233,25 +238,25 @@ class TrainingApplication:
             args=self.args,
             paths=self.paths,
             run_name=self.run_name,
-            scene=self._scene,
+            scene=self._sceneContext,
         )
 
         if self.args.profile_run:
             print("[profile-run] finished; skipping final metrics / PLY export.")
             return
 
-        scene = self._scene
+        sceneContext = self._sceneContext
         run_post_training(
-            pipeline=runtime.pipeline,
-            scene=scene.scene,
+            pipeline=trainingRuntime.pipeline,
+            scene=sceneContext.colmapScene,
             args=self.args,
             run_dir=self.paths.root,
             cams_dir=self.paths.cameras,
             targets_srgb=self._targets.srgb,
             targets_linear=self._targets.linear,
-            test_indices=scene.test_indices,
-            stride=scene.holdout_stride,
-            n_cams=scene.camera_count,
+            test_indices=sceneContext.test_indices,
+            stride=sceneContext.holdout_stride,
+            n_cams=sceneContext.camera_count,
             train_wall_s=result.wall_time_seconds,
             completed_iters=result.iterations,
             t_start=result.started_at,
@@ -259,31 +264,23 @@ class TrainingApplication:
 
     def _prepare_profiler(self) -> None:
         self.profiler.configure_session()
-        self.profiler.inject()
+        self.profiler.inject()     
 
-    def _resolve_loss_lambdas_and_lrs(self) -> None:
-        self.effective_lambda_l2, self.effective_lambda_ssim, self.base_lrs = resolve_loss_and_lrs(self.args)
-
-    def _build_densify_configs(self) -> None:
-        self.densify_config, self.structure_config = build_densify_configs(self.args, self._scene.extent)
-
-    def _load_and_validate_experiment(self) -> None:
+    def _load_scene_and_validate_experiment(self) -> None:
         self.scene_context = load_scene_context(self.args)
-        scene = self._scene
+        sceneContext = self._sceneContext
 
         self.densify_mode = validate_training_config(
             self.args,
-            n_cams=scene.camera_count,
-            n_train=len(scene.train_indices),
-            n_test=len(scene.test_indices),
+            n_cams=sceneContext.camera_count,
+            n_train=len(sceneContext.train_indices),
+            n_test=len(sceneContext.test_indices),
         )
-        
-        self._write_resolved_config()
 
     def _prepare_targets(self) -> None:
-        scene = self._scene
+        scene = self._sceneContext
         self.targets = TargetDataset(
-            scene=scene.scene,
+            scene=scene.colmapScene,
             width=scene.width,
             height=scene.height,
             use_alpha=self.args.w_alpha > 0,
@@ -291,9 +288,10 @@ class TrainingApplication:
         self.targets.write_ground_truths(self.paths.cameras)
 
     def _create_rendering_system(self) -> None:
-        scene = self._scene
+        scene = self._sceneContext
         self.device = create_training_device(self.args)
         self.gpu_lock = create_gpu_queue_lock(viewer_enabled=not self.args.no_viewer)
+
         self.pipeline = create_pipeline(
             args=self.args,
             device=self.device,
@@ -304,7 +302,7 @@ class TrainingApplication:
         )
         initialize_pipeline(
             pipeline=self._pipeline,
-            initial_points=scene.scene.initial_points,
+            initial_points=scene.colmapScene.initial_points,
             densify_mode=self._densify_mode,
             use_flat_bucket_backward=self.args.flat_bucket_backward,
         )
@@ -313,13 +311,13 @@ class TrainingApplication:
             enabled=self.args.mip_splatting,
             pipeline=self._pipeline,
         )
-        train_cameras = [scene.scene.images[i].camera for i in scene.train_indices]
+        train_cameras = [scene.colmapScene.images[i].camera for i in scene.train_indices]
         self.mip_diagnostics.initialize(
             train_cameras=train_cameras,
             kernel_size=self.args.mip_kernel_size,
         )
 
-        if self.args.no_viewer:
+        if not self.args.no_viewer:
             self.viewer = ViewerSession.create(
                 device=self.device,
                 width=scene.width,
@@ -329,6 +327,8 @@ class TrainingApplication:
                 gpu_lock=self.gpu_lock,
                 pipeline=self._pipeline,
             )
+        else:
+            self.viewer = ViewerSession(None)
 
     def _prepare_optional_features(self) -> None:
         pipeline = self._pipeline
@@ -338,7 +338,7 @@ class TrainingApplication:
         self.structure_textures = StructureTextureProvider(
             args=self.args,
             device=self.device,
-            scene=self._scene,
+            scene=self._sceneContext,
             targets=self._targets.srgb,
             densify_mode=self._densify_mode,
         ).load()
@@ -346,10 +346,10 @@ class TrainingApplication:
     def _start_integrations(self) -> None:
         self._viewer.start()
         self.profiler.open_window(
-            self._pipeline, self._scene.width, self._scene.height)
+            self._pipeline, self._sceneContext.width, self._sceneContext.height)
 
     def _create_training_services(self) -> None:
-        scene = self._scene
+        scene = self._sceneContext
         artifacts = RunArtifacts.create(self.paths.root, self.args)
         reporter = TrainingReporter(artifacts, self.args, scene)
         reporter.write_header()
@@ -399,13 +399,13 @@ class TrainingApplication:
         )
 
     def _write_resolved_config(self) -> None:
-        scene = self._scene
+        sceneContext = self._sceneContext
         base_lrs = self._base_lrs
         config = {
             "scene": self.args.scene,
             "iters": self.args.iters,
-            "width": scene.width,
-            "height": scene.height,
+            "width": sceneContext.width,
+            "height": sceneContext.height,
             "preview_every": self.args.preview_every,
             "log_every": self.args.log_every,
             "densify_every": self.args.densify_every,
@@ -425,18 +425,18 @@ class TrainingApplication:
             "mip_kernel_size": (
                 self.args.mip_kernel_size if self.args.mip_splatting else 0.3),
             "run_name": self.run_name,
-            "n_cams": scene.camera_count,
-            "n_init_points": scene.initial_gaussian_count,
+            "n_cams": sceneContext.camera_count,
+            "n_init_points": sceneContext.initial_gaussian_count,
             "cli_args": dict(vars(self.args)),
             "resolved": {
                 "densify_mode": self._densify_mode.value,
-                "width": scene.width,
-                "height": scene.height,
-                "n_cams": scene.camera_count,
-                "n_init_points": scene.initial_gaussian_count,
-                "n_train": len(scene.train_indices),
-                "n_test": len(scene.test_indices),
-                "holdout_stride": scene.holdout_stride,
+                "width": sceneContext.width,
+                "height": sceneContext.height,
+                "n_cams": sceneContext.camera_count,
+                "n_init_points": sceneContext.initial_gaussian_count,
+                "n_train": len(sceneContext.train_indices),
+                "n_test": len(sceneContext.test_indices),
+                "holdout_stride": sceneContext.holdout_stride,
                 "eff_lambda_l2": self.effective_lambda_l2,
                 "eff_lambda_ssim": self.effective_lambda_ssim,
                 "base_lr_scale": base_lrs.scale,
@@ -450,22 +450,22 @@ class TrainingApplication:
     def _write_final_test_psnr(self, result: TrainingResult) -> None:
         if not self.args.final_test_psnr or self.args.profile_run:
             return
-        scene = self._scene
+        sceneContext = self._sceneContext
         psnr, count = eval_test_psnr_srgb(
-            self._pipeline, scene.scene, scene.test_indices, self._targets.srgb)
+            self._pipeline, sceneContext.colmapScene, sceneContext.test_indices, self._targets.srgb)
         (self.paths.root / "test_psnr.json").write_text(json.dumps({
             "psnr_srgb": psnr,
             "n_gaussians": count,
-            "n_test_cams": len(scene.test_indices),
+            "n_test_cams": len(sceneContext.test_indices),
             "train_wall_s": result.wall_time_seconds,
             "iters": result.iterations,
             "flat_bucket_backward": bool(self.args.flat_bucket_backward),
         }, indent=2))
         print(f"[final-test-psnr] TEST PSNR sRGB = {psnr:.3f} dB over "
-              f"{len(scene.test_indices)} held-out cams  (n_gaussians={count})")
+              f"{len(sceneContext.test_indices)} held-out cams  (n_gaussians={count})")
 
     @property
-    def _scene(self) -> SceneContext:
+    def _sceneContext(self) -> SceneContext:
         assert self.scene_context is not None
         return self.scene_context
 
@@ -475,7 +475,7 @@ class TrainingApplication:
         return self.targets
 
     @property
-    def _runtime(self) -> TrainingRuntime:
+    def _training_runtime(self) -> TrainingRuntime:
         assert self.runtime is not None
         return self.runtime
 
@@ -594,7 +594,7 @@ class TrainingLoop:
     def _next_iteration(self) -> IterationContext:
         self.iteration += 1
         camera_index = self.sampler.next()
-        camera_entry = self.scene.scene.images[camera_index]
+        camera_entry = self.scene.colmapScene.images[camera_index]
         learning_rates = AdamLRs(
             mean=self.mean_lr.at(self.iteration - 1),
             scale=self.base_lrs.scale,
@@ -697,7 +697,7 @@ class TrainingLoop:
         if context.number > 1 and context.events.render_all:
             render_all_cameras(
                 self.runtime.pipeline,
-                self.scene.scene,
+                self.scene.colmapScene,
                 context.number,
                 self.paths.cameras,
             )
@@ -729,7 +729,7 @@ class TrainingLoop:
         started = time.time()
         psnr, count = eval_test_psnr_srgb(
             self.runtime.pipeline,
-            self.scene.scene,
+            self.scene.colmapScene,
             self.scene.test_indices,
             self.targets.srgb,
         )
@@ -750,7 +750,7 @@ class TrainingLoop:
             return
         self.eval_time_total = run_eval_sweep(
             pipeline=self.runtime.pipeline,
-            scene=self.scene.scene,
+            scene=self.scene.colmapScene,
             it=context.number,
             test_indices=self.scene.test_indices,
             targets_srgb=self.targets.srgb,
@@ -1198,42 +1198,39 @@ class PsNRPlotWriter:
                   f"({error}); `.venv/Scripts/python.exe -m pip install "
                   "matplotlib` to enable it.")
 
-
-
 def load_scene_context(args: argparse.Namespace) -> SceneContext:
-    scene = load_colmap(
+    colmapScene : ColmapDataset = load_colmap(
         args.scene,
         width=args.width,
         height=args.height,
         downsample=args.downsample,
         init_opacity=args.init_opacity,
     )
-    camera_count = len(scene.images)
-    initial_count = scene.initial_points["means"].shape[0]
-    width, height = scene.images[0].camera.image_size
-    print(f"loaded {camera_count} cameras, {initial_count} init points, "
-          f"scene_extent={scene.scene_extent:.3f}")
 
-    stride, test_indices, train_indices = resolve_holdout_split(
-        args, camera_count)
-    morton_min, morton_max = compute_morton_bounds(
-        scene.initial_points["means"])
-    print(f"schedule: densify [{args.densify_from}, {args.densify_to}] "
-          f"every {args.densify_every}")
+    camera_count = len(colmapScene.images)
+    initial_count = colmapScene.initial_points["means"].shape[0]
+    width, height = colmapScene.images[0].camera.image_size
+
+    print(f"loaded {camera_count} cameras, {initial_count} init points, scene_extent={colmapScene.scene_extent:.3f}")
+
+    stride, test_indices, train_indices = resolve_holdout_split(args, camera_count)
+    morton_min, morton_max = compute_morton_bounds(colmapScene.initial_points["means"])
+
+    print(f"schedule: densify [{args.densify_from}, {args.densify_to}] every {args.densify_every}")
+
     return SceneContext(
-        scene=scene,
+        colmapScene=colmapScene,
         width=width,
         height=height,
         camera_count=camera_count,
         initial_gaussian_count=initial_count,
-        extent=scene.scene_extent,
+        extent=colmapScene.scene_extent,
         train_indices=train_indices,
         test_indices=test_indices,
         holdout_stride=stride,
         morton_min=morton_min,
         morton_max=morton_max,
     )
-
 
 def create_training_device(args: argparse.Namespace) -> Any:
     specialization = ShaderSpecialization.from_args(args)
@@ -1247,15 +1244,8 @@ def create_training_device(args: argparse.Namespace) -> Any:
               "(SPIR-V NonSemantic.Shader.DebugInfo) for Nsight correlation.")
     return device
 
-
 def create_gpu_queue_lock(*, viewer_enabled: bool) -> Any:
-    """Return the reentrant queue lock shared by training and the viewer.
-
-    A reentrant lock is required because coarse training/viewer operations can
-    enter runtime code that acquires the same queue lock again.
-    """
     return threading.RLock() if viewer_enabled else None
-
 
 def create_pipeline(*, args: argparse.Namespace, device: Any, gpu_lock: Any,
                     scene: SceneContext, lambda_l2: float,

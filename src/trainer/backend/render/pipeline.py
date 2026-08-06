@@ -417,15 +417,16 @@ class Pipeline:
 
     def _clear_sh_state(self) -> None:
         """Zero features_rest + its Adam moments (device-side; buffers are far
-        too large to host-fill at a big --max-splats)."""
+        too large to host-fill at a big --max-splats). All fp16-packed uint32."""
         sh = self.buffers.sh
-        rest_count = self.max_splats * sh.rest_floats
-        self._dispatch(self.k_clear_float_buffer, "clear_features_rest",
-            thread_count=[rest_count, 1, 1],
-            buffer=sh.features_rest.storage, count=rest_count)
-        self._dispatch(self.k_clear_float_buffer, "clear_adam_rest",
-            thread_count=[rest_count * 2, 1, 1],
-            buffer=sh.adam_rest.storage, count=rest_count * 2)
+        feat_count = self.max_splats * sh.feat_uints
+        adam_count = self.max_splats * sh.rest_floats
+        self._dispatch(self.k_clear_uint_buffer, "clear_features_rest",
+            thread_count=[feat_count, 1, 1],
+            buffer=sh.features_rest.storage, count=feat_count)
+        self._dispatch(self.k_clear_uint_buffer, "clear_adam_rest",
+            thread_count=[adam_count, 1, 1],
+            buffer=sh.adam_rest.storage, count=adam_count)
 
     def set_gaussians_raw(self, floats: np.ndarray, count: int) -> None:
         """Upload a snapshot already in the packed 14-float layout (from the
@@ -443,10 +444,11 @@ class Pipeline:
         rest_floats = self.buffers.sh.rest_floats
         assert features_rest.shape[1] == rest_floats, (
             f"features_rest width {features_rest.shape[1]} != rest_floats {rest_floats}")
-        # Partial upload: writes the first N*rest_floats floats; the tail stays
+        # Partial upload: writes the first N*feat_uints uints; the tail stays
         # zero from _clear_sh_state (no full max_splats-sized host array).
         self.buffers.features_rest.copy_from_numpy(
-            np.ascontiguousarray(features_rest, dtype=np.float32).reshape(-1))
+            buffer_io.pack_features_rest(
+                np.ascontiguousarray(features_rest, dtype=np.float32)))
 
     def set_target_image(self, rgb: np.ndarray) -> None:
         """Upload a target image into the pipeline's owned texture. Call
@@ -689,6 +691,7 @@ class Pipeline:
                     features_rest=b.features_rest.storage,
                     blend_data=b.blend_data.storage,
                     active_sh_degree=self._active_sh_degree,
+                    rest_floats=b.sh.rest_floats,
                     max_splats=self.max_splats,
                 )
 
@@ -1040,6 +1043,7 @@ class Pipeline:
                     grad_mean_z=gb["mean_z"].storage,
                     cluster_visible=b.cluster_visible.storage,
                     active_sh_degree=self._active_sh_degree,
+                    rest_floats=b.sh.rest_floats,
                     max_splats=self.max_splats,
                 )
 

@@ -13,6 +13,7 @@
 //     (available as the ``total_out`` of the scan pass).
 
 #include "../common/types.slang"
+#include "../common/half_pack.slang"
 
 static const uint ACTION_KEEP  = 0;
 static const uint ACTION_SPLIT = 1;
@@ -121,17 +122,18 @@ void scatterCompactEta(
 // Additive SH-carry for compaction: move the optional features_rest coeffs +
 // their Adam moments through the SAME valid_mask / scan the gaussian compaction
 // used, so they land on the compacted slot. Dispatched only when SH is enabled,
-// after scatterCompact / scatterCompactEta (whichever moved the gaussians).
+// after scatterCompact / scatterCompactEta. All SH buffers are fp16-packed
+// uint32 (features: (rest_floats+1)/2 uints/gaussian; adam: rest_floats uints).
 [shader("compute")]
 [numthreads(256, 1, 1)]
 void scatterCompactSH(
     uint3 dtid: SV_DispatchThreadID,
-    StructuredBuffer<float> features_rest_in,
-    StructuredBuffer<float> adam_rest_in,
+    StructuredBuffer<uint> features_rest_in,
+    StructuredBuffer<uint> adam_rest_in,
     StructuredBuffer<uint>  valid_mask,
     StructuredBuffer<uint>  scan,
-    RWStructuredBuffer<float> features_rest_out,
-    RWStructuredBuffer<float> adam_rest_out,
+    RWStructuredBuffer<uint> features_rest_out,
+    RWStructuredBuffer<uint> adam_rest_out,
     uniform uint rest_floats,
     uniform uint max_splats)
 {
@@ -139,12 +141,11 @@ void scatterCompactSH(
     if (i >= max_splats) return;
     if (valid_mask[i] == 0u) return;
     uint dst = scan[i];
-    uint pd = dst * rest_floats, ps = i * rest_floats;
-    uint ad = dst * rest_floats * 2u, asrc = i * rest_floats * 2u;
+    uint fu = halfFeatUints(rest_floats);
+    uint fd = dst * fu, fs = i * fu;
+    for (uint c = 0u; c < fu; ++c)
+        features_rest_out[fd + c] = features_rest_in[fs + c];
+    uint ad = dst * rest_floats, asrc = i * rest_floats;
     for (uint c = 0u; c < rest_floats; ++c)
-    {
-        features_rest_out[pd + c] = features_rest_in[ps + c];
-        adam_rest_out[ad + c * 2u + 0u] = adam_rest_in[asrc + c * 2u + 0u];
-        adam_rest_out[ad + c * 2u + 1u] = adam_rest_in[asrc + c * 2u + 1u];
-    }
+        adam_rest_out[ad + c] = adam_rest_in[asrc + c];
 }

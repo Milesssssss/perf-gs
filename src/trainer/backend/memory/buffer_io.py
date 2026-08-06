@@ -73,3 +73,33 @@ def write_gaussians_raw(buffers: GaussianBuffers, floats: np.ndarray, n: int) ->
     if n > 0:
         buffers.gaussians.copy_from_numpy(block)
     set_num_gaussians(buffers, n)
+
+
+def sh_feature_uints(rest_floats: int) -> int:
+    """uint32s per gaussian for the fp16-packed features_rest (2 coeffs/uint)."""
+    return (rest_floats + 1) // 2
+
+
+def pack_features_rest(feat: np.ndarray) -> np.ndarray:
+    """``(N, rest_floats)`` float32 coefficients -> ``(N * feat_uints,)`` uint32,
+    fp16-packed 2 scalars per uint (matches the shader's readHalfScalar)."""
+    feat = np.ascontiguousarray(feat, dtype=np.float32)
+    n, rf = feat.shape
+    fu = sh_feature_uints(rf)
+    padded = np.zeros((n, fu * 2), np.float32)
+    padded[:, :rf] = feat
+    h = padded.astype(np.float16).view(np.uint16).reshape(n, fu, 2).astype(np.uint32)
+    return (h[..., 0] | (h[..., 1] << 16)).reshape(-1)
+
+
+def unpack_features_rest(packed: np.ndarray, n: int, rest_floats: int) -> np.ndarray:
+    """Inverse of :func:`pack_features_rest`: ``(N * feat_uints,)`` uint32 ->
+    ``(N, rest_floats)`` float32."""
+    fu = sh_feature_uints(rest_floats)
+    p = np.ascontiguousarray(packed, dtype=np.uint32).reshape(n, fu)
+    lo = (p & 0xFFFF).astype(np.uint16).view(np.float16).astype(np.float32)
+    hi = (p >> 16).astype(np.uint16).view(np.float16).astype(np.float32)
+    out = np.empty((n, fu * 2), np.float32)
+    out[:, 0::2] = lo
+    out[:, 1::2] = hi
+    return out[:, :rest_floats]

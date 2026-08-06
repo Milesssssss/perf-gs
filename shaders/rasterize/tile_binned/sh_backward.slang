@@ -28,8 +28,8 @@ void shBackward(
     StructuredBuffer<Gaussian3D> gaussians,
     StructuredBuffer<uint> num_gaussians_counter,
     StructuredBuffer<CameraData> camera,
-    StructuredBuffer<float> features_rest,
-    RWStructuredBuffer<float> features_rest_grad,
+    StructuredBuffer<uint> features_rest,
+    RWStructuredBuffer<uint> features_rest_grad,
     // Accumulated color gradient (read; clamped channels zeroed for the DC term).
     RWStructuredBuffer<int64_t> grad_color_r,
     RWStructuredBuffer<int64_t> grad_color_g,
@@ -41,6 +41,7 @@ void shBackward(
     RWStructuredBuffer<int64_t> grad_mean_z,
     StructuredBuffer<uint> cluster_visible,
     uniform uint active_sh_degree,
+    uniform uint rest_floats,
     uniform uint max_splats)
 {
     uint gid = dtid.x;
@@ -59,7 +60,7 @@ void shBackward(
                        fromFixed(grad_color_g[gid]),
                        fromFixed(grad_color_b[gid]));
 
-    float3 rest[SH_REST_COEFFS] = loadSHRest(features_rest, gid);
+    float3 rest[SH_REST_COEFFS] = loadSHRest(features_rest, gid, rest_floats);
 
     // Primal (pre-clamp) color to reconstruct the forward's >=0 clamp mask.
     float3 rgb_raw = shColorFromMean(g.sh0, rest, g.mean, cam, deg);
@@ -74,14 +75,29 @@ void shBackward(
     var dp_mean = diffPair(g.mean);
     bwd_diff(shColorFromMean)(g.sh0, dp_rest, dp_mean, cam, deg, seed);
 
-    // Higher-band coefficient gradients (RGB-interleaved per coeff; sole writer).
-    uint base = gid * uint(SH_REST_FLOATS);
+    // Higher-band coefficient gradients, packed fp16 (2 scalars per uint) into
+    // features_rest_grad (sole writer). dp_rest.d beyond the active degree is 0.
+    uint fu = halfFeatUints(rest_floats);
+    uint gbase = gid * fu;
     [ForceUnroll]
-    for (int k = 0; k < SH_REST_COEFFS; ++k)
+    for (uint u = 0u; u < uint(SH_FEAT_UINTS_MAX); ++u)
     {
-        features_rest_grad[base + uint(k * 3 + 0)] = dp_rest.d[k].x;
-        features_rest_grad[base + uint(k * 3 + 1)] = dp_rest.d[k].y;
-        features_rest_grad[base + uint(k * 3 + 2)] = dp_rest.d[k].z;
+        if (u >= fu) continue;
+        uint s0 = u * 2u, s1 = s0 + 1u;
+        uint k0 = s0 / 3u, c0 = s0 % 3u;
+        float3 v0 = dp_rest.d[k0];
+        float a = (c0 == 0u) ? v0.x : (c0 == 1u ? v0.y : v0.z);
+        float b = 0.0;
+        if (s1 < rest_floats)
+        {
+            // min() bounds the static index for the unrolled loop (s1==45 would
+            // give k1==15, OOB for the size-15 array); the branch only runs for
+            // real coeffs (k1 <= 14) so it is a no-op at runtime.
+            uint k1 = min(s1 / 3u, uint(SH_REST_COEFFS) - 1u), c1 = s1 % 3u;
+            float3 v1 = dp_rest.d[k1];
+            b = (c1 == 0u) ? v1.x : (c1 == 1u ? v1.y : v1.z);
+        }
+        features_rest_grad[gbase + u] = packHalf2x(a, b);
     }
 
     // DC (sh0) gradient == grad_color for unclamped channels; zero the ones the

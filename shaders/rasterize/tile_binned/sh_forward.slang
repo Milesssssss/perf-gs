@@ -22,9 +22,10 @@ void shForward(
     StructuredBuffer<Gaussian3D> gaussians,
     StructuredBuffer<uint> num_gaussians_counter,
     StructuredBuffer<CameraData> camera,
-    StructuredBuffer<float> features_rest,
+    StructuredBuffer<uint> features_rest,
     RWStructuredBuffer<BlendData> blend_data,
     uniform uint active_sh_degree,
+    uniform uint rest_floats,
     uniform uint max_splats)
 {
     uint gid = dtid.x;
@@ -34,7 +35,7 @@ void shForward(
     Gaussian3D g = gaussians[gid];
     float3 cam_center = cameraCenterWorld(camera[0].view_matrix);
 
-    float3 rest[SH_REST_COEFFS] = loadSHRest(features_rest, gid);
+    float3 rest[SH_REST_COEFFS] = loadSHRest(features_rest, gid, rest_floats);
     float3 rgb = max(shColorFromMean(g.sh0, rest, g.mean, cam_center,
                                      int(active_sh_degree)), 0.0);
 

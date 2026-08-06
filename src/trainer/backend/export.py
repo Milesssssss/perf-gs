@@ -11,6 +11,7 @@ from trainer.backend.render.pipeline import Pipeline
 from trainer.data.dataset import Camera
 from trainer.data.ply import write_gaussian_ply
 from trainer.contracts.codegen import gaussian_numpy_dtype
+from trainer.backend.memory import buffer_io
 
 
 def render_to_png(pipeline: Pipeline, camera: Camera, path: str | Path) -> None:
@@ -47,11 +48,12 @@ def save_ply(pipeline: Pipeline, path: str | Path) -> None:
     raw = pipeline.buffers.gaussians.to_numpy()
     gaussians = np.frombuffer(raw.tobytes(), dtype=gaussian_numpy_dtype())[:n]
 
-    # Optional view-dependent SH: export the higher-band coefficients as f_rest_*.
+    # Optional view-dependent SH: unpack the fp16-packed higher-band coefficients
+    # and export them as f_rest_*.
     features_rest = None
     if pipeline.buffers.sh_enabled:
-        rest_floats = pipeline.buffers.sh.rest_floats
-        rest_raw = pipeline.buffers.features_rest.to_numpy()
-        features_rest = np.frombuffer(rest_raw.tobytes(), dtype=np.float32)[
-            : n * rest_floats].reshape(n, rest_floats)
+        sh = pipeline.buffers.sh
+        packed = np.frombuffer(pipeline.buffers.features_rest.to_numpy().tobytes(),
+                               dtype=np.uint32)[: n * sh.feat_uints]
+        features_rest = buffer_io.unpack_features_rest(packed, n, sh.rest_floats)
     write_gaussian_ply(gaussians, path, features_rest=features_rest)

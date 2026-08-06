@@ -11,7 +11,12 @@
 #define TRAINER_GAUSSIAN_SH_SLANG
 
 #include "../../common/math.slang"      // SH_C0, shDC
+#include "../../common/half_pack.slang"  // fp16x2 packing for features_rest
 #include "generated/sh_types.slang"     // SH_REST_COEFFS, SH_REST_FLOATS, SH_MAX_DEGREE
+
+// Compile-time upper bound on packed feature uints per gaussian (2 coeffs/uint
+// at the max degree); the runtime count is halfFeatUints(rest_floats) <= this.
+static const int SH_FEAT_UINTS_MAX = (SH_REST_FLOATS + 1) / 2;
 
 // Real spherical-harmonics band constants (Kerbl et al. / INRIA 3DGS).
 static const float SH_C1 = 0.4886025119029199;
@@ -89,16 +94,30 @@ float3 shColorFromMean(no_diff float3 sh0, float3 rest[SH_REST_COEFFS],
 }
 
 // Load a gaussian's SH rest coefficients (RGB-interleaved per coeff) from the
-// flat features_rest buffer into the fixed-size array evalSHColor expects.
-float3[SH_REST_COEFFS] loadSHRest(StructuredBuffer<float> features_rest, uint gid)
+// fp16-packed features_rest buffer into the fixed-size array evalSHColor wants.
+// `rest_floats` is the configured storage width (3 * per-channel rest coeffs);
+// coefficients beyond it (unused at the active degree) are zero-filled.
+float3[SH_REST_COEFFS] loadSHRest(StructuredBuffer<uint> features_rest, uint gid,
+                                 uint rest_floats)
 {
     float3 rest[SH_REST_COEFFS];
-    uint base = gid * uint(SH_REST_FLOATS);
+    uint base = gid * halfFeatUints(rest_floats);
+    uint n_coeffs = rest_floats / 3u;
     [ForceUnroll]
-    for (int k = 0; k < SH_REST_COEFFS; ++k)
-        rest[k] = float3(features_rest[base + uint(k * 3 + 0)],
-                         features_rest[base + uint(k * 3 + 1)],
-                         features_rest[base + uint(k * 3 + 2)]);
+    for (uint k = 0u; k < uint(SH_REST_COEFFS); ++k)
+    {
+        if (k < n_coeffs)
+        {
+            uint s = k * 3u;
+            rest[k] = float3(readHalfScalar(features_rest, base, s),
+                             readHalfScalar(features_rest, base, s + 1u),
+                             readHalfScalar(features_rest, base, s + 2u));
+        }
+        else
+        {
+            rest[k] = float3(0.0);
+        }
+    }
     return rest;
 }
 

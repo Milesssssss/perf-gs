@@ -8,30 +8,32 @@
 #ifndef TRAINER_SH_CARRY_SLANG
 #define TRAINER_SH_CARRY_SLANG
 
+#include "../common/half_pack.slang"
+
 // Copy SH rest coefficients parent->child and zero the child's rest Adam
-// moments. Flat layout: features_rest[slot*rest_floats + c],
-// adam_rest[slot*rest_floats*2 + c*2 + {0,1}] (m, v).
+// moments. All SH buffers are fp16-packed uint32: features_rest is
+// (rest_floats+1)/2 uints/gaussian (2 coeffs each); adam_rest is rest_floats
+// uints (one packed (m, v) each). A zero uint = two 0.0 halves.
 void shInheritRest(uint child, uint parent, uint rest_floats,
-                   RWStructuredBuffer<float> features_rest,
-                   RWStructuredBuffer<float> adam_rest)
+                   RWStructuredBuffer<uint> features_rest,
+                   RWStructuredBuffer<uint> adam_rest)
 {
-    uint pc = child * rest_floats, pp = parent * rest_floats;
-    uint ac = child * rest_floats * 2u;
+    uint fu = halfFeatUints(rest_floats);
+    uint fc = child * fu, fp = parent * fu;
+    for (uint c = 0u; c < fu; ++c)
+        features_rest[fc + c] = features_rest[fp + c];
+    uint ac = child * rest_floats;
     for (uint c = 0u; c < rest_floats; ++c)
-    {
-        features_rest[pc + c] = features_rest[pp + c];
-        adam_rest[ac + c * 2u + 0u] = 0.0;
-        adam_rest[ac + c * 2u + 1u] = 0.0;
-    }
+        adam_rest[ac + c] = 0u;
 }
 
 // Zero a slot's rest Adam moments in place (a SPLIT parent slot becomes child-0:
 // it keeps its own features_rest but gets fresh Adam moments).
-void shZeroRestAdam(uint slot, uint rest_floats, RWStructuredBuffer<float> adam_rest)
+void shZeroRestAdam(uint slot, uint rest_floats, RWStructuredBuffer<uint> adam_rest)
 {
-    uint a = slot * rest_floats * 2u;
-    for (uint c = 0u; c < rest_floats * 2u; ++c)
-        adam_rest[a + c] = 0.0;
+    uint a = slot * rest_floats;
+    for (uint c = 0u; c < rest_floats; ++c)
+        adam_rest[a + c] = 0u;
 }
 
 #endif // TRAINER_SH_CARRY_SLANG

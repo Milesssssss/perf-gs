@@ -174,8 +174,8 @@ void splitAnisotropicSH(
     StructuredBuffer<uint> split_factor_y,
     StructuredBuffer<uint> split_factor_z,
     StructuredBuffer<uint> pre_count_buf,
-    RWStructuredBuffer<float> features_rest,
-    RWStructuredBuffer<float> adam_rest,
+    RWStructuredBuffer<uint> features_rest,
+    RWStructuredBuffer<uint> adam_rest,
     uniform float ks_scale_power,
     uniform uint rest_floats,
     uniform uint max_splats)
