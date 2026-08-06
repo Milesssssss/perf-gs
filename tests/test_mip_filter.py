@@ -45,7 +45,7 @@ def test_compute_3d_filter_basic(backend: str) -> None:
     cam = simple_camera(width=64, height=64, eye=(0.0, 0.0, 0.0),
                         target=(0.0, 0.0, 3.0))
 
-    p.set_cameras([cam])
+    p.set_mipsplatting_cameras([cam])
     p.compute_3d_filter()
     p.device.wait_for_idle()
 
@@ -97,7 +97,7 @@ def test_mip_on_gradients_finite_difference(backend: str) -> None:
 
     # Upload base params, then compute the 3D filter ONCE and freeze it.
     pipeline.set_primitive_from_numpy(**scene)
-    pipeline.set_cameras([camera])
+    pipeline.set_mipsplatting_cameras([camera])
     pipeline.compute_3d_filter()
     f = np.frombuffer(pipeline.buffers.filter_3D.to_numpy().tobytes(), dtype=np.float32)[:n]
     assert np.any(f > 0.0), f"mip filter should be non-zero for the test gaussians: {f}"

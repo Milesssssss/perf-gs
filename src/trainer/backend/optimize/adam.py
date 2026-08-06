@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from trainer.config.config import AdamLRs
 
+# TODO: these should be matching the adam.slang code
 _BETA1 = 0.9
 _BETA2 = 0.999
 
@@ -27,12 +28,13 @@ class AdamOptimizer:
     """
 
     def __init__(self, *, dispatch, dispatch_indirect, prepare_args_kernel,
-                 adam_kernel, buffers, max_splats: int, width: int, height: int,
+                 adam_kernel, clear_adam_state, buffers, max_splats: int, width: int, height: int,
                  adam_rest_kernel=None) -> None:
         self._dispatch = dispatch
         self._dispatch_indirect = dispatch_indirect
         self._k_prepare_args = prepare_args_kernel
         self._k_adam = adam_kernel
+        self._k_clear_adam_state = clear_adam_state
         self._k_adam_rest = adam_rest_kernel
         self._buffers = buffers
         self._max_splats = max_splats
@@ -52,9 +54,6 @@ class AdamOptimizer:
 
         b = self._buffers
 
-        # Populate adam_dispatch_args from num_gaussians_counter so we dispatch
-        # only ceil(count/256) workgroups instead of ceil(max_splats/256).
-        # Reuses the existing prepareDensifyArgs shader (same math).
         self._dispatch(self._k_prepare_args, "adam_prepare_args",
             thread_count=[1, 1, 1],
             count_buf=b.num_gaussians_counter.storage,
@@ -62,9 +61,6 @@ class AdamOptimizer:
             max_splats=self._max_splats,
         )
 
-        # Indirect: the driver reads (groups_x, 1, 1) from adam_dispatch_args at
-        # submit time, so if densify grows the count between iters the next
-        # dispatch covers the new range with no host-side count read.
         self._dispatch_indirect(self._k_adam, "adam", b.adam_dispatch_args,
             gaussians=b.gaussians.storage,
             adam_state=b.adam_state.storage,
@@ -83,9 +79,6 @@ class AdamOptimizer:
             pixels_per_step=float(self._width * self._height),
         )
 
-        # Optional view-dependent SH rest coefficients: their own Adam step over
-        # the separate features_rest buffer (LR = color/20, INRIA). Same indirect
-        # active-gaussian dispatch; skipped entirely on the SH-off path.
         if self._k_adam_rest is not None and b.sh_enabled:
             self._dispatch_indirect(self._k_adam_rest, "adam_rest", b.adam_dispatch_args,
                 features_rest=b.features_rest.storage,
@@ -99,3 +92,9 @@ class AdamOptimizer:
                 pixels_per_step=float(self._width * self._height),
                 rest_floats=b.sh.rest_floats,
             )
+
+    def clear_state(self):
+        self._dispatch(self._k_clear_adam_state, "clear_adam_state",
+            thread_count=[self._max_splats, 1, 1],
+            adam_state=self._buffers.adam_state.storage,
+            max_splats=self._max_splats)

@@ -182,7 +182,6 @@ class TrainingApplication:
         self.gpu_lock: Any = None
         self.pipeline: Pipeline | None = None
         self.viewer: ViewerSession | None = None
-        self.mip_diagnostics: MipFilterDiagnostics | None = None
         self.target_textures: list[Any] = []
         self.structure_textures: list[Any] = []
         self.mean_lr: MeanLearningRateSchedule | None = None
@@ -220,7 +219,8 @@ class TrainingApplication:
         self._prepare_targets()
         self._create_rendering_system()
         self._prepare_optional_features()
-        self._start_integrations()
+        self._start_viewer(self.scene_context)
+        self._start_profiler()
         self._create_training_services()
 
         # ---- launch training loop --------------------
@@ -234,7 +234,6 @@ class TrainingApplication:
             base_lrs=self._base_lrs,
             target_textures=self.target_textures,
             structure_textures=self.structure_textures,
-            mip_diagnostics=self._mip_diagnostics,
             mean_lr=self._mean_lr,
             extinction=self._extinction,
             paths=self.paths,
@@ -302,33 +301,11 @@ class TrainingApplication:
             lambda_ssim=self.effective_lambda_ssim,
             initial_state=scene.colmapScene.initial_points,
         )
-        
-        if self._densify_mode == DensificationMode.STRUCTURE_AWARE:
-            self._pipeline.clear_structure_scores()
 
-        self.mip_diagnostics = MipFilterDiagnostics(
-            enabled=self.args.mip_splatting,
-            pipeline=self._pipeline,
-        )
 
-        train_cameras = [scene.colmapScene.images[i].camera for i in scene.train_indices]
-        self.mip_diagnostics.initialize(
-            train_cameras=train_cameras,
-            kernel_size=self.args.mip_kernel_size,
-        )
 
-        if not self.args.no_viewer:
-            self.viewer = ViewerSession.create(
-                device=self.device,
-                width=scene.width,
-                height=scene.height,
-                max_splats=self.args.max_splats,
-                fovy=getattr(self.args, "fovy", 45.0),
-                gpu_lock=self.gpu_lock,
-                pipeline=self._pipeline,
-            )
-        else:
-            self.viewer = ViewerSession(None)
+        self._pipeline.set_mipsplatting_cameras([scene.colmapScene.images[i].camera for i in scene.train_indices])
+
 
     def _prepare_optional_features(self) -> None:
         pipeline = self._pipeline
@@ -343,8 +320,23 @@ class TrainingApplication:
             densify_mode=self._densify_mode,
         ).load()
 
-    def _start_integrations(self) -> None:
-        self._viewer.start()
+    def _start_viewer(self, scene: SceneContext) -> None:
+        if not self.args.no_viewer:
+            self.viewer = ViewerSession.create(
+                device=self.device,
+                width=scene.width,
+                height=scene.height,
+                max_splats=self.args.max_splats,
+                fovy=getattr(self.args, "fovy", 45.0),
+                gpu_lock=self.gpu_lock,
+                pipeline=self._pipeline,
+            )
+        else:
+            self.viewer = ViewerSession(None)
+
+        self.viewer.start()
+
+    def _start_profiler(self):
         if self.profiling_enabled:
             self.profiler = Profiler(self.args)
             self.profiler.open_window(
@@ -503,11 +495,6 @@ class TrainingApplication:
         return self.viewer
 
     @property
-    def _mip_diagnostics(self) -> "MipFilterDiagnostics":
-        assert self.mip_diagnostics is not None
-        return self.mip_diagnostics
-
-    @property
     def _mean_lr(self) -> MeanLearningRateSchedule:
         assert self.mean_lr is not None
         return self.mean_lr
@@ -533,7 +520,6 @@ class TrainingLoop:
         base_lrs: AdamLRs,
         target_textures: list[Any],
         structure_textures: list[Any],
-        mip_diagnostics: "MipFilterDiagnostics",
         mean_lr: MeanLearningRateSchedule,
         extinction: ExtinctionHardnessSchedule,
         paths: RunPaths,
@@ -547,7 +533,6 @@ class TrainingLoop:
         self.base_lrs = base_lrs
         self.target_textures = target_textures
         self.structure_textures = structure_textures
-        self.mip_diagnostics = mip_diagnostics
         self.mean_lr = mean_lr
         self.extinction = extinction
         self.paths = paths
@@ -691,7 +676,7 @@ class TrainingLoop:
             self.runtime.reporter.report_morton_sort(context.step_number)
 
         if events.mip_periodic:
-            self.mip_diagnostics.refresh("periodic", context.step_number)
+            pipeline.compute_3d_filter()
 
     def _produce_observations(self, context: IterationContext) -> bool:
         self.runtime.reporter.report_throughput(context)
@@ -866,51 +851,6 @@ class OpacityBundleReporter:
             f"reset_decay={settings['reset_decay']} "
             f"structure_grad_thresh={settings['structure_grad_thresh']} "
             f"absgs_grad_thresh={settings['absgs_grad_thresh']}",
-            flush=True,
-        )
-
-
-class MipFilterDiagnostics:
-    """Owns Mip-Splatting camera setup, refreshes, and buffer diagnostics."""
-
-    def __init__(self, *, enabled: bool, pipeline: Pipeline) -> None:
-        self._enabled = enabled
-        self._pipeline = pipeline
-
-    def initialize(self, *, train_cameras: list[Any], kernel_size: float) -> None:
-        if not self._enabled:
-            return
-        self._pipeline.set_cameras(train_cameras)
-        self._pipeline.compute_3d_filter()
-        print(f"[mip] enabled: kernel_size={kernel_size}, 3D filter over "
-              f"{len(train_cameras)} train cameras", flush=True)
-        self.log("init")
-
-    def refresh(self, tag: str, iteration: int | None = None) -> None:
-        if not self._enabled:
-            return
-        self._pipeline.compute_3d_filter()
-        self.log(tag, iteration)
-
-    def log(self, tag: str, iteration: int | None = None) -> None:
-        if not self._enabled:
-            return
-        buffers = self._pipeline.buffers
-        count = int(
-            buffers.num_gaussians_counter.to_numpy().view(np.uint32)[0])
-        if count == 0:
-            print(f"[filter3d] {tag}: no active gaussians", flush=True)
-            return
-        values = np.frombuffer(
-            buffers.filter_3D.to_numpy().tobytes(), dtype=np.float32
-        )[:count].astype(np.float64)
-        iteration_text = f"it={iteration} " if iteration is not None else ""
-        print(
-            f"[filter3d] {tag} {iteration_text}n={count} "
-            f"min={values.min():.6g} mean={values.mean():.6g} "
-            f"max={values.max():.6g} "
-            f"nonzero={np.count_nonzero(values) / count:.3f} "
-            f"sum={values.sum():.6g}",
             flush=True,
         )
 

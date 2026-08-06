@@ -230,13 +230,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--mip-kernel-size", type=float, default=0.1,
                     help="Mip-Splatting 2D low-pass dilation (mip canonical 0.1). Only used "
                          "with --mip-splatting; vanilla uses 0.3 with no compensation.")
-    parser.add_argument("--sh-degree", type=int, default=3, choices=[0, 1, 2, 3],
+    parser.add_argument("--sh-degree", type=int, default=0, choices=[0, 1, 2, 3],
                     help="Spherical-harmonics degree for view-dependent color (classic "
                          "3DGS). 0 (default) = view-independent SH band-0 (DC) only, the "
                          "original bit-identical path. 1-3 enables higher bands, stored in "
                          "a separate features_rest buffer allocated only when >0, activated "
                          "one band every --sh-band-interval iters (oneupSHdegree).")
-    parser.add_argument("--sh-band-interval", type=int, default=500,
+    parser.add_argument("--sh-band-interval", type=int, default=1000,
                     help="Iterations between activating successive SH bands (classic 3DGS "
                          "oneupSHdegree). Only used with --sh-degree > 0.")
     parser.add_argument("--sample-mode", type=str, default="sadgs", choices=["ours", "sadgs"],

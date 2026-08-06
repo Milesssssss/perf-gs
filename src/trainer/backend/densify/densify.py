@@ -406,15 +406,12 @@ def morton_sort(pipeline: Pipeline, world_min: np.ndarray,
     inv_extent = (1.0 / extent).astype(np.float32)
 
     with pipeline.recording("morton_sort") as recording, pipeline.marker_group("morton_sort"):
-        # 1. Publish n GPU-side: scan_total[0] = num_gaussians_counter[0].
         pipeline.dispatch(pipeline.k_densify_snapshot, "morton_snapshot",
             thread_count=[1, 1, 1],
             src=b.num_gaussians_counter.storage,
             dst=b.scan_total.storage,
         )
 
-        # 2. Encode Morton codes over max_splats. Tail slots get
-        # 0xFFFF...FF so the radix parks them at the end.
         pipeline.dispatch(pipeline.k_morton_encode, "morton_encode",
             thread_count=[pipeline.max_splats, 1, 1],
             gaussians=b.gaussians.storage,
@@ -427,10 +424,8 @@ def morton_sort(pipeline: Pipeline, world_min: np.ndarray,
             max_splats=pipeline.max_splats,
         )
 
-        # 3. 8-pass LSD radix; deterministic return to the A slot.
         pipeline.radix_sort_pairs()
 
-        # 4. Gather-permute Gaussian3D + AdamState via sorted_values.
         pipeline.dispatch(pipeline.k_morton_scatter, "morton_scatter",
             thread_count=[pipeline.max_splats, 1, 1],
             gaussians_in=b.gaussians.storage,
@@ -442,10 +437,6 @@ def morton_sort(pipeline: Pipeline, world_min: np.ndarray,
             max_splats=pipeline.max_splats,
         )
 
-        # 4b. (SAD-GS) Permute the eta accumulators by the SAME sorted_values,
-        # so the multiview frequency window survives the re-sort. Pure
-        # permutation (no create/destroy), reading the identical sorted_values
-        # slot as step 4 — the two permutations are consistent by construction.
         if carry_eta:
             pipeline.dispatch(pipeline.k_morton_scatter_eta, "morton_scatter_eta",
                 thread_count=[pipeline.max_splats, 1, 1],
@@ -455,8 +446,6 @@ def morton_sort(pipeline: Pipeline, world_min: np.ndarray,
                 max_splats=pipeline.max_splats,
             )
 
-        # 4c. (SH) Permute features_rest + its Adam moments by the SAME
-        # sorted_values into the SH scratch, committed by the carry_sh swap.
         if b.sh_enabled:
             pipeline.dispatch(pipeline.k_morton_scatter_sh, "morton_scatter_sh",
                 thread_count=[pipeline.max_splats, 1, 1],
@@ -469,6 +458,5 @@ def morton_sort(pipeline: Pipeline, world_min: np.ndarray,
                 rest_floats=b.sh.rest_floats,
                 max_splats=pipeline.max_splats,
             )
-        recording.after_submit(
-            lambda: b.swap_primitive_storage(carry_eta=carry_eta,
-                                             carry_sh=b.sh_enabled))
+
+        recording.after_submit(lambda: b.swap_primitive_storage(carry_eta=carry_eta, carry_sh=b.sh_enabled))

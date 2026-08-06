@@ -32,6 +32,7 @@ from trainer.config.config import (
     RasterConfig,
     RegularizationConfig,
 )
+from trainer.config.config_types import DensificationMode
 from trainer.contracts.codegen import sh_rest_coeffs
 from trainer.data.dataset import Camera
 from trainer.backend.densify.densify import DensifyConfig
@@ -48,19 +49,6 @@ from trainer.backend.densify.simple_densifier import (
 )
 
 _RADIX_SCAN_DIM = 128
-
-
-@dataclass(frozen=True)
-class RasterizationContext:
-    """The non-stable forward output the backward must consume.
-
-    Today that is just the sorted (tile, depth) -> primitive-id buffer — the
-    radix ping-pong winner — since every other backward input (blend data, tile
-    ranges, bucket offsets, checkpoints, per-pixel counts, the rendered image)
-    lives in a stable buffer the backward reads directly.
-    """
-    sorted_ids: spy.NDBuffer
-
 
 class _RecordingTransaction:
     """A recorded batch plus host-state commits that run after submit succeeds."""
@@ -109,8 +97,9 @@ class Pipeline:
         appearance_config: AppearanceConfig | None = None,
         viewer_only: bool = False,
         initial_state: dict | None = None,
-        use_persplat_backward: bool = False,
+        use_persplat_backward: bool = True,
         use_flat_bucket_backward: bool = True,
+        densify_mode: DensificationMode | None = None,
     ) -> None:
         self.device = device
         # Serializes GPU queue access (submit/present/wait_for_idle) against
@@ -185,6 +174,7 @@ class Pipeline:
             dispatch_indirect=self._dispatch_indirect,
             prepare_args_kernel=self.k_densify_prepare_args,
             adam_kernel=self.k_adam,
+            clear_adam_state=self.k_clear_adam_state,
             adam_rest_kernel=getattr(self, "k_adam_rest", None),
             buffers=self.buffers,
             max_splats=max_splats,
@@ -238,10 +228,14 @@ class Pipeline:
 
         self.last_submit_id: int = 0
 
-        assert use_persplat_backward or use_flat_bucket_backward and not (use_persplat_backward and use_flat_bucket_backward), "At least one backward mode must be enabled, but not both"
+        # Flat warp-per-bucket is a variant of the per-splat backward, so it
+        # requires it: valid (persplat, flat) are (True,True)/(True,False)/
+        # (False,False); (False,True) is meaningless.
+        assert use_persplat_backward or not use_flat_bucket_backward, \
+            "use_flat_bucket_backward=True requires use_persplat_backward=True"
 
-        self.use_persplat_backward      = use_persplat_backward
-        self.use_flat_bucket_backward   = use_flat_bucket_backward
+        self.use_persplat_backward = use_persplat_backward
+        self.use_flat_bucket_backward = use_flat_bucket_backward
 
         if self.raster_config.mip_enabled and not self.use_persplat_backward:
             raise RuntimeError(
@@ -252,6 +246,7 @@ class Pipeline:
             raise RuntimeError(
                 "extinction_hardness != 1 requires use_persplat_backward=True: "
                 "the per-pixel backward does not implement hardened extinction.")
+
 
         #starts at 0, increments after each bwd step
         self._backward_pixel_phase = 0
@@ -270,6 +265,8 @@ class Pipeline:
             self._load_snapshot(**initial_state)
             self._clear_grads()
             self.clear_tracking()
+            if densify_mode == DensificationMode.STRUCTURE_AWARE:
+                self.clear_structure_scores()
 
     def on_hot_reload(self) -> None:
         """Refresh reflection-dependent objects after device.reload_all_programs().
@@ -360,9 +357,10 @@ class Pipeline:
         """Read-only uploaded camera resource for specialized GPU services."""
         return self._camera_buffer
 
-    def rasterize(self, camera: Camera) -> RasterizationContext:
-        """Record one forward rasterization and return its explicit handoff."""
-        return self._run_forward(camera)
+    def rasterize(self, camera: Camera) -> None:
+        """Record one forward rasterization; the results land in pipeline
+        buffers (the sorted ids in ``self._sorted_values``)."""
+        self._run_forward(camera)
 
     def radix_sort_pairs(self) -> tuple[spy.NDBuffer, spy.NDBuffer, spy.NDBuffer]:
         """Record the shared 64-bit-key radix sort service."""
@@ -410,10 +408,7 @@ class Pipeline:
         # Zero the Adam moments device-side (one clear kernel over the AdamState
         # buffer). Replaces a full GPU->CPU readback that existed only to size a
         # host zero-array — wasteful (>1 GB at a large --max-splats).
-        self._dispatch(self.k_clear_adam_state, "clear_adam_state",
-            thread_count=[self.max_splats, 1, 1],
-            adam_state=self.buffers.adam_state.storage,
-            max_splats=self.max_splats)
+        self._adam.clear_state()
         self._adam.reset()
 
         # Optional SH: zero the rest coefficients (INRIA features_rest init) and
@@ -619,179 +614,149 @@ class Pipeline:
             src_v, dst_v = dst_v, src_v
         return src_lo, src_hi, src_v
 
-    def _run_forward(self, camera: Camera) -> RasterizationContext:
+    def _run_forward(self, camera: Camera) -> None:
         self._upload_camera(camera)
-        b = self.buffers
-        num_tiles = b.num_tiles
+        buffers = self.buffers
+        num_tiles = buffers.num_tiles
 
         # Clear output textures + tile ranges.
         with self._marker_group("clear"):
             self._dispatch(self.k_clear_textures, "clear_textures",
                 thread_count=[self.width, self.height, 1],
-                output_image=b.output_image,
-                gaussian_count_per_pixel=b.gaussian_count_per_pixel,
+                output_image=buffers.output_image,
+                gaussian_count_per_pixel=buffers.gaussian_count_per_pixel,
                 frame_dim=spy.uint2(self.width, self.height),
             )
             self._dispatch(self.k_clear_tile_ranges, "clear_tile_ranges",
                 thread_count=[num_tiles, 1, 1],
-                tile_start=b.tile_start.storage,
-                tile_end=b.tile_end.storage,
+                tile_start=buffers.tile_start.storage,
+                tile_end=buffers.tile_end.storage,
                 num_tiles=num_tiles,
             )
 
-        # Phase 0.5: cluster-frustum cull (Laine 2011, gated by
-        # cfg.cluster_cull). Rebuild per-cluster AABBs from the current
-        # gaussians and mark clusters fully outside the frustum. bin_count
-        # below reads cluster_visible as its first early-out. When off,
-        # cluster_visible stays seeded to all-ones (see buffers.allocate)
-        # so bin_count's check is a no-op.
         #TODO: This should ideally also be gpu driven by an indirect dispatch
         if self.raster_config.cluster_cull:
             num_clusters = (self.max_splats + CLUSTER_SIZE - 1) // CLUSTER_SIZE
             with self._marker_group("cluster_cull"):
                 self._dispatch(self.k_build_cluster_aabb, "build_cluster_aabb",
                     thread_count=[num_clusters * CLUSTER_SIZE, 1, 1],
-                    gaussians=b.gaussians.storage,
-                    num_gaussians_counter=b.num_gaussians_counter.storage,
-                    cluster_aabb_min=b.cluster_aabb_min.storage,
-                    cluster_aabb_max=b.cluster_aabb_max.storage,
+                    gaussians=buffers.gaussians.storage,
+                    num_gaussians_counter=buffers.num_gaussians_counter.storage,
+                    cluster_aabb_min=buffers.cluster_aabb_min.storage,
+                    cluster_aabb_max=buffers.cluster_aabb_max.storage,
                     max_splats=self.max_splats,
                     num_clusters=num_clusters,
                 )
                 self._dispatch(self.k_cull_clusters_frustum, "cull_clusters_frustum",
                     thread_count=[num_clusters, 1, 1],
-                    cluster_aabb_min=b.cluster_aabb_min.storage,
-                    cluster_aabb_max=b.cluster_aabb_max.storage,
+                    cluster_aabb_min=buffers.cluster_aabb_min.storage,
+                    cluster_aabb_max=buffers.cluster_aabb_max.storage,
                     camera=self._camera_buffer,
-                    cluster_visible=b.cluster_visible.storage,
+                    cluster_visible=buffers.cluster_visible.storage,
                     num_clusters=num_clusters,
                 )
 
-        # Phase 1: per-gaussian tile count.
+       
         with self._marker_group("bin_count"):
             self._dispatch(self.k_bin_count, "bin_count",
                 thread_count=[self.max_splats, 1, 1],
-                gaussians=b.gaussians.storage,
-                num_gaussians_counter=b.num_gaussians_counter.storage,
+                gaussians=buffers.gaussians.storage,
+                num_gaussians_counter=buffers.num_gaussians_counter.storage,
                 camera=self._camera_buffer,
-                projected_2d=b.projected_2d.storage,
-                blend_data=b.blend_data.storage,
-                tile_count_per_gaussian=b.tile_count_per_gaussian.storage,
-                cluster_visible=b.cluster_visible.storage,
-                filter_3D=b.filter_3D.storage,
+                projected_2d=buffers.projected_2d.storage,
+                blend_data=buffers.blend_data.storage,
+                tile_count_per_gaussian=buffers.tile_count_per_gaussian.storage,
+                cluster_visible=buffers.cluster_visible.storage,
+                filter_3D=buffers.filter_3D.storage,
                 mip_enabled=1 if self.raster_config.mip_enabled else 0,
                 kernel_size=self.raster_config.kernel_size,
                 z_near=self.raster_config.z_near_cull,
                 max_splats=self.max_splats,
             )
 
-        # Optional view-dependent SH: overwrite each gaussian's packed blend
-        # color with the SH-evaluated (view-dependent) color. Runs only when SH
-        # is enabled; bin_count already packed the SH0 DC color for the SH-off
-        # path, which skips this dispatch entirely.
-        if b.sh_enabled:
+        if buffers.sh_enabled:
             with self._marker_group("sh_forward"):
                 self._dispatch(self.k_sh_forward, "sh_forward",
                     thread_count=[self.max_splats, 1, 1],
-                    gaussians=b.gaussians.storage,
-                    num_gaussians_counter=b.num_gaussians_counter.storage,
+                    gaussians=buffers.gaussians.storage,
+                    num_gaussians_counter=buffers.num_gaussians_counter.storage,
                     camera=self._camera_buffer,
-                    features_rest=b.features_rest.storage,
-                    blend_data=b.blend_data.storage,
+                    features_rest=buffers.features_rest.storage,
+                    blend_data=buffers.blend_data.storage,
                     active_sh_degree=self._active_sh_degree,
-                    rest_floats=b.sh.rest_floats,
+                    rest_floats=buffers.sh.rest_floats,
                     max_splats=self.max_splats,
                 )
 
-        # Phase 2: exclusive scan → tile_offset_per_gaussian + total count.
-        # scan_total[0] holds the total pair count on the GPU; no readback.
         with self._marker_group("scan_tile_offsets"):
             self._scan(
                 n=self.max_splats,
-                in_buf=b.tile_count_per_gaussian,
-                out_buf=b.tile_offset_per_gaussian,
+                in_buf=buffers.tile_count_per_gaussian,
+                out_buf=buffers.tile_offset_per_gaussian,
             )
 
-        # Phase 3: emit (tile_id, depth, gaussian_idx) pairs into A buffers.
-        # If the total_pair count is 0, bin_emit does nothing (per-gaussian
-        # tile_count==0 → no writes). The downstream sort + tile_ranges
-        # kernels early-out on i >= scan_total[0], so zero-pair frames are
-        # correct without a CPU branch.
         with self._marker_group("bin_emit"):
             self._dispatch(self.k_bin_emit, "bin_emit",
                 thread_count=[self.max_splats, 1, 1],
-                gaussians=b.gaussians.storage,
-                num_gaussians_counter=b.num_gaussians_counter.storage,
+                gaussians=buffers.gaussians.storage,
+                num_gaussians_counter=buffers.num_gaussians_counter.storage,
                 camera=self._camera_buffer,
-                projected_2d=b.projected_2d.storage,
-                tile_offset_per_gaussian=b.tile_offset_per_gaussian.storage,
-                keys_lo=b.sort_keys_lo_a.storage,
-                keys_hi=b.sort_keys_hi_a.storage,
-                values=b.sort_values_a.storage,
-                cluster_visible=b.cluster_visible.storage,
+                projected_2d=buffers.projected_2d.storage,
+                tile_offset_per_gaussian=buffers.tile_offset_per_gaussian.storage,
+                keys_lo=buffers.sort_keys_lo_a.storage,
+                keys_hi=buffers.sort_keys_hi_a.storage,
+                values=buffers.sort_values_a.storage,
+                cluster_visible=buffers.cluster_visible.storage,
                 z_near=self.raster_config.z_near_cull,
                 max_sort_pairs=self.max_sort_pairs,
             )
 
-        # Phase 4: global radix sort. Reads n from scan_total[0].
         with self._marker_group("radix_sort"):
             sorted_lo, sorted_hi, sorted_v = self._radix_sort_pairs()
 
-        # Phase 5: identify per-tile start/end in the sorted array.
         with self._marker_group("identify_tile_ranges"):
             self._dispatch(self.k_identify_tile_ranges, "identify_tile_ranges",
                 thread_count=[self.max_sort_pairs, 1, 1],
                 keys_hi=sorted_hi.storage,
-                tile_start=b.tile_start.storage,
-                tile_end=b.tile_end.storage,
-                n_buf=b.scan_total.storage,
+                tile_start=buffers.tile_start.storage,
+                tile_end=buffers.tile_end.storage,
+                n_buf=buffers.scan_total.storage,
                 num_tiles=num_tiles,
             )
 
-        # Stash the sorted-values buffer for backward/forward to consume.
-        # Which side of the ping-pong won depends on the last pass; we
-        # cached it in self._sorted_values for the backward.
+
         self._sorted_values = sorted_v
 
-        # Phase 5b: per-tile bucket count + CSR offset scan for the ragged
-        # forward-checkpoint buffer consumed by the transposed backward.
-        # bucket_offsets[t] = exclusive scan of ceil(tile_len[t] / P);
-        # its total (buckets used this frame) goes to bucket_offset_total.
         with self._marker_group("bucket_scan"):
             self._dispatch(self.k_bucket_count, "bucket_count",
                 thread_count=[num_tiles, 1, 1],
-                tile_start=b.tile_start.storage,
-                tile_end=b.tile_end.storage,
-                bucket_count=b.bucket_count.storage,
+                tile_start=buffers.tile_start.storage,
+                tile_end=buffers.tile_end.storage,
+                bucket_count=buffers.bucket_count.storage,
                 num_tiles=num_tiles,
             )
             self._scan(
                 n=num_tiles,
-                in_buf=b.bucket_count,
-                out_buf=b.bucket_offsets,
-                total_buf=b.bucket_offset_total,
+                in_buf=buffers.bucket_count,
+                out_buf=buffers.bucket_offsets,
+                total_buf=buffers.bucket_offset_total,
             )
 
-        # Phase 6: forward rasterize.
         with self._marker_group("rasterize"):
             self._dispatch(self.k_forward, "forward",
-                thread_count=[b.num_tiles_x * 16, b.num_tiles_y * 16, 1],
-                blend_data=b.blend_data.storage,
-                tile_start=b.tile_start.storage,
-                tile_end=b.tile_end.storage,
+                thread_count=[buffers.num_tiles_x * 16, buffers.num_tiles_y * 16, 1],
+                blend_data=buffers.blend_data.storage,
+                tile_start=buffers.tile_start.storage,
+                tile_end=buffers.tile_end.storage,
                 sorted_gaussian_ids=sorted_v.storage,
                 camera=self._camera_buffer,
-                bucket_offsets=b.bucket_offsets.storage,
-                raster_checkpoints=b.raster_checkpoints.storage,
-                output_image=b.output_image,
-                gaussian_count_per_pixel=b.gaussian_count_per_pixel,
+                bucket_offsets=buffers.bucket_offsets.storage,
+                raster_checkpoints=buffers.raster_checkpoints.storage,
+                output_image=buffers.output_image,
+                gaussian_count_per_pixel=buffers.gaussian_count_per_pixel,
                 extinction_hardness=float(self._extinction_hardness),
             )
 
-        # Explicit forward -> backward handoff (was the hidden self._sorted_values,
-        # which is still set above for importance scoring + introspection). The
-        # backward takes this context so the dependency is a passed value.
-        return RasterizationContext(sorted_ids=sorted_v)
 
     def set_extinction_hardness(self, hardness: float) -> None:
         """Set the compositor extinction hardness used by subsequent forward /
@@ -885,16 +850,11 @@ class Pipeline:
             target=self._active_target,
         )
 
-    def _run_backward(self, context: "RasterizationContext | None" = None,
-                      structure_tensor=None,
-                      structure_kwargs: dict | None = None) -> None:
+    def _run_backward(self, structure_tensor=None, structure_kwargs: dict | None = None) -> None:
         b = self.buffers
         gb = b.grad_buffers
-        # Explicit forward -> backward handoff: the sorted gaussian-id buffer (the
-        # radix ping-pong winner) comes from the forward's RasterizationContext.
-        # Falls back to self._sorted_values for callers that split forward/backward
-        # without threading the context (e.g. the test kit's backward()).
-        sorted_values = context.sorted_ids if context is not None else self._sorted_values
+        sorted_values = self._sorted_values
+
         with self._marker_group("rasterize_backward"):
             if self.use_persplat_backward:
                 num_tiles = b.num_tiles_x * b.num_tiles_y
@@ -939,7 +899,7 @@ class Pipeline:
                         blend_data=b.blend_data.storage,
                         tile_start=b.tile_start.storage,
                         tile_end=b.tile_end.storage,
-                        sorted_gaussian_ids=sorted_values.storage,
+                        sorted_gaussian_ids=self._sorted_values.storage,
                         bucket_offsets=b.bucket_offsets.storage,
                         live_buckets=b.live_buckets.storage,
                         live_bucket_total=b.live_bucket_total.storage,
@@ -1157,12 +1117,11 @@ class Pipeline:
                 # running _clear_grads() once at pipeline setup.
                 self._clear_2d_grad_seeds()
             with self._marker_group("forward"):
-                raster_ctx = self._run_forward(camera)
+                self._run_forward(camera)
             with self._marker_group("loss"):
                 self._run_loss()
             with self._marker_group("backward"):
-                self._run_backward(raster_ctx, structure_tensor=structure_tensor,
-                                   structure_kwargs=structure_kwargs)
+                self._run_backward(structure_tensor=structure_tensor, structure_kwargs=structure_kwargs)
             with self._marker_group("regularization"):
                 self._run_regularization()
             with self._marker_group("adam"):
@@ -1178,7 +1137,7 @@ class Pipeline:
             cfg, grad_thresh, scale_thresh, prune_big_scale,
             allow_scale_prune, carry_eta)
 
-    def set_cameras(self, cameras: list) -> None:
+    def set_mipsplatting_cameras(self, train_cameras: list[Camera]) -> None:
         """Mip-Splatting setup: upload the (static) training-camera array and
         derive the sqrt(0.2)/max_focal coefficient ONCE. Must be called before
         :meth:`compute_3d_filter`.
@@ -1189,16 +1148,17 @@ class Pipeline:
         not). Pass the TRAIN split to match mip-splatting / SADGS (held-out test
         views must not influence the filter).
 
-        `cameras` are the same Camera objects the trainer renders; each packs to
-        a 144-byte CameraData (view 16f + proj 16f + image_size 2f + 2f pad).
+        Each Camera packs to a 144-byte CameraData (view 16f + proj 16f +
+        image_size 2f + 2f pad).
         """
-        n = len(cameras)
+        n = len(train_cameras)
+
         # CameraData packs to 36 float32s: view 4x4 (16) + proj 4x4 (16) +
         # image_size (2) + 2 pad-to-16B-alignment. Buffer size derives from the
         # array itself (data.nbytes) — no hardcoded byte count.
         data = np.zeros((n, 36), dtype=np.float32)
         max_focal = 0.0
-        for i, cam in enumerate(cameras):
+        for i, cam in enumerate(train_cameras):
             data[i, 0:16] = cam.view_matrix.flatten()
             data[i, 16:32] = cam.proj_matrix.flatten()
             data[i, 32:34] = np.array(cam.image_size, dtype=np.float32)
@@ -1217,19 +1177,20 @@ class Pipeline:
 
     def compute_3d_filter(self) -> None:
         """Mip-Splatting: recompute the per-gaussian 3D smoothing-filter size
-        (buffers.filter_3D) from the cameras uploaded by :meth:`set_cameras`.
+        (buffers.filter_3D) from the cameras uploaded by :meth:`set_mipsplatting_cameras`.
         Run under no_grad — filter_3D is a geometric constant, never a gradient
         target. Call once at init and after every densify+morton so new children
         get a valid filter.
 
         Only the per-gaussian dispatch runs here (means change every step); the
-        static camera array + filter coefficient were built once by set_cameras.
+        static camera array + filter coefficient were built once by
+        set_mipsplatting_cameras.
         Heavy (O(n_gaussians * n_cameras)) but only fires on the ~17 densify
         ticks of a run, off the hot path.
         """
         if getattr(self, "_mip_cameras_buffer", None) is None:
             raise RuntimeError(
-                "compute_3d_filter() requires set_cameras(cameras) to be called first")
+                "compute_3d_filter() requires set_mipsplatting_cameras(...) to be called first")
         b = self.buffers
         self._dispatch(self.k_compute_3d_filter, "compute_3d_filter",
             thread_count=[self.max_splats, 1, 1],
