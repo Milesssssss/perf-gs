@@ -51,7 +51,7 @@ By writing the kernels in Slang and having the whole system driven by slangpy, w
 
 Full Mip-NeRF 360 dataset (9 scenes), quarter resolution, 3000 iterations, structure-aware densification with Mip-Splatting, every 8th view held out for test. Held-out sRGB PSNR and full-loop train time (final metrics pass excluded), for view-independent color (SH0) and the full view-dependent spherical-harmonic model (SH3), on an RTX 3090.
 
-| Scene | PSNR SH0 (dB) | PSNR SH3 (dB) | Time SH0 (s) | Time SH3 (s) |
+| Scene | PSNR SH0 (dB) | PSNR SH3 (dB) | Time SH0 (seconds) | Time SH3 (seconds) |
 |---|---:|---:|---:|---:|
 | bicycle | 24.62 | 24.61 | 53.2 | 77.2 |
 | flowers | 21.22 | 21.22 | 58.6 | 90.4 |
