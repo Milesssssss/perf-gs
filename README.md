@@ -16,7 +16,7 @@ A fast and efficient Slang-based 3DGS trainer.
 ![Status](https://img.shields.io/badge/status-research-F5A623)
 
 A 3D Gaussian Splatting trainer written in [Slang](https://shader-slang.org) and driven from Python through [SlangPy](https://slangpy.shader-slang.org).<br>
-It achieves convergence in ~64s on the Mip-NeRF 360 dataset on an RTX 3090 (45s with SH0, 64s with SH3). The codebase has no CUDA dependencies, is directly integratable with pytorch frontend and all shaders are dispatched via SlangPy.
+It converges in ~47s per scene at SH0 and ~69s at SH3, averaged over the full Mip-NeRF 360 dataset on an RTX 3090. The codebase has no CUDA dependencies, is directly integratable with pytorch frontend and all shaders are dispatched via SlangPy.
 
 <p align="center">
   <img src="assets/teaser.jpg" alt="Mip-NeRF 360 bicycle scene trained by this pipeline, rendered from a held-out view" width="80%">
@@ -49,56 +49,32 @@ By writing the kernels in Slang and having the whole system driven by slangpy, w
 
 ## Results
 
-The benchmark scene is Mip-NeRF 360 bicycle (quarter resolution, 3000 iterations, structure-aware densification with Mip-Splatting, every 8th view held out for test, ~6.2M gaussians, RTX 3090). The headline result is quality against per-step GPU cost, for view-independent color (SH0) and the full view-dependent spherical-harmonic model (SH3):
+Full Mip-NeRF 360 dataset (9 scenes), quarter resolution, 3000 iterations, structure-aware densification with Mip-Splatting, every 8th view held out for test. Held-out sRGB PSNR and full-loop train time (final metrics pass excluded), for view-independent color (SH0) and the full view-dependent spherical-harmonic model (SH3), on an RTX 3090.
 
-| Config | Test PSNR (dB) | Forward (ms) | Backward (ms) | Adam (ms) | Step (ms) |
-|---|---:|---:|---:|---:|---:|
-| SH0 | 24.64 | 9.60 | 8.55 | 2.45 | 23.4 |
-| SH3 | 24.64 | 10.94 | 10.08 | 8.06 | 31.8 |
+| Scene | PSNR SH0 (dB) | PSNR SH3 (dB) | Time SH0 (s) | Time SH3 (s) |
+|---|---:|---:|---:|---:|
+| bicycle | 24.62 | 24.61 | 53.2 | 77.2 |
+| flowers | 21.22 | 21.22 | 58.6 | 90.4 |
+| garden | 26.56 | 26.54 | 71.4 | 108.4 |
+| stump | 26.15 | 26.19 | 54.5 | 82.0 |
+| treehill | 22.19 | 22.21 | 58.4 | 81.4 |
+| bonsai | 30.17 | 30.16 | 28.9 | 39.9 |
+| counter | 27.55 | 27.51 | 36.0 | 53.6 |
+| kitchen | 30.06 | 30.10 | 36.2 | 51.4 |
+| room | 30.85 | 30.91 | 27.7 | 38.4 |
+| **Average** | **26.60** | **26.61** | **47.2** | **69.2** |
 
-Per-step timings are the median of 150 frozen steps at iteration 1560 (`scripts/running/bench_iter.py`, 8×8 rasterizer tile). On bicycle the SH3 bands barely move PSNR while adding ~36% to the step, almost all of it in the higher-band Adam update (`adam_rest`, ~5.6 ms); the backward rasterize (~8.3 ms) is the largest single kernel in both configs.
+<p align="center">
+  <img src="assets/psnr_sweep.png" alt="Held-out PSNR per scene, SH0 vs SH3" width="90%">
+  <br>
+  <img src="assets/timing_sweep.png" alt="Training time per scene, SH0 vs SH3" width="90%">
+</p>
 
-## Quality validation
-
-Mip-NeRF 360, quarter resolution, spherical-harmonic degree 0, 3000 iterations, every 8th view held out for test. The table compares this trainer against a reference structure-aware densification run on the identical scenes and settings.
-
-| Scene | Slang PSNR (dB) | SAD-GS reference (dB) | Delta |
-|---|---:|---:|---:|
-| bicycle | 24.64 | 24.46 | +0.18 |
-| flowers | 21.23 | 21.26 | -0.03 |
-| garden | 26.60 | 26.26 | +0.34 |
-| stump | 26.10 | 25.91 | +0.19 |
-| treehill | 22.29 | 22.11 | +0.18 |
-| bonsai | 30.16 | 29.72 | +0.44 |
-| counter | 27.60 | 27.31 | +0.29 |
-| kitchen | 30.22 | 29.98 | +0.24 |
-| room | 30.66 | 30.83 | -0.18 |
-| **Average (9)** | **26.61** | **26.43** | **+0.18** |
-
-Reference quality on the same runs, for context: average SSIM 0.811, LPIPS 0.178 (the trainer tracks these within noise). This is not a claim of a new state of the art. It is a check that a from-scratch Slang implementation reproduces a known-good pipeline faithfully, which is the bar a research base needs to clear before it is worth building on.
+The higher-order SH bands leave PSNR essentially flat on this dataset (+0.01 dB average) while adding ~47% to train time, so SH0 is the better default here; SH3 is available for scenes with strong view-dependent shading. This is not a claim of a new state of the art — it is a check that a from-scratch Slang implementation reproduces a known-good pipeline faithfully, the bar a research base needs to clear before it is worth building on.
 
 <p align="center">
   <img src="assets/convergence.png" alt="Test PSNR versus iteration" width="70%">
 </p>
-
-## Performance
-
-Same runs, single GPU, wall-clock for the full 3000-iteration loop (the final metrics pass is measured separately and excluded).
-
-| Scene | Train time (s) |
-|---|---:|
-| bicycle | 81.4 
-| flowers | 90.7 
-| garden | 109.4 
-| stump | 82.0 
-| treehill | 83.1 
-| bonsai | 48.4 
-| counter | 56.5 
-| kitchen | 58.8
-| room | 43.5
-| **Average** | **72.6**
-
-Evaluated on an RTX 3090. Per-step GPU cost for SH0 vs SH3 (bicycle) is in the [Results](#results) table above.
 
 ## How it trains
 
