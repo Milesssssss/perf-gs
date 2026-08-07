@@ -3,7 +3,8 @@
      30k iters); convergence.png is plotted from the per-scene psnr_curve.json
      runs. Swap in your own renders by replacing the files under assets/. -->
 
-# SCATTO-GS (Slang-Compiled Accelerated Training-Time Optimization for Gaussian Splatting)
+# SCATTO-GS
+## Slang-Compiled Accelerated Training-Time Optimization for Gaussian Splatting)
 A fast and efficient Slang-based 3DGS trainer.
 
 ![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)
