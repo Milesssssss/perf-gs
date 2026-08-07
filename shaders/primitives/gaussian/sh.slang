@@ -100,9 +100,24 @@ float3 shColorFromMean(no_diff float3 sh0, float3 rest[SH_REST_COEFFS],
 float3[SH_REST_COEFFS] loadSHRest(StructuredBuffer<uint> features_rest, uint gid,
                                  uint rest_floats)
 {
+    return loadSHRestActive(features_rest, gid, rest_floats, SH_REST_COEFFS);
+}
+
+// As loadSHRest, but only reads the first `active_coeffs` coefficients from
+// memory and zero-fills the rest. evalSHColor ignores coefficients beyond the
+// active degree, so passing active_coeffs = (active_deg+1)^2 - 1 loads exactly
+// what the color eval consumes and skips the dead fp16 gathers for inactive
+// higher bands (which are zero in storage anyway — never trained). Bit-identical
+// to loadSHRest for the active bands; the zero-fill for inactive bands matches
+// the full-width load (those coeffs are stored as 0). active_coeffs is clamped
+// to the configured storage width.
+float3[SH_REST_COEFFS] loadSHRestActive(StructuredBuffer<uint> features_rest,
+                                        uint gid, uint rest_floats,
+                                        uint active_coeffs)
+{
     float3 rest[SH_REST_COEFFS];
     uint base = gid * halfFeatUints(rest_floats);
-    uint n_coeffs = rest_floats / 3u;
+    uint n_coeffs = min(rest_floats / 3u, active_coeffs);
     [ForceUnroll]
     for (uint k = 0u; k < uint(SH_REST_COEFFS); ++k)
     {

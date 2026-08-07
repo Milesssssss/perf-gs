@@ -9,6 +9,7 @@ than a method buried in ``Pipeline``.
 
 from __future__ import annotations
 
+import contextlib
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -29,7 +30,7 @@ class AdamOptimizer:
 
     def __init__(self, *, dispatch, dispatch_indirect, prepare_args_kernel,
                  adam_kernel, clear_adam_state, buffers, max_splats: int, width: int, height: int,
-                 adam_rest_kernel=None) -> None:
+                 adam_rest_kernel=None, marker_group=None) -> None:
         self._dispatch = dispatch
         self._dispatch_indirect = dispatch_indirect
         self._k_prepare_args = prepare_args_kernel
@@ -40,13 +41,22 @@ class AdamOptimizer:
         self._max_splats = max_splats
         self._width = width
         self._height = height
+        # Optional nested debug-marker scope (profiler captures + the timing
+        # benchmark). Defaults to a no-op context so the hot path is unchanged.
+        self._marker_group = marker_group or (lambda label: contextlib.nullcontext())
         self.step_count = 0
 
     def reset(self) -> None:
         self.step_count = 0
 
-    def step(self, lrs: "AdamLRs") -> None:
-        """Run one Adam parameter update over the active gaussians."""
+    def step(self, lrs: "AdamLRs", active_rest_floats: int | None = None) -> None:
+        """Run one Adam parameter update over the active gaussians.
+
+        ``active_rest_floats`` (SH runs only): the number of scalar rest coeffs
+        currently active under the progressive-SH schedule. The rest-Adam only
+        iterates that active head — inactive higher bands have exactly-zero
+        gradient, so their update is a provable parameter no-op (see
+        adamStepRest). None => the full configured width (old behavior)."""
         self.step_count += 1
         step = float(self.step_count)
         bc1 = 1.0 - _BETA1 ** step
@@ -61,37 +71,46 @@ class AdamOptimizer:
             max_splats=self._max_splats,
         )
 
-        self._dispatch_indirect(self._k_adam, "adam", b.adam_dispatch_args,
-            gaussians=b.gaussians.storage,
-            adam_state=b.adam_state.storage,
-            num_gaussians_counter=b.num_gaussians_counter.storage,
-            **b.grad_kwargs(),
-            cluster_visible=b.cluster_visible.storage,
-            cfg={
-                "lr_mean": lrs.mean,
-                "lr_scale": lrs.scale,
-                "lr_rot": lrs.rot,
-                "lr_opacity": lrs.opacity,
-                "lr_color": lrs.color,
-                "bias_correction1": bc1,
-                "bias_correction2": bc2,
-            },
-            pixels_per_step=float(self._width * self._height),
-        )
+        with self._marker_group("adam_main"):
+            self._dispatch_indirect(self._k_adam, "adam", b.adam_dispatch_args,
+                gaussians=b.gaussians.storage,
+                adam_state=b.adam_state.storage,
+                num_gaussians_counter=b.num_gaussians_counter.storage,
+                **b.grad_kwargs(),
+                cluster_visible=b.cluster_visible.storage,
+                cfg={
+                    "lr_mean": lrs.mean,
+                    "lr_scale": lrs.scale,
+                    "lr_rot": lrs.rot,
+                    "lr_opacity": lrs.opacity,
+                    "lr_color": lrs.color,
+                    "bias_correction1": bc1,
+                    "bias_correction2": bc2,
+                },
+                pixels_per_step=float(self._width * self._height),
+            )
 
         if self._k_adam_rest is not None and b.sh_enabled:
-            self._dispatch_indirect(self._k_adam_rest, "adam_rest", b.adam_dispatch_args,
-                features_rest=b.features_rest.storage,
-                features_rest_grad=b.features_rest_grad.storage,
-                adam_rest=b.adam_rest_state.storage,
-                num_gaussians_counter=b.num_gaussians_counter.storage,
-                cluster_visible=b.cluster_visible.storage,
-                lr_rest=lrs.sh_rest,
-                bias_correction1=bc1,
-                bias_correction2=bc2,
-                pixels_per_step=float(self._width * self._height),
-                rest_floats=b.sh.rest_floats,
-            )
+            rest_floats = b.sh.rest_floats
+            # Only the active SH bands need an Adam step; inactive higher bands
+            # have zero gradient => zero update. Default to the full width when
+            # the caller doesn't pass an active count (bit-identical fallback).
+            active_rest = (rest_floats if active_rest_floats is None
+                           else max(0, min(int(active_rest_floats), rest_floats)))
+            with self._marker_group("adam_rest"):
+                self._dispatch_indirect(self._k_adam_rest, "adam_rest", b.adam_dispatch_args,
+                    features_rest=b.features_rest.storage,
+                    features_rest_grad=b.features_rest_grad.storage,
+                    adam_rest=b.adam_rest_state.storage,
+                    num_gaussians_counter=b.num_gaussians_counter.storage,
+                    cluster_visible=b.cluster_visible.storage,
+                    lr_rest=lrs.sh_rest,
+                    bias_correction1=bc1,
+                    bias_correction2=bc2,
+                    pixels_per_step=float(self._width * self._height),
+                    rest_floats=rest_floats,
+                    active_rest_floats=active_rest,
+                )
 
     def clear_state(self):
         self._dispatch(self._k_clear_adam_state, "clear_adam_state",

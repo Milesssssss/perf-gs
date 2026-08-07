@@ -180,6 +180,7 @@ class Pipeline:
             max_splats=max_splats,
             width=width,
             height=height,
+            marker_group=self._marker_group,
         )
 
         # Active command batch during a recorded step. When set, _dispatch /
@@ -261,6 +262,11 @@ class Pipeline:
         self._mip_num_cameras: int = 0
         self._mip_filter_coef: float = 0.0
 
+        # Optional per-phase GPU timestamp timer. None (default) => train_step
+        # records no timestamps and the hot path is unchanged. Installed by
+        # benchmark_frozen() to measure fwd/bwd/adam ms at a pinned iteration.
+        self._step_timer = None
+
         if initial_state is not None:
             self._load_snapshot(**initial_state)
             self._clear_grads()
@@ -285,6 +291,21 @@ class Pipeline:
         configured max. No-op on the SH-off path."""
         interval = max(1, self.appearance_config.band_interval)
         self.set_active_sh_degree(iteration // interval)
+
+    def _active_rest_floats(self) -> int:
+        """Scalar rest-coefficient count currently active under the progressive
+        SH schedule: 3 * ((active_deg+1)^2 - 1). The rest-Adam iterates only this
+        active head (inactive higher bands have zero gradient => no-op update).
+        0 on the SH-off path (no rest storage).
+
+        ``_bench_force_full_rest_adam`` (test-only) forces the full configured
+        width so the active-band optimization can be proved bit-identical to the
+        full-width reference."""
+        if not self.buffers.sh_enabled:
+            return 0
+        if getattr(self, "_bench_force_full_rest_adam", False):
+            return self.buffers.sh.rest_floats
+        return sh_rest_coeffs(self._active_sh_degree) * 3
 
     @property
     def _encoder(self) -> "spy.CommandEncoder | None":
@@ -329,13 +350,29 @@ class Pipeline:
             transient.dispatch_indirect(kernel, marker, args_buf, offset, **kwargs)
             self.last_submit_id = self.runtime.submit(transient).submit_id
 
+    @contextlib.contextmanager
     def _marker_group(self, label: str):
         """Nested debug-group scope for profiler captures (Nsight etc.). No-op
         (nullcontext) when no batch is active, so it costs nothing outside a
-        recorded step; otherwise delegates to CommandBatch.marker_group."""
+        recorded step; otherwise delegates to CommandBatch.marker_group.
+
+        When a StepTimer is installed (benchmark only), also brackets the scope
+        with GPU timestamps so every marker group is timed with no extra call
+        sites. The timing writes go on the active batch's encoder alongside the
+        debug-group push/pop."""
         if self._batch is None:
-            return contextlib.nullcontext()
-        return self._batch.marker_group(label)
+            yield
+            return
+        timer = self._step_timer
+        interval_id = -1
+        if timer is not None:
+            interval_id = timer.open(label, self._batch.encoder)
+        with self._batch.marker_group(label):
+            try:
+                yield
+            finally:
+                if timer is not None:
+                    timer.close(interval_id, self._batch.encoder)
 
     # Public command contract for extracted GPU services. The private aliases
     # remain while Pipeline's internal implementation is migrated incrementally.
@@ -1109,6 +1146,9 @@ class Pipeline:
         if lrs is None:
             lrs = AdamLRs()
         with self._recording("train_step"):
+            # Marker groups double as GPU-timestamp phase boundaries when a
+            # StepTimer is installed by benchmark_frozen(); no-op otherwise, so
+            # the hot path is unchanged. See _marker_group.
             with self._marker_group("clear_grads"):
                 # Hot path: only zero the 5 2D grad seeds. The 14 scalar param
                 # grad buffers are already zero because Adam zero'd them per-thread
@@ -1125,8 +1165,81 @@ class Pipeline:
             with self._marker_group("regularization"):
                 self._run_regularization()
             with self._marker_group("adam"):
-                self._adam.step(lrs)
+                self._adam.step(lrs, active_rest_floats=self._active_rest_floats())
 
+
+    # Top-level train_step marker groups, in execution order. These are the
+    # coarse phases the training goal tracks (fwd / bwd / adam among them).
+    _TOP_PHASES: tuple[str, ...] = (
+        "clear_grads", "forward", "loss", "backward", "regularization", "adam")
+
+    def benchmark_frozen(self, camera: Camera, warmup: int = 16,
+                         iters: int = 64) -> dict:
+        """Measure per-marker GPU ms over frozen train_steps.
+
+        Reproduces the Nsight-capture workload: a pinned camera with all LRs = 0
+        so the full backward + Adam workload runs but no parameter moves, making
+        every timed step bit-identical (see profiler.run_capture_if_due). Installs
+        a marker-driven GPU-timestamp StepTimer for the duration, runs ``warmup``
+        untimed steps to reach steady state (caches warm, no first-frame compile/
+        alloc spikes), then times ``iters`` steps and returns per-marker mean/
+        median/min/max ms. Every ``_marker_group`` scope is timed, so the result
+        carries both the coarse phases (forward/backward/adam) AND the nested
+        kernels (bin_count / radix_sort / rasterize / backward_persbucket / ...)
+        that pinpoint where the time goes.
+
+        The timer is uninstalled on exit, so this leaves the hot path untouched.
+        """
+        from trainer.backend.compute.timing import StepTimer
+
+        frozen_lrs = AdamLRs(mean=0.0, scale=0.0, rot=0.0, opacity=0.0, color=0.0,
+                             sh_rest=0.0)
+
+        # Warm up frozen frames BEFORE timing (steady state; no compile spikes).
+        for _ in range(max(0, warmup)):
+            self.train_step(camera, lrs=frozen_lrs)
+        self.runtime.wait_for_idle()
+
+        timer = StepTimer(self.device)
+        self._step_timer = timer
+        samples: dict[str, list[float]] = {}
+        try:
+            for _ in range(max(1, iters)):
+                timer.begin_step()
+                self.train_step(camera, lrs=frozen_lrs)
+                self.runtime.wait_for_submit(self.last_submit_id)
+                for label, ms in timer.read().markers_ms.items():
+                    samples.setdefault(label, []).append(ms)
+        finally:
+            self._step_timer = None
+
+        def _stats(values: list[float]) -> dict:
+            ordered = sorted(values)
+            n = len(ordered)
+            median = (ordered[n // 2] if n % 2
+                      else 0.5 * (ordered[n // 2 - 1] + ordered[n // 2]))
+            return {
+                "mean": sum(ordered) / n,
+                "median": median,
+                "min": ordered[0],
+                "max": ordered[-1],
+                "count": n,
+            }
+
+        marker_stats = {label: _stats(vals) for label, vals in samples.items()}
+        top = {p: marker_stats[p]["median"] for p in self._TOP_PHASES
+               if p in marker_stats}
+        total_median = sum(top.values())
+        return {
+            "iters": iters,
+            "warmup": warmup,
+            "markers": marker_stats,
+            "top_phases": list(self._TOP_PHASES),
+            "forward_ms": marker_stats.get("forward", {}).get("median", 0.0),
+            "backward_ms": marker_stats.get("backward", {}).get("median", 0.0),
+            "adam_ms": marker_stats.get("adam", {}).get("median", 0.0),
+            "total_ms": total_median,
+        }
 
     def densify_simple(self, cfg, grad_thresh=0.0002, scale_thresh=None,
                        prune_big_scale=None, allow_scale_prune=True,

@@ -314,6 +314,11 @@ void backwardRasterizePerSplat(
             : GaussianPrimitive.make(float2(0.0), float3(0.0), 0.0, float3(0.0), 0.0);
         float3 c_i = prim.color();
 
+        // Splat-invariant coverage precompute (1/det, inverse-cov, sigmoid),
+        // hoisted out of the per-pixel loop below. See the per-bucket kernel.
+        GaussCovConst cov_pre = gaussCovPrecompute(prim.mean, prim.cov2d,
+                                                   prim.opacity, prim.opacity_compensation);
+
         uint cp_bucket = tile_bucket_base + bucket;
         // First splat index of this bucket. A pixel contributes to this
         // bucket only if its ray reached at least this splat
@@ -392,9 +397,12 @@ void backwardRasterizePerSplat(
 
             float alpha = 0.0;
             float alpha_grad_scale = 0.0;
+            GaussCovCache cov_cache;   // reused by the cached coverage backward
             if (contributes)
             {
-                float alpha_raw = prim.coverage(pixel_center);
+                // Per-pixel coverage from the splat-invariant precompute (see
+                // the per-bucket kernel). Caches intermediates for the gradient.
+                float alpha_raw = evalGaussian2DAtPixel(pixel_center, cov_pre, cov_cache);
                 alpha = min(alpha_raw, ALPHA_MAX);
                 alpha_grad_scale = (alpha_raw <= ALPHA_MAX) ? 1.0 : 0.0;
                 // Alpha-min skip — MUST be bit-identical to the forward
@@ -517,20 +525,24 @@ void backwardRasterizePerSplat(
 #endif
                 float dL_d_alpha_raw = dL_dalpha * alpha_grad_scale;
 
-                var dp_prim = diffPair(prim);
-                
-                bwd_diff(primitiveCoverage<GaussianPrimitive>)(dp_prim, pixel_center, dL_d_alpha_raw);
+                // Cached analytic coverage backward (see the per-bucket kernel).
+                // Reuses the alpha eval's cov_cache; verified vs autodiff to fp32
+                // epsilon.
+                float2 d_mean; float3 d_cov2d; float d_opacity; float d_comp;
+                evalGaussian2DFromCov_bwd_cached(cov_cache, prim.cov2d,
+                    prim.opacity_compensation, dL_d_alpha_raw,
+                    d_mean, d_cov2d, d_opacity, d_comp);
 
-                acc_mean2d += dp_prim.d.mean;
-                acc_cov2d  += dp_prim.d.cov2d;
-                acc_opacity += dp_prim.d.opacity;
-                acc_comp   += dp_prim.d.opacity_compensation;
+                acc_mean2d += d_mean;
+                acc_cov2d  += d_cov2d;
+                acc_opacity += d_opacity;
+                acc_comp   += d_comp;
                 // acc_color seed accumulated above (SH_C0 applied post-loop).
 
                 if (alpha >= ALPHA_MIN_TRACK)
                 {
-                    acc_absx += abs(dp_prim.d.mean.x);
-                    acc_absy += abs(dp_prim.d.mean.y);
+                    acc_absx += abs(d_mean.x);
+                    acc_absy += abs(d_mean.y);
                 }
             }
         }
@@ -716,6 +728,14 @@ void backwardRasterizePerBucket(
                                  blend_only_data.opacity_compensation) : GaussianPrimitive.make(float2(0.0), float3(0.0), 0.0, float3(0.0), 0.0);
     float3 c_i = prim.color();
 
+    // Splat-invariant coverage precompute: 1/det, inverse-cov, sigmoid(opacity)
+    // depend only on this lane's splat, not the pixel. Computing them ONCE here
+    // (instead of once per pixel inside the 256-iteration loop) hoists a divide
+    // + an exp out of the hot loop; the per-pixel eval below is then just d, the
+    // quadratic form, and exp(power). Bit-identical arithmetic.
+    GaussCovConst cov_pre = gaussCovPrecompute(prim.mean, prim.cov2d,
+                                               prim.opacity, prim.opacity_compensation);
+
     // --- Pixel loop: all 32 lanes lockstep so the wave scans stay valid ---
     [loop]
     for (uint p = 0u; p < TILE_AREA; ++p)
@@ -749,9 +769,13 @@ void backwardRasterizePerBucket(
 
         float alpha = 0.0;
         float alpha_grad_scale = 0.0;
+        GaussCovCache cov_cache;   // reused by the cached coverage backward below
         if (contributes)
         {
-            float alpha_raw = prim.coverage(pixel_center);
+            // Per-pixel coverage from the splat-invariant precompute (no divide/
+            // sigmoid here — those were hoisted to cov_pre). Caches the eval
+            // intermediates so the gradient reuses them (no 2nd primal eval).
+            float alpha_raw = evalGaussian2DAtPixel(pixel_center, cov_pre, cov_cache);
             alpha = min(alpha_raw, ALPHA_MAX);
             alpha_grad_scale = (alpha_raw <= ALPHA_MAX) ? 1.0 : 0.0;
             if (alpha < ALPHA_MIN_TRACK)
@@ -810,19 +834,24 @@ void backwardRasterizePerBucket(
 #endif
             float dL_d_alpha_raw = dL_dalpha * alpha_grad_scale;
 
-            var dp_prim = diffPair(prim);
+            // Cached analytic coverage backward (was bwd_diff(primitiveCoverage),
+            // the pipeline's hottest autodiff call). Reuses the cov_cache from the
+            // alpha eval above, so NO redundant primal recompute. Same Jacobian,
+            // verified vs autodiff to fp32 epsilon (tests/test_gradients.py).
+            float2 d_mean; float3 d_cov2d; float d_opacity; float d_comp;
+            evalGaussian2DFromCov_bwd_cached(cov_cache, prim.cov2d,
+                prim.opacity_compensation, dL_d_alpha_raw,
+                d_mean, d_cov2d, d_opacity, d_comp);
 
-            bwd_diff(primitiveCoverage<GaussianPrimitive>)(dp_prim, pixel_center, dL_d_alpha_raw);
-
-            acc_mean2d += dp_prim.d.mean;
-            acc_cov2d  += dp_prim.d.cov2d;
-            acc_opacity += dp_prim.d.opacity;
-            acc_comp   += dp_prim.d.opacity_compensation;
+            acc_mean2d += d_mean;
+            acc_cov2d  += d_cov2d;
+            acc_opacity += d_opacity;
+            acc_comp   += d_comp;
 
             if (alpha >= ALPHA_MIN_TRACK)
             {
-                acc_absx += abs(dp_prim.d.mean.x);
-                acc_absy += abs(dp_prim.d.mean.y);
+                acc_absx += abs(d_mean.x);
+                acc_absy += abs(d_mean.y);
             }
         }
     }

@@ -20,6 +20,7 @@ from trainer.frontend.app import (
 
 
 def test_default_shader_specialization_uses_shader_default() -> None:
+    # No stride override and hardness NOT specialized (default) => no defines.
     specialization = ShaderSpecialization(backward_pixel_stride=1)
     assert specialization.compiler_defines() is None
 
@@ -29,6 +30,20 @@ def test_strided_backward_specialization_emits_slang_uint_define() -> None:
     assert specialization.compiler_defines() == {
         "BACKWARD_PIXEL_STRIDE": "4u",
     }
+
+
+def test_hardness_one_specialization_emits_define() -> None:
+    spec = ShaderSpecialization(backward_pixel_stride=1, hardness_is_one=True)
+    assert spec.compiler_defines() == {"COMPOSITOR_HARDNESS_ONE": "1"}
+
+
+def test_from_args_specializes_hardness_when_target_le_one() -> None:
+    on = ShaderSpecialization.from_args(
+        Namespace(backward_pixel_stride=1, extinction_hardness=1.0))
+    assert on.compiler_defines() == {"COMPOSITOR_HARDNESS_ONE": "1"}
+    off = ShaderSpecialization.from_args(
+        Namespace(backward_pixel_stride=1, extinction_hardness=2.0))
+    assert off.compiler_defines() is None
 
 
 def test_device_factory_passes_resolved_specialization(monkeypatch) -> None:
@@ -44,6 +59,7 @@ def test_device_factory_passes_resolved_specialization(monkeypatch) -> None:
         backend="vulkan",
         profile_run=False,
         backward_pixel_stride=2,
+        extinction_hardness=2.0,   # > 1 => hardness path NOT specialized
     )
 
     assert create_training_device(args) is sentinel

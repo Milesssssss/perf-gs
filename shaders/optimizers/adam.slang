@@ -190,26 +190,49 @@ void adamStepRest(
     uniform float bias_correction1,
     uniform float bias_correction2,
     uniform float pixels_per_step,
-    uniform uint rest_floats)
+    uniform uint rest_floats,
+    // Number of scalar rest coeffs currently ACTIVE (progressive SH schedule):
+    // 3*((active_deg+1)^2 - 1), computed on the host. Coefficients beyond this
+    // are inactive bands the forward never reads at this degree, so sh_backward
+    // produces EXACTLY-zero gradient for them and their Adam parameter update is
+    // a no-op (m stays 0 => the step is lr*0/(...) = 0). Iterating only the
+    // active head skips that dead work AND its heavily-uncoalesced adam_rest
+    // traffic (gaussian-major stride) — at active_deg=1 this is 9 of 45 floats,
+    // the dominant cost of the whole train step. Clamped to rest_floats so the
+    // SH-off / full-width caller reproduces the old sweep.
+    //
+    // Note vs the old full-width sweep: that sweep also stored max(v,SH_V_FLOOR)
+    // for inactive coeffs every iter, so a band arrived at its activation iter
+    // with v = SH_V_FLOOR instead of 0. Skipping the dead iters leaves those
+    // coeffs at v = 0 (textbook Adam init for a freshly-optimized parameter),
+    // which changes the first activated step by an SH_V_FLOOR-scale amount. This
+    // is a tiny, arguably-more-correct difference, held to no PSNR regression by
+    // the end-to-end eval (see the perf-goal memory), not a bit-for-bit match.
+    uniform uint active_rest_floats)
 {
     uint idx = dtid.x;
     if (idx >= num_gaussians_counter[0]) return;
     if (cluster_visible[idx / CLUSTER_SIZE] == 0u) return;
 
     float inv_pixels = 1.0 / max(pixels_per_step, 1.0);
-    uint fu = halfFeatUints(rest_floats);
-    uint pbase = idx * fu;              // packed feature uints (2 scalars each)
-    uint abase = idx * rest_floats;     // adam uints (one (m,v) each)
+    uint active = min(active_rest_floats, rest_floats);
+    uint fu = halfFeatUints(active);     // only the active coeff uints
+    uint pbase = idx * halfFeatUints(rest_floats);  // packed features stride
+    uint abase = idx * rest_floats;      // adam uints (one (m,v) each)
 
     for (uint u = 0u; u < fu; ++u)
     {
+        // One grad uint holds this uint's two scalars; unpack once (was two
+        // readHalfScalar loads of the SAME uint).
+        float2 g_pair = unpackHalf2x(features_rest_grad[pbase + u]);
         float2 p_pair = unpackHalf2x(features_rest[pbase + u]);
         float p_out[2] = { p_pair.x, p_pair.y };
+        [unroll]
         for (uint lane = 0u; lane < 2u; ++lane)
         {
             uint s = u * 2u + lane;
-            if (s >= rest_floats) break;
-            float g = readHalfScalar(features_rest_grad, pbase, s) * inv_pixels;
+            if (s >= active) break;
+            float g = ((lane == 0u) ? g_pair.x : g_pair.y) * inv_pixels;
             if (isnan(g) || isinf(g)) continue;
             float2 mv = unpackHalf2x(adam_rest[abase + s]);
             float m = mv.x, v = mv.y;

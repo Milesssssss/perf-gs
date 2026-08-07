@@ -60,7 +60,12 @@ void shBackward(
                        fromFixed(grad_color_g[gid]),
                        fromFixed(grad_color_b[gid]));
 
-    float3 rest[SH_REST_COEFFS] = loadSHRest(features_rest, gid, rest_floats);
+    // Load only the active bands: shColorFromMean + its bwd_diff ignore coeffs
+    // beyond `deg`, so inactive higher-band gathers are dead work (those coeffs
+    // are zero in storage and get zero gradient). active_coeffs excludes DC.
+    uint active_coeffs = uint((deg + 1) * (deg + 1) - 1);
+    float3 rest[SH_REST_COEFFS] = loadSHRestActive(features_rest, gid, rest_floats,
+                                                   active_coeffs);
 
     // Primal (pre-clamp) color to reconstruct the forward's >=0 clamp mask.
     float3 rgb_raw = shColorFromMean(g.sh0, rest, g.mean, cam, deg);

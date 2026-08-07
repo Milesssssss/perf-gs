@@ -35,7 +35,12 @@ void shForward(
     Gaussian3D g = gaussians[gid];
     float3 cam_center = cameraCenterWorld(camera[0].view_matrix);
 
-    float3 rest[SH_REST_COEFFS] = loadSHRest(features_rest, gid, rest_floats);
+    // Load only the active bands: evalSHColor ignores coeffs beyond
+    // active_sh_degree, so the inactive higher-band gathers are dead work.
+    // active_coeffs = (active_deg+1)^2 - 1 (excludes the DC term).
+    uint active_coeffs = (active_sh_degree + 1u) * (active_sh_degree + 1u) - 1u;
+    float3 rest[SH_REST_COEFFS] = loadSHRestActive(features_rest, gid, rest_floats,
+                                                   active_coeffs);
     float3 rgb = max(shColorFromMean(g.sh0, rest, g.mean, cam_center,
                                      int(active_sh_degree)), 0.0);
 

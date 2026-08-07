@@ -283,6 +283,58 @@ def test_sh_training_updates_rest_and_reduces_loss(backend: str) -> None:
 
 
 @pytest.mark.parametrize("backend", BACKENDS)
+def test_sh_active_band_adam_matches_full_width(backend: str) -> None:
+    """The rest-Adam active-band optimization (iterate only the active SH
+    coefficients) must be BIT-IDENTICAL to the full-width step.
+
+    At a partial active degree the inactive higher bands have exactly-zero
+    gradient (autodiff of evalSHColor never touches them), so their Adam update
+    is a parameter no-op. Capping the loop to the active head must therefore
+    leave features_rest byte-for-byte equal to a reference run that steps the
+    full width — and the inactive bands must stay exactly zero throughout.
+    """
+    W = H = 24
+    cam = simple_camera(W, H, eye=(-1.0, -1.0, 0.0), target=(0.0, 0.0, 3.0),
+                        fovy_degrees=60.0)
+    means = np.array([[0.0, 0.0, 3.0]], np.float32)
+    log_scales = np.log(np.full((1, 3), 0.7, np.float32))
+    rot = np.array([[1.0, 0.0, 0.0, 0.0]], np.float32)
+    opac = np.array([0.99], np.float32)
+    target = np.zeros((H, W, 3), np.float32)
+    target[..., 0] = 0.9; target[..., 1] = 0.1; target[..., 2] = 0.2
+    active_deg = 1  # only band 1 (9 of 45 rest floats) is active
+
+    def _run(cap_active: bool) -> np.ndarray:
+        p = _make_pipeline(backend, sh_degree=3, width=W, height=H)
+        p.set_primitive_from_numpy(
+            means=means, log_scales=log_scales, rot_quats=rot, opacities=opac,
+            color_logits=np.zeros((1, 3), np.float32))
+        p.set_active_sh_degree(active_deg)
+        p.set_target_image(target)
+        # cap_active=False forces the full-width reference (active_rest_floats
+        # defaults to the configured width inside AdamOptimizer.step).
+        p._bench_force_full_rest_adam = not cap_active
+        lrs = AdamLRs()
+        for _ in range(40):
+            p.train_step(cam, lrs=lrs)
+        p.device.wait_for_idle()
+        return _read_features_rest(p, 1)[0]
+
+    capped = _run(cap_active=True)
+    full = _run(cap_active=False)
+
+    rest_per_band = 3
+    n_active = ((active_deg + 1) ** 2 - 1) * rest_per_band  # 9 floats
+    # Active head must match the full-width reference bit-for-bit.
+    np.testing.assert_array_equal(capped[:n_active], full[:n_active])
+    # Inactive higher bands must be untouched (exactly zero) in BOTH runs.
+    assert np.all(capped[n_active:] == 0.0), "capped run moved an inactive band"
+    assert np.all(full[n_active:] == 0.0), "full run moved an inactive band"
+    # And the active band must actually have moved (the step is doing work).
+    assert np.abs(capped[:n_active]).max() > 1e-4
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
 def test_sh_features_rest_survives_morton_sort(backend: str) -> None:
     """features_rest + its Adam moments must be permuted in lockstep with the
     gaussians by a Morton re-sort (mortonScatterSH), or the coefficients desync

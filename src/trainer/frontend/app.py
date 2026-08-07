@@ -131,20 +131,34 @@ class ShaderSpecialization:
     to size staged arrays and specialize loop/index arithmetic. The application
     deals in the semantic value; only this adapter knows the Slang macro name
     and unsigned-literal spelling.
+
+    hardness_is_one specializes the Compositor to the pure alpha-over path when
+    the run's extinction hardness is fixed at <= 1 (default): the dead pow-based
+    hardened-extinction branches compile out, freeing registers in the hottest
+    backward loop. Any hardness > 1 run keeps the full runtime path (define off).
     """
 
     backward_pixel_stride: int
+    # Default False = full runtime compositor (safe/back-compat). from_args sets
+    # it True when the run's extinction hardness is fixed at <= 1.
+    hardness_is_one: bool = False
 
     @classmethod
     def from_args(cls, args: argparse.Namespace) -> "ShaderSpecialization":
-        return cls(backward_pixel_stride=args.backward_pixel_stride)
+        # The hardness SCHEDULE only ever ramps UP toward the target and starts
+        # at 1.0, so target <= 1 means hardness == 1 for the whole run.
+        return cls(
+            backward_pixel_stride=args.backward_pixel_stride,
+            hardness_is_one=(float(args.extinction_hardness) <= 1.0),
+        )
 
     def compiler_defines(self) -> dict[str, str] | None:
-        if self.backward_pixel_stride == 1:
-            return None
-        return {
-            "BACKWARD_PIXEL_STRIDE": f"{self.backward_pixel_stride}u",
-        }
+        defines: dict[str, str] = {}
+        if self.backward_pixel_stride != 1:
+            defines["BACKWARD_PIXEL_STRIDE"] = f"{self.backward_pixel_stride}u"
+        if self.hardness_is_one:
+            defines["COMPOSITOR_HARDNESS_ONE"] = "1"
+        return defines or None
 
 
 @dataclass
@@ -191,8 +205,12 @@ class TrainingApplication:
     def from_cli(cls) -> "TrainingApplication":
         return cls(build_parser().parse_args())
 
-    def launch_training(self) -> None:
-        # ------ prepare for training -------------------------
+    def prepare(self) -> None:
+        """Run the full pre-loop setup: scene load, config validation, device +
+        pipeline construction, targets, optional features, viewer, profiler, and
+        training services. Extracted from :meth:`launch_training` so alternate
+        drivers (e.g. the timing benchmark) can prepare identically and then run
+        their own tail instead of the standard loop + post-training."""
         self.profiling_enabled = apply_profile_session_overrides(self.args)
 
         self.scene_context = load_scene_context(self.args)
@@ -223,8 +241,11 @@ class TrainingApplication:
         self._start_profiler()
         self._create_training_services()
 
-        # ---- launch training loop --------------------
-        result = TrainingLoop(
+    def build_training_loop(self) -> "TrainingLoop":
+        """Construct the :class:`TrainingLoop` from the prepared runtime. Call
+        only after :meth:`prepare`. Shared by :meth:`launch_training` and the
+        timing benchmark so both drive the identical loop wiring."""
+        return TrainingLoop(
             args=self.args,
             scene=self._sceneContext,
             targets=self._targets,
@@ -237,7 +258,14 @@ class TrainingApplication:
             mean_lr=self._mean_lr,
             extinction=self._extinction,
             paths=self.paths,
-        ).launch_training_loop()
+        )
+
+    def launch_training(self) -> None:
+        # ------ prepare for training -------------------------
+        self.prepare()
+
+        # ---- launch training loop --------------------
+        result = self.build_training_loop().launch_training_loop()
 
         # -----Post-training----------------------------------------
         self._write_final_test_psnr(result)
@@ -570,6 +598,34 @@ class TrainingLoop:
                 break
 
         return self._complete_training_loop()
+
+    def advance_to_capture(self, capture_step: int) -> IterationContext:
+        """Drive the normal training loop up to — but NOT executing — the
+        train_step at ``capture_step``, returning that iteration's context
+        (pinned camera + resolved LRs + scheduled events).
+
+        This mirrors ``Profiler.run_capture_if_due``'s freeze point EXACTLY: the
+        capture fires at the top of iter == capture_iter, after
+        ``_next_iteration`` / ``_prepare_iteration`` but before
+        ``_execute_training_step``. Every densify / opacity-reset / morton / mip
+        mutation for iters ``1..capture_step-1`` runs as in a normal run, so the
+        frozen state a benchmark then measures matches what the Nsight capture
+        profiles at that iteration. Drains the queue before returning so the
+        pinned state is fully realized on the GPU.
+        """
+        self._begin_training_loop()
+        while self._should_continue():
+            context = self._next_iteration()
+            self._prepare_iteration(context)
+            if context.step_number >= capture_step:
+                self.runtime.pipeline.runtime.wait_for_idle()
+                return context
+            self._execute_training_step(context)
+            self._apply_mutations(context)
+            if not self._produce_observations(context):
+                break
+        raise RuntimeError(
+            f"training ended before reaching capture step {capture_step}")
 
     def _begin_training_loop(self) -> None:
         if self.args.wait_for_viewer:
