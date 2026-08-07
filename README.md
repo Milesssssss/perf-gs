@@ -87,6 +87,30 @@ Same runs, single GPU, wall-clock for the full 3000-iteration loop (the final me
 
 Evaluated on an RTX 3090.
 
+### Per-iteration kernel timing
+
+Steady-state GPU time per training step, broken down by phase. Measured on the
+bicycle scene at iteration 1560 (~6.2M gaussians), structure-aware densification
+with Mip-Splatting, as the median of 150 frozen steps (`scripts/running/bench_iter.py`,
+8×8 rasterizer tile, RTX 3090). SH0 is view-independent color; SH3 adds the
+view-dependent spherical-harmonic bands.
+
+| Phase | SH0 (ms) | SH3 (ms) |
+|---|---:|---:|
+| clear grads | 0.56 | 0.56 |
+| forward | 9.60 | 10.94 |
+| loss | 2.22 | 2.20 |
+| backward | 8.55 | 10.08 |
+| adam | 2.45 | 8.06 |
+| **step total** | **23.4** | **31.8** |
+
+The SH3 overhead is concentrated in the optimizer: the higher-band Adam step
+(`adam_rest`) accounts for ~5.6 ms of the ~8.4 ms SH0→SH3 difference, with the
+remainder split between SH color evaluation in the forward (~1.3 ms) and backward
+(~1.5 ms) passes. In both configurations the backward rasterize (~8.3 ms) is the
+single largest kernel, followed by the forward rasterize (~3.7 ms) and the radix
+sort (~3.6 ms).
+
 ## How it trains
 
 ```

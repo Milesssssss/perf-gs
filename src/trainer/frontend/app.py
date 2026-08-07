@@ -236,12 +236,12 @@ class TrainingApplication:
         self._start_profiler()
         self._create_training_services()
 
-    def launch_training(self) -> None:
-        # ------ prepare for training -------------------------
-        self.prepare()
-
-        # ---- launch training loop --------------------
-        result = TrainingLoop(
+    def build_training_loop(self) -> "TrainingLoop":
+        """Construct the :class:`TrainingLoop` from the prepared runtime. Call
+        only after :meth:`prepare`. Shared by :meth:`launch_training` and the
+        timing benchmark (scripts/running/bench_iter.py) so both drive the
+        identical loop wiring."""
+        return TrainingLoop(
             args=self.args,
             scene=self._sceneContext,
             targets=self._targets,
@@ -254,7 +254,14 @@ class TrainingApplication:
             mean_lr=self._mean_lr,
             extinction=self._extinction,
             paths=self.paths,
-        ).launch_training_loop()
+        )
+
+    def launch_training(self) -> None:
+        # ------ prepare for training -------------------------
+        self.prepare()
+
+        # ---- launch training loop --------------------
+        result = self.build_training_loop().launch_training_loop()
 
         # -----Post-training----------------------------------------
         self._write_final_test_psnr(result)
@@ -568,6 +575,7 @@ class TrainingLoop:
         self.eval_time_total = 0.0
         self.psnr_curve_records: list[dict] = []
         self.started_at = 0.0
+        self.post_iteration_clean_timing = 0.0
 
     def launch_training_loop(self) -> TrainingResult:
         self._begin_training_loop()
@@ -578,6 +586,10 @@ class TrainingLoop:
             self._capture_if_requested(it_context)
 
             self._execute_training_step(it_context)
+
+            # we need to record the actual final step timing here or it will be skewed by the post-iteration evals and renders
+            if it_context.step_number == self.args.iters:
+                self._record_current_timing()
 
             self._apply_mutations(it_context)
             should_continue = self._produce_observations(it_context)
@@ -652,7 +664,7 @@ class TrainingLoop:
         )
 
     def _prepare_iteration(self, context: IterationContext) -> None:
-        self.runtime.pipeline.set_target_texture(self.target_textures[context.camera_entry])
+        self.runtime.pipeline.set_target_texture(self.target_textures[context.camera_index])
 
         if context.step_number == 1:
             print(f"[determinism] iter 1 cam_idx={context.camera_index} (should match across same-seed runs)")
@@ -699,6 +711,12 @@ class TrainingLoop:
 
         self.runtime.queue_limiter.record(pipeline.last_submit_id)
         self._stream_viewer_snapshot_if_due(context)
+
+    def _record_current_timing(self) -> None:
+        # Lets way for all the gpu work to finish to get a fair and accurate final timing
+        self.runtime.pipeline.runtime.wait_for_idle()
+        self.post_iteration_clean_timing = time.time() - self.started_at
+
 
     def _apply_mutations(self, context: IterationContext) -> None:
         events = context.events
@@ -814,12 +832,11 @@ class TrainingLoop:
 
     def _complete_training_loop(self) -> TrainingResult:
         self.runtime.pipeline.runtime.wait_for_idle()
-        wall_time = time.time() - self.started_at
         self.runtime.pipeline.set_extinction_hardness(self.extinction.target)
-        self.runtime.reporter.report_complete(self.training_step, wall_time)
+        self.runtime.reporter.report_complete(self.training_step, self.post_iteration_clean_timing)
         return TrainingResult(
             iterations=self.training_step,
-            wall_time_seconds=wall_time,
+            wall_time_seconds=self.post_iteration_clean_timing,
             psnr_curve=self.psnr_curve_records,
             started_at=self.started_at,
         )
