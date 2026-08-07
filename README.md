@@ -3,7 +3,8 @@
      30k iters); convergence.png is plotted from the per-scene psnr_curve.json
      runs. Swap in your own renders by replacing the files under assets/. -->
 
-# Slang 3DGS Trainer
+# SCATTO-GS (Slang-Compiled Accelerated Training-Time Optimization for Gaussian Splatting)
+A fast and efficient Slang-based 3DGS trainer.
 
 ![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)
 ![Shaders](https://img.shields.io/badge/Shaders-Slang-DE3163)
@@ -14,7 +15,7 @@
 ![Status](https://img.shields.io/badge/status-research-F5A623)
 
 A 3D Gaussian Splatting trainer written in [Slang](https://shader-slang.org) and driven from Python through [SlangPy](https://slangpy.shader-slang.org).<br>
-It achieves convergence in ~72s on the Mip-NeRF 360 dataset on an RTX 3090. The codebase has no CUDA dependencies, is directly integratable with pytorch frontend and all shaders are dispatched via SlangPy.
+It achieves convergence in ~64s on the Mip-NeRF 360 dataset on an RTX 3090 (45s with SH0, 64s with SH3). The codebase has no CUDA dependencies, is directly integratable with pytorch frontend and all shaders are dispatched via SlangPy.
 
 <p align="center">
   <img src="assets/teaser.jpg" alt="Mip-NeRF 360 bicycle scene trained by this pipeline, rendered from a held-out view" width="80%">
