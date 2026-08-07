@@ -47,6 +47,17 @@ By writing the kernels in Slang and having the whole system driven by slangpy, w
 
 ## Results
 
+The benchmark scene is Mip-NeRF 360 bicycle (quarter resolution, 3000 iterations, structure-aware densification with Mip-Splatting, every 8th view held out for test, ~6.2M gaussians, RTX 3090). The headline result is quality against per-step GPU cost, for view-independent color (SH0) and the full view-dependent spherical-harmonic model (SH3):
+
+| Config | Test PSNR (dB) | Forward (ms) | Backward (ms) | Adam (ms) | Step (ms) |
+|---|---:|---:|---:|---:|---:|
+| SH0 | 24.64 | 9.60 | 8.55 | 2.45 | 23.4 |
+| SH3 | 24.64 | 10.94 | 10.08 | 8.06 | 31.8 |
+
+Per-step timings are the median of 150 frozen steps at iteration 1560 (`scripts/running/bench_iter.py`, 8×8 rasterizer tile). On bicycle the SH3 bands barely move PSNR while adding ~36% to the step, almost all of it in the higher-band Adam update (`adam_rest`, ~5.6 ms); the backward rasterize (~8.3 ms) is the largest single kernel in both configs.
+
+## Quality validation
+
 Mip-NeRF 360, quarter resolution, spherical-harmonic degree 0, 3000 iterations, every 8th view held out for test. The table compares this trainer against a reference structure-aware densification run on the identical scenes and settings.
 
 | Scene | Slang PSNR (dB) | SAD-GS reference (dB) | Delta |
@@ -85,31 +96,7 @@ Same runs, single GPU, wall-clock for the full 3000-iteration loop (the final me
 | room | 43.5
 | **Average** | **72.6**
 
-Evaluated on an RTX 3090.
-
-### Per-iteration kernel timing
-
-Steady-state GPU time per training step, broken down by phase. Measured on the
-bicycle scene at iteration 1560 (~6.2M gaussians), structure-aware densification
-with Mip-Splatting, as the median of 150 frozen steps (`scripts/running/bench_iter.py`,
-8×8 rasterizer tile, RTX 3090). SH0 is view-independent color; SH3 adds the
-view-dependent spherical-harmonic bands.
-
-| Phase | SH0 (ms) | SH3 (ms) |
-|---|---:|---:|
-| clear grads | 0.56 | 0.56 |
-| forward | 9.60 | 10.94 |
-| loss | 2.22 | 2.20 |
-| backward | 8.55 | 10.08 |
-| adam | 2.45 | 8.06 |
-| **step total** | **23.4** | **31.8** |
-
-The SH3 overhead is concentrated in the optimizer: the higher-band Adam step
-(`adam_rest`) accounts for ~5.6 ms of the ~8.4 ms SH0→SH3 difference, with the
-remainder split between SH color evaluation in the forward (~1.3 ms) and backward
-(~1.5 ms) passes. In both configurations the backward rasterize (~8.3 ms) is the
-single largest kernel, followed by the forward rasterize (~3.7 ms) and the radix
-sort (~3.6 ms).
+Evaluated on an RTX 3090. Per-step GPU cost for SH0 vs SH3 (bicycle) is in the [Results](#results) table above.
 
 ## How it trains
 
