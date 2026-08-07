@@ -21,7 +21,7 @@ from typing import Any
 import numpy as np
 from PIL import Image
 
-from trainer.data.colmap import load_colmap, load_colmap_image
+from trainer.data.colmap import ColmapImageEntry, load_colmap, load_colmap_image
 from trainer.common.color import srgb_to_linear
 from trainer.config.config import (
     AdamLRs,
@@ -59,7 +59,7 @@ from trainer.frontend.training_preflight import (
     resolve_holdout_split,
     resolve_loss_and_lrs,
 )
-from trainer.frontend.schedule import TrainingSchedule
+from trainer.frontend.schedule import IterationEvents, TrainingSchedule
 from trainer.frontend.viewer.viewer_control import ViewerSession
 
 from trainer.data.colmap import ColmapDataset
@@ -70,12 +70,7 @@ from trainer.frontend.profiling.profiler import (
     Profiler,
     apply_profile_session_overrides,
 )
-from _v2_sampling import CameraSampler  # pyright: ignore[reportMissingImports]
-
-
-# ---------------------------------------------------------------------------
-# Application data
-# ---------------------------------------------------------------------------
+from trainer.frontend.evaluation.evaluation import CameraSampler 
 
 
 @dataclass(frozen=True)
@@ -93,7 +88,7 @@ class RunPaths:
 
 @dataclass(frozen=True)
 class SceneContext:
-    colmapScene: Any
+    colmapScene: ColmapDataset
     width: int
     height: int
     camera_count: int
@@ -110,9 +105,9 @@ class SceneContext:
 class IterationContext:
     step_number: int
     camera_index: int
-    camera_entry: Any
+    camera_entry: ColmapImageEntry
     learning_rates: AdamLRs
-    events: Any
+    events: IterationEvents
 
 
 @dataclass(frozen=True)
@@ -241,11 +236,12 @@ class TrainingApplication:
         self._start_profiler()
         self._create_training_services()
 
-    def build_training_loop(self) -> "TrainingLoop":
-        """Construct the :class:`TrainingLoop` from the prepared runtime. Call
-        only after :meth:`prepare`. Shared by :meth:`launch_training` and the
-        timing benchmark so both drive the identical loop wiring."""
-        return TrainingLoop(
+    def launch_training(self) -> None:
+        # ------ prepare for training -------------------------
+        self.prepare()
+
+        # ---- launch training loop --------------------
+        result = TrainingLoop(
             args=self.args,
             scene=self._sceneContext,
             targets=self._targets,
@@ -258,14 +254,7 @@ class TrainingApplication:
             mean_lr=self._mean_lr,
             extinction=self._extinction,
             paths=self.paths,
-        )
-
-    def launch_training(self) -> None:
-        # ------ prepare for training -------------------------
-        self.prepare()
-
-        # ---- launch training loop --------------------
-        result = self.build_training_loop().launch_training_loop()
+        ).launch_training_loop()
 
         # -----Post-training----------------------------------------
         self._write_final_test_psnr(result)
@@ -584,14 +573,14 @@ class TrainingLoop:
         self._begin_training_loop()
 
         while self._should_continue():
-            context = self._next_iteration()
-            self._prepare_iteration(context)
-            self._capture_if_requested(context)
+            it_context = self._next_iteration()
+            self._prepare_iteration(it_context)
+            self._capture_if_requested(it_context)
 
-            self._execute_training_step(context)
+            self._execute_training_step(it_context)
 
-            self._apply_mutations(context)
-            should_continue = self._produce_observations(context)
+            self._apply_mutations(it_context)
+            should_continue = self._produce_observations(it_context)
             self._present_profile_frame_if_enabled()
 
             if not should_continue:
@@ -653,20 +642,21 @@ class TrainingLoop:
             color=self.base_lrs.color,
             sh_rest=self.base_lrs.sh_rest,
         )
+
         return IterationContext(
             step_number=self.training_step,
-            camera_index=camera_index,
+            camera_index=camera_index, #the cam idx is in the camera entry but the colmap cam id is 1-indexed, kept separate to avoid conf
             camera_entry=camera_entry,
             learning_rates=learning_rates,
             events=self.schedule.events_at(self.training_step),
         )
 
     def _prepare_iteration(self, context: IterationContext) -> None:
-        self.runtime.pipeline.set_target_texture(
-            self.target_textures[context.camera_index])
+        self.runtime.pipeline.set_target_texture(self.target_textures[context.camera_entry])
+
         if context.step_number == 1:
-            print(f"[determinism] iter 1 cam_idx={context.camera_index} "
-                  "(should match across same-seed runs)")
+            print(f"[determinism] iter 1 cam_idx={context.camera_index} (should match across same-seed runs)")
+
         self.runtime.queue_limiter.before_submit()
 
     def _capture_if_requested(self, context: IterationContext) -> None:
@@ -684,6 +674,7 @@ class TrainingLoop:
             raise SystemExit(0)
 
     def _execute_training_step(self, context: IterationContext) -> None:
+        #TODO this too sould not be part of this detail-agnostic function
         structure_texture = None
         structure_kwargs = None
         if self._should_accumulate_structure(context):
@@ -695,14 +686,17 @@ class TrainingLoop:
             }
 
         pipeline = self.runtime.pipeline
+        # TODO extinction hardness is a per-iteration schedule info, same for the sh degree, they should absolutely NOT be part of the pipeline state
         pipeline.set_extinction_hardness(self.extinction.at(context.step_number))
         pipeline.update_sh_degree(context.step_number)
+
         pipeline.train_step(
             context.camera_entry.camera,
             lrs=context.learning_rates,
             structure_tensor=structure_texture,
             structure_kwargs=structure_kwargs,
         )
+
         self.runtime.queue_limiter.record(pipeline.last_submit_id)
         self._stream_viewer_snapshot_if_due(context)
 
@@ -727,11 +721,14 @@ class TrainingLoop:
                 carry_eta=(self.densify_mode == DensificationMode.STRUCTURE_AWARE),
             )
             pipeline.clear_tracking()
+
             if pipeline.last_submit_id:
                 self.runtime.queue_limiter.record(pipeline.last_submit_id)
-            self.runtime.reporter.report_morton_sort(context.step_number)
+
+            #self.runtime.reporter.report_morton_sort(context.step_number)
 
         if events.mip_periodic:
+            # TODO: benchmark the 3d filter, its slow af afair
             pipeline.compute_3d_filter()
 
     def _produce_observations(self, context: IterationContext) -> bool:

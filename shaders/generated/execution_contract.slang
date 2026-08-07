@@ -5,7 +5,9 @@
 #ifndef TRAINER_EXECUTION_CONTRACT
 #define TRAINER_EXECUTION_CONTRACT
 
-static const int CONTRACT_TILE_SIZE = 8;
+static const int CONTRACT_TILE_WIDTH = 8;
+static const int CONTRACT_TILE_HEIGHT = 8;
+static const int CONTRACT_TILE_AREA = 64;
 static const int CONTRACT_CLUSTER_SIZE = 128;
 static const int CONTRACT_RADIX_PART_SIZE = 2048;
 static const int CONTRACT_RADIX_DIGITS = 256;

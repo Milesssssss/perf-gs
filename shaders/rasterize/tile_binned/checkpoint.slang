@@ -35,10 +35,9 @@
 static const uint RASTER_BUCKET_SIZE = CONTRACT_RASTER_BUCKET_SIZE;
 
 // Pixels per tile = the per-bucket checkpoint stride (one (T,C) entry per pixel
-// per bucket). Derived from the tile side so a tile-size change is a single knob;
-// was a hardcoded 256 here + in buffers.py's raster_checkpoints allocation, which
-// must stay in lockstep with this stride.
-static const uint CHECKPOINT_TILE_AREA = CONTRACT_TILE_SIZE * CONTRACT_TILE_SIZE;
+// per bucket). = TILE_WIDTH*TILE_HEIGHT (non-square tiles allowed). Must stay in
+// lockstep with buffers.py's raster_checkpoints allocation (max_buckets*TILE_AREA).
+static const uint CHECKPOINT_TILE_AREA = CONTRACT_TILE_AREA;
 
 // Pack (a, b) two floats into one uint as two fp16 halves (a low, b high).
 uint packHalf2(float a, float b)

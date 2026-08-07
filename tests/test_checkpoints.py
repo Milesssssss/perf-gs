@@ -20,7 +20,8 @@ import numpy as np
 import pytest
 
 from trainer.data.dataset import simple_camera
-from trainer.contracts.codegen import RASTER_BUCKET_SIZE, TILE_SIZE
+from trainer.contracts.codegen import (
+    RASTER_BUCKET_SIZE, TILE_WIDTH, TILE_HEIGHT, TILE_AREA)
 from trainer.backend.compute.device import create_device
 from _pipeline_testkit import TestPipeline
 
@@ -93,8 +94,8 @@ def test_forward_checkpoints_reconstruct(backend: str) -> None:
     device.wait_for_idle()
 
     b = pipeline.buffers
-    num_tiles_x = (W + TILE_SIZE - 1) // TILE_SIZE
-    num_tiles_y = (H + TILE_SIZE - 1) // TILE_SIZE
+    num_tiles_x = (W + TILE_WIDTH - 1) // TILE_WIDTH
+    num_tiles_y = (H + TILE_HEIGHT - 1) // TILE_HEIGHT
 
     tile_start = np.frombuffer(b.tile_start.to_numpy().tobytes(), dtype=np.uint32)
     tile_end = np.frombuffer(b.tile_end.to_numpy().tobytes(), dtype=np.uint32)
@@ -140,18 +141,18 @@ def test_forward_checkpoints_reconstruct(backend: str) -> None:
                 continue
             gb_base = int(bucket_offsets[tile_idx])
 
-            for ly in range(TILE_SIZE):
-                for lx in range(TILE_SIZE):
-                    gx = tx * TILE_SIZE + lx
-                    gy = ty * TILE_SIZE + ly
+            for ly in range(TILE_HEIGHT):
+                for lx in range(TILE_WIDTH):
+                    gx = tx * TILE_WIDTH + lx
+                    gy = ty * TILE_HEIGHT + ly
                     if gx >= W or gy >= H:
                         continue
-                    pixel_in_tile = ly * TILE_SIZE + lx
+                    pixel_in_tile = ly * TILE_WIDTH + lx
                     px = gx + 0.5
                     py = gy + 0.5
 
                     # bucket 0 checkpoint must be (T=1, C=0).
-                    e0 = ckpt_u[(gb_base + 0) * (TILE_SIZE * TILE_SIZE) + pixel_in_tile]
+                    e0 = ckpt_u[(gb_base + 0) * TILE_AREA + pixel_in_tile]
                     T0, R0 = unpack_half2(e0[0])
                     G0, B0 = unpack_half2(e0[1])
                     assert abs(T0 - 1.0) < 1e-2, f"bucket0 T={T0} != 1"
@@ -171,7 +172,7 @@ def test_forward_checkpoints_reconstruct(backend: str) -> None:
                     for k in range(length):
                         if (k % BUCKET) == 0:
                             kb = k // BUCKET
-                            e = ckpt_u[(gb_base + kb) * (TILE_SIZE * TILE_SIZE) + pixel_in_tile]
+                            e = ckpt_u[(gb_base + kb) * TILE_AREA + pixel_in_tile]
                             Tk, Rk = unpack_half2(e[0])
                             Gk, Bk = unpack_half2(e[1])
                             # fp16 tolerance: relative for T, absolute for C.

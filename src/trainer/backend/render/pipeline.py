@@ -33,7 +33,7 @@ from trainer.config.config import (
     RegularizationConfig,
 )
 from trainer.config.config_types import DensificationMode
-from trainer.contracts.codegen import sh_rest_coeffs, TILE_SIZE
+from trainer.contracts.codegen import sh_rest_coeffs, TILE_WIDTH, TILE_HEIGHT, TILE_AREA
 from trainer.data.dataset import Camera
 from trainer.backend.densify.densify import DensifyConfig
 from trainer.backend.compute.device import SHADERS_DIR
@@ -113,12 +113,13 @@ class Pipeline:
         self.max_splats = max_splats
         if max_sort_pairs is None:
             # A gaussian contributes one (tile,depth,id) pair per tile its ellipse
-            # touches; smaller tiles (see CONTRACT_TILE_SIZE) mean each gaussian
-            # spans more tiles, so the per-splat multiplier scales with tiles per
-            # gaussian. At the 8x8 tile the average tile-touch count is ~2-4x the
-            # 16x16 count, so use a 4x headroom (bin_emit silently drops pairs past
-            # this cap -> black-tile artifacts, so err generous; the smaller tile
-            # also shrinks the per-bucket checkpoint block 4x, offsetting VRAM).
+            # touches; smaller tiles (see CONTRACT_TILE_WIDTH/HEIGHT) mean each
+            # gaussian spans more tiles, so the per-splat multiplier scales with
+            # tiles per gaussian. At 8x4 (area 32) the average tile-touch count is
+            # several x the 16x16 count, so use a 4x headroom (bin_emit silently
+            # drops pairs past this cap -> black-tile artifacts, so err generous;
+            # the smaller tile also shrinks the per-bucket checkpoint block,
+            # offsetting VRAM).
             max_sort_pairs = max(buffers.DEFAULT_MAX_SORT_PAIRS, max_splats * 4)
         self.max_sort_pairs = max_sort_pairs
 
@@ -788,9 +789,9 @@ class Pipeline:
 
         with self._marker_group("rasterize"):
             self._dispatch(self.k_forward, "forward",
-                # One thread per tile-pixel: [numthreads(TILE_SIZE,TILE_SIZE)].
-                thread_count=[buffers.num_tiles_x * TILE_SIZE,
-                              buffers.num_tiles_y * TILE_SIZE, 1],
+                # One thread per tile-pixel: [numthreads(TILE_WIDTH,TILE_HEIGHT)].
+                thread_count=[buffers.num_tiles_x * TILE_WIDTH,
+                              buffers.num_tiles_y * TILE_HEIGHT, 1],
                 blend_data=buffers.blend_data.storage,
                 tile_start=buffers.tile_start.storage,
                 tile_end=buffers.tile_end.storage,
@@ -912,7 +913,7 @@ class Pipeline:
                     with self._marker_group("live_bucket_compaction"):
                         self._dispatch(self.k_tile_max_processed, "tile_max_processed",
                             # TILE_AREA threads/tile (reduces over the tile's pixels).
-                            thread_count=[num_tiles * TILE_SIZE * TILE_SIZE, 1, 1],
+                            thread_count=[num_tiles * TILE_AREA, 1, 1],
                             gaussian_count_per_pixel=b.gaussian_count_per_pixel,
                             live_bucket_count=b.live_bucket_count.storage,
                             frame_dim_px=spy.uint2(self.width, self.height),
@@ -969,7 +970,7 @@ class Pipeline:
                   # Transposed per-splat backward: one workgroup (TILE_AREA
                   # threads) per tile, splat-parallel with checkpoint reconstruction.
                   self._dispatch(self.k_backward_persplat, "backward_persplat",
-                    thread_count=[num_tiles * TILE_SIZE * TILE_SIZE, 1, 1],
+                    thread_count=[num_tiles * TILE_AREA, 1, 1],
                     blend_data=b.blend_data.storage,
                     tile_start=b.tile_start.storage,
                     tile_end=b.tile_end.storage,
@@ -1022,9 +1023,9 @@ class Pipeline:
                     )
             else:
                 self._dispatch(self.k_backward, "backward",
-                    # One thread per tile-pixel: [numthreads(TILE_SIZE,TILE_SIZE)].
-                    thread_count=[b.num_tiles_x * TILE_SIZE,
-                                  b.num_tiles_y * TILE_SIZE, 1],
+                    # One thread per tile-pixel: [numthreads(TILE_WIDTH,TILE_HEIGHT)].
+                    thread_count=[b.num_tiles_x * TILE_WIDTH,
+                                  b.num_tiles_y * TILE_HEIGHT, 1],
                     gaussians=b.gaussians.storage,
                     projected_2d=b.projected_2d.storage,
                     tile_start=b.tile_start.storage,
@@ -1158,15 +1159,8 @@ class Pipeline:
         if lrs is None:
             lrs = AdamLRs()
         with self._recording("train_step"):
-            # Marker groups double as GPU-timestamp phase boundaries when a
-            # StepTimer is installed by benchmark_frozen(); no-op otherwise, so
-            # the hot path is unchanged. See _marker_group.
             with self._marker_group("clear_grads"):
-                # Hot path: only zero the 5 2D grad seeds. The 14 scalar param
-                # grad buffers are already zero because Adam zero'd them per-thread
-                # at the end of the previous iter (see _clear_2d_grad_seeds docs).
-                # Callers must ensure the scalar-grad invariant is seeded by
-                # running _clear_grads() once at pipeline setup.
+                # TODO this should not be here by itself
                 self._clear_2d_grad_seeds()
             with self._marker_group("forward"):
                 self._run_forward(camera)

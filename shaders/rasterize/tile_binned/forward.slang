@@ -19,10 +19,13 @@
 #include "blend_forward.slang"
 #include "generated/execution_contract.slang"
 
-static const uint TILE_SIZE = CONTRACT_TILE_SIZE;
+// Non-square tiles: TILE_WIDTH pixels across, TILE_HEIGHT down. Pixel-in-tile
+// row stride is TILE_WIDTH.
+static const uint TILE_WIDTH  = CONTRACT_TILE_WIDTH;
+static const uint TILE_HEIGHT = CONTRACT_TILE_HEIGHT;
 
 [shader("compute")]
-[numthreads(TILE_SIZE, TILE_SIZE, 1)]
+[numthreads(TILE_WIDTH, TILE_HEIGHT, 1)]
 void forwardRasterize(
     uint3 dtid: SV_DispatchThreadID,
     uint3 gid: SV_GroupID,
@@ -48,17 +51,18 @@ void forwardRasterize(
     uint2 pixel = dtid.xy;
     uint2 frame_dim_px = uint2(camera[0].image_size);
 
-    uint2 num_tiles = (frame_dim_px + TILE_SIZE - 1) / TILE_SIZE;
+    uint2 num_tiles = (frame_dim_px + uint2(TILE_WIDTH, TILE_HEIGHT) - 1u)
+                      / uint2(TILE_WIDTH, TILE_HEIGHT);
     uint tile_idx = gid.y * num_tiles.x + gid.x;
     uint t_start = tile_start[tile_idx];
     uint t_end   = tile_end[tile_idx];
     uint tile_count = (t_end > t_start) ? (t_end - t_start) : 0;
 
-    // Pixel index within the 16x16 tile (row-major), used to address the
-    // per-pixel slot inside each bucket's 256-entry block. Computed even
-    // for out-of-frame pixels so the whole workgroup agrees on layout,
-    // but out-of-frame threads skip all writes.
-    uint pixel_in_tile = gtid.y * TILE_SIZE + gtid.x;
+    // Pixel index within the tile (row-major, row stride = TILE_WIDTH), used to
+    // address the per-pixel slot inside each bucket's TILE_AREA-entry block.
+    // Computed even for out-of-frame pixels so the whole workgroup agrees on
+    // layout, but out-of-frame threads skip all writes.
+    uint pixel_in_tile = gtid.y * TILE_WIDTH + gtid.x;
     uint tile_bucket_base = bucket_offsets[tile_idx];
 
     bool valid_pixel = (pixel.x < frame_dim_px.x && pixel.y < frame_dim_px.y);

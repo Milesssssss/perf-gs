@@ -32,9 +32,11 @@
 #include "checkpoint.slang"
 
 #include "generated/execution_contract.slang"
-static const uint TILE_SIZE = CONTRACT_TILE_SIZE;
-static const uint TILE_AREA = TILE_SIZE * TILE_SIZE;   // 256
-static const uint NUM_WARPS = TILE_AREA / 32u;         // 8 (assumes wave=32)
+// Non-square tiles: WIDTH across, HEIGHT down; pixel-in-tile row stride = WIDTH.
+static const uint TILE_WIDTH  = CONTRACT_TILE_WIDTH;
+static const uint TILE_HEIGHT = CONTRACT_TILE_HEIGHT;
+static const uint TILE_AREA   = CONTRACT_TILE_AREA;    // W*H (256 at 16x16, 32 at 8x4)
+static const uint NUM_WARPS   = TILE_AREA / 32u;       // buckets/WG (assumes wave=32)
 
 static const float ALPHA_MAX = 0.99;
 static const float ALPHA_MIN_TRACK = 1.0 / 255.0;
@@ -205,7 +207,8 @@ void backwardRasterizePerSplat(
 {
     uint tid = gtid.x;
     uint2 frame_dim_px = uint2(camera[0].image_size);
-    uint2 num_tiles = (frame_dim_px + TILE_SIZE - 1) / TILE_SIZE;
+    uint2 num_tiles = (frame_dim_px + uint2(TILE_WIDTH, TILE_HEIGHT) - 1u)
+                      / uint2(TILE_WIDTH, TILE_HEIGHT);
     // 1D dispatch: one 256-thread workgroup per tile. gid.x is the LINEAR
     // tile index; recover 2D tile coords from it (do NOT assume a 2D grid
     // like the per-pixel backward does).
@@ -227,10 +230,10 @@ void backwardRasterizePerSplat(
 
     // --- Stage per-pixel constants into LDS once ---
     // tid indexes a pixel-in-tile [0,256). Its screen coords:
-    uint tile_origin_x = tile_x * TILE_SIZE;
-    uint tile_origin_y = tile_y * TILE_SIZE;
-    uint2 my_pixel = uint2(tile_origin_x + (tid % TILE_SIZE),
-                           tile_origin_y + (tid / TILE_SIZE));
+    uint tile_origin_x = tile_x * TILE_WIDTH;
+    uint tile_origin_y = tile_y * TILE_HEIGHT;
+    uint2 my_pixel = uint2(tile_origin_x + (tid % TILE_WIDTH),
+                           tile_origin_y + (tid / TILE_WIDTH));
     bool my_pixel_valid = (my_pixel.x < frame_dim_px.x && my_pixel.y < frame_dim_px.y);
     if (my_pixel_valid)
     {
@@ -387,8 +390,8 @@ void backwardRasterizePerSplat(
 
             // Pixel center for pixel-in-tile p (computed unconditionally so
             // it's in scope for the eval backward below).
-            float2 pixel_center = float2(tile_origin_x + (p % TILE_SIZE),
-                                         tile_origin_y + (p / TILE_SIZE)) + 0.5;
+            float2 pixel_center = float2(tile_origin_x + (p % TILE_WIDTH),
+                                         tile_origin_y + (p / TILE_WIDTH)) + 0.5;
 
             float alpha = 0.0;
             float alpha_grad_scale = 0.0;
@@ -652,7 +655,8 @@ void backwardRasterizePerBucket(
     bool bucket_valid = (slot < live_total);
 
     uint2 frame_dim_px = uint2(camera[0].image_size);
-    uint2 grid_tiles = (frame_dim_px + TILE_SIZE - 1) / TILE_SIZE;
+    uint2 grid_tiles = (frame_dim_px + uint2(TILE_WIDTH, TILE_HEIGHT) - 1u)
+                       / uint2(TILE_WIDTH, TILE_HEIGHT);
 
     uint tile_idx = 0u, local_bucket = 0u;
     uint t_start = 0u, tile_count = 0u;
@@ -665,8 +669,8 @@ void backwardRasterizePerBucket(
         local_bucket = lb.y;
         uint tile_x = tile_idx % grid_tiles.x;
         uint tile_y = tile_idx / grid_tiles.x;
-        tile_origin_x = tile_x * TILE_SIZE;
-        tile_origin_y = tile_y * TILE_SIZE;
+        tile_origin_x = tile_x * TILE_WIDTH;
+        tile_origin_y = tile_y * TILE_HEIGHT;
         t_start = tile_start[tile_idx];
         uint t_end = tile_end[tile_idx];
         tile_count = (t_end > t_start) ? (t_end - t_start) : 0u;
@@ -720,8 +724,8 @@ void backwardRasterizePerBucket(
     [loop]
     for (uint p = 0u; p < TILE_AREA; ++p)
     {
-        uint2 pixel = uint2(tile_origin_x + (p % TILE_SIZE),
-                            tile_origin_y + (p / TILE_SIZE));
+        uint2 pixel = uint2(tile_origin_x + (p % TILE_WIDTH),
+                            tile_origin_y + (p / TILE_WIDTH));
         bool pix_valid = (pixel.x < frame_dim_px.x && pixel.y < frame_dim_px.y);
         // Inline per-pixel processed depth (was gs_processed[p]). OOB -> 0.
         uint processed = pix_valid ? gaussian_count_per_pixel[pixel] : 0u;

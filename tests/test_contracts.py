@@ -96,8 +96,9 @@ def test_projected_and_eta_channels() -> None:
 
 
 def test_execution_constants() -> None:
-    assert (C.TILE_SIZE, C.CLUSTER_SIZE, C.RADIX_PART_SIZE, C.SCAN_BLOCK_SIZE,
-            C.RASTER_BUCKET_SIZE) == (8, 128, 2048, 1024, 32)
+    assert (C.TILE_WIDTH, C.TILE_HEIGHT, C.TILE_AREA, C.CLUSTER_SIZE,
+            C.RADIX_PART_SIZE, C.SCAN_BLOCK_SIZE,
+            C.RASTER_BUCKET_SIZE) == (8, 8, 64, 128, 2048, 1024, 32)
     # radix_part_size + global_hist_size are DERIVED from independent inputs
     # (digits, keys_per_thread, passes) — never stored a second time.
     assert C.RADIX_PART_SIZE == C.EXECUTION.radix_digits * C.EXECUTION.radix_keys_per_thread
@@ -113,10 +114,12 @@ def test_buffers_reexports_match_contract() -> None:
     assert B.GRAD_SCALAR_COMPONENTS == C.GRAD_SCALAR_COMPONENTS
     assert B.GRAD_2D_SEED_COMPONENTS == C.GRAD_2D_SEED_COMPONENTS
     assert B.ETA_ACCUM_COMPONENTS == C.ETA_ACCUM_COMPONENTS
-    assert (B.TILE_SIZE, B.CLUSTER_SIZE, B.RADIX_PART_SIZE,
-            B.RADIX_GLOBAL_HIST_SIZE, B.SCAN_BLOCK_SIZE, B.RASTER_BUCKET_SIZE) == (
-        C.TILE_SIZE, C.CLUSTER_SIZE, C.RADIX_PART_SIZE,
-        C.RADIX_GLOBAL_HIST_SIZE, C.SCAN_BLOCK_SIZE, C.RASTER_BUCKET_SIZE)
+    assert (B.TILE_WIDTH, B.TILE_HEIGHT, B.TILE_AREA, B.CLUSTER_SIZE,
+            B.RADIX_PART_SIZE, B.RADIX_GLOBAL_HIST_SIZE, B.SCAN_BLOCK_SIZE,
+            B.RASTER_BUCKET_SIZE) == (
+        C.TILE_WIDTH, C.TILE_HEIGHT, C.TILE_AREA, C.CLUSTER_SIZE,
+        C.RADIX_PART_SIZE, C.RADIX_GLOBAL_HIST_SIZE, C.SCAN_BLOCK_SIZE,
+        C.RASTER_BUCKET_SIZE)
 
 
 

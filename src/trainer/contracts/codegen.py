@@ -38,7 +38,9 @@ sh_degree_from_rest_floats = _schema.sh_degree_from_rest_floats
 GRAD_2D_SEED_COMPONENTS = _schema.GRAD_2D_SEED_COMPONENTS
 ETA_ACCUM_COMPONENTS = _schema.ETA_ACCUM_COMPONENTS
 EXECUTION = _schema.EXECUTION
-TILE_SIZE = _schema.TILE_SIZE
+TILE_WIDTH = _schema.TILE_WIDTH
+TILE_HEIGHT = _schema.TILE_HEIGHT
+TILE_AREA = _schema.TILE_AREA
 CLUSTER_SIZE = _schema.CLUSTER_SIZE
 RADIX_PART_SIZE = _schema.RADIX_PART_SIZE
 RADIX_GLOBAL_HIST_SIZE = _schema.RADIX_GLOBAL_HIST_SIZE
@@ -93,7 +95,9 @@ _SLANG_BANNER = (
 def generate_execution_slang(ex: ExecutionContract = EXECUTION) -> str:
     """Emit the Slang header of shared execution + layout constants."""
     consts = [
-        ("TILE_SIZE", ex.tile_size),
+        ("TILE_WIDTH", ex.tile_width),
+        ("TILE_HEIGHT", ex.tile_height),
+        ("TILE_AREA", ex.tile_area),
         ("CLUSTER_SIZE", ex.cluster_size),
         ("RADIX_PART_SIZE", ex.radix_part_size),
         ("RADIX_DIGITS", ex.radix_digits),

@@ -230,13 +230,23 @@ ETA_ACCUM_COMPONENTS: tuple[str, ...] = (
 class ExecutionContract:
     """Independent algorithm inputs; dependent values are properties."""
 
-    tile_size: int = 8
+    # Tiles may be NON-SQUARE. tile_width/tile_height are the independent knobs;
+    # a lane's per-pixel row stride is the WIDTH, num_tiles_x uses WIDTH,
+    # num_tiles_y uses HEIGHT, and the workgroup/pixel-count is the AREA (W*H).
+    # There is deliberately no single `tile_size` — consumers must pick the right
+    # axis, so a wrong choice is an import/compile error, not a silent bug.
+    tile_width: int = 8
+    tile_height: int = 8
     cluster_size: int = 128
     radix_digits: int = 256
     radix_keys_per_thread: int = 8
     radix_passes: int = 8
     scan_block_size: int = 1024
     raster_bucket_size: int = 32
+
+    @property
+    def tile_area(self) -> int:
+        return self.tile_width * self.tile_height
 
     @property
     def radix_part_size(self) -> int:
@@ -248,7 +258,9 @@ class ExecutionContract:
 
 
 EXECUTION = ExecutionContract()
-TILE_SIZE = EXECUTION.tile_size
+TILE_WIDTH = EXECUTION.tile_width
+TILE_HEIGHT = EXECUTION.tile_height
+TILE_AREA = EXECUTION.tile_area
 CLUSTER_SIZE = EXECUTION.cluster_size
 RADIX_PART_SIZE = EXECUTION.radix_part_size
 RADIX_GLOBAL_HIST_SIZE = EXECUTION.radix_global_hist_size

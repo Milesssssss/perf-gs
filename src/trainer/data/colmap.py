@@ -33,6 +33,7 @@ _SH_C0 = 0.28209479177387814
 
 @dataclass
 class ColmapImageEntry:
+    # image id starts at 1
     image_id: int
     image_name: str
     camera: Camera

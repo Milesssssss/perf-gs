@@ -17,7 +17,7 @@
 #include "../../primitives/gaussian/accutile.slang"
 
 #include "generated/execution_contract.slang"
-static const uint TILE_SIZE = CONTRACT_TILE_SIZE;
+static const uint2 TILE_DIM = uint2(CONTRACT_TILE_WIDTH, CONTRACT_TILE_HEIGHT);
 static const uint CLUSTER_SIZE = CONTRACT_CLUSTER_SIZE;
 
 // IEEE float32 -> sortable uint32. For positive finite floats, flipping
@@ -82,9 +82,9 @@ void binEmit(
     if (bbox_min.x >= bbox_max.x || bbox_min.y >= bbox_max.y)
         return;
 
-    uint2 num_tiles = ((uint2)frame_dim + TILE_SIZE - 1) / TILE_SIZE;
-    uint2 tile_min = uint2(bbox_min) / TILE_SIZE;
-    uint2 tile_max = uint2(bbox_max) / TILE_SIZE;
+    uint2 num_tiles = ((uint2)frame_dim + TILE_DIM - 1u) / TILE_DIM;
+    uint2 tile_min = uint2(bbox_min) / TILE_DIM;
+    uint2 tile_max = uint2(bbox_max) / TILE_DIM;
     tile_max = min(tile_max, num_tiles - 1);
 
     uint write_slot = tile_offset_per_gaussian[gid];

@@ -188,8 +188,10 @@ void computeExtremumOffsets(EllipseParams e, out float x_d_args, out float y_d_a
 
 // AccuTile emits the rasterizer's tile coordinates, so this is deliberately
 // the SAME contract as bin_count/bin_emit/rasterization, not an independent
-// algorithm knob.
-static const uint ACCUTILE_TILE_SIZE = CONTRACT_TILE_SIZE;
+// algorithm knob. Non-square tiles: a row (varying tx) steps by WIDTH in x, a
+// column (varying ty) steps by HEIGHT in y.
+static const uint ACCUTILE_TILE_W = CONTRACT_TILE_WIDTH;
+static const uint ACCUTILE_TILE_H = CONTRACT_TILE_HEIGHT;
 
 // Iterate the shorter tile-axis (Speedy-Splat: fewer strips = less work, and
 // each strip prunes the corner tiles the SnugBox rectangle would over-count).
@@ -210,13 +212,14 @@ bool accuTileRowTiles(
     out uint tx_lo, out uint tx_hi)
 {
     tx_lo = 0u; tx_hi = 0u;
-    float row_y_bot = float(ty * ACCUTILE_TILE_SIZE);
-    float row_y_top = float((ty + 1u) * ACCUTILE_TILE_SIZE);
+    // Row index ty spans y (HEIGHT); the resolved x-range maps to tx by WIDTH.
+    float row_y_bot = float(ty * ACCUTILE_TILE_H);
+    float row_y_top = float((ty + 1u) * ACCUTILE_TILE_H);
     float2 xr = accuTileRowXRange(e, mean_2d.y, bbox_min.x, bbox_max.x,
                                   y_d_args, mean_2d, row_y_bot, row_y_top);
     if (xr.x > xr.y) return false;   // sentinel: no intersection this row
-    tx_lo = max(uint(xr.x) / ACCUTILE_TILE_SIZE, tile_min_x);
-    tx_hi = min(uint(xr.y) / ACCUTILE_TILE_SIZE, tile_max_x);
+    tx_lo = max(uint(xr.x) / ACCUTILE_TILE_W, tile_min_x);
+    tx_hi = min(uint(xr.y) / ACCUTILE_TILE_W, tile_max_x);
     return tx_lo <= tx_hi;
 }
 
@@ -228,13 +231,14 @@ bool accuTileColTiles(
     out uint ty_lo, out uint ty_hi)
 {
     ty_lo = 0u; ty_hi = 0u;
-    float col_x_left  = float(tx * ACCUTILE_TILE_SIZE);
-    float col_x_right = float((tx + 1u) * ACCUTILE_TILE_SIZE);
+    // Column index tx spans x (WIDTH); the resolved y-range maps to ty by HEIGHT.
+    float col_x_left  = float(tx * ACCUTILE_TILE_W);
+    float col_x_right = float((tx + 1u) * ACCUTILE_TILE_W);
     float2 yr = accuTileColYRange(e, mean_2d.x, bbox_min.y, bbox_max.y,
                                   x_d_args, mean_2d, col_x_left, col_x_right);
     if (yr.x > yr.y) return false;
-    ty_lo = max(uint(yr.x) / ACCUTILE_TILE_SIZE, tile_min_y);
-    ty_hi = min(uint(yr.y) / ACCUTILE_TILE_SIZE, tile_max_y);
+    ty_lo = max(uint(yr.x) / ACCUTILE_TILE_H, tile_min_y);
+    ty_hi = min(uint(yr.y) / ACCUTILE_TILE_H, tile_max_y);
     return ty_lo <= ty_hi;
 }
 

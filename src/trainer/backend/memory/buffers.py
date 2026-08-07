@@ -35,7 +35,9 @@ from trainer.contracts.codegen import (
     RADIX_PART_SIZE,
     RASTER_BUCKET_SIZE,
     SCAN_BLOCK_SIZE,
-    TILE_SIZE,
+    TILE_AREA,
+    TILE_HEIGHT,
+    TILE_WIDTH,
 )
 
 
@@ -532,8 +534,8 @@ def allocate(
     types = _reflect_types(shared_data_module)
     allocator = _Alloc(device, width, height)
 
-    num_tiles_x = _ceil_div(width, TILE_SIZE)
-    num_tiles_y = _ceil_div(height, TILE_SIZE)
+    num_tiles_x = _ceil_div(width, TILE_WIDTH)
+    num_tiles_y = _ceil_div(height, TILE_HEIGHT)
     num_tiles = num_tiles_x * num_tiles_y
 
     # DeviceRadixSort scratch sizing (see RADIX_PART_SIZE / RADIX_GLOBAL_HIST_SIZE).
@@ -586,7 +588,7 @@ def allocate(
     buffers.bucket_offsets = allocator.uint_buffer(num_tiles)
     buffers.bucket_offset_total = allocator.uint_buffer(1)
     buffers.raster_checkpoints = allocator.typed_buffer(
-        "uint2", max_buckets * (TILE_SIZE * TILE_SIZE))
+        "uint2", max_buckets * TILE_AREA)
 
     # Live-bucket compaction (flat warp-per-bucket backward).
     buffers.live_bucket_count = allocator.uint_buffer(num_tiles)
@@ -727,8 +729,8 @@ def allocate_viewer(
     types = _reflect_types(shared_data_module)
     allocator = _Alloc(device, width, height)
 
-    num_tiles_x = _ceil_div(width, TILE_SIZE)
-    num_tiles_y = _ceil_div(height, TILE_SIZE)
+    num_tiles_x = _ceil_div(width, TILE_WIDTH)
+    num_tiles_y = _ceil_div(height, TILE_HEIGHT)
     num_tiles = num_tiles_x * num_tiles_y
     max_blocks = _ceil_div(max_sort_pairs, RADIX_PART_SIZE)
     max_buckets = _ceil_div(max_sort_pairs, RASTER_BUCKET_SIZE) + num_tiles
@@ -781,7 +783,7 @@ def allocate_viewer(
     buffers.bucket_offsets = allocator.uint_buffer(num_tiles)
     buffers.bucket_offset_total = allocator.uint_buffer(1)
     buffers.raster_checkpoints = allocator.typed_buffer(
-        "uint2", max_buckets * (TILE_SIZE * TILE_SIZE))
+        "uint2", max_buckets * TILE_AREA)
 
     # Live-bucket compaction (flat warp-per-bucket backward).
     buffers.live_bucket_count = allocator.uint_buffer(num_tiles)

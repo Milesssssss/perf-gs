@@ -12,8 +12,10 @@
 #include "../../primitives/gaussian/eval.slang"
 
 #include "generated/execution_contract.slang"
-static const uint TILE_SIZE = CONTRACT_TILE_SIZE;
-static const uint TILE_AREA = TILE_SIZE * TILE_SIZE;
+// Non-square tiles: WIDTH across, HEIGHT down; pixel-in-tile row stride = WIDTH.
+static const uint TILE_WIDTH  = CONTRACT_TILE_WIDTH;
+static const uint TILE_HEIGHT = CONTRACT_TILE_HEIGHT;
+static const uint TILE_AREA   = CONTRACT_TILE_AREA;
 
 static const float ALPHA_MAX = 0.99;
 static const float ALPHA_MIN_TRACK = 1.0 / 255.0;
@@ -62,7 +64,7 @@ groupshared Projected2DGaussian gs_proj;
 groupshared uint gs_g_idx;
 
 [shader("compute")]
-[numthreads(TILE_SIZE, TILE_SIZE, 1)]
+[numthreads(TILE_WIDTH, TILE_HEIGHT, 1)]
 void backwardRasterize(
     uint3 dtid: SV_DispatchThreadID,
     uint3 gid: SV_GroupID,
@@ -94,12 +96,13 @@ void backwardRasterize(
     RWStructuredBuffer<int64_t> grad_2d_y_iter)
 {
     uint2 pixel = dtid.xy;
-    uint tid = gtid.y * TILE_SIZE + gtid.x;
+    uint tid = gtid.y * TILE_WIDTH + gtid.x;
     uint2 frame_dim_px = uint2(camera[0].image_size);
 
     bool valid_pixel = (pixel.x < frame_dim_px.x && pixel.y < frame_dim_px.y);
 
-    uint2 num_tiles = (frame_dim_px + TILE_SIZE - 1) / TILE_SIZE;
+    uint2 num_tiles = (frame_dim_px + uint2(TILE_WIDTH, TILE_HEIGHT) - 1u)
+                      / uint2(TILE_WIDTH, TILE_HEIGHT);
     uint tile_idx = gid.y * num_tiles.x + gid.x;
     uint t_start = tile_start[tile_idx];
 

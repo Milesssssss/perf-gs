@@ -13,7 +13,7 @@ import random
 
 import numpy as np
 
-from _v2_sampling import CameraSampler
+from trainer.frontend.evaluation.evaluation import CameraSampler
 
 
 def test_ours_matches_reference_rng_order() -> None:

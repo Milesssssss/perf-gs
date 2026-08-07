@@ -20,10 +20,12 @@
 #include "checkpoint.slang"   // RASTER_BUCKET_SIZE
 
 #include "generated/execution_contract.slang"
-static const uint TILE_SIZE = CONTRACT_TILE_SIZE;
-static const uint TILE_AREA = TILE_SIZE * TILE_SIZE;
+// Non-square tiles: WIDTH across, HEIGHT down; pixel-in-tile row stride = WIDTH.
+static const uint TILE_WIDTH  = CONTRACT_TILE_WIDTH;
+static const uint TILE_HEIGHT = CONTRACT_TILE_HEIGHT;
+static const uint TILE_AREA   = CONTRACT_TILE_AREA;
 // Warps (== buckets) per flat-backward workgroup = TILE_AREA/32 (one 256-thread
-// WG at 16x16 -> 8 warps; a 8x8 tile -> 64 threads -> 2 warps). MUST match the
+// WG at 16x16 -> 8 warps; 8x8 -> 2; 8x4 (area 32) -> 1 warp). MUST match the
 // per-bucket kernel's numthreads(TILE_AREA) and its slot = gid.x*NUM_WARPS+warp
 // mapping, or the indirect dispatch under/over-covers the live-bucket list.
 static const uint FLAT_WARPS_PER_WG = TILE_AREA / CONTRACT_RASTER_BUCKET_SIZE;
@@ -32,7 +34,7 @@ groupshared uint gs_tile_max;
 
 // Pass 1: per tile, reduce the max processed-depth over its TILE_AREA pixels and
 // turn it into a LIVE bucket count (ceil(max / P)). One TILE_AREA-thread WG/tile
-// (tid indexes pixel-in-tile via tid%TILE_SIZE / tid/TILE_SIZE, so the launch
+// (tid indexes pixel-in-tile via tid%TILE_WIDTH / tid/TILE_WIDTH, so the launch
 // MUST be TILE_AREA threads — host dispatches num_tiles*TILE_AREA to match).
 [shader("compute")]
 [numthreads(TILE_AREA, 1, 1)]
@@ -54,8 +56,9 @@ void tileMaxProcessed(
 
     uint tile_x = tile_idx % num_tiles_x;
     uint tile_y = tile_idx / num_tiles_x;
-    uint2 pixel = uint2(tile_x * TILE_SIZE + (tid % TILE_SIZE),
-                        tile_y * TILE_SIZE + (tid / TILE_SIZE));
+    // pixel-in-tile: col = tid % WIDTH (row stride WIDTH), row = tid / WIDTH.
+    uint2 pixel = uint2(tile_x * TILE_WIDTH  + (tid % TILE_WIDTH),
+                        tile_y * TILE_HEIGHT + (tid / TILE_WIDTH));
     uint processed = (pixel.x < frame_dim_px.x && pixel.y < frame_dim_px.y)
                      ? gaussian_count_per_pixel[pixel] : 0u;
     InterlockedMax(gs_tile_max, processed);

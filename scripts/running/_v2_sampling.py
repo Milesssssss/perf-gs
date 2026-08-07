@@ -10,33 +10,7 @@ import random
 
 import numpy as np
 
-
 class CameraSampler:
-    """Draws a train-camera index each iteration. Two modes:
-
-    ``ours``
-        Uniform draw (with replacement) over the name-sorted train indices,
-        using the SHARED numpy Generator so its stream stays interleaved with
-        the densify view-scoring draws (preserving run-to-run determinism).
-
-    ``sadgs``
-        Byte-for-byte replica of the reference SADGS trainer's draw so a
-        like-for-like PSNR comparison isolates the renderer, not the data order.
-        The reference (INRIA lineage) consumes the Python ``random`` stream as:
-        ``random.seed(0)``; ``Scene(shuffle=True)`` shuffles the train then the
-        test cameras (the test shuffle advances the stream); epoch cycling pops
-        the load-shuffled order IN ORDER for the first epoch (no reshuffle),
-        then reshuffles on every refill before popping from the front. We mirror
-        that with a private ``random.Random(seed)`` (identical sequence to a
-        fresh global seed, but isolated), same shuffle-call order over the same
-        train/test index lists, ``batch_size=1``, without replacement. Our
-        camera order already matches SADGS (both name-sort then drop every
-        ``stride``-th as holdout), so index i maps to the same image on both
-        sides. Bit-exactness assumes SADGS makes no other ``random.*`` draws in
-        the loop (holds for the SH0 bicycle config: random_background off,
-        densify uses torch RNG).
-    """
-
     def __init__(self, mode: str, train_indices, test_indices, seed: int,
                  rng: np.random.Generator) -> None:
         self.mode = mode
