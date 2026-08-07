@@ -21,15 +21,21 @@
 
 #include "generated/execution_contract.slang"
 static const uint TILE_SIZE = CONTRACT_TILE_SIZE;
-static const uint TILE_AREA = TILE_SIZE * TILE_SIZE;   // 256
-static const uint FLAT_WARPS_PER_WG = 8u;              // 256 threads / 32 lanes
+static const uint TILE_AREA = TILE_SIZE * TILE_SIZE;
+// Warps (== buckets) per flat-backward workgroup = TILE_AREA/32 (one 256-thread
+// WG at 16x16 -> 8 warps; a 8x8 tile -> 64 threads -> 2 warps). MUST match the
+// per-bucket kernel's numthreads(TILE_AREA) and its slot = gid.x*NUM_WARPS+warp
+// mapping, or the indirect dispatch under/over-covers the live-bucket list.
+static const uint FLAT_WARPS_PER_WG = TILE_AREA / CONTRACT_RASTER_BUCKET_SIZE;
 
 groupshared uint gs_tile_max;
 
-// Pass 1: per tile, reduce the max processed-depth over its 256 pixels and
-// turn it into a LIVE bucket count (ceil(max / P)). One 256-thread WG/tile.
+// Pass 1: per tile, reduce the max processed-depth over its TILE_AREA pixels and
+// turn it into a LIVE bucket count (ceil(max / P)). One TILE_AREA-thread WG/tile
+// (tid indexes pixel-in-tile via tid%TILE_SIZE / tid/TILE_SIZE, so the launch
+// MUST be TILE_AREA threads — host dispatches num_tiles*TILE_AREA to match).
 [shader("compute")]
-[numthreads(256, 1, 1)]
+[numthreads(TILE_AREA, 1, 1)]
 void tileMaxProcessed(
     uint3 gid: SV_GroupID,
     uint3 gtid: SV_GroupThreadID,

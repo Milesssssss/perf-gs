@@ -97,7 +97,7 @@ def test_projected_and_eta_channels() -> None:
 
 def test_execution_constants() -> None:
     assert (C.TILE_SIZE, C.CLUSTER_SIZE, C.RADIX_PART_SIZE, C.SCAN_BLOCK_SIZE,
-            C.RASTER_BUCKET_SIZE) == (16, 128, 2048, 1024, 32)
+            C.RASTER_BUCKET_SIZE) == (8, 128, 2048, 1024, 32)
     # radix_part_size + global_hist_size are DERIVED from independent inputs
     # (digits, keys_per_thread, passes) — never stored a second time.
     assert C.RADIX_PART_SIZE == C.EXECUTION.radix_digits * C.EXECUTION.radix_keys_per_thread

@@ -219,7 +219,7 @@ class GaussianBuffers:
     # bucket_offsets     : uint[num_tiles], exclusive scan of bucket_count
     #                      (base bucket index of each tile in the flat buffer)
     # bucket_offset_total: uint[1], total buckets used this frame (scan total)
-    # raster_checkpoints : uint2[max_buckets * 256], (T,R,G,B) fp16 per pixel
+    # raster_checkpoints : uint2[max_buckets * TILE_AREA], (T,R,G,B) fp16 per pixel
     #                      per bucket. max_buckets = ceil(max_sort_pairs/P)
     #                      + num_tiles (tight upper bound on sum of per-tile
     #                      ceil(len/P), no readback needed).
@@ -585,7 +585,8 @@ def allocate(
     buffers.bucket_count = allocator.uint_buffer(num_tiles)
     buffers.bucket_offsets = allocator.uint_buffer(num_tiles)
     buffers.bucket_offset_total = allocator.uint_buffer(1)
-    buffers.raster_checkpoints = allocator.typed_buffer("uint2", max_buckets * 256)
+    buffers.raster_checkpoints = allocator.typed_buffer(
+        "uint2", max_buckets * (TILE_SIZE * TILE_SIZE))
 
     # Live-bucket compaction (flat warp-per-bucket backward).
     buffers.live_bucket_count = allocator.uint_buffer(num_tiles)
@@ -779,7 +780,8 @@ def allocate_viewer(
     buffers.bucket_count = allocator.uint_buffer(num_tiles)
     buffers.bucket_offsets = allocator.uint_buffer(num_tiles)
     buffers.bucket_offset_total = allocator.uint_buffer(1)
-    buffers.raster_checkpoints = allocator.typed_buffer("uint2", max_buckets * 256)
+    buffers.raster_checkpoints = allocator.typed_buffer(
+        "uint2", max_buckets * (TILE_SIZE * TILE_SIZE))
 
     # Live-bucket compaction (flat warp-per-bucket backward).
     buffers.live_bucket_count = allocator.uint_buffer(num_tiles)

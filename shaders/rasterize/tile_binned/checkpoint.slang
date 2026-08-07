@@ -34,6 +34,12 @@
 #include "generated/execution_contract.slang"
 static const uint RASTER_BUCKET_SIZE = CONTRACT_RASTER_BUCKET_SIZE;
 
+// Pixels per tile = the per-bucket checkpoint stride (one (T,C) entry per pixel
+// per bucket). Derived from the tile side so a tile-size change is a single knob;
+// was a hardcoded 256 here + in buffers.py's raster_checkpoints allocation, which
+// must stay in lockstep with this stride.
+static const uint CHECKPOINT_TILE_AREA = CONTRACT_TILE_SIZE * CONTRACT_TILE_SIZE;
+
 // Pack (a, b) two floats into one uint as two fp16 halves (a low, b high).
 uint packHalf2(float a, float b)
 {
@@ -63,7 +69,7 @@ void unpackCheckpoint(uint2 e, out float T, out float3 rgb)
 // checkpoint buffer. global_bucket = bucket_offsets[tile] + local_bucket.
 uint checkpointIndex(uint global_bucket, uint pixel_in_tile)
 {
-    return global_bucket * 256u + pixel_in_tile;
+    return global_bucket * CHECKPOINT_TILE_AREA + pixel_in_tile;
 }
 
 #endif // TRAINER_RASTER_CHECKPOINT_SLANG

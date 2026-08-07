@@ -31,14 +31,13 @@ static const uint CH_ITER_X    = 9;
 static const uint CH_ITER_Y    = 10;
 static const uint NUM_CHANNELS = 11;
 
-// Warp-partial reduction slots. 256 threads / 32-lane wave = 8 warps
-// (WGE16-only path; matches every desktop GPU we target — same assumption
-// the radix sort makes). Each warp writes ONE partial sum per channel via
-// WaveActiveSum. Then a single cross-warp step sums the 8 slots into a
-// per-channel total. Footprint: 11 * 8 * 4 = 352 B (was 11 * 256 * 4 = 11 KB).
-// Freeing 10 KB of groupshared memory raises occupancy on top of eliminating
-// the eight barrier'd reduction rounds.
-static const uint MAX_WARPS = 8u;
+// Warp-partial reduction slots. TILE_AREA threads / 32-lane wave = TILE_AREA/32
+// warps (8 at 16x16, 2 at 8x8). WGE16-only path; matches every desktop GPU we
+// target — same assumption the radix sort makes. Each warp writes ONE partial
+// sum per channel via WaveActiveSum; a single cross-warp step sums the slots
+// into a per-channel total. Derived from TILE_AREA so a tile-size change is one
+// knob (was a hardcoded 8).
+static const uint MAX_WARPS = TILE_AREA / 32u;
 groupshared float gs_warp[NUM_CHANNELS * MAX_WARPS];
 
 // Sixteen final atomic operands, populated then consumed in parallel by

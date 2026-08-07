@@ -151,7 +151,7 @@ def test_forward_checkpoints_reconstruct(backend: str) -> None:
                     py = gy + 0.5
 
                     # bucket 0 checkpoint must be (T=1, C=0).
-                    e0 = ckpt_u[(gb_base + 0) * 256 + pixel_in_tile]
+                    e0 = ckpt_u[(gb_base + 0) * (TILE_SIZE * TILE_SIZE) + pixel_in_tile]
                     T0, R0 = unpack_half2(e0[0])
                     G0, B0 = unpack_half2(e0[1])
                     assert abs(T0 - 1.0) < 1e-2, f"bucket0 T={T0} != 1"
@@ -171,7 +171,7 @@ def test_forward_checkpoints_reconstruct(backend: str) -> None:
                     for k in range(length):
                         if (k % BUCKET) == 0:
                             kb = k // BUCKET
-                            e = ckpt_u[(gb_base + kb) * 256 + pixel_in_tile]
+                            e = ckpt_u[(gb_base + kb) * (TILE_SIZE * TILE_SIZE) + pixel_in_tile]
                             Tk, Rk = unpack_half2(e[0])
                             Gk, Bk = unpack_half2(e[1])
                             # fp16 tolerance: relative for T, absolute for C.

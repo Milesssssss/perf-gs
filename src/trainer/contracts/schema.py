@@ -230,7 +230,7 @@ ETA_ACCUM_COMPONENTS: tuple[str, ...] = (
 class ExecutionContract:
     """Independent algorithm inputs; dependent values are properties."""
 
-    tile_size: int = 16
+    tile_size: int = 8
     cluster_size: int = 128
     radix_digits: int = 256
     radix_keys_per_thread: int = 8

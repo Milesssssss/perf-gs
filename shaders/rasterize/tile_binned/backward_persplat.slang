@@ -161,7 +161,7 @@ groupshared uint2  gs_checkpoints[NUM_WARPS][STAGED_PIXELS]; //Transmitt, R,G an
 // we most likely cannot compress the gs checkpoints more
 
 [shader("compute")]
-[numthreads(256, 1, 1)]
+[numthreads(TILE_AREA, 1, 1)]
 void backwardRasterizePerSplat(
     uint3 gid: SV_GroupID,
     uint3 gtid: SV_GroupThreadID,
@@ -621,7 +621,7 @@ void backwardRasterizePerSplat(
 // there is no in-kernel tile search and saturated buckets are never launched.
 // ===========================================================================
 [shader("compute")]
-[numthreads(256, 1, 1)]
+[numthreads(TILE_AREA, 1, 1)]
 void backwardRasterizePerBucket(
     uint3 gid: SV_GroupID,
     uint3 gtid: SV_GroupThreadID,

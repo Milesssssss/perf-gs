@@ -33,7 +33,7 @@ from trainer.config.config import (
     RegularizationConfig,
 )
 from trainer.config.config_types import DensificationMode
-from trainer.contracts.codegen import sh_rest_coeffs
+from trainer.contracts.codegen import sh_rest_coeffs, TILE_SIZE
 from trainer.data.dataset import Camera
 from trainer.backend.densify.densify import DensifyConfig
 from trainer.backend.compute.device import SHADERS_DIR
@@ -112,7 +112,14 @@ class Pipeline:
         self.height = height
         self.max_splats = max_splats
         if max_sort_pairs is None:
-            max_sort_pairs = max(buffers.DEFAULT_MAX_SORT_PAIRS, max_splats * 2)
+            # A gaussian contributes one (tile,depth,id) pair per tile its ellipse
+            # touches; smaller tiles (see CONTRACT_TILE_SIZE) mean each gaussian
+            # spans more tiles, so the per-splat multiplier scales with tiles per
+            # gaussian. At the 8x8 tile the average tile-touch count is ~2-4x the
+            # 16x16 count, so use a 4x headroom (bin_emit silently drops pairs past
+            # this cap -> black-tile artifacts, so err generous; the smaller tile
+            # also shrinks the per-bucket checkpoint block 4x, offsetting VRAM).
+            max_sort_pairs = max(buffers.DEFAULT_MAX_SORT_PAIRS, max_splats * 4)
         self.max_sort_pairs = max_sort_pairs
 
         self.shared_data_module = _module_for_reflection(device)
@@ -781,7 +788,9 @@ class Pipeline:
 
         with self._marker_group("rasterize"):
             self._dispatch(self.k_forward, "forward",
-                thread_count=[buffers.num_tiles_x * 16, buffers.num_tiles_y * 16, 1],
+                # One thread per tile-pixel: [numthreads(TILE_SIZE,TILE_SIZE)].
+                thread_count=[buffers.num_tiles_x * TILE_SIZE,
+                              buffers.num_tiles_y * TILE_SIZE, 1],
                 blend_data=buffers.blend_data.storage,
                 tile_start=buffers.tile_start.storage,
                 tile_end=buffers.tile_end.storage,
@@ -902,7 +911,8 @@ class Pipeline:
                     # as the per-tile path, no straggler tail / idle warps.
                     with self._marker_group("live_bucket_compaction"):
                         self._dispatch(self.k_tile_max_processed, "tile_max_processed",
-                            thread_count=[num_tiles * 256, 1, 1],
+                            # TILE_AREA threads/tile (reduces over the tile's pixels).
+                            thread_count=[num_tiles * TILE_SIZE * TILE_SIZE, 1, 1],
                             gaussian_count_per_pixel=b.gaussian_count_per_pixel,
                             live_bucket_count=b.live_bucket_count.storage,
                             frame_dim_px=spy.uint2(self.width, self.height),
@@ -956,10 +966,10 @@ class Pipeline:
                         extinction_hardness=float(self._extinction_hardness),
                     )
                 else:
-                  # Transposed per-splat backward: one workgroup (256 threads)
-                  # per tile, splat-parallel with checkpoint reconstruction.
+                  # Transposed per-splat backward: one workgroup (TILE_AREA
+                  # threads) per tile, splat-parallel with checkpoint reconstruction.
                   self._dispatch(self.k_backward_persplat, "backward_persplat",
-                    thread_count=[num_tiles * 256, 1, 1],
+                    thread_count=[num_tiles * TILE_SIZE * TILE_SIZE, 1, 1],
                     blend_data=b.blend_data.storage,
                     tile_start=b.tile_start.storage,
                     tile_end=b.tile_end.storage,
@@ -1012,7 +1022,9 @@ class Pipeline:
                     )
             else:
                 self._dispatch(self.k_backward, "backward",
-                    thread_count=[b.num_tiles_x * 16, b.num_tiles_y * 16, 1],
+                    # One thread per tile-pixel: [numthreads(TILE_SIZE,TILE_SIZE)].
+                    thread_count=[b.num_tiles_x * TILE_SIZE,
+                                  b.num_tiles_y * TILE_SIZE, 1],
                     gaussians=b.gaussians.storage,
                     projected_2d=b.projected_2d.storage,
                     tile_start=b.tile_start.storage,
