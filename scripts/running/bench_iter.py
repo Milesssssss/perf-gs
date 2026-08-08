@@ -70,7 +70,7 @@ def main() -> int:
     capture_step = args.capture_iter
 
     app = TrainingApplication(args)
-    app.prepare()
+    app.prepare_training_context()
     loop = app.build_training_loop()
 
     print(f"[bench] advancing to iter {capture_step} "

@@ -40,8 +40,6 @@ class DensifyOutcome:
     count: int
     kind: str
     stats: dict
-    diag_record: dict | None = None
-    opacity_assert: tuple[float, float, list[str]] | None = None
 
 
 class DensificationController:
@@ -60,11 +58,8 @@ class DensificationController:
         image_height: int,
         morton_world_min,
         morton_world_max,
-        extinction: "ExtinctionHardnessSchedule",
+        extinction_hardness_schedule: "ExtinctionHardnessSchedule",
         queue_limiter: "QueueLimiter",
-        collect_diagnostics: bool,
-        diag_module,
-        diag_grad_internal,
     ) -> None:
         self._pipeline = pipeline
         self._args = args
@@ -76,11 +71,8 @@ class DensificationController:
         self._image_height = image_height
         self._morton_world_min = morton_world_min
         self._morton_world_max = morton_world_max
-        self._extinction = extinction
+        self._extinction_hardness_schedule = extinction_hardness_schedule
         self._queue_limiter = queue_limiter
-        self._collect_diagnostics = collect_diagnostics
-        self._diag = diag_module
-        self._diag_grad_internal = diag_grad_internal
 
     def run(self, it: int, ev: "IterationEvents", cur_n_gaussians: int) -> DensifyOutcome:
         """Execute one densify tick and return its outcome (updated count,
@@ -94,33 +86,16 @@ class DensificationController:
         densify_cfg = self._densify_cfg
         structure_cfg = self._structure_cfg
         extent = self._extent
-        IMAGES_WIDTH = self._image_width
-        IMAGES_HEIGHT = self._image_height
         morton_world_min = self._morton_world_min
         morton_world_max = self._morton_world_max
-        extinction = self._extinction
+        extinction_hardness_schedule = self._extinction_hardness_schedule
         queue_limiter = self._queue_limiter
-        _diag = self._diag
-        _diag_grad_internal = self._diag_grad_internal
         do_structure_step = ev.structure
 
-        # First densify starts the extinction-hardness ramp (held at 1.0 up
-        # to here; see ExtinctionHardnessSchedule).
-        extinction.notify_first_densification(it)
+        # First densify starts the extinction-hardness ramp (held at 1.0 up to here; see ExtinctionHardnessSchedule).
+        extinction_hardness_schedule.notify_first_densification(it)
 
         stats = {}
-
-        # DIAGNOSTIC pre-capture: read back eta/grad/scale + spatial state
-        # BEFORE the densify mutates anything, so gate selectivity and
-        # fan-out reflect the decision this tick actually made.
-        _diag_rec = None
-        if self._collect_diagnostics:
-            _diag_rec = _diag.capture_pre(
-                pipeline, structure=(mode == DensificationMode.STRUCTURE_AWARE),
-                width=IMAGES_WIDTH, height=IMAGES_HEIGHT,
-                structure_cfg=structure_cfg,
-                grad_thresh_internal=_diag_grad_internal,
-                dense_scale=structure_cfg.dense_scale)
 
         sad_carry_eta = (mode == DensificationMode.STRUCTURE_AWARE
                          and not do_structure_step)
@@ -167,25 +142,5 @@ class DensificationController:
         kind = "structure" if do_structure_step else (
             "absgs" if mode == DensificationMode.STRUCTURE_AWARE else "densify")
 
-        # DIAGNOSTIC post-capture: realized growth + post-densify spatial
-        # concentration, after densify + morton have settled. The record and the
-        # opacity-bundle assert (a GPU read-back) travel out in the outcome for
-        # the reporter to serialize.
-        opacity_assert = None
-        if _diag_rec is not None:
-            _diag_rec = _diag.capture_post(
-                pipeline, _diag_rec,
-                structure=(mode == DensificationMode.STRUCTURE_AWARE))
-            _diag_rec["iter"] = it
-            _diag_rec["kind"] = kind
-            if kind == "structure":
-                opacity_assert = _diag.assert_opacity_bundle(
-                    pipeline,
-                    floor=structure_cfg.t_opacity,
-                    cap_enabled=bool(structure_cfg.opacity_cap
-                                     and structure_cfg.opacity_cap > 0.0),
-                    cap=structure_cfg.opacity_cap)
-
         return DensifyOutcome(
-            iteration=it, count=cur_n_gaussians, kind=kind, stats=stats,
-            diag_record=_diag_rec, opacity_assert=opacity_assert)
+            iteration=it, count=cur_n_gaussians, kind=kind, stats=stats)

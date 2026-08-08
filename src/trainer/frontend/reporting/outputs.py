@@ -29,7 +29,6 @@ class RunArtifacts:
         log_txt: TextIO,
         log_json: TextIO,
         densify_json: TextIO,
-        densify_diag_json: "TextIO | None",
         eval_curve_json: "TextIO | None",
         psnr_curve_json: "TextIO | None",
         bin_viz_json: "TextIO | None",
@@ -38,7 +37,6 @@ class RunArtifacts:
         self.log_txt = log_txt
         self.log_json = log_json
         self.densify_json = densify_json
-        self.densify_diag_json = densify_diag_json
         self.eval_curve_json = eval_curve_json
         self.psnr_curve_json = psnr_curve_json
         self.bin_viz_json = bin_viz_json
@@ -57,8 +55,6 @@ class RunArtifacts:
 
         # Per-frame profile records, opened only under --profile-every.
         profile_json = _stream("profile_log.jsonl") if args.profile_every > 0 else None
-        # Per-densify structure-decision diagnostics (--densify-diag).
-        densify_diag_json = _stream("densify_diag.jsonl") if args.densify_diag else None
 
         # Full-dataset average-PSNR curve, opened only when --eval-every > 0.
         # One JSON line per eval sweep for post-hoc convergence plotting.
@@ -76,8 +72,7 @@ class RunArtifacts:
             print("[debug-bin-viz] ignored: requires --eval-every > 0.")
 
         return cls(
-            log_txt=log_txt, log_json=log_json, densify_json=densify_json,
-            densify_diag_json=densify_diag_json, eval_curve_json=eval_curve_json,
+            log_txt=log_txt, log_json=log_json, densify_json=densify_json, eval_curve_json=eval_curve_json,
             psnr_curve_json=psnr_curve_json, bin_viz_json=bin_viz_json,
             profile_json=profile_json,
         )
@@ -90,8 +85,7 @@ class RunArtifacts:
         stream was already flushed.
         """
         for stream in (
-            self.log_txt, self.log_json, self.densify_json,
-            self.densify_diag_json, self.eval_curve_json, self.psnr_curve_json,
+            self.log_txt, self.log_json, self.densify_json, self.eval_curve_json, self.psnr_curve_json,
             self.bin_viz_json, self.profile_json
         ):
             if stream is not None:

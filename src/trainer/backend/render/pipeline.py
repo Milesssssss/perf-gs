@@ -1,11 +1,3 @@
-"""Dispatch orchestration for the v1 trainer.
-
-A ``Pipeline`` owns a device, the compute kernels, and the GPU resources.
-For inference, call :meth:`Pipeline.render`. For training, set a target
-image with :meth:`Pipeline.set_target_image` and call
-:meth:`Pipeline.train_step`.
-"""
-
 from __future__ import annotations
 
 import contextlib
@@ -32,6 +24,7 @@ from trainer.config.config import (
     RasterConfig,
     RegularizationConfig,
 )
+
 from trainer.config.config_types import DensificationMode
 from trainer.contracts.codegen import sh_rest_coeffs, TILE_WIDTH, TILE_HEIGHT, TILE_AREA
 from trainer.data.dataset import Camera
@@ -47,6 +40,8 @@ from trainer.backend.densify.simple_densifier import (
     SimpleDensifier,
     SimpleDensifyKernels,
 )
+
+from trainer.config.config import IterationContext, IterationContextualVariables
 
 _RADIX_SCAN_DIM = 128
 
@@ -102,40 +97,28 @@ class Pipeline:
         densify_mode: DensificationMode | None = None,
     ) -> None:
         self.device = device
-        # Serializes GPU queue access (submit/present/wait_for_idle) against
-        # any OTHER thread sharing this device, notably the live Viewer, which
-        # runs its render loop on a background thread.
         self.gpu_lock = gpu_lock if gpu_lock is not None else contextlib.nullcontext()
-        # GPU runtime: owns the device + queue-lock discipline and hands out CommandBatches
         self.runtime = GpuRuntime(device, self.gpu_lock)
         self.width = width
         self.height = height
         self.max_splats = max_splats
+
         if max_sort_pairs is None:
-            # A gaussian contributes one (tile,depth,id) pair per tile its ellipse
-            # touches; smaller tiles (see CONTRACT_TILE_WIDTH/HEIGHT) mean each
-            # gaussian spans more tiles, so the per-splat multiplier scales with
-            # tiles per gaussian. At 8x4 (area 32) the average tile-touch count is
-            # several x the 16x16 count, so use a 4x headroom (bin_emit silently
-            # drops pairs past this cap -> black-tile artifacts, so err generous;
-            # the smaller tile also shrinks the per-bucket checkpoint block,
-            # offsetting VRAM).
             max_sort_pairs = max(buffers.DEFAULT_MAX_SORT_PAIRS, max_splats * 4)
+
         self.max_sort_pairs = max_sort_pairs
 
         self.shared_data_module = _module_for_reflection(device)
         self.viewer_only = viewer_only
         self.raster_config = raster_config or RasterConfig()
+
         if viewer_only and self.raster_config.cluster_cull:
             self.raster_config = replace(self.raster_config, cluster_cull=False)
+
         self.compositor_config = compositor_config or CompositorConfig()
-        self.regularization_config = (
-            regularization_config or RegularizationConfig())
+        self.regularization_config = (regularization_config or RegularizationConfig())
         resolved_loss_config = loss_config or LossConfig()
 
-        # View-dependent SH policy. sh_degree 0 (default) => rest storage is not
-        # allocated and every SH path below is a no-op. active_sh_degree starts
-        # at 0 and is raised by the progressive schedule during training.
         self.appearance_config = appearance_config or AppearanceConfig()
         self._sh_rest_floats = sh_rest_coeffs(self.appearance_config.sh_degree) * 3
         self._active_sh_degree = 0
@@ -151,9 +134,6 @@ class Pipeline:
             sh_rest_floats=self._sh_rest_floats,
         )
 
-        # Image-space loss (SSIM / L1+L2), recorded independently of how the
-        # pixels were produced. viewer_only skips it: allocate_viewer builds no
-        # loss kernels, SSIM maps, or dL_dC texture, and _run_loss never runs.
         self.image_loss = None if viewer_only else ImageLoss(
             ssim_maps_kernel=self.k_ssim_maps,
             ssim_grad_kernel=self.k_ssim_grad,
@@ -166,17 +146,13 @@ class Pipeline:
             config=resolved_loss_config,
         )
 
-        # Camera buffer: raw 144-byte buffer (136 data + 8 padding to 16-byte align).
-        # Using a raw Buffer avoids reflection dependency (survives hot-reload).
+        # Camera buffer: raw 144-byte buffer (136 data + 8 padding to 16-byte align)
         self._camera_buffer = device.create_buffer(
             size=144,
             usage=spy.BufferUsage.shader_resource | spy.BufferUsage.unordered_access,
             label="camera_data",
         )
 
-        # The Adam parameter-update step and its bias-correction counter live in
-        # their own optimizer object, not inline on the Pipeline. Training-only:
-        # viewer_only omits it (its densify/adam kernels aren't compiled).
         self._adam = None if viewer_only else AdamOptimizer(
             dispatch=self._dispatch,
             dispatch_indirect=self._dispatch_indirect,
@@ -192,9 +168,7 @@ class Pipeline:
         )
 
         # Active command batch during a recorded step. When set, _dispatch /
-        # _marker_group record into it; None => immediate dispatch. External
-        # encoder owners (densify, viewer) assign a raw encoder via the
-        # `_encoder` compat property below, which wraps it in a CommandBatch.
+        # _marker_group record into it; None => immediate dispatch
         self._batch: CommandBatch | None = None
         self.scan_service = GpuScan(
             resources=self.buffers.scan,
@@ -237,9 +211,6 @@ class Pipeline:
 
         self.last_submit_id: int = 0
 
-        # Flat warp-per-bucket is a variant of the per-splat backward, so it
-        # requires it: valid (persplat, flat) are (True,True)/(True,False)/
-        # (False,False); (False,True) is meaningless.
         assert use_persplat_backward or not use_flat_bucket_backward, \
             "use_flat_bucket_backward=True requires use_persplat_backward=True"
 
@@ -260,6 +231,10 @@ class Pipeline:
         #starts at 0, increments after each bwd step
         self._backward_pixel_phase = 0
 
+        # Transient render state: the LAST-APPLIED schedule values. The frontend
+        # owns the schedule and injects fresh values into each train_step via
+        # IterationContextualVariables; render()/benchmark_frozen (which run
+        # outside train_step) inherit whatever was last applied.
         self._extinction_hardness = float(self.compositor_config.extinction_hardness)
 
         self._active_target = None if viewer_only else self.buffers.target_image
@@ -270,9 +245,6 @@ class Pipeline:
         self._mip_num_cameras: int = 0
         self._mip_filter_coef: float = 0.0
 
-        # Optional per-phase GPU timestamp timer. None (default) => train_step
-        # records no timestamps and the hot path is unchanged. Installed by
-        # benchmark_frozen() to measure fwd/bwd/adam ms at a pinned iteration.
         self._step_timer = None
 
         if initial_state is not None:
@@ -289,26 +261,12 @@ class Pipeline:
         self.shared_data_module = _module_for_reflection(self.device)
 
     def set_active_sh_degree(self, degree: int) -> None:
-        """Set the active SH band count for the progressive schedule, clamped to
-        the configured max degree. No effect on the SH-off path (max == 0)."""
         self._active_sh_degree = max(0, min(int(degree), self.appearance_config.sh_degree))
 
-    def update_sh_degree(self, iteration: int) -> None:
-        """Progressive SH activation (classic 3DGS oneupSHdegree): raise the
-        active band count by one every band_interval iterations, up to the
-        configured max. No-op on the SH-off path."""
-        interval = max(1, self.appearance_config.band_interval)
-        self.set_active_sh_degree(iteration // interval)
+    def set_extinction_hardness(self, hardness: float) -> None:
+        self._extinction_hardness = float(hardness)
 
     def _active_rest_floats(self) -> int:
-        """Scalar rest-coefficient count currently active under the progressive
-        SH schedule: 3 * ((active_deg+1)^2 - 1). The rest-Adam iterates only this
-        active head (inactive higher bands have zero gradient => no-op update).
-        0 on the SH-off path (no rest storage).
-
-        ``_bench_force_full_rest_adam`` (test-only) forces the full configured
-        width so the active-band optimization can be proved bit-identical to the
-        full-width reference."""
         if not self.buffers.sh_enabled:
             return 0
         if getattr(self, "_bench_force_full_rest_adam", False):
@@ -805,16 +763,6 @@ class Pipeline:
             )
 
 
-    def set_extinction_hardness(self, hardness: float) -> None:
-        """Set the compositor extinction hardness used by subsequent forward /
-        backward dispatches. Lets the trainer SCHEDULE k across training (e.g.
-        hold at 1.0 until the first densify, then ramp to the target) without
-        rebuilding the frozen CompositorConfig. Its extinction_hardness stays
-        the run TARGET; the construction guard already required the per-splat
-        backward for a target != 1, so any scheduled value in [1, target] is
-        honored by that path."""
-        self._extinction_hardness = float(hardness)
-
     def render(self, camera: Camera) -> None:
         with self.recording("render"):
             self.rasterize(camera)
@@ -825,13 +773,6 @@ class Pipeline:
             return self.buffers.output_image.to_numpy()
 
     def read_bin_debug(self) -> tuple[np.ndarray, np.ndarray, int, int]:
-        """Read the binning-debug buffers the LAST forward produced, for the
-        --debug-bin-viz visualization. Returns:
-          (tile_counts[num_tiles], overlap[H, W], num_tiles_x, num_tiles_y)
-        where tile_counts[t] = tile_end[t] - tile_start[t] (splats binned into
-        tile t) and overlap = gaussian_count_per_pixel (splats blended per pixel
-        before early-break). Both are already filled every frame — no extra
-        kernel. Call after render()/wait_for_idle()."""
         b = self.buffers
         with self.gpu_lock:
             starts = b.tile_start.to_numpy().view(np.uint32)
@@ -869,19 +810,6 @@ class Pipeline:
             )
 
     def _clear_2d_grad_seeds(self) -> None:
-        """Per-iter grad-clear for the HOT PATH: clears only the 5 2D grad
-        seeds. Those are atomic-accumulated by the blend backward every iter
-        and there's no other zeroing site, so they MUST be re-zeroed each iter.
-
-        The 14 scalar param grad buffers (grad_mean_x ... grad_color_b) are
-        NOT cleared here because the Adam step at end-of-iter already zeros
-        them per-thread (adam.slang:140-144) as part of its per-gaussian
-        update, so they're guaranteed zero at start-of-iter. This saves 14
-        max_splats-sized dense-write dispatches per iter.
-
-        Invariant: the caller must have run :meth:`_clear_grads` once at
-        setup (before the first train_step) to seed the invariant, because
-        NDBuffer allocator contents aren't guaranteed zero on construction."""
         b = self.buffers
         for name in b.grad_2d_seed_buffers:
             self._dispatch(self.k_grad_clear, "grad_clear",
@@ -897,7 +825,7 @@ class Pipeline:
             target=self._active_target,
         )
 
-    def _run_backward(self, structure_tensor=None, structure_kwargs: dict | None = None) -> None:
+    def _run_backward(self, iteration_contextual_variables: IterationContextualVariables) -> None:
         b = self.buffers
         gb = b.grad_buffers
         sorted_values = self._sorted_values
@@ -906,10 +834,6 @@ class Pipeline:
             if self.use_persplat_backward:
                 num_tiles = b.num_tiles_x * b.num_tiles_y
                 if self.use_flat_bucket_backward:
-                    # Flat warp-per-bucket backward. Build the compacted
-                    # live-bucket list (only buckets a pixel actually reached),
-                    # then dispatch ONE WARP PER BUCKET indirectly. Same grads
-                    # as the per-tile path, no straggler tail / idle warps.
                     with self._marker_group("live_bucket_compaction"):
                         self._dispatch(self.k_tile_max_processed, "tile_max_processed",
                             # TILE_AREA threads/tile (reduces over the tile's pixels).
@@ -933,9 +857,7 @@ class Pipeline:
                             live_buckets=b.live_buckets.storage,
                             num_tiles=num_tiles,
                         )
-                        max_buckets = (
-                            buffers._ceil_div(self.max_sort_pairs, buffers.RASTER_BUCKET_SIZE)
-                            + num_tiles)
+                        max_buckets = (buffers._ceil_div(self.max_sort_pairs, buffers.RASTER_BUCKET_SIZE) + num_tiles)
                         self._dispatch(self.k_bucket_prepare_dispatch, "bucket_prepare_dispatch",
                             thread_count=[1, 1, 1],
                             live_bucket_total=b.live_bucket_total.storage,
@@ -993,11 +915,9 @@ class Pipeline:
                     pixel_phase=self._backward_pixel_phase,
                     extinction_hardness=float(self._extinction_hardness),
                 )
+
                 self._backward_pixel_phase += 1
-                # Per-gaussian projection backward: turn the summed 2D grads
-                # into 3D mean/scale/rot grads, ONCE per gaussian. Must run
-                # before regularization (which InterlockedAdds onto the 3D
-                # grads this kernel direct-stores).
+
                 with self._marker_group("projection_backward"):
                     self._dispatch(self.k_projection_backward, "projection_backward",
                         thread_count=[self.max_splats, 1, 1],
@@ -1040,10 +960,6 @@ class Pipeline:
                     grad_2d_y_iter=b.grad_2d_y_iter.storage,
                 )
 
-        # Optional view-dependent SH backward: turn the accumulated per-gaussian
-        # color gradient into higher-band coefficient gradients + the
-        # direction->mean term. Runs after projection_backward (it ADDS to
-        # grad_mean) and before regularization. SH-off path skips it.
         if b.sh_enabled:
             with self._marker_group("sh_backward"):
                 self._dispatch(self.k_sh_backward, "sh_backward",
@@ -1065,19 +981,13 @@ class Pipeline:
                     max_splats=self.max_splats,
                 )
 
-        # SAD-GS online eta accumulation (must be HERE: after backward filled
-        # grad_2d_*_iter, before accumulate_iter clears them, so the per-view
-        # grad gate in score_structure_aware sees this view's gradient).
-        if structure_tensor is not None:
+        if iteration_contextual_variables.densification_variables.structure_tensor_texture is not None:
             with self._marker_group("structure_accum"):
-                _densify.accumulate_structure_scores(
-                    self, structure_tensor, **(structure_kwargs or {}))
+                _densify.accumulate_structure_scores(self,
+                    iteration_contextual_variables.densification_variables.structure_tensor_texture,
+                    **(iteration_contextual_variables.densification_variables.structure_kwargs or {})
+                )
 
-        # Fold the per-iter 2D grad vector into the window-level
-        # mag + visibility accumulators. Gsplat semantics: the signal
-        # driving densification is the NORM OF THE SUM of per-pixel
-        # gradients per iter, averaged over iters the gaussian was
-        # visible — not the sum of per-pixel norms.
         with self._marker_group("accumulate_iter"):
             self._dispatch(self.k_accumulate_iter, "accumulate_iter",
                 thread_count=[self.max_splats, 1, 1],
@@ -1133,47 +1043,32 @@ class Pipeline:
             "visibility_count": vis.astype(np.int64),
         }
 
-    def train_step(self, camera: Camera, lrs: AdamLRs | None = None,
-                   structure_tensor=None, structure_kwargs: dict | None = None) -> None:
-        """Run one training step: forward -> loss -> backward -> regularization -> adam.
 
-        The target image must have been uploaded via
-        :meth:`set_target_image` before calling.
-
-        ``structure_tensor`` (SAD-GS online accumulation): when provided (the
-        current view's structure-tensor field), a per-gaussian eta sample is
-        accumulated into the eta buffers DURING backward — after the per-view
-        2D gradient is computed (so the SADGS per-view grad gate can see it) and
-        before accumulate_iter clears it. Over a densify window this builds the
-        multiview N_high/N_low/eta_max statistics the paper accumulates (Section
-        3.6). None (default) = no SAD overhead. ``structure_kwargs`` forwards
-        per-call options (pass_idx, opacity_threshold, per_view_grad_thresh) to
-        accumulate_structure_scores; the caller gates cadence by simply passing
-        structure_tensor=None on iters it wants to skip.
-
-        NO CPU/GPU sync here, training submits kernels and returns
-        immediately. This keeps the GPU saturated; the queue drains
-        when the training loop next reads back data (loss sample,
-        preview render, densify).
-        """
+    def train_step(self, iterationContext: IterationContext) -> None:
+        lrs = iterationContext.learning_rates
         if lrs is None:
             lrs = AdamLRs()
+
+        if iterationContext.iteration_contextual_variables is not None:
+            self.set_extinction_hardness(iterationContext.iteration_contextual_variables.hardness_value)
+            self.set_active_sh_degree(iterationContext.iteration_contextual_variables.sh_degree)
+
         with self._recording("train_step"):
             with self._marker_group("clear_grads"):
                 # TODO this should not be here by itself
                 self._clear_2d_grad_seeds()
             with self._marker_group("forward"):
-                self._run_forward(camera)
+                self._run_forward(iterationContext.camera_entry.camera)
             with self._marker_group("loss"):
                 self._run_loss()
             with self._marker_group("backward"):
-                self._run_backward(structure_tensor=structure_tensor, structure_kwargs=structure_kwargs)
+                self._run_backward(iterationContext.iteration_contextual_variables)
             with self._marker_group("regularization"):
                 self._run_regularization()
             with self._marker_group("adam"):
                 self._adam.step(lrs, active_rest_floats=self._active_rest_floats())
 
-
+    #TODO remove after agentic looped benchmarking is done
     # Top-level train_step marker groups, in execution order. These are the
     # coarse phases the training goal tracks (fwd / bwd / adam among them).
     _TOP_PHASES: tuple[str, ...] = (
@@ -1257,18 +1152,10 @@ class Pipeline:
             allow_scale_prune, carry_eta)
 
     def set_mipsplatting_cameras(self, train_cameras: list[Camera]) -> None:
-        """Mip-Splatting setup: upload the (static) training-camera array and
+        """
+        Mip-Splatting setup: upload the (static) training-camera array and
         derive the sqrt(0.2)/max_focal coefficient ONCE. Must be called before
         :meth:`compute_3d_filter`.
-
-        Cameras are fixed for a run (intrinsics + extrinsics never change), so
-        this is a one-time upload; compute_3d_filter then only re-dispatches the
-        per-gaussian kernel each densify tick (the means move, the cameras do
-        not). Pass the TRAIN split to match mip-splatting / SADGS (held-out test
-        views must not influence the filter).
-
-        Each Camera packs to a 144-byte CameraData (view 16f + proj 16f +
-        image_size 2f + 2f pad).
         """
         n = len(train_cameras)
 
@@ -1327,8 +1214,6 @@ class Pipeline:
         return _densify.reset_opacity(self, cfg)
 
     def morton_sort(self, world_min, world_max, carry_eta=False) -> None:
-        """Reorder gaussians + adam_state by 3D Morton code (Z-order).
-        See :func:`trainer.densify.morton_sort`."""
         return _densify.morton_sort(self, world_min, world_max, carry_eta)
 
     def compute_structure_scores(self, cameras, structure_textures, cfg) -> None:

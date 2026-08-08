@@ -35,7 +35,7 @@
 // Non-square tiles: WIDTH across, HEIGHT down; pixel-in-tile row stride = WIDTH.
 static const uint TILE_WIDTH  = CONTRACT_TILE_WIDTH;
 static const uint TILE_HEIGHT = CONTRACT_TILE_HEIGHT;
-static const uint TILE_AREA   = CONTRACT_TILE_AREA;    // W*H (256 at 16x16, 32 at 8x4)
+static const uint TILE_AREA   = CONTRACT_TILE_AREA;    // W*H 
 static const uint NUM_WARPS   = TILE_AREA / 32u;       // buckets/WG (assumes wave=32)
 
 static const float ALPHA_MAX = 0.99;

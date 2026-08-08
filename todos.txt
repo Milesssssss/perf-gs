@@ -1,0 +1,12 @@
+- fix SH3 LR (likely a LR issue)
+- fix hard cap in viewer streaming
+- hack-in separate queue submission for viewer, same device
+- fix aspect ratio in viewer
+- add glomap as optional dependency
+- allow launching viewer and THEN selecting dataset OR image folder and launch glomap
+- add features to viewer
+- create installer for 0 headache usage
+
+V1 should be done at this point
+
+- attempt moving the 8x8 tile to be still in a 64thread wg but each thread gets an 8x4 chunk of the tile rather than a separate splat. More coeherent, should be faster.

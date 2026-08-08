@@ -27,6 +27,7 @@ from trainer.config.config import (
     AdamLRs,
     AppearanceConfig,
     CompositorConfig,
+    DensificationProperties,
     LossConfig,
     RasterConfig,
     RegularizationConfig,
@@ -47,6 +48,7 @@ from trainer.frontend.evaluation.evaluation import (
     run_eval_sweep,
 )
 from trainer.frontend.lr_schedule import (
+    AppearanceSchedule,
     ExtinctionHardnessSchedule,
     MeanLearningRateSchedule,
 )
@@ -71,7 +73,7 @@ from trainer.frontend.profiling.profiler import (
     apply_profile_session_overrides,
 )
 from trainer.frontend.evaluation.evaluation import CameraSampler 
-
+from trainer.config.config import IterationContext, IterationContextualVariables
 
 @dataclass(frozen=True)
 class RunPaths:
@@ -99,16 +101,6 @@ class SceneContext:
     holdout_stride: int
     morton_min: np.ndarray
     morton_max: np.ndarray
-
-
-@dataclass(frozen=True)
-class IterationContext:
-    step_number: int
-    camera_index: int
-    camera_entry: ColmapImageEntry
-    learning_rates: AdamLRs
-    events: IterationEvents
-
 
 @dataclass(frozen=True)
 class TrainingResult:
@@ -194,18 +186,14 @@ class TrainingApplication:
         self.target_textures: list[Any] = []
         self.structure_textures: list[Any] = []
         self.mean_lr: MeanLearningRateSchedule | None = None
-        self.extinction: ExtinctionHardnessSchedule | None = None
+        self.extinction_hardness_schedule: ExtinctionHardnessSchedule | None = None
+        self.appearance_schedule: AppearanceSchedule | None = None
 
     @classmethod
     def from_cli(cls) -> "TrainingApplication":
         return cls(build_parser().parse_args())
 
-    def prepare(self) -> None:
-        """Run the full pre-loop setup: scene load, config validation, device +
-        pipeline construction, targets, optional features, viewer, profiler, and
-        training services. Extracted from :meth:`launch_training` so alternate
-        drivers (e.g. the timing benchmark) can prepare identically and then run
-        their own tail instead of the standard loop + post-training."""
+    def prepare_training_context(self) -> None:
         self.profiling_enabled = apply_profile_session_overrides(self.args)
 
         self.scene_context = load_scene_context(self.args)
@@ -236,12 +224,12 @@ class TrainingApplication:
         self._start_profiler()
         self._create_training_services()
 
-    def build_training_loop(self) -> "TrainingLoop":
-        """Construct the :class:`TrainingLoop` from the prepared runtime. Call
-        only after :meth:`prepare`. Shared by :meth:`launch_training` and the
-        timing benchmark (scripts/running/bench_iter.py) so both drive the
-        identical loop wiring."""
-        return TrainingLoop(
+    def start_training(self) -> None:
+        # ------ prepare for training -------------------------
+        self.prepare_training_context()
+
+        # ---- launch training loop --------------------
+        result = TrainingLoop(
             args=self.args,
             scene=self._sceneContext,
             targets=self._targets,
@@ -252,25 +240,19 @@ class TrainingApplication:
             target_textures=self.target_textures,
             structure_textures=self.structure_textures,
             mean_lr=self._mean_lr,
-            extinction=self._extinction,
             paths=self.paths,
-        )
-
-    def launch_training(self) -> None:
-        # ------ prepare for training -------------------------
-        self.prepare()
-
-        # ---- launch training loop --------------------
-        result = self.build_training_loop().launch_training_loop()
+            extinction_hardness_schedule=self._extinction,
+            appearance_schedule=self._appearance_schedule,
+        ).launch_training_loop()
 
         # -----Post-training----------------------------------------
         self._write_final_test_psnr(result)
 
-        trainingRuntime: TrainingRuntime = self._training_runtime
-        if trainingRuntime.profiler is not None:
-            trainingRuntime.profiler.close()
-        trainingRuntime.viewer.hold_after_training(trainingRuntime.pipeline)
-        trainingRuntime.artifacts.close_all()
+        if self._training_runtime.profiler is not None:
+            self._training_runtime.profiler.close()
+            
+        self._training_runtime.viewer.hold_after_training(self._training_runtime.pipeline)
+        self._training_runtime.artifacts.close_all()
 
         PsNRPlotWriter.write(
             enabled=self.args.psnr_curve,
@@ -286,7 +268,7 @@ class TrainingApplication:
             return
 
         run_post_training(
-            pipeline=trainingRuntime.pipeline,
+            pipeline=self._training_runtime.pipeline,
             scene=self._sceneContext.colmapScene,
             args=self.args,
             run_dir=self.paths.root,
@@ -373,23 +355,26 @@ class TrainingApplication:
         reporter = TrainingReporter(artifacts, self.args, scene)
         reporter.write_header()
 
-        diag_module = None
-        diag_grad_internal = None
-        if artifacts.densify_diag_json is not None:
-            import densify_diag as diag_module  # pyright: ignore[reportMissingImports]
-            diag_grad_internal = (
-                self.args.sad_grad_threshold * scene.width * scene.height * 3.0)
-
         self.mean_lr = MeanLearningRateSchedule(
-            lr_init=1.6e-4 * scene.extent,
-            lr_final=1.6e-6 * scene.extent,
+            lr_init=self.base_lrs.mean * scene.extent,
+            lr_final=self.base_lrs.mean * 1e-2 * scene.extent,
             max_steps=self.args.position_lr_max_steps,
         )
-        self.extinction = ExtinctionHardnessSchedule(
+
+        self.extinction_hardness_schedule = ExtinctionHardnessSchedule(
             target=self.args.extinction_hardness,
             warmup=self.args.extinction_hardness_warmup,
         )
+
+        self.appearance_schedule = AppearanceSchedule(
+            appearanceConfig=AppearanceConfig(
+                sh_degree=self.args.sh_degree,
+                band_interval=self.args.sh_band_interval
+            )
+        )
+
         queue_limiter = QueueLimiter(self._pipeline.runtime, max_depth=1)
+
         densifier = DensificationController(
             pipeline=self._pipeline,
             args=self.args,
@@ -401,12 +386,10 @@ class TrainingApplication:
             image_height=scene.height,
             morton_world_min=scene.morton_min,
             morton_world_max=scene.morton_max,
-            extinction=self._extinction,
+            extinction_hardness_schedule=self.extinction_hardness_schedule,
             queue_limiter=queue_limiter,
-            collect_diagnostics=artifacts.densify_diag_json is not None,
-            diag_module=diag_module,
-            diag_grad_internal=diag_grad_internal
         )
+
         self.runtime = TrainingRuntime(
             pipeline=self._pipeline,
             viewer=self._viewer,
@@ -525,9 +508,13 @@ class TrainingApplication:
 
     @property
     def _extinction(self) -> ExtinctionHardnessSchedule:
-        assert self.extinction is not None
-        return self.extinction
-
+        assert self.extinction_hardness_schedule is not None
+        return self.extinction_hardness_schedule
+    
+    @property
+    def _appearance_schedule(self) -> AppearanceSchedule:
+        assert self.appearance_schedule is not None
+        return self.appearance_schedule
 
 class TrainingLoop:
     """Executes optimizer steps, then scheduled mutations, then observations."""
@@ -545,8 +532,9 @@ class TrainingLoop:
         target_textures: list[Any],
         structure_textures: list[Any],
         mean_lr: MeanLearningRateSchedule,
-        extinction: ExtinctionHardnessSchedule,
         paths: RunPaths,
+        extinction_hardness_schedule: ExtinctionHardnessSchedule | None = None,
+        appearance_schedule: AppearanceSchedule | None = None,
     ) -> None:
         self.args = args
         self.scene = scene
@@ -558,7 +546,8 @@ class TrainingLoop:
         self.target_textures = target_textures
         self.structure_textures = structure_textures
         self.mean_lr = mean_lr
-        self.extinction = extinction
+        self.extinction_hardness_schedule: ExtinctionHardnessSchedule | None = extinction_hardness_schedule
+        self.appearance_schedule: AppearanceSchedule | None = appearance_schedule
         self.paths = paths
 
         rng = np.random.default_rng(args.seed)
@@ -661,6 +650,16 @@ class TrainingLoop:
             camera_entry=camera_entry,
             learning_rates=learning_rates,
             events=self.schedule.events_at(self.training_step),
+
+            iteration_contextual_variables=IterationContextualVariables(
+                hardness_value=(self.extinction_hardness_schedule.at(self.training_step) if self.extinction_hardness_schedule is not None else 1.0),
+                sh_degree=(self.appearance_schedule.at(self.training_step) if self.appearance_schedule is not None else int(self.args.sh_degree)),
+                densification_variables=DensificationProperties(
+                    structure_tensor_texture=self.structure_textures[camera_index] if self._should_accumulate_structure(self.training_step) else None,
+                    #TODO: writing the threshold like this is shit, need a better way to avoid having these damn hyperparams float as magic stuff around
+                    structure_kwargs={"per_view_grad_thresh": (self.args.sad_freq_grad_threshold * self.scene.width * self.scene.height * 3.0) if self._should_accumulate_structure(self.training_step) else None}
+                ),
+            ),
         )
 
     def _prepare_iteration(self, context: IterationContext) -> None:
@@ -686,30 +685,10 @@ class TrainingLoop:
             raise SystemExit(0)
 
     def _execute_training_step(self, context: IterationContext) -> None:
-        #TODO this too sould not be part of this detail-agnostic function
-        structure_texture = None
-        structure_kwargs = None
-        if self._should_accumulate_structure(context):
-            structure_texture = self.structure_textures[context.camera_index]
-            structure_kwargs = {
-                "per_view_grad_thresh": (
-                    self.args.sad_freq_grad_threshold
-                    * self.scene.width * self.scene.height * 3.0),
-            }
 
-        pipeline = self.runtime.pipeline
-        # TODO extinction hardness is a per-iteration schedule info, same for the sh degree, they should absolutely NOT be part of the pipeline state
-        pipeline.set_extinction_hardness(self.extinction.at(context.step_number))
-        pipeline.update_sh_degree(context.step_number)
+        self.runtime.pipeline.train_step(context)
 
-        pipeline.train_step(
-            context.camera_entry.camera,
-            lrs=context.learning_rates,
-            structure_tensor=structure_texture,
-            structure_kwargs=structure_kwargs,
-        )
-
-        self.runtime.queue_limiter.record(pipeline.last_submit_id)
+        self.runtime.queue_limiter.record(self.runtime.pipeline.last_submit_id)
         self._stream_viewer_snapshot_if_due(context)
 
     def _record_current_timing(self) -> None:
@@ -774,11 +753,11 @@ class TrainingLoop:
         self._run_evaluation_if_due(context)
         return True
 
-    def _should_accumulate_structure(self, context: IterationContext) -> bool:
+    def _should_accumulate_structure(self, training_step) -> bool:
         return (
             self.densify_mode == DensificationMode.STRUCTURE_AWARE
-            and self.args.densify_from < context.step_number <= self.args.densify_to
-            and context.step_number % self.args.sad_accum_every == 0
+            and self.args.densify_from < training_step <= self.args.densify_to
+            and training_step % self.args.sad_accum_every == 0
         )
 
     def _present_profile_frame_if_enabled(self) -> None:
@@ -832,7 +811,8 @@ class TrainingLoop:
 
     def _complete_training_loop(self) -> TrainingResult:
         self.runtime.pipeline.runtime.wait_for_idle()
-        self.runtime.pipeline.set_extinction_hardness(self.extinction.target)
+        if self.extinction_hardness_schedule is not None:
+            self.runtime.pipeline.set_extinction_hardness(self.extinction_hardness_schedule.target)
         self.runtime.reporter.report_complete(self.training_step, self.post_iteration_clean_timing)
         return TrainingResult(
             iterations=self.training_step,
@@ -1130,23 +1110,6 @@ class TrainingReporter:
             "iter": outcome.iteration, "event": "densify",
             "kind": outcome.kind, **outcome.stats}) + "\n")
 
-        rec = outcome.diag_record
-        if rec is not None:
-            self._artifacts.densify_diag_json.write(json.dumps(rec) + "\n")
-            fo = rec.get("fanout", {})
-            gate = rec.get("eta_gate", {})
-            sp = rec.get("spatial_post", {})
-            print(f"  [diag] {outcome.kind:9s} {rec['pre_count']}->{rec['post_count']} "
-                  f"(x{rec['growth_factor']}) | "
-                  f"trig={gate.get('frac_triggered_of_seen')} "
-                  f"prune={gate.get('frac_prune_of_seen')} "
-                  f"prod_p90={fo.get('prod_p90')} prod_max={fo.get('prod_max')} "
-                  f"| gini={sp.get('gini')} top1%={sp.get('top1pct_cell_share')}")
-            if outcome.opacity_assert is not None:
-                amin, amax, msgs = outcome.opacity_assert
-                print(f"  [opacity-bundle assert] iter {outcome.iteration}: "
-                      f"min={amin:.4f} max={amax:.4f} | " + " | ".join(msgs))
-
         pre_s = outcome.stats.get("pre_count")
         final_s = outcome.stats.get("final_count")
         if pre_s is not None and final_s is not None:
@@ -1304,7 +1267,7 @@ def create_pipeline(*, args: argparse.Namespace, device: Any, gpu_lock: Any,
 
 
 def main() -> None:
-    TrainingApplication.from_cli().launch_training()
+    TrainingApplication.from_cli().start_training()
 
 
 if __name__ == "__main__":

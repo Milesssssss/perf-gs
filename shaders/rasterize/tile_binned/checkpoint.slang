@@ -1,24 +1,5 @@
 // Forward-pass transmittance/color checkpoints for the transposed
 // (per-splat) backward.
-//
-// The transposed backward makes the SPLAT the unit of parallelism (a lane
-// owns a splat, streams over the tile's 256 pixels). A splat-owning lane
-// can't walk a pixel's front-to-back chain, so it can't recover the
-// pre-splat transmittance T_i the way the per-pixel backward does. We fix
-// that with checkpointing (à la Taming-3DGS / activation checkpointing):
-// the forward records, once every RASTER_BUCKET_SIZE splats, the running
-// (T, C_in_front) for each pixel. The backward reads the checkpoint at the
-// start of a splat's bucket and re-blends only the ≤P-1 splats between the
-// checkpoint and the splat — bounded recompute, all forward multiplies of
-// (1-alpha) (no division by near-zero, so opaque splats need no clamp).
-//
-// Storage is a RAGGED (CSR) buffer: buckets are indexed by a per-tile
-// bucket-offset prefix sum (bucket_offsets[tile] + local_bucket), so the
-// buffer scales with actual work (~num_rendered / P) instead of a
-// rectangular W*H*MAX_BUCKETS grid. Each bucket stores TILE_AREA (256)
-// per-pixel entries; each entry is (T, R, G, B) packed as fp16 into a
-// uint2 (8 bytes) — half precision is ample since T and RGB are bounded
-// and we only re-multiply a handful of well-conditioned terms after a read.
 
 #ifndef TRAINER_RASTER_CHECKPOINT_SLANG
 #define TRAINER_RASTER_CHECKPOINT_SLANG
