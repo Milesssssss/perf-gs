@@ -45,13 +45,10 @@ class SubmitHandle:
 
 
 class CommandBatch:
-    """One command-buffer's worth of recorded GPU work.
-
+    """
+    One command-buffer's worth of recorded GPU work.
     Wraps a ``spy.CommandEncoder`` and provides the dispatch / marker helpers
-    that record into it. Construct via :meth:`GpuRuntime.command_batch` (which
-    creates a fresh encoder) or by wrapping an externally-owned encoder
-    (``CommandBatch(existing_encoder)``) — the latter is how the ``Pipeline.
-    _encoder`` compat setter adapts the densify/viewer encoders.
+    that record into it.
     """
 
     def __init__(self, encoder: spy.CommandEncoder, label: str = "") -> None:
@@ -77,15 +74,9 @@ class CommandBatch:
         params via a ShaderCursor (matching ``kernel.dispatch(**kwargs)``), then
         ``dispatch_compute_indirect``."""
         self._encoder.insert_debug_marker(marker, spy.math.float3(*marker_color(marker)))
-        # HAZARD: args_buf was written by a preceding kernel dispatch (e.g.
-        # prepareDispatchArgs). dispatch_compute_indirect reads it as
-        # driver-consumed indirect args; without a barrier the read may race
-        # the write and pick up garbage -> a catastrophic group count. Force
-        # write-visibility first. Cheap vs. the failure mode (a 32-bit garbage
-        # groups_x can queue billions of workgroups).
         # TODO: im not sure if the barrier is actually needed here.
-        if barrier_before:
-            self._encoder.global_barrier()
+        #if barrier_before:
+        #    self._encoder.global_barrier()
         pass_enc = self._encoder.begin_compute_pass()
         try:
             shader_obj = pass_enc.bind_pipeline(kernel.pipeline)
