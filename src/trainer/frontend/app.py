@@ -677,9 +677,7 @@ class TrainingLoop:
             return
         captured = self.runtime.profiler.run_capture_if_due(
             self.runtime.pipeline,
-            context.step_number,
-            context.camera_entry,
-            context.camera_index,
+            context,
             self.runtime.queue_limiter,
         )
         if captured:
@@ -727,7 +725,6 @@ class TrainingLoop:
             #self.runtime.reporter.report_morton_sort(context.step_number)
 
         if events.mip_periodic:
-            # TODO: benchmark the 3d filter, its slow af, you're going through all the mip cameras per kernel.....
             pipeline.compute_3d_filter()
 
     def _produce_observations(self, context: IterationContext) -> bool:

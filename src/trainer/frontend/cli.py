@@ -128,7 +128,7 @@ def build_parser() -> argparse.ArgumentParser:
                          "'structure_aware' = SAD-GS anisotropic grid-split "
                          "(arXiv 2604.28016) with an interleaved AbsGS gradient "
                          "filler on the non-structure densify ticks.")
-    parser.add_argument("--sad-tau-split", type=float, default=0.4,
+    parser.add_argument("--sad-tau-split", type=float, default=0.8,
                     help="SAD split_ratio_threshold: split if high_ratio (fraction of views "
                          "with scalar eta>1) exceeds this AND the gradient is high (SADGS 0.8)")
     parser.add_argument("--sad-tau-prune", type=float, default=0.8,

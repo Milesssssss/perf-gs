@@ -54,7 +54,7 @@ EXPECTED_DEFAULTS = {
     "morton_every": 0,
     "cluster_cull": True,
     "densify_mode": "structure_aware",
-    "sad_tau_split": 0.4,
+    "sad_tau_split": 0.8,
     "sad_tau_prune": 0.8,
     "sad_grad_threshold": 1e-5,
     "sad_accum_every": 10,

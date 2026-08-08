@@ -189,9 +189,8 @@ def densify_structure_aware(pipeline: TrainingPipeline, cfg: StructureConfig) ->
     # SADGS mean-loss threshold must be scaled up by W*H*channels here.
     grad_thresh_internal = cfg.grad_threshold * (pipeline.width * pipeline.height * 3.0)
 
-    # Shared kwargs for the decide passes. Pass 1 needs writes for the
-    # capacity-bound scratch; Pass 2 only reads the threshold. Split for
-    # clarity but the input list is the same.
+    # kwargs for the single-pass structure decide (densify_children_sum is
+    # passed separately at the dispatch site).
     decide_inputs = dict(
         gaussians=b.gaussians.storage,
         num_gaussians_counter=b.num_gaussians_counter.storage,
@@ -219,47 +218,28 @@ def densify_structure_aware(pipeline: TrainingPipeline, cfg: StructureConfig) ->
 
     with pipeline.recording("densify_structure") as recording, \
             pipeline.marker_group("densify_structure"):
-        # P0: zero the capacity-bound scratch (children_sum, fanout_hist,
-        # fanout_threshold). Dispatched at [513] so a single workgroup covers
-        # every histogram bin.
-        pipeline.dispatch(pipeline.k_clear_capacity_scratch, "clear_capacity_scratch",
-            thread_count=[513, 1, 1],
-            densify_children_sum=b.densify_children_sum.storage,
-            densify_fanout_hist=b.densify_fanout_hist.storage,
-            densify_fanout_threshold=b.densify_fanout_threshold.storage,
+        # P0: zero the requested-tail-growth counter (read back after the tick
+        # for the overbudget warning).
+        pipeline.dispatch(pipeline.k_clear_uint_buffer, "clear_children_sum",
+            thread_count=[1, 1, 1],
+            buffer=b.densify_children_sum.storage,
+            count=1,
         )
 
-        # P1: tentative decide + fan-out sum + histogram.
-        pipeline.dispatch(pipeline.k_decide_actions_structure_pass1, "decide_actions_structure_pass1",
+        # P1: single-pass structure decide -> action + split_factor_{x,y,z}
+        # (+ atomic children_sum). No capacity demotion: overbudget splits are
+        # dropped at the tail by split_anisotropic and surfaced by the host.
+        pipeline.dispatch(pipeline.k_decide_actions_structure, "decide_actions_structure",
             thread_count=[pipeline.max_splats, 1, 1],
             densify_children_sum=b.densify_children_sum.storage,
-            densify_fanout_hist=b.densify_fanout_hist.storage,
             **decide_inputs,
         )
 
-        # P2: snapshot pre_count (needed by the threshold picker and by the
-        # split_anisotropic indirect dispatch).
+        # P2: snapshot pre_count (bound for the split_anisotropic indirect dispatch).
         pipeline.dispatch(pipeline.k_densify_snapshot, "densify_snapshot",
             thread_count=[1, 1, 1],
             src=b.num_gaussians_counter.storage,
             dst=b.densify_pre_count.storage,
-        )
-
-        # P3: single-thread threshold picker.
-        pipeline.dispatch(pipeline.k_decide_actions_structure_threshold, "decide_actions_structure_threshold",
-            thread_count=[1, 1, 1],
-            num_gaussians_counter=b.num_gaussians_counter.storage,
-            densify_children_sum=b.densify_children_sum.storage,
-            densify_fanout_hist=b.densify_fanout_hist.storage,
-            densify_fanout_threshold=b.densify_fanout_threshold.storage,
-            max_splats=pipeline.max_splats,
-        )
-
-        # P4: demote high-fan-out splits to CLONE (no-op if threshold sentinel).
-        pipeline.dispatch(pipeline.k_decide_actions_structure_pass2, "decide_actions_structure_pass2",
-            thread_count=[pipeline.max_splats, 1, 1],
-            densify_fanout_threshold=b.densify_fanout_threshold.storage,
-            **decide_inputs,
         )
 
         # P5: indirect-dispatch args for split_anisotropic (groups = ceil(pre_count/256)).
@@ -361,12 +341,72 @@ def densify_structure_aware(pipeline: TrainingPipeline, cfg: StructureConfig) ->
             recording.after_submit(
                 lambda: b.swap_primitive_storage(carry_sh=b.sh_enabled))
 
-    # Wait-free: return None counts. The caller reads num_gaussians_counter on
-    # its own cadence (log-every ticks).
+    # Overbudget telemetry. The structure decision fires only every
+    # sad_structure_every (~500) iters and is already a heavy multi-dispatch, so
+    # ONE uint readback here is negligible (unlike the per-step loop). We surface
+    # when the window's requested splits exceed the buffer headroom — the
+    # overflow children are then DROPPED at the tail by split_anisotropic's
+    # capacity bounds-check (arbitrary GPU-thread order, NOT demoted). A splat
+    # explosion you want to SEE and respond to, not silently absorb.
+    # Reflection-free readback (.storage.to_numpy) so a mid-run shader hot-reload
+    # can't invalidate it.
+    pipeline.runtime.wait_for_idle()
+    children_sum = int(np.frombuffer(
+        b.densify_children_sum.storage.to_numpy().tobytes(), dtype=np.uint32)[0])
+    pre_count = int(np.frombuffer(
+        b.densify_pre_count.storage.to_numpy().tobytes(), dtype=np.uint32)[0])
+    headroom = max(pipeline.max_splats - pre_count, 0)
+    overbudget = children_sum > headroom
+    split_frac = (children_sum / pre_count) if pre_count > 0 else 0.0
+    if overbudget:
+        print(f"WARNING: structure densify overbudget at {pre_count} splats — "
+              f"requested {children_sum} new children ({split_frac:.0%} of the "
+              f"population) but only {headroom} fit (max_splats="
+              f"{pipeline.max_splats}); overflow children DROPPED at the tail. "
+              f"A single tick asking for this many splits usually means the split "
+              f"gate is too loose — tune --sad-tau-split / --sad-max-split-factor "
+              f"/ --max-splats.")
+        # Only when overbudget: read back the eta-gate buffers and reconstruct
+        # the shader's split gate on CPU to show WHICH term is saturating
+        # (eta too big? multiview gate meaningless on tiny n_total? grad gate
+        # not gating?). Heavy readback, but gated on the rare overbudget tick.
+        def _u32(buf):
+            return np.frombuffer(buf.storage.to_numpy().tobytes(), dtype=np.uint32)[:pre_count]
+        def _i64(buf):
+            return np.frombuffer(buf.storage.to_numpy().tobytes(), dtype=np.int64)[:pre_count]
+        n_total = _u32(b.eta_n_total).astype(np.float64)
+        n_high = _u32(b.eta_buffers["n_high"]).astype(np.float64)
+        max_x = _u32(b.eta_buffers["max_x"]).astype(np.float64) / 65536.0
+        max_y = _u32(b.eta_buffers["max_y"]).astype(np.float64) / 65536.0
+        max_z = _u32(b.eta_buffers["max_z"]).astype(np.float64) / 65536.0
+        vis = _u32(b.visibility_count_accum).astype(np.float64)
+        grad_mag = _i64(b.grad_mean_2d_mag_accum).astype(np.float64) / 65536.0
+        seen = n_total > 0
+        n_seen = int(seen.sum())
+        if n_seen > 0:
+            high_ratio = np.where(seen, n_high / np.maximum(n_total, 1.0), 0.0)[seen]
+            avg_grad = np.where(vis > 0, grad_mag / np.maximum(vis, 1.0), 0.0)[seen]
+            eta_max = np.maximum(max_x, np.maximum(max_y, max_z))[seen]
+            is_grad_high = avg_grad >= grad_thresh_internal
+            frac_ratio_pass = float(np.mean(high_ratio > cfg.tau_split))
+            frac_grad_pass = float(np.mean(is_grad_high))
+            print(f"  eta-gate breakdown (over {n_seen} seen splats): "
+                  f"n_total p50={np.percentile(n_total[seen], 50):.0f} "
+                  f"p90={np.percentile(n_total[seen], 90):.0f}; "
+                  f"eta_max p50={np.percentile(eta_max, 50):.2f} "
+                  f"p90={np.percentile(eta_max, 90):.2f}; "
+                  f"high_ratio>{cfg.tau_split:.2f}: {frac_ratio_pass:.0%}; "
+                  f"grad>thresh: {frac_grad_pass:.0%}. "
+                  f"(low n_total => multiview gate meaningless; high eta_max => "
+                  f"splats too big / structure field too hot.)")
+
+    # Wait-free otherwise: return None counts. The caller reads
+    # num_gaussians_counter on its own cadence (log-every ticks).
     return {
         "pre_count": None,
         "post_split_count": None,
         "final_count": None,
+        "overbudget": overbudget,
     }
 
 

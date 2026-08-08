@@ -297,19 +297,12 @@ class GaussianBuffers:
     split_factor_y: spy.NDBuffer = field(init=False)
     split_factor_z: spy.NDBuffer = field(init=False)
 
-    # GPU-side capacity-bound scratch for the wait-free structure densify.
-    # Pass 1 accumulates the total requested tail growth (sum of prod-1 over
-    # tentative splits) into `densify_children_sum` and a histogram of the
-    # per-split fan-out (`prod-1` bins) into `densify_fanout_hist` (513 bins
-    # is enough since prod<=max_split_factor^3=512). Pass 1.5 (a single-thread
-    # dispatch) scans the histogram top-down and picks
-    # `densify_fanout_threshold` — the smallest fan-out whose bin (plus all
-    # higher bins) must be demoted to CLONE so the tail growth fits under
-    # `max_splats - pre_count`. UINT_MAX means "no demotion needed". Pass 2
-    # reads that threshold and demotes.
+    # The single-pass structure decide atomically sums the total requested tail
+    # growth (sum of prod-1 over splits) into `densify_children_sum`. The host
+    # reads it back after the tick to warn when a window's requested splits
+    # exceed the buffer headroom (overflow children are dropped at the tail by
+    # split_anisotropic — surfaced, not silently demoted).
     densify_children_sum: spy.NDBuffer = field(init=False)      # uint[1]
-    densify_fanout_hist: spy.NDBuffer = field(init=False)       # uint[513]
-    densify_fanout_threshold: spy.NDBuffer = field(init=False)  # uint[1]
 
     # --- Cluster-Cull-Compact (Laine-2011 pattern, applied to 3DGS) ---
     # Gaussians are Morton-sorted every ~1000 iters (see morton_sort), so
@@ -665,10 +658,8 @@ def allocate(
     buffers.split_factor_x = allocator.uint_buffer(max_splats)
     buffers.split_factor_y = allocator.uint_buffer(max_splats)
     buffers.split_factor_z = allocator.uint_buffer(max_splats)
-    # Wait-free structure densify capacity-bound scratch (tiny: ~2 KB total).
+    # Requested-tail-growth counter for the structure densify overbudget warning.
     buffers.densify_children_sum = allocator.uint_buffer(1)
-    buffers.densify_fanout_hist = allocator.uint_buffer(513)
-    buffers.densify_fanout_threshold = allocator.uint_buffer(1)
 
     # --- optional view-dependent SH rest coefficients ---
     # Allocated only when sh_degree > 0. All SH buffers are fp16-packed into

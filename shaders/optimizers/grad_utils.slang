@@ -71,8 +71,7 @@ void checkSaturation(
     int64_t v = grad_buffer[i];
     if (v == int64_t(0x7FFFFFFFFFFFFFFF) || v == -int64_t(0x7FFFFFFFFFFFFFFF) - int64_t(1))
     {
-        uint dummy;
-        InterlockedOr(saturation_flag[0], 1u, dummy);
+        InterlockedOr(saturation_flag[0], 1u);
     }
 }
 

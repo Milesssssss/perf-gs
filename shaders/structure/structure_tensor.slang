@@ -1,26 +1,5 @@
-// GPU port of the multi-scale structure-tensor field (src/trainer/structure_analysis.py).
-//
-// Produces, per image, a per-pixel aggregated structure tensor S-bar packed as
-// float3 (Sxx, Sxy, Syy) — the exact same field the CPU reference
-// `compute_structure_tensor_field` builds with scipy, but computed as a chain
-// of separable-Gaussian / Sobel / DoG compute passes so a whole scene's fields
-// build in a fraction of the time. The CPU version stays the reference oracle
-// (see tests/test_structure_analysis_gpu.py for the parity check).
-//
-// The host (src/trainer/structure_analysis_gpu.py) drives the pass order; this
-// file only supplies the per-pixel math. Every pass clamps out-of-bounds
-// samples to the edge (mode="nearest"), matching scipy's default border mode.
-//
-// Gaussian weights are computed in-shader as exp(-0.5*(i/sigma)^2) normalized
-// to sum 1 over [-radius, radius] — identical to scipy's `_gaussian_kernel1d`
-// with truncate=4.0 (radius = int(4*sigma + 0.5), passed as a uniform).
-
 static const float ST_EPS = 1e-8;   // structure_analysis.EPS
 
-// ---------------------------------------------------------------------------
-// Separable Gaussian blur (all 4 channels). Two dispatches = one 2D blur:
-// blurH (horizontal) then blurV (vertical), ping-ponging through a scratch tex.
-// ---------------------------------------------------------------------------
 [shader("compute")]
 [numthreads(16, 16, 1)]
 void blurH(

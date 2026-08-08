@@ -84,11 +84,8 @@ KERNEL_SPECS: tuple[tuple[str, str, str], ...] = (
     ("morton_scatter",       "densify/morton_sort.slang",                      "mortonScatter"),
     ("morton_scatter_eta",   "densify/morton_sort.slang",                      "mortonScatterEta"),
     ("morton_scatter_sh",    "densify/morton_sort.slang",                      "mortonScatterSH"),
-    # wait-free structure-densify decision (all 4 entry points share one file)
-    ("clear_capacity_scratch",             "densify/decide_actions_structure.slang", "clearCapacityScratch"),
-    ("decide_actions_structure_pass1",     "densify/decide_actions_structure.slang", "decideActionsStructurePass1"),
-    ("decide_actions_structure_threshold", "densify/decide_actions_structure.slang", "decideActionsStructureThreshold"),
-    ("decide_actions_structure_pass2",     "densify/decide_actions_structure.slang", "decideActionsStructurePass2"),
+    # single-pass structure-densify decision
+    ("decide_actions_structure",           "densify/decide_actions_structure.slang", "decideActionsStructure"),
     # common
     ("scan_block",           "common/scan.slang",                              "scanBlock"),
     ("scan_block_sums",      "common/scan.slang",                              "scanBlockSums"),

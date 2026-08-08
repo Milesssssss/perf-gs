@@ -83,13 +83,13 @@ void scoreStructureAware(
     uniform uint pass_idx,       // view index, for jitter decorrelation across views
     uniform uint max_splats)
 {
-    uint i = dtid.x;
-    if (i >= max_splats) return;
-    if (i >= num_gaussians_counter[0]) return;
+    uint gaussian_idx = dtid.x;
+    if (gaussian_idx >= max_splats) return;
+    if (gaussian_idx >= num_gaussians_counter[0]) return;
 
-    if (tile_count_per_gaussian[i] == 0u) return;
+    if (tile_count_per_gaussian[gaussian_idx] == 0u) return;
 
-    Gaussian3D g = gaussians[i];
+    Gaussian3D g = gaussians[gaussian_idx];
     if (1.0 / (1.0 + exp(-g.opacity)) <= opacity_threshold) return;
 
     CameraData cam = camera[0];
@@ -97,8 +97,8 @@ void scoreStructureAware(
 
     if (per_view_grad_thresh > 0.0)
     {
-        float gx = fromFixed(grad_2d_x_iter[i]) * (frame_dim.x * 0.5);
-        float gy = fromFixed(grad_2d_y_iter[i]) * (frame_dim.y * 0.5);
+        float gx = fromFixed(grad_2d_x_iter[gaussian_idx]) * (frame_dim.x * 0.5);
+        float gy = fromFixed(grad_2d_y_iter[gaussian_idx]) * (frame_dim.y * 0.5);
         if (sqrt(gx * gx + gy * gy) < per_view_grad_thresh) return;
     }
 
@@ -110,7 +110,6 @@ void scoreStructureAware(
     if (mean_vs.z <= 0.0) return;   // behind camera; no observation this view
     if (clip_w <= 0.0) return;      // behind clip plane
 
-    // Projection Jacobian J (shared with project.slang).
     float3x3 J = projectionJacobian(mean_vs, cam.proj_matrix, frame_dim);
 
     // A = J W R diag(scale). Its columns are the projected axis vectors v_k.
@@ -138,14 +137,12 @@ void scoreStructureAware(
     float L21 = cov_xy / L11;
     float L22 = sqrt(max(cov_yy - L21 * L21, 1e-6));
 
-    uint seed = i * 2654435761u + pass_idx * 40503u;
+    uint seed = gaussian_idx * 2654435761u + pass_idx * 40503u;
     float2 eps = _randn2(seed);
     float2 sample_px = mean_px + float2(L11 * eps.x, L21 * eps.x + L22 * eps.y);
 
     uint2 dim;
     structure_tensor.GetDimensions(dim.x, dim.y);
-    // Bilinear fetch with zero-padding outside the image (SADGS grid_sample
-    // align_corners=True default), replacing nearest + border clamp.
     float3 sbar = _sample_structure_bilinear(structure_tensor, sample_px, dim);
 
     float lambda1 = _principal_eigenvalue(sbar);
@@ -154,19 +151,31 @@ void scoreStructureAware(
     float eta_x = len_vx * inv_lambda_min;
     float eta_y = len_vy * inv_lambda_min;
     float eta_z = len_vz * inv_lambda_min;
-    // SADGS classifies this view on the SCALAR max-over-axes eta.
     float eta_max_scalar = max(eta_x, max(eta_y, eta_z));
 
-    uint dummy;
-    InterlockedAdd(eta_n_total[i], 1u, dummy);
+    record_observations(
+        gaussian_idx, eta_x, eta_y, eta_z, eta_max_scalar,
+        eta_n_high, eta_n_low, eta_max_x, eta_max_y, eta_max_z, eta_n_total
+    );
+    
+}
 
-    if (eta_max_scalar > ETA_HIGH) InterlockedAdd(eta_n_high[i], 1u, dummy);
-    else if (eta_max_scalar <= ETA_LOW) InterlockedAdd(eta_n_low[i], 1u, dummy);
+void record_observations(uint gaussian_idx, float eta_x, float eta_y, float eta_z, float eta_max_scalar,
+    RWStructuredBuffer<uint> eta_n_high, RWStructuredBuffer<uint> eta_n_low,
+    RWStructuredBuffer<uint> eta_max_x, RWStructuredBuffer<uint> eta_max_y, RWStructuredBuffer<uint> eta_max_z,
+    RWStructuredBuffer<uint> eta_n_total
+)
+{
+    //Record how many times this gaussian was observed
+    InterlockedAdd(eta_n_total[gaussian_idx], 1u);
 
-    // Track max eta PER AXIS as fixed-point (drives the split factor).
-    InterlockedMax(eta_max_x[i], uint(max(eta_x, 0.0) * FIXED_SCALE), dummy);
-    InterlockedMax(eta_max_y[i], uint(max(eta_y, 0.0) * FIXED_SCALE), dummy);
-    InterlockedMax(eta_max_z[i], uint(max(eta_z, 0.0) * FIXED_SCALE), dummy);
+    if (eta_max_scalar > ETA_HIGH) InterlockedAdd(eta_n_high[gaussian_idx], 1u);
+    else if (eta_max_scalar <= ETA_LOW) InterlockedAdd(eta_n_low[gaussian_idx], 1u);
+
+    //We need to accumulate these for the anisotripic split decision, so we store the max of each axis across all views
+    InterlockedMax(eta_max_x[gaussian_idx], uint(max(eta_x, 0.0) * FIXED_SCALE));
+    InterlockedMax(eta_max_y[gaussian_idx], uint(max(eta_y, 0.0) * FIXED_SCALE));
+    InterlockedMax(eta_max_z[gaussian_idx], uint(max(eta_z, 0.0) * FIXED_SCALE));
 }
 
 [shader("compute")]

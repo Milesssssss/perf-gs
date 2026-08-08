@@ -18,7 +18,7 @@
 
 //[PreferRecompute]
 [Differentiable]
-float evalGaussian2DFromCov(
+float evalGaussian2DFromCov_out(
     no_diff float2 pixel,
     float2 mean_2d,
     float3 cov2d,
@@ -48,6 +48,28 @@ float evalGaussian2DFromCov(
     // back to scale/cov by projection_backward) AND scales dL/dopacity,
     // dL/dcov2d by comp — matching mip-splatting's backward. 1.0 when off.
     return sigmoid(opacity_logit) * opacity_compensation * exp(power);
+}
+
+[Differentiable]
+float evalGaussian2DFromCov(
+    no_diff float2 pixel,
+    float2 mean_2d,
+    float3 cov2d,
+    float opacity_logit,
+    float opacity_compensation)
+{
+    float2 d = pixel - mean_2d;
+
+    float q =
+        cov2d.z * d.x * d.x
+        - 2.0 * cov2d.y * d.x * d.y
+        + cov2d.x * d.y * d.y;
+
+    float det =
+        cov2d.x * cov2d.z
+        - cov2d.y * cov2d.y;
+
+    return opacity_compensation * sigmoid(opacity_logit) * exp(-0.5 * q / det);
 }
 
 #endif // TRAINER_GAUSSIAN_EVAL_SLANG

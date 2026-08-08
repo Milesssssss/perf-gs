@@ -20,7 +20,7 @@ import numpy as np
 from trainer.contracts import schema as _schema
 
 
-# Backward-compatible public facade over the dependency-free semantic model.
+# Backward-compatible public facade over the dependency-free semantic model
 FieldSpec = _schema.FieldSpec
 ExecutionContract = _schema.ExecutionContract
 GAUSSIAN_FIELDS = _schema.GAUSSIAN_FIELDS

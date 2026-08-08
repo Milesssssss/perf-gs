@@ -120,9 +120,7 @@ def run_eval_sweep(
     # Drain GPU queue so num_gaussians_counter is accurate and no in-flight
     # work skews the per-cam renders.
     pipeline.runtime.wait_for_idle()
-    eval_n_g = int(
-        pipeline.buffers.num_gaussians_counter.to_numpy().view(np.uint32)[0]
-    )
+    eval_n_g = int(pipeline.buffers.num_gaussians_counter.to_numpy().view(np.uint32)[0])
     # Accumulate PER-IMAGE PSNR (dB) and average the dB values — the paper's
     # mean-of-per-image metric. Scored on the held-out TEST split (all cams
     # when holdout is off, since test_indices == all).

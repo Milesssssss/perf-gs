@@ -219,8 +219,7 @@ void upsweep(
     for (uint i = partition_start + t; i < partition_end; i += US_DIM)
     {
         uint word = loadDigitSourceWord(i, key_word, keys_lo, keys_hi);
-        uint dummy;
-        InterlockedAdd(g_us[extractDigit(word, radix_shift) + hist_offset], 1u, dummy);
+        InterlockedAdd(g_us[extractDigit(word, radix_shift) + hist_offset], 1u);
     }
     GroupMemoryBarrierWithGroupSync();
 
@@ -254,8 +253,7 @@ void upsweep(
         uint index = circular_lane_shift + (i & ~lane_mask);
         uint add = (WaveGetLaneIndex() != lane_mask ? g_us[i] : 0u)
                  + (i >= lane_count ? WaveReadLaneAt(g_us[i - 1u], 0u) : 0u);
-        uint dummy;
-        InterlockedAdd(b_global_hist[index + global_hist_offset], add, dummy);
+        InterlockedAdd(b_global_hist[index + global_hist_offset], add);
     }
 }
 

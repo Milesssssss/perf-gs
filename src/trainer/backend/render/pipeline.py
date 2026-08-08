@@ -1133,7 +1133,10 @@ class TrainingPipeline:
             filter_coef=self._mip_filter_coef,
             max_splats=self.max_splats,
         )
-        self.runtime.wait_for_idle()
+        # No wait_for_idle: filter_3D is a GPU buffer consumed by the next forward
+        # (bin_count / project); nothing reads it back to CPU here. Draining the
+        # whole queue on every call cost ~650ms in-loop (kernel itself is ~59ms) —
+        # a pure host-side sync bubble. Let it flow through the command stream.
 
     def reset_opacity(self, cfg) -> None:
         return _densify.reset_opacity(self, cfg)

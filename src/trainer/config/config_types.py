@@ -154,6 +154,10 @@ def validate_training_config(args, *, n_cams: int, n_train: int,
             raise ConfigError(
                 f"--sad-accum-every must be >= 1 for --densify-mode "
                 f"structure_aware, got {args.sad_accum_every}.")
+        if args.sad_max_split_factor < 1:
+            raise ConfigError(
+                f"--sad-max-split-factor must be >= 1, got "
+                f"{args.sad_max_split_factor}.")
 
     # The camera split must leave something to train on (and, when the holdout
     # protocol is on, something to evaluate).

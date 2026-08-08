@@ -159,8 +159,7 @@ void blockSort(
     gs_hist[lid] = 0u;
     GroupMemoryBarrierWithGroupSync();
     if (real_slot) {
-        uint dummy;
-        InterlockedAdd(gs_hist[d_s], 1u, dummy);
+        InterlockedAdd(gs_hist[d_s], 1u);
     }
     GroupMemoryBarrierWithGroupSync();
 

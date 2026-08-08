@@ -13,11 +13,16 @@ boundary halfway through an asynchronous command buffer.
 
 from __future__ import annotations
 
+import dataclasses
 import time
 
 import numpy as np
 
-from trainer.config.config import AdamLRs
+from trainer.config.config import (
+    AdamLRs,
+    DensificationProperties,
+    IterationContext,
+)
 
 
 def apply_profile_session_overrides(args) -> bool:
@@ -128,7 +133,7 @@ class Profiler:
 
     # -- deterministic GPU-Trace capture ----------------------------------
 
-    def run_capture_if_due(self, pipeline, it: int, entry, cam_idx: int,
+    def run_capture_if_due(self, pipeline, context: IterationContext,
                            queue_limiter) -> bool:
         """Run the deterministic GPU-Trace capture when ``it == capture_iter``.
 
@@ -154,6 +159,8 @@ class Profiler:
         own resources (log files, etc.) and exit the process; False otherwise.
         """
         args = self.args
+        it = context.step_number
+        cam_idx = context.camera_index
         if not (args.capture_external and it == args.capture_iter):
             return False
 
@@ -168,10 +175,20 @@ class Profiler:
         print(f"[capture] state @ iter {it}: cam_idx={cam_idx}  "
               f"n_gaussians={n_g_capture}")
 
-        pinned_camera = entry.camera
-        # Zero ALL learning rates so the Adam step runs its full workload but no
-        # parameter moves -> every frame in the collection window is identical.
-        frozen_lrs = AdamLRs(mean=0.0, scale=0.0, rot=0.0, opacity=0.0, color=0.0)
+        # Frozen capture context: reuse this iteration's real context (camera,
+        # SH degree, hardness) but ZERO all learning rates so the Adam step runs
+        # its full workload without moving params -> every frame is bit-identical.
+        # Also strip the structure texture so no densify/eta-accum fires in the
+        # capture loop, keeping the profiled workload a pure train_step.
+        frozen_ctx = dataclasses.replace(
+            context,
+            learning_rates=AdamLRs(mean=0.0, scale=0.0, rot=0.0, opacity=0.0,
+                                   color=0.0, sh_rest=0.0),
+            iteration_contextual_variables=dataclasses.replace(
+                context.iteration_contextual_variables,
+                densification_variables=DensificationProperties(),
+            ),
+        )
 
         # Warm up a few frozen frames BEFORE the trace window so Nsight sees a
         # steady state (caches warm, no first-frame compile/alloc spikes).
@@ -179,7 +196,7 @@ class Profiler:
         for _ in range(8):
             if self.window is not None:
                 self.window.process_events()
-            pipeline.train_step(pinned_camera, lrs=frozen_lrs)
+            pipeline.train_step(frozen_ctx)
             if self.window is not None:
                 self.present_frame(pipeline.last_submit_id)
         pipeline.runtime.wait_for_idle()
@@ -195,7 +212,7 @@ class Profiler:
                 if self.window.should_close():
                     break
                 self.window.process_events()
-            pipeline.train_step(pinned_camera, lrs=frozen_lrs)
+            pipeline.train_step(frozen_ctx)
             if self.window is not None:
                 self.present_frame(pipeline.last_submit_id)
             else:

@@ -1,9 +1,4 @@
-// Adam optimizer step.
-//
-// One thread per gaussian. Reads float gradient accumulators (summed by
-// the backward pass via float atomics), normalizes by pixel count, runs
-// Adam, writes updated params and m/v state.
-
+// Adam optimizer step
 #include "../common/types.slang"
 
 #include "generated/execution_contract.slang"
@@ -11,10 +6,6 @@ static const uint CLUSTER_SIZE = CONTRACT_CLUSTER_SIZE;
 
 static const float ADAM_BETA1 = 0.9;
 static const float ADAM_BETA2 = 0.999;
-// SADGS/3DGS default (arguments/__init__.py: adam_eps_order=8 -> 10^-8).
-// Was 1e-15 (essentially off) — that lets tiny gradients produce nearly full
-// LR-magnitude steps because ε doesn't kick in. 1e-8 damps updates on quiet
-// parameters, which is the standard PyTorch default and what SADGS trains with.
 static const float ADAM_EPSILON = 1e-8;
 
 struct AdamConfig
@@ -93,13 +84,6 @@ void adamStep(
 {
     uint idx = dtid.x;
     if (idx >= num_gaussians_counter[0]) return;
-    // Culled clusters: their grads never got scattered by the backward pass
-    // (backward_persplat + projection_backward both mask on cluster_visible),
-    // so all 14 grads at this idx are zero. The Adam math would be a no-op
-    // (m/v decay by β toward zero) but the ~640 B of loads + stores at
-    // 32-byte-sector granularity still costs L2 bandwidth. Early-return
-    // eliminates that dead traffic. Wave-uniform read within the workgroup
-    // (Morton keeps 128-splat clusters aligned).
     if (cluster_visible[idx / CLUSTER_SIZE] == 0u) return;
 
     float inv_pixels = 1.0 / max(pixels_per_step, 1.0);
@@ -163,18 +147,9 @@ void adamStep(
     grad_color_r[idx] = int64_t(0); grad_color_g[idx] = int64_t(0); grad_color_b[idx] = int64_t(0);
 }
 
-// Adam step for the optional view-dependent SH 'rest' coefficients. One thread
-// per gaussian; walks the packed feature uints (2 fp16 coeffs each). All SH
-// buffers are fp16-packed into uint32 (features_rest / features_rest_grad: 2
-// scalars/uint; adam_rest: (m, v) of one scalar/uint). The Adam math runs in
-// fp32; v is floored before packing so it never underflows fp16 (which would
-// make sqrt(v) collapse and blow the step up). Same cluster-visible gate as
-// adamStep. features_rest_grad is written fresh each iter by sh_backward.
 #include "generated/sh_types.slang"
 #include "../common/half_pack.slang"
 
-// Floor on the packed second moment: keeps fp16 v out of the denormal underflow
-// zone (~6e-8) so sqrt(v) stays bounded; sqrt(1e-6)=1e-3 caps the step.
 static const float SH_V_FLOOR = 1e-6;
 
 [shader("compute")]
@@ -191,23 +166,6 @@ void adamStepRest(
     uniform float bias_correction2,
     uniform float pixels_per_step,
     uniform uint rest_floats,
-    // Number of scalar rest coeffs currently ACTIVE (progressive SH schedule):
-    // 3*((active_deg+1)^2 - 1), computed on the host. Coefficients beyond this
-    // are inactive bands the forward never reads at this degree, so sh_backward
-    // produces EXACTLY-zero gradient for them and their Adam parameter update is
-    // a no-op (m stays 0 => the step is lr*0/(...) = 0). Iterating only the
-    // active head skips that dead work AND its heavily-uncoalesced adam_rest
-    // traffic (gaussian-major stride) — at active_deg=1 this is 9 of 45 floats,
-    // the dominant cost of the whole train step. Clamped to rest_floats so the
-    // SH-off / full-width caller reproduces the old sweep.
-    //
-    // Note vs the old full-width sweep: that sweep also stored max(v,SH_V_FLOOR)
-    // for inactive coeffs every iter, so a band arrived at its activation iter
-    // with v = SH_V_FLOOR instead of 0. Skipping the dead iters leaves those
-    // coeffs at v = 0 (textbook Adam init for a freshly-optimized parameter),
-    // which changes the first activated step by an SH_V_FLOOR-scale amount. This
-    // is a tiny, arguably-more-correct difference, held to no PSNR regression by
-    // the end-to-end eval (see the perf-goal memory), not a bit-for-bit match.
     uniform uint active_rest_floats)
 {
     uint idx = dtid.x;
