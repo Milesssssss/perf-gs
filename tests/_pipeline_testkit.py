@@ -19,7 +19,7 @@ from trainer.config.config import (
     IterationContextualVariables,
 )
 from trainer.data.dataset import Camera
-from trainer.backend.render.pipeline import Pipeline
+from trainer.backend.render.pipeline import TrainingPipeline
 
 
 class _CameraEntry:
@@ -31,7 +31,7 @@ class _CameraEntry:
         self.camera = camera
 
 
-class TestPipeline(Pipeline):
+class TestPipeline(TrainingPipeline):
     """Pipeline plus test-only introspection / step-splitting helpers."""
 
     # Not a pytest test class despite the ``Test`` prefix — it's a Pipeline

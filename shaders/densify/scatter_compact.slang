@@ -42,26 +42,6 @@ void scatterCompact(
     adam_state_out[dst] = adam_state_in[i];
 }
 
-// Variant of scatterCompact that ALSO carries the slot-indexed SAD-GS eta
-// accumulators through the compaction, so the multiview frequency statistics
-// survive a filler (AbsGS) densify instead of being reset every 100 iters.
-// SADGS accumulates eta over the whole ~500-iter structure interval (~50
-// samples/gaussian); resetting after every filler pass collapsed that to ~10.
-//
-// Carry rule (matches SADGS: surviving gaussians keep their eta, brand-new
-// primitives start at zero):
-//   i >= pre_count                          -> appended child        -> zero
-//   i <  pre_count, action == KEEP          -> untouched survivor    -> carry
-//   i <  pre_count, action == CLONE         -> untouched parent slot -> carry
-//   i <  pre_count, action == SPLIT         -> slot overwritten with
-//                                              a NEW child-1          -> zero
-//   i <  pre_count, action == PRUNE         -> dropped (valid_mask 0) -> n/a
-// So: carry iff (i < pre_count && action in {KEEP, CLONE}); else zero.
-//
-// eta_n_total is bundled with the 5 eta_buffers components (n_high, n_low,
-// max_x, max_y, max_z) — all 6 permute identically. Dispatched over
-// [max_splats]; the same valid_mask / scan produced for the gaussian scatter
-// drive the eta scatter, so the two permutations are identical by construction.
 [shader("compute")]
 [numthreads(256, 1, 1)]
 void scatterCompactEta(

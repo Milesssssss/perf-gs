@@ -1,28 +1,3 @@
-// Cluster-Cull-Compact (Laine et al 2011), adapted for 3DGS training.
-//
-// Runs BEFORE bin_count each frame. Two entry points:
-//
-//   1. buildClusterAABB
-//      One workgroup per cluster (CLUSTER_SIZE = 128 threads / cluster).
-//      Each thread bounds its own gaussian by (mean +/- k_sigma * |R| * scale)
-//      — the 3-sigma AABB of the rotated ellipsoid — then a groupshared
-//      min/max reduction produces the cluster AABB. Threads whose slot >=
-//      num_gaussians (tail of the last cluster) contribute the neutral
-//      element (+inf min, -inf max) so they don't corrupt the reduce.
-//
-//   2. cullClustersFrustum
-//      One thread per cluster. Derives 6 frustum planes from
-//      mvp = proj * view via Gribb/Hartmann. Runs a conservative
-//      AABB-vs-6-planes p-vertex test: for each plane, pick the AABB
-//      corner most along the plane normal; if it's still on the negative
-//      side of the plane the whole box is outside -> mark not visible.
-//      Never a false negative (culls only what is guaranteed offscreen).
-//
-// Slot indexing is NEVER modified: cluster_visible[c] is a lookup used
-// by bin_count's early-out, so backward's grad scatters and Adam's
-// per-slot updates continue to operate on the canonical layout. No
-// compaction, no per-splat remap table.
-
 #include "../common/types.slang"
 #include "../common/math.slang"
 

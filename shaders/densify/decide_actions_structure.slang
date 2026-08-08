@@ -1,45 +1,3 @@
-// Structure-aware densification decision — wait-free GPU port.
-//
-// Byte-for-byte translation of the former CPU-side decision in
-// densify.py::densify_structure_aware. Runs entirely on the GPU: no readbacks,
-// no host numpy, no wait_for_idle. Called from a single command encoder,
-// mirroring densify_simple.
-//
-// Two logical passes with a tiny threshold-picker between them, so the
-// capacity bound stays deterministic without a host argsort:
-//
-//   Pass 1  (decideActionsStructurePass1, [max_splats])
-//     Per-gaussian tentative decide: writes action + split_factor_{x,y,z}
-//     as if there were no capacity limit. For each tentative SPLIT, atomically
-//     adds its (prod - 1) to `children_sum` and bumps `fanout_hist[prod - 1]`.
-//     Cheap: one atomic per triggered split.
-//
-//   Pass 1.5 (decideActionsStructureThreshold, [1])
-//     Single-thread. Reads `children_sum`, `pre_count`, `max_splats`. Computes
-//     `overflow = max(0, pre_count + children_sum - max_splats)`. If zero,
-//     writes UINT_MAX to `fanout_threshold` (sentinel — "no demotion"). Else
-//     scans `fanout_hist` top-down, accumulating (bin_pop * bin_fanout) until
-//     the running sum >= overflow, and writes that bin's fan-out as the
-//     threshold. Every SPLIT with `prod - 1 >= threshold` will be demoted.
-//     Bounded above by 513 iterations because prod <= max_split_factor^3 <= 512.
-//
-//   Pass 2  (decideActionsStructurePass2, [max_splats])
-//     Per-gaussian finalize: recomputes the same tentative decide (cheap —
-//     the eta reads are ~40 bytes/gaussian, cached), and if the tentative
-//     action is SPLIT with `prod - 1 >= threshold`, demotes to CLONE and
-//     resets split_factor_{x,y,z} to 1. Otherwise the write is idempotent.
-//     Re-computing avoids allocating a `prod-1` scratch buffer for the
-//     inter-pass hand-off.
-//
-// Pass 0 (clearCapacityScratch, [513]) zeros children_sum + fanout_hist
-// + fanout_threshold at the start of the encoder.
-//
-// The tentative-then-demote design preserves the semantics of the former
-// CPU argsort: within a fan-out bin, atomic-race order picks which splits
-// get demoted (same non-canonical tie-break the CPU sort already had for
-// equal fan-outs); across bins, the "largest fan-out demoted first" order
-// is preserved exactly by scanning the histogram top-down.
-
 #include "../common/types.slang"
 #include "../common/math.slang"
 
@@ -51,10 +9,6 @@ static const uint ACTION_PRUNE = 3;
 static const uint FANOUT_BINS = 513;   // prod - 1 in [0, max_split_factor^3 - 1] <= 511
 static const uint NO_DEMOTE   = 0xFFFFFFFFu;
 
-// ---------- helpers ----------
-
-// Compute the per-axis split factor n_k for one axis, matching the CPU
-// np.clip(np.ceil(np.power(max(eta, 0), split_power)), 1, max_split_factor).
 uint _nk_from_eta(float eta_axis, float split_power, uint max_split_factor)
 {
     float e = max(eta_axis, 0.0);
@@ -257,16 +211,6 @@ void decideActionsStructurePass1(
     }
 }
 
-// ---------- Pass 1.5: pick the fan-out demotion threshold ----------
-
-// Dispatched at [1, 1, 1]. Scans fanout_hist from bin (FANOUT_BINS - 1) down
-// to bin 0, accumulating each bin's tail-growth contribution (count * bin)
-// until the accumulated demote-savings reach `overflow`. That bin's fan-out
-// becomes the threshold: every SPLIT with (prod - 1) >= threshold demotes to
-// CLONE. If no overflow, we write the NO_DEMOTE sentinel.
-//
-// Bounded above by FANOUT_BINS iterations (<= 513) on a single thread —
-// microseconds even in the worst case.
 [shader("compute")]
 [numthreads(1, 1, 1)]
 void decideActionsStructureThreshold(
@@ -280,9 +224,6 @@ void decideActionsStructureThreshold(
     uint pre_count = num_gaussians_counter[0];
     uint children_sum = densify_children_sum[0];
 
-    // Headroom = how many tail slots we have. If pre_count already >= max
-    // (shouldn't happen because splitAnisotropic self-bounds too, but be
-    // defensive), demote everything.
     uint headroom = (max_splats > pre_count) ? (max_splats - pre_count) : 0u;
 
     if (children_sum <= headroom)
@@ -293,33 +234,11 @@ void decideActionsStructureThreshold(
 
     uint overflow = children_sum - headroom;
 
-    // Scan bins high-to-low. `saved` accumulates the tail-growth we free up
-    // by demoting all splits in bins [bin, FANOUT_BINS - 1] to clones. We
-    // want the smallest `bin` such that `saved >= overflow`.
     uint saved = 0u;
     uint bin = FANOUT_BINS;   // exclusive upper — loop counter, not the answer
     while (bin > 0u)
     {
         bin -= 1u;
-        // A bin at index `b` represents splits with prod - 1 == b. Each such
-        // split contributes exactly `b` to the tail growth (child 0 overwrites
-        // the parent slot, so only prod - 1 = b children go to the tail).
-        // Demoting it to CLONE frees those `b` slots (CLONE appends 1 child,
-        // but the parent slot stays occupied — net -b, +1; simpler to say the
-        // clone still consumes 1 slot, so freed growth = b - 1... but we want
-        // to preserve the semantic: after demotion, the split no longer emits
-        // prod-1 tail children — the clone emits 1. So freed = (prod-1) - 1
-        // for bin >= 1, and 0 for bin == 0. However, bin==0 means prod==1
-        // which is already demoted to clone in _tentative_decide, so it never
-        // contributes to the histogram. Thus for every populated bin b >= 1
-        // the per-split demotion frees (b - 1) tail slots.
-        //
-        // We conservatively use `b` per split — matching the CPU code's
-        // capacity accounting which counts CLONE against `headroom` first
-        // and then splits against the remainder. The overshoot (at most one
-        // extra clone per demoted split, i.e. up to (population of this bin)
-        // extra slots) is bounded and safe: split_anisotropic.slang has a
-        // per-child `dst < max_splats` check as a final safety net.
         uint pop = densify_fanout_hist[bin];
         saved += pop * bin;
         if (saved >= overflow)
@@ -329,17 +248,10 @@ void decideActionsStructureThreshold(
         }
     }
 
-    // If we ran out of bins without covering overflow (shouldn't happen given
-    // children_sum was computed from the same histogram), demote every split.
     densify_fanout_threshold[0] = 1u;
 }
 
-// ---------- Pass 2: demote high-fan-out splits to CLONE ----------
 
-// If `fanout_threshold == NO_DEMOTE`, this pass is effectively a no-op — every
-// thread re-runs the tentative decide and writes back the same values it wrote
-// in Pass 1. We could branch host-side and skip the dispatch, but the cost is
-// small and the branch-free discipline mirrors densify_simple.
 [shader("compute")]
 [numthreads(256, 1, 1)]
 void decideActionsStructurePass2(

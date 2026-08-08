@@ -27,7 +27,7 @@ from trainer.data.colmap import load_colmap
 from trainer.data.ply import load_ply
 from trainer.backend.compute.device import create_device
 from trainer.config.config import RasterConfig
-from trainer.backend.render.pipeline import Pipeline
+from trainer.backend.render.pipeline import TrainingPipeline
 
 
 def _pct(a: np.ndarray, q: float) -> float:
@@ -54,7 +54,7 @@ def main() -> None:
           f"p10={_pct(gauss['opacities'],10):.4f} p50={_pct(gauss['opacities'],50):.3f})")
 
     device = create_device(backend=args.backend)
-    pipeline = Pipeline(
+    pipeline = TrainingPipeline(
         device=device, width=W, height=H,
         max_splats=max(n + 1, 8_000_000),
         raster_config=RasterConfig(cluster_cull=False),  # raw binning, no cull

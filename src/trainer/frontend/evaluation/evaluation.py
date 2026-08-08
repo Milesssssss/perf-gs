@@ -25,7 +25,7 @@ from trainer.common.color import srgb_to_linear
 from trainer.common.metrics import psnr as psnr_image, ssim as ssim_image
 
 if TYPE_CHECKING:
-    from trainer.backend.render.pipeline import Pipeline
+    from trainer.backend.render.pipeline import TrainingPipeline
 
 
 class CameraSampler:
@@ -59,7 +59,7 @@ class CameraSampler:
         return int(self._train_arr[self._rng.integers(0, self._train_arr.shape[0])])
 
 
-def render_all_cameras(pipeline: "Pipeline", scene, iter_idx: int,
+def render_all_cameras(pipeline: "TrainingPipeline", scene, iter_idx: int,
                        cams_dir: Path) -> None:
     """Render every scene camera at ``iter_idx`` and write one PNG per camera.
 
@@ -74,7 +74,7 @@ def render_all_cameras(pipeline: "Pipeline", scene, iter_idx: int,
         Image.fromarray(png, mode="RGBA").save(out_path)
 
 
-def eval_test_psnr_srgb(pipeline: "Pipeline", scene,
+def eval_test_psnr_srgb(pipeline: "TrainingPipeline", scene,
                         test_indices: Sequence[int],
                         targets_srgb: Sequence[np.ndarray]) -> tuple[float, int]:
     """Mean per-image sRGB PSNR over the held-out TEST split (paper metric) plus
@@ -95,7 +95,7 @@ def eval_test_psnr_srgb(pipeline: "Pipeline", scene,
 
 def run_eval_sweep(
     *,
-    pipeline: "Pipeline",
+    pipeline: "TrainingPipeline",
     scene,
     it: int,
     test_indices: Sequence[int],

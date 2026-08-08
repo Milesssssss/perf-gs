@@ -71,7 +71,7 @@ def _module_for_reflection(device: spy.Device) -> spy.Module:
     )
 
 
-class Pipeline:
+class TrainingPipeline:
     def __init__(
         self,
         device: spy.Device,
@@ -1118,8 +1118,13 @@ class Pipeline:
             raise RuntimeError(
                 "compute_3d_filter() requires set_mipsplatting_cameras(...) to be called first")
         b = self.buffers
+        # One threadgroup of 32 threads per gaussian (must match
+        # THREADS_PER_SPLAT in shaders/mip/compute_3d_filter.slang). slangpy
+        # divides the total thread_count by the shader's numthreads, so
+        # max_splats*32 total threads => max_splats groups (one per gaussian).
+        MIP_THREADS_PER_SPLAT = 32
         self._dispatch(self.k_compute_3d_filter, "compute_3d_filter",
-            thread_count=[self.max_splats, 1, 1],
+            thread_count=[self.max_splats * MIP_THREADS_PER_SPLAT, 1, 1],
             gaussians=b.gaussians.storage,
             num_gaussians_counter=b.num_gaussians_counter.storage,
             cameras=self._mip_cameras_buffer,

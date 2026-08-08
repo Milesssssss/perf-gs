@@ -82,17 +82,12 @@ class CommandBatch:
             shader_obj = pass_enc.bind_pipeline(kernel.pipeline)
             cursor = spy.ShaderCursor(shader_obj).find_entry_point(0)
             cursor.write(kwargs)
-            pass_enc.dispatch_compute_indirect(
-                spy.BufferOffsetPair(args_buf.storage, offset)
-            )
+            pass_enc.dispatch_compute_indirect(spy.BufferOffsetPair(args_buf.storage, offset))
         finally:
             pass_enc.end()
 
     @contextlib.contextmanager
     def marker_group(self, label: str):
-        """Nested debug-group scope for profiler captures (Nsight etc.). Groups
-        nest, so wrapping a sub-stage of a phase gives a drill-down tree. The
-        color is derived deterministically from ``label``."""
         self._encoder.push_debug_group(label, spy.math.float3(*marker_color(label)))
         try:
             yield
@@ -100,8 +95,6 @@ class CommandBatch:
             self._encoder.pop_debug_group()
 
     def finish(self):
-        """Close the encoder and return the command buffer (submit via
-        :meth:`GpuRuntime.submit`)."""
         return self._encoder.finish()
 
 

@@ -30,7 +30,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     import slangpy as spy
 
-    from trainer.backend.render.pipeline import Pipeline
+    from trainer.backend.render.pipeline import TrainingPipeline
     from trainer.frontend.viewer.viewer import Viewer
 
 
@@ -55,7 +55,7 @@ class ViewerSession:
         max_splats: int,
         fovy: float,
         gpu_lock,
-        pipeline: "Pipeline",
+        pipeline: "TrainingPipeline",
     ) -> "ViewerSession":
         """Build the viewer and push the initialized gaussians, but DO NOT start
         the render thread yet.
@@ -121,12 +121,12 @@ class ViewerSession:
         if self._viewer is not None:
             self._viewer.set_training_active(active)
 
-    def push_snapshot(self, pipeline: "Pipeline") -> None:
+    def push_snapshot(self, pipeline: "TrainingPipeline") -> None:
         """Push a gaussian snapshot to the viewer (zero-copy GPU->GPU blit)."""
         if self._viewer is not None:
             self._viewer.update_gaussians(pipeline)
 
-    def hold_after_training(self, pipeline: "Pipeline") -> None:
+    def hold_after_training(self, pipeline: "TrainingPipeline") -> None:
         """Push the final state and leave the window live until the user closes
         it (or Ctrl-C, which stops the viewer)."""
         if self._viewer is None:

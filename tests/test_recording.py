@@ -11,7 +11,7 @@ from __future__ import annotations
 import pytest
 
 from trainer.backend.compute.gpu import SubmitHandle
-from trainer.backend.render.pipeline import Pipeline
+from trainer.backend.render.pipeline import TrainingPipeline
 
 
 class _StubRuntime:
@@ -32,7 +32,7 @@ class _StubRuntime:
 class _StubPipeline:
     # Bind the real context manager onto a minimal stub with just the state it
     # touches (runtime / _batch / last_submit_id) — no device, no buffers.
-    _recording = Pipeline._recording
+    _recording = TrainingPipeline._recording
 
     def __init__(self) -> None:
         self.runtime = _StubRuntime()

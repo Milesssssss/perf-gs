@@ -7,14 +7,14 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-from trainer.backend.render.pipeline import Pipeline
+from trainer.backend.render.pipeline import TrainingPipeline
 from trainer.data.dataset import Camera
 from trainer.data.ply import write_gaussian_ply
 from trainer.contracts.codegen import gaussian_numpy_dtype
 from trainer.backend.memory import buffer_io
 
 
-def render_to_png(pipeline: Pipeline, camera: Camera, path: str | Path) -> None:
+def render_to_png(pipeline: TrainingPipeline, camera: Camera, path: str | Path) -> None:
     """Render once and save the result as an 8-bit sRGB PNG.
 
     COLORSPACE: the renderer composites in sRGB (matches INRIA 3DGS / gsplat /
@@ -34,7 +34,7 @@ def render_to_png(pipeline: Pipeline, camera: Camera, path: str | Path) -> None:
     Image.fromarray(png_uint8, mode="RGBA").save(path)
 
 
-def save_ply(pipeline: Pipeline, path: str | Path) -> None:
+def save_ply(pipeline: TrainingPipeline, path: str | Path) -> None:
     """Export the pipeline's current gaussians as a 3DGS-format .ply.
 
     Reads the GPU buffers, then delegates the format serialization to

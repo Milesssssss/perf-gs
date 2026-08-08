@@ -30,12 +30,12 @@ from trainer.frontend.evaluation.evaluation import render_all_cameras
 if TYPE_CHECKING:
     import argparse
 
-    from trainer.backend.render.pipeline import Pipeline
+    from trainer.backend.render.pipeline import TrainingPipeline
 
 
 def run_post_training(
     *,
-    pipeline: "Pipeline",
+    pipeline: "TrainingPipeline",
     scene,
     args: "argparse.Namespace",
     run_dir: Path,

@@ -24,7 +24,7 @@ from trainer.config.config_types import DensificationMode
 if TYPE_CHECKING:
     import argparse
 
-    from trainer.backend.render.pipeline import Pipeline
+    from trainer.backend.render.pipeline import TrainingPipeline
     from trainer.frontend.lr_schedule import ExtinctionHardnessSchedule
     from trainer.frontend.queue_limiter import QueueLimiter
     from trainer.frontend.schedule import IterationEvents
@@ -48,7 +48,7 @@ class DensificationController:
     def __init__(
         self,
         *,
-        pipeline: "Pipeline",
+        pipeline: "TrainingPipeline",
         args: "argparse.Namespace",
         densify_mode: DensificationMode,
         densify_cfg,

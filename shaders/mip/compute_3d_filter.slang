@@ -1,29 +1,22 @@
-// Mip-Splatting 3D smoothing filter (Yu et al., CVPR 2024).
-//
-// Per-gaussian world-space low-pass size, computed from the maximal sampling
-// rate across all training views (mirrors mip-splatting's
-// gaussian_model.compute_3D_filter, run under no_grad periodically / after
-// densification):
-//
-//   filter_3D[g] = min_over_valid_views(z_depth) * sqrt(0.2) / max_focal
-//
-// A view is "valid" for gaussian g if g is in front of the camera (z > 0.2)
-// and projects within a 1.15x-expanded image rectangle (tangent-space margin,
-// matching the reference). `max_focal` (max focal_x over all cameras) and the
-// sqrt(0.2) constant are folded on the CPU into `filter_coef = sqrt(0.2)/max_focal`
-// and passed as a uniform, so the shader only needs the per-view min depth.
-//
-// The result is consumed by projectGaussian3DTo2D when --mip-splatting is on:
-//   scale_eff = sqrt(exp(log_scale)^2 + filter_3D^2)   (isotropic, all 3 axes)
-//   opacity  *= sqrt(prod(scale^2) / prod(scale^2 + filter_3D^2))
-// filter_3D itself is a CONSTANT w.r.t. autodiff (recomputed, never a grad target).
-
 #include "../common/types.slang"
+#include "../primitives/gaussian/project.slang"
+
+// One threadgroup of THREADS_PER_SPLAT threads per gaussian: each lane strides
+// over num_cameras/THREADS_PER_SPLAT cameras computing a local min view-space
+// depth, then the group reduces to a single min and lane 0 writes filter_3D[gid]
+// once. Total camera-tests are unchanged vs. 1-thread-per-splat, but the per-
+// splat latency is cut ~THREADS_PER_SPLAT-fold when the grid under-occupies the
+// device (few live gaussians).
+static const uint THREADS_PER_SPLAT = 32;
+
+groupshared float s_min_z[THREADS_PER_SPLAT];
+groupshared uint  s_any[THREADS_PER_SPLAT];   // bool as uint for the OR reduction
 
 [shader("compute")]
-[numthreads(256, 1, 1)]
+[numthreads(THREADS_PER_SPLAT, 1, 1)]
 void computeMip3DFilter(
-    uint3 dtid: SV_DispatchThreadID,
+    uint3 group_id: SV_GroupID,
+    uint3 gtid: SV_GroupThreadID,
     StructuredBuffer<Gaussian3D> gaussians,
     StructuredBuffer<uint> num_gaussians_counter,
     StructuredBuffer<CameraData> cameras,
@@ -32,34 +25,37 @@ void computeMip3DFilter(
     uniform float filter_coef,               // sqrt(0.2) / max_focal
     uniform uint max_splats)
 {
-    uint gid = dtid.x;
+    uint gid = group_id.x;            // one group == one gaussian
+    uint lane = gtid.x;               // 0 .. THREADS_PER_SPLAT-1
     if (gid >= max_splats) return;
 
-    // Default (culled / unseen slots): no smoothing.
-    filter_3D[gid] = 0.0;
-    if (gid >= num_gaussians_counter[0]) return;
+    // Uniform across the group (gid is per-group), so these early-outs never
+    // split the group ahead of a barrier.
+    if (gid >= num_gaussians_counter[0])
+    {
+        if (lane == 0)
+            filter_3D[gid] = 0.0;     // culled / unseen slot: no smoothing
+        return;
+    }
 
     float3 mean = gaussians[gid].mean;
 
     float min_z = 1e30;
     bool any_valid = false;
 
-    //TODO: Im wondering if we can randomly sample a subset of cameras each time, rather than all of them. How big of a differece would it make? Ablate it
-    for (uint c = 0; c < num_cameras; c++)
+    // Strided so consecutive lanes touch consecutive cameras (coalesced reads).
+    for (uint c = lane; c < num_cameras; c += THREADS_PER_SPLAT)
     {
         CameraData cam = cameras[c];
 
-        // World -> view (same access convention as project.slang / bin_count)
-        float3 vs = mul(cam.view_matrix, float4(mean, 1.0)).xyz;
+        // Shared mean projection (single source of truth in project.slang).
+        float3 vs;
+        float2 px;
+        float clip_w;
+        projectMeanToPixel(mean, cam.view_matrix, cam.proj_matrix, cam.image_size, vs, px, clip_w);
         float z = vs.z;
         if (z <= 0.2)
             continue;
-
-        // Exact projection to pixels (view -> clip -> ndc -> pixels)
-        float4 clip = mul(cam.proj_matrix, float4(vs, 1.0));
-        float inv_w = 1.0 / clip.w;
-        float2 ndc = clip.xy * inv_w;
-        float2 px = (ndc * 0.5 + 0.5) * cam.image_size;
 
         // In-screen with the reference's 1.15x tangent-space margin
         float W = cam.image_size.x;
@@ -74,7 +70,24 @@ void computeMip3DFilter(
         any_valid = true;
     }
 
-    if (any_valid)
-        filter_3D[gid] = min_z * filter_coef;
-    // a gaussian seen by no view needs no low-pass (and is a prune candidate anyway)
+    // Groupshared tree reduction
+    s_min_z[lane] = min_z;
+    s_any[lane] = any_valid ? 1u : 0u;
+    GroupMemoryBarrierWithGroupSync();
+
+    for (uint stride = THREADS_PER_SPLAT / 2; stride > 0; stride >>= 1)
+    {
+        if (lane < stride)
+        {
+            s_min_z[lane] = min(s_min_z[lane], s_min_z[lane + stride]);
+            s_any[lane]   = s_any[lane] | s_any[lane + stride];
+        }
+        GroupMemoryBarrierWithGroupSync();
+    }
+
+    if (lane == 0)
+    {
+        // a gaussian seen by no view needs no low-pass (and is a prune candidate)
+        filter_3D[gid] = (s_any[0] != 0u) ? (s_min_z[0] * filter_coef) : 0.0;
+    }
 }

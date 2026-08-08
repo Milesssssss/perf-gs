@@ -12,7 +12,7 @@ import slangpy as spy
 from trainer.data.dataset import Camera
 from trainer.backend.compute.device import SHADERS_DIR
 from trainer.backend.compute.gpu import GpuRuntime
-from trainer.backend.render.pipeline import Pipeline
+from trainer.backend.render.pipeline import TrainingPipeline
 from trainer.config.config import AppearanceConfig
 
 
@@ -204,7 +204,7 @@ class _ShaderWatcher:
     DEBOUNCE_S = 0.4
     POLL_INTERVAL = 0.5
 
-    def __init__(self, device: spy.Device, pipeline: Pipeline, runtime: GpuRuntime):
+    def __init__(self, device: spy.Device, pipeline: TrainingPipeline, runtime: GpuRuntime):
         self._device = device
         self._pipeline = pipeline
         self._runtime = runtime
@@ -298,7 +298,7 @@ class Viewer:
         # max_sort_pairs to override for tight-VRAM setups.
         if max_sort_pairs is None:
             max_sort_pairs = min(5_000_000, max(2_000_000, max_splats * 6))
-        self._pipeline = Pipeline(
+        self._pipeline = TrainingPipeline(
             device=device, width=width, height=height, max_splats=max_splats,
             max_sort_pairs=max_sort_pairs,
             gpu_lock=self.gpu_lock,
@@ -312,7 +312,7 @@ class Viewer:
         self._has_data = False
         self._update_pending = False
 
-    def update_gaussians(self, train_pipeline: Pipeline):
+    def update_gaussians(self, train_pipeline: TrainingPipeline):
         src_g = train_pipeline.buffers.gaussians.storage
         dst_g = self._pipeline.buffers.gaussians.storage
         src_n = train_pipeline.buffers.num_gaussians_counter.storage

@@ -17,7 +17,7 @@ import numpy as np
 import slangpy as spy
 
 if TYPE_CHECKING:
-    from trainer.backend.render.pipeline import Pipeline
+    from trainer.backend.render.pipeline import TrainingPipeline
 
 
 @dataclass
@@ -70,7 +70,7 @@ class StructureConfig:
     dense_scale: float = 0.0         # dense * extent, in world units; set by the caller
 
 
-def densify_simple(pipeline: Pipeline, cfg: DensifyConfig,
+def densify_simple(pipeline: TrainingPipeline, cfg: DensifyConfig,
                    grad_thresh: float = 0.0002,
                    scale_thresh: float | None = None,
                    prune_big_scale: float | None = None,
@@ -84,7 +84,7 @@ def densify_simple(pipeline: Pipeline, cfg: DensifyConfig,
         allow_scale_prune, carry_eta)
 
 
-def reset_opacity(pipeline: Pipeline, cfg: DensifyConfig) -> None:
+def reset_opacity(pipeline: TrainingPipeline, cfg: DensifyConfig) -> None:
     """Per-gaussian opacity reset. CLAMP mode (default): opacity <-
     min(opacity, logit(t_opacity_reset_value)). RELATIVE mode (SADGS): opacity
     <- opacity * reset_decay. Forces the optimizer to re-earn opacity on real
@@ -101,7 +101,7 @@ def reset_opacity(pipeline: Pipeline, cfg: DensifyConfig) -> None:
     )
 
 
-def clear_structure_scores(pipeline: Pipeline) -> None:
+def clear_structure_scores(pipeline: TrainingPipeline) -> None:
     """Zero the per-axis eta accumulators. Call at the start of each
     accumulation window (right after a densify reorders gaussian slots), so
     the multiview statistics are gathered over a stable gaussian set."""
@@ -114,7 +114,7 @@ def clear_structure_scores(pipeline: Pipeline) -> None:
     )
 
 
-def accumulate_structure_scores(pipeline: Pipeline, structure_tensor,
+def accumulate_structure_scores(pipeline: TrainingPipeline, structure_tensor,
                                 pass_idx: int | None = None,
                                 opacity_threshold: float = 0.05,
                                 per_view_grad_thresh: float = 0.0) -> None:
@@ -164,7 +164,7 @@ def accumulate_structure_scores(pipeline: Pipeline, structure_tensor,
 
 
 def compute_structure_scores(
-    pipeline: Pipeline,
+    pipeline: TrainingPipeline,
     cameras: list,
     structure_textures: list,
     cfg: StructureConfig,
@@ -180,7 +180,7 @@ def compute_structure_scores(
         pipeline.rasterize(cam)
         accumulate_structure_scores(pipeline, structure_tex, pass_idx=view_idx)
 
-def densify_structure_aware(pipeline: Pipeline, cfg: StructureConfig) -> dict:
+def densify_structure_aware(pipeline: TrainingPipeline, cfg: StructureConfig) -> dict:
 
     b = pipeline.buffers
 
@@ -371,7 +371,7 @@ def densify_structure_aware(pipeline: Pipeline, cfg: StructureConfig) -> dict:
 
 
 
-def morton_sort(pipeline: Pipeline, world_min: np.ndarray,
+def morton_sort(pipeline: TrainingPipeline, world_min: np.ndarray,
                 world_max: np.ndarray, carry_eta: bool = False) -> None:
     """Reorder the [0, num_gaussians) prefix of gaussians + adam_state by
     3D Morton (Z-order) code so spatially-adjacent primitives become

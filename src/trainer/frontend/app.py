@@ -39,7 +39,7 @@ from trainer.config.config_types import (
 )
 from trainer.backend.compute.device import create_device
 from trainer.common.metrics import psnr
-from trainer.backend.render.pipeline import Pipeline
+from trainer.backend.render.pipeline import TrainingPipeline
 from trainer.frontend.cli import build_parser
 from trainer.frontend.densification import DensificationController, DensifyOutcome
 from trainer.frontend.evaluation.evaluation import (
@@ -150,7 +150,7 @@ class ShaderSpecialization:
 
 @dataclass
 class TrainingRuntime:
-    pipeline: Pipeline
+    pipeline: TrainingPipeline
     viewer: ViewerSession
     profiler: Profiler | None
     artifacts: RunArtifacts
@@ -181,7 +181,7 @@ class TrainingApplication:
 
         self.device: Any = None
         self.gpu_lock: Any = None
-        self.pipeline: Pipeline | None = None
+        self.pipeline: TrainingPipeline | None = None
         self.viewer: ViewerSession | None = None
         self.target_textures: list[Any] = []
         self.structure_textures: list[Any] = []
@@ -493,7 +493,7 @@ class TrainingApplication:
         return self.base_lrs
 
     @property
-    def _pipeline(self) -> Pipeline:
+    def _pipeline(self) -> TrainingPipeline:
         assert self.pipeline is not None
         return self.pipeline
 
@@ -1060,7 +1060,7 @@ class TrainingReporter:
         self._last_time = now
         self._last_iteration = context.step_number
 
-    def report_iteration(self, *, context: IterationContext, pipeline: Pipeline,
+    def report_iteration(self, *, context: IterationContext, pipeline: TrainingPipeline,
                          target: np.ndarray,
                          current_count: int) -> tuple[bool, int]:
         pipeline.render(context.camera_entry.camera)
@@ -1235,8 +1235,8 @@ def create_gpu_queue_lock(*, viewer_enabled: bool) -> Any:
 def create_pipeline(*, args: argparse.Namespace, device: Any, gpu_lock: Any,
                     scene: SceneContext, lambda_l2: float,
                     lambda_ssim: float,
-                    initial_state: dict | None = None) -> Pipeline:
-    return Pipeline(
+                    initial_state: dict | None = None) -> TrainingPipeline:
+    return TrainingPipeline(
         device=device,
         width=scene.width,
         height=scene.height,

@@ -41,7 +41,7 @@ from trainer.common.color import srgb_to_linear
 from trainer.data.colmap import load_colmap, load_colmap_image
 from trainer.backend.compute.device import create_device
 from trainer.backend.export import render_to_png
-from trainer.backend.render.pipeline import AdamLRs, Pipeline
+from trainer.backend.render.pipeline import AdamLRs, TrainingPipeline
 
 
 def _srgb_to_linear(c: np.ndarray) -> np.ndarray:
@@ -65,7 +65,7 @@ def _save_srgb_png(rgb_linear: np.ndarray, path: Path) -> None:
     Image.fromarray(png, mode="RGBA").save(path)
 
 
-def _render_all_cameras(pipeline: Pipeline, scene, iter_idx: int, cams_dir: Path) -> None:
+def _render_all_cameras(pipeline: TrainingPipeline, scene, iter_idx: int, cams_dir: Path) -> None:
     """Render every camera at current gaussian state, save to that cam's folder."""
     for cam_i, entry in enumerate(scene.images):
         pipeline.render(entry.camera)
@@ -126,7 +126,7 @@ def main() -> None:
                         mode="RGB").save(cam_dir / "gt.png")
 
     device = create_device(backend=args.backend)
-    pipeline = Pipeline(
+    pipeline = TrainingPipeline(
         device=device,
         width=args.width, height=args.height,
         max_splats=max(n_init, 1024),

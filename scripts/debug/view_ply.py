@@ -15,7 +15,7 @@ from trainer.data.ply import load_ply
 from trainer.contracts.codegen import sh_degree_from_rest_floats
 from trainer.config.config import AppearanceConfig
 from trainer.backend.compute.device import create_device
-from trainer.backend.render.pipeline import Pipeline
+from trainer.backend.render.pipeline import TrainingPipeline
 from trainer.frontend.viewer.viewer import Viewer
 
 def main() -> None:
@@ -38,7 +38,7 @@ def main() -> None:
         print(f"  SH degree {sh_degree} ({rest.shape[1]} f_rest coeffs) -> view-dependent")
 
     device = create_device(backend=args.backend)
-    pipeline = Pipeline(device=device, width=args.width, height=args.height,
+    pipeline = TrainingPipeline(device=device, width=args.width, height=args.height,
                         max_splats=max(args.max_splats, n),
                         appearance_config=AppearanceConfig(sh_degree=sh_degree),
                         initial_state=data)
