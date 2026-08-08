@@ -453,8 +453,8 @@ class TrainingApplication:
         if not self.args.final_test_psnr or self.args.profile_run:
             return
         sceneContext = self._sceneContext
-        psnr, count = eval_test_psnr_srgb(
-            self._pipeline, sceneContext.colmapScene, sceneContext.test_indices, self._targets.srgb)
+        psnr, count = eval_test_psnr_srgb(self._pipeline, sceneContext.colmapScene, sceneContext.test_indices, self._targets.srgb)
+
         (self.paths.root / "test_psnr.json").write_text(json.dumps({
             "psnr_srgb": psnr,
             "n_gaussians": count,
@@ -463,6 +463,7 @@ class TrainingApplication:
             "iters": result.iterations,
             "flat_bucket_backward": bool(self.args.flat_bucket_backward),
         }, indent=2))
+
         print(f"[final-test-psnr] TEST PSNR sRGB = {psnr:.3f} dB over "
               f"{len(sceneContext.test_indices)} held-out cams  (n_gaussians={count})")
 
@@ -657,6 +658,7 @@ class TrainingLoop:
                 densification_variables=DensificationProperties(
                     structure_tensor_texture=self.structure_textures[camera_index] if self._should_accumulate_structure(self.training_step) else None,
                     #TODO: writing the threshold like this is shit, need a better way to avoid having these damn hyperparams float as magic stuff around
+                    # ALSO -> the product is hacky way to hide that our magic hyperparms should all be normalized
                     structure_kwargs={"per_view_grad_thresh": (self.args.sad_freq_grad_threshold * self.scene.width * self.scene.height * 3.0) if self._should_accumulate_structure(self.training_step) else None}
                 ),
             ),
@@ -725,7 +727,7 @@ class TrainingLoop:
             #self.runtime.reporter.report_morton_sort(context.step_number)
 
         if events.mip_periodic:
-            # TODO: benchmark the 3d filter, its slow af afair
+            # TODO: benchmark the 3d filter, its slow af, you're going through all the mip cameras per kernel.....
             pipeline.compute_3d_filter()
 
     def _produce_observations(self, context: IterationContext) -> bool:
@@ -1245,9 +1247,6 @@ def create_pipeline(*, args: argparse.Namespace, device: Any, gpu_lock: Any,
             cluster_cull=args.cluster_cull,
             mip_enabled=args.mip_splatting,
             kernel_size=(args.mip_kernel_size if args.mip_splatting else 0.3),
-        ),
-        compositor_config=CompositorConfig(
-            extinction_hardness=args.extinction_hardness,
         ),
         loss_config=LossConfig(
             alpha_weight=args.w_alpha,

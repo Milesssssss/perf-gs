@@ -12,6 +12,9 @@ from __future__ import annotations
 import contextlib
 from typing import TYPE_CHECKING
 
+from trainer.config.config import IterationContext
+from trainer.contracts.schema import sh_rest_coeffs
+
 if TYPE_CHECKING:
     from trainer.config.config import AdamLRs
 
@@ -49,14 +52,8 @@ class AdamOptimizer:
     def reset(self) -> None:
         self.step_count = 0
 
-    def step(self, lrs: "AdamLRs", active_rest_floats: int | None = None) -> None:
-        """Run one Adam parameter update over the active gaussians.
+    def step(self, iterationContext: IterationContext) -> None:
 
-        ``active_rest_floats`` (SH runs only): the number of scalar rest coeffs
-        currently active under the progressive-SH schedule. The rest-Adam only
-        iterates that active head — inactive higher bands have exactly-zero
-        gradient, so their update is a provable parameter no-op (see
-        adamStepRest). None => the full configured width (old behavior)."""
         self.step_count += 1
         step = float(self.step_count)
         bc1 = 1.0 - _BETA1 ** step
@@ -79,11 +76,11 @@ class AdamOptimizer:
                 **b.grad_kwargs(),
                 cluster_visible=b.cluster_visible.storage,
                 cfg={
-                    "lr_mean": lrs.mean,
-                    "lr_scale": lrs.scale,
-                    "lr_rot": lrs.rot,
-                    "lr_opacity": lrs.opacity,
-                    "lr_color": lrs.color,
+                    "lr_mean": iterationContext.learning_rates.mean,
+                    "lr_scale": iterationContext.learning_rates.scale,
+                    "lr_rot": iterationContext.learning_rates.rot,
+                    "lr_opacity": iterationContext.learning_rates.opacity,
+                    "lr_color": iterationContext.learning_rates.color,
                     "bias_correction1": bc1,
                     "bias_correction2": bc2,
                 },
@@ -91,12 +88,17 @@ class AdamOptimizer:
             )
 
         if self._k_adam_rest is not None and b.sh_enabled:
+            #rest floats will just be the max given the target sh degree for training, but we can also use the active rest floats to only update the active rest floats
             rest_floats = b.sh.rest_floats
-            # Only the active SH bands need an Adam step; inactive higher bands
-            # have zero gradient => zero update. Default to the full width when
-            # the caller doesn't pass an active count (bit-identical fallback).
-            active_rest = (rest_floats if active_rest_floats is None
-                           else max(0, min(int(active_rest_floats), rest_floats)))
+            
+            if not iterationContext.iteration_contextual_variables.sh_degree:
+                active_rest_floats = 0
+            else:
+                RGB_CHANNELS = 3
+                active_rest_floats = sh_rest_coeffs(iterationContext.iteration_contextual_variables.sh_degree) * RGB_CHANNELS
+
+            active_rest = (rest_floats if active_rest_floats is None else max(0, min(int(active_rest_floats), rest_floats)))
+
             with self._marker_group("adam_rest"):
                 self._dispatch_indirect(self._k_adam_rest, "adam_rest", b.adam_dispatch_args,
                     features_rest=b.features_rest.storage,
@@ -104,7 +106,7 @@ class AdamOptimizer:
                     adam_rest=b.adam_rest_state.storage,
                     num_gaussians_counter=b.num_gaussians_counter.storage,
                     cluster_visible=b.cluster_visible.storage,
-                    lr_rest=lrs.sh_rest,
+                    lr_rest=iterationContext.learning_rates.sh_rest,
                     bias_correction1=bc1,
                     bias_correction2=bc2,
                     pixels_per_step=float(self._width * self._height),

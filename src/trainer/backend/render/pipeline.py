@@ -61,16 +61,11 @@ class _RecordingTransaction:
 
 
 def _module_for_reflection(device: spy.Device) -> spy.Module:
-    """Load the NEUTRAL shared-layout module (``common/types.slang``) so
+    """
+    Load the NEUTRAL shared-layout module (``common/types.slang``) so
     buffers.py can reflect the primitive/projected/optimizer struct layouts
     (``Gaussian3D`` / ``Projected2DGaussian`` / ``BlendData`` / ``AdamState``)
-    without depending on an optimizer file. types.slang is the single source of
-    those layouts — every shader that needs them includes it — and buffers sizes
-    every NDBuffer from this reflection so Python never duplicates the layout.
-    (Reflecting through optimizers/adam.slang worked only because it transitively
-    includes types.slang; pointing straight at the shared module removes that
-    accidental optimizer coupling. Layout is byte-identical — see
-    tests/test_reflection_layout.py.)"""
+    """
     return spy.Module.load_from_file(
         device, str(SHADERS_DIR / "common" / "types.slang")
     )
@@ -86,7 +81,6 @@ class Pipeline:
         max_sort_pairs: int | None = None,
         gpu_lock: "contextlib.AbstractContextManager | None" = None,
         raster_config: RasterConfig | None = None,
-        compositor_config: CompositorConfig | None = None,
         loss_config: LossConfig | None = None,
         regularization_config: RegularizationConfig | None = None,
         appearance_config: AppearanceConfig | None = None,
@@ -115,13 +109,11 @@ class Pipeline:
         if viewer_only and self.raster_config.cluster_cull:
             self.raster_config = replace(self.raster_config, cluster_cull=False)
 
-        self.compositor_config = compositor_config or CompositorConfig()
         self.regularization_config = (regularization_config or RegularizationConfig())
         resolved_loss_config = loss_config or LossConfig()
 
         self.appearance_config = appearance_config or AppearanceConfig()
         self._sh_rest_floats = sh_rest_coeffs(self.appearance_config.sh_degree) * 3
-        self._active_sh_degree = 0
 
         load_kernels(device, self, viewer_only=viewer_only)
 
@@ -222,20 +214,17 @@ class Pipeline:
                 "mip_enabled requires use_persplat_backward=True: the per-pixel "
                 "backward does not propagate opacity-compensation gradients.")
 
-        if (self.compositor_config.extinction_hardness != 1.0 and not self.use_persplat_backward):
-            raise RuntimeError(
-                "extinction_hardness != 1 requires use_persplat_backward=True: "
-                "the per-pixel backward does not implement hardened extinction.")
-
-
         #starts at 0, increments after each bwd step
         self._backward_pixel_phase = 0
 
-        # Transient render state: the LAST-APPLIED schedule values. The frontend
-        # owns the schedule and injects fresh values into each train_step via
-        # IterationContextualVariables; render()/benchmark_frozen (which run
-        # outside train_step) inherit whatever was last applied.
-        self._extinction_hardness = float(self.compositor_config.extinction_hardness)
+        # Applied render-state: the LAST values a train_step applied to the
+        # pipeline. The frontend owns the SCHEDULE and injects per-step values
+        # via IterationContextualVariables; renders outside a training step
+        # (eval, export, viewer, bench) inherit whatever was last applied.
+        # Default to 1.0 (standard alpha-over) — the neutral value the
+        # ExtinctionHardnessSchedule holds before its warmup ramp starts.
+        self._active_sh_degree: int = 0
+        self._extinction_hardness: float = 1.0
 
         self._active_target = None if viewer_only else self.buffers.target_image
 
@@ -260,19 +249,6 @@ class Pipeline:
         reference needs refreshing (for any code that uses reflected types)."""
         self.shared_data_module = _module_for_reflection(self.device)
 
-    def set_active_sh_degree(self, degree: int) -> None:
-        self._active_sh_degree = max(0, min(int(degree), self.appearance_config.sh_degree))
-
-    def set_extinction_hardness(self, hardness: float) -> None:
-        self._extinction_hardness = float(hardness)
-
-    def _active_rest_floats(self) -> int:
-        if not self.buffers.sh_enabled:
-            return 0
-        if getattr(self, "_bench_force_full_rest_adam", False):
-            return self.buffers.sh.rest_floats
-        return sh_rest_coeffs(self._active_sh_degree) * 3
-
     @property
     def _encoder(self) -> "spy.CommandEncoder | None":
         """Compat view of the active command batch's raw encoder. External
@@ -290,6 +266,12 @@ class Pipeline:
         """Adam bias-correction step count; densification reads it as a
         decorrelation seed. The counter itself lives in the optimizer."""
         return self._adam.step_count if self._adam is not None else 0
+
+    def set_active_sh_degree(self, degree: int) -> None:
+        self._active_sh_degree = max(0, min(int(degree), self.appearance_config.sh_degree))
+
+    def set_extinction_hardness(self, hardness: float) -> None:
+        self._extinction_hardness = float(hardness)
 
     def _dispatch(self, kernel, marker: str, **kwargs):
         """Dispatch a kernel, tagging it with a flat debug marker ``marker`` when
@@ -360,10 +342,14 @@ class Pipeline:
         """Read-only uploaded camera resource for specialized GPU services."""
         return self._camera_buffer
 
-    def rasterize(self, camera: Camera) -> None:
-        """Record one forward rasterization; the results land in pipeline
-        buffers (the sorted ids in ``self._sorted_values``)."""
-        self._run_forward(camera)
+    def rasterize(self, camera: Camera,
+                  contextual: IterationContextualVariables | None = None) -> None:
+        if contextual is None:
+            contextual = IterationContextualVariables(
+                hardness_value=self._extinction_hardness,
+                sh_degree=self._active_sh_degree,
+            )
+        self._run_forward(camera, contextual)
 
     def radix_sort_pairs(self) -> tuple[spy.NDBuffer, spy.NDBuffer, spy.NDBuffer]:
         """Record the shared 64-bit-key radix sort service."""
@@ -617,8 +603,9 @@ class Pipeline:
             src_v, dst_v = dst_v, src_v
         return src_lo, src_hi, src_v
 
-    def _run_forward(self, camera: Camera) -> None:
+    def _run_forward(self, camera: Camera, contextual: IterationContextualVariables) -> None:
         self._upload_camera(camera)
+        hardness_value = contextual.hardness_value
         buffers = self.buffers
         num_tiles = buffers.num_tiles
 
@@ -686,7 +673,7 @@ class Pipeline:
                     camera=self._camera_buffer,
                     features_rest=buffers.features_rest.storage,
                     blend_data=buffers.blend_data.storage,
-                    active_sh_degree=self._active_sh_degree,
+                    active_sh_degree=contextual.sh_degree,
                     rest_floats=buffers.sh.rest_floats,
                     max_splats=self.max_splats,
                 )
@@ -759,7 +746,7 @@ class Pipeline:
                 raster_checkpoints=buffers.raster_checkpoints.storage,
                 output_image=buffers.output_image,
                 gaussian_count_per_pixel=buffers.gaussian_count_per_pixel,
-                extinction_hardness=float(self._extinction_hardness),
+                extinction_hardness=hardness_value,
             )
 
 
@@ -825,7 +812,8 @@ class Pipeline:
             target=self._active_target,
         )
 
-    def _run_backward(self, iteration_contextual_variables: IterationContextualVariables) -> None:
+    def _run_backward(self, iterationContext) -> None:
+        iteration_contextual_variables: IterationContextualVariables = iterationContext.iteration_contextual_variables
         b = self.buffers
         gb = b.grad_buffers
         sorted_values = self._sorted_values
@@ -886,7 +874,7 @@ class Pipeline:
                         grad_2d_x_iter=b.grad_2d_x_iter.storage,
                         grad_2d_y_iter=b.grad_2d_y_iter.storage,
                         pixel_phase=self._backward_pixel_phase,
-                        extinction_hardness=float(self._extinction_hardness),
+                        extinction_hardness=iteration_contextual_variables.hardness_value,
                     )
                 else:
                   # Transposed per-splat backward: one workgroup (TILE_AREA
@@ -913,7 +901,7 @@ class Pipeline:
                     # SGD pixel-subsampling phase; rotates each backward so the
                     # visited subset alternates (no-op at BACKWARD_PIXEL_STRIDE=1).
                     pixel_phase=self._backward_pixel_phase,
-                    extinction_hardness=float(self._extinction_hardness),
+                    extinction_hardness=iteration_contextual_variables.hardness_value,
                 )
 
                 self._backward_pixel_phase += 1
@@ -976,16 +964,18 @@ class Pipeline:
                     grad_mean_y=gb["mean_y"].storage,
                     grad_mean_z=gb["mean_z"].storage,
                     cluster_visible=b.cluster_visible.storage,
-                    active_sh_degree=self._active_sh_degree,
+                    active_sh_degree=iteration_contextual_variables.sh_degree,
                     rest_floats=b.sh.rest_floats,
                     max_splats=self.max_splats,
                 )
 
-        if iteration_contextual_variables.densification_variables.structure_tensor_texture is not None:
+        densification_variables = iteration_contextual_variables.densification_variables
+        if (densification_variables is not None
+                and densification_variables.structure_tensor_texture is not None):
             with self._marker_group("structure_accum"):
                 _densify.accumulate_structure_scores(self,
-                    iteration_contextual_variables.densification_variables.structure_tensor_texture,
-                    **(iteration_contextual_variables.densification_variables.structure_kwargs or {})
+                    densification_variables.structure_tensor_texture,
+                    **(densification_variables.structure_kwargs or {})
                 )
 
         with self._marker_group("accumulate_iter"):
@@ -1045,102 +1035,32 @@ class Pipeline:
 
 
     def train_step(self, iterationContext: IterationContext) -> None:
-        lrs = iterationContext.learning_rates
-        if lrs is None:
-            lrs = AdamLRs()
 
-        if iterationContext.iteration_contextual_variables is not None:
-            self.set_extinction_hardness(iterationContext.iteration_contextual_variables.hardness_value)
-            self.set_active_sh_degree(iterationContext.iteration_contextual_variables.sh_degree)
+        if iterationContext.learning_rates is None:
+            raise RuntimeError("train_step requires learning_rates to be set in iterationContext")
+
+        contextual = iterationContext.iteration_contextual_variables
+        # Apply this iteration's scheduled values to the pipeline's render state so renders outside the step (eval/export/viewer/bench) inherit them.
+        # This is code smell, that we need to have the pipeline state be set from the iterationContext
+        # but at the same time we may need to run run_forward from outside the train step, and the train step depends on the iterationContext
+        # i may need to think more about how to fix ts
+        self.set_extinction_hardness(contextual.hardness_value)
+        self.set_active_sh_degree(contextual.sh_degree)
 
         with self._recording("train_step"):
             with self._marker_group("clear_grads"):
                 # TODO this should not be here by itself
                 self._clear_2d_grad_seeds()
             with self._marker_group("forward"):
-                self._run_forward(iterationContext.camera_entry.camera)
+                self._run_forward(iterationContext.camera_entry.camera, contextual)
             with self._marker_group("loss"):
                 self._run_loss()
             with self._marker_group("backward"):
-                self._run_backward(iterationContext.iteration_contextual_variables)
+                self._run_backward(iterationContext)
             with self._marker_group("regularization"):
                 self._run_regularization()
             with self._marker_group("adam"):
-                self._adam.step(lrs, active_rest_floats=self._active_rest_floats())
-
-    #TODO remove after agentic looped benchmarking is done
-    # Top-level train_step marker groups, in execution order. These are the
-    # coarse phases the training goal tracks (fwd / bwd / adam among them).
-    _TOP_PHASES: tuple[str, ...] = (
-        "clear_grads", "forward", "loss", "backward", "regularization", "adam")
-
-    def benchmark_frozen(self, camera: Camera, warmup: int = 16,
-                         iters: int = 64) -> dict:
-        """Measure per-marker GPU ms over frozen train_steps.
-
-        Reproduces the Nsight-capture workload: a pinned camera with all LRs = 0
-        so the full backward + Adam workload runs but no parameter moves, making
-        every timed step bit-identical (see profiler.run_capture_if_due). Installs
-        a marker-driven GPU-timestamp StepTimer for the duration, runs ``warmup``
-        untimed steps to reach steady state (caches warm, no first-frame compile/
-        alloc spikes), then times ``iters`` steps and returns per-marker mean/
-        median/min/max ms. Every ``_marker_group`` scope is timed, so the result
-        carries both the coarse phases (forward/backward/adam) AND the nested
-        kernels (bin_count / radix_sort / rasterize / backward_persbucket / ...)
-        that pinpoint where the time goes.
-
-        The timer is uninstalled on exit, so this leaves the hot path untouched.
-        """
-        from trainer.backend.compute.timing import StepTimer
-
-        frozen_lrs = AdamLRs(mean=0.0, scale=0.0, rot=0.0, opacity=0.0, color=0.0,
-                             sh_rest=0.0)
-
-        # Warm up frozen frames BEFORE timing (steady state; no compile spikes).
-        for _ in range(max(0, warmup)):
-            self.train_step(camera, lrs=frozen_lrs)
-        self.runtime.wait_for_idle()
-
-        timer = StepTimer(self.device)
-        self._step_timer = timer
-        samples: dict[str, list[float]] = {}
-        try:
-            for _ in range(max(1, iters)):
-                timer.begin_step()
-                self.train_step(camera, lrs=frozen_lrs)
-                self.runtime.wait_for_submit(self.last_submit_id)
-                for label, ms in timer.read().markers_ms.items():
-                    samples.setdefault(label, []).append(ms)
-        finally:
-            self._step_timer = None
-
-        def _stats(values: list[float]) -> dict:
-            ordered = sorted(values)
-            n = len(ordered)
-            median = (ordered[n // 2] if n % 2
-                      else 0.5 * (ordered[n // 2 - 1] + ordered[n // 2]))
-            return {
-                "mean": sum(ordered) / n,
-                "median": median,
-                "min": ordered[0],
-                "max": ordered[-1],
-                "count": n,
-            }
-
-        marker_stats = {label: _stats(vals) for label, vals in samples.items()}
-        top = {p: marker_stats[p]["median"] for p in self._TOP_PHASES
-               if p in marker_stats}
-        total_median = sum(top.values())
-        return {
-            "iters": iters,
-            "warmup": warmup,
-            "markers": marker_stats,
-            "top_phases": list(self._TOP_PHASES),
-            "forward_ms": marker_stats.get("forward", {}).get("median", 0.0),
-            "backward_ms": marker_stats.get("backward", {}).get("median", 0.0),
-            "adam_ms": marker_stats.get("adam", {}).get("median", 0.0),
-            "total_ms": total_median,
-        }
+                self._adam.step(iterationContext)
 
     def densify_simple(self, cfg, grad_thresh=0.0002, scale_thresh=None,
                        prune_big_scale=None, allow_scale_prune=True,

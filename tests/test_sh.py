@@ -304,24 +304,31 @@ def test_sh_active_band_adam_matches_full_width(backend: str) -> None:
     target[..., 0] = 0.9; target[..., 1] = 0.1; target[..., 2] = 0.2
     active_deg = 1  # only band 1 (9 of 45 rest floats) is active
 
-    def _run(cap_active: bool) -> np.ndarray:
+    def _run(adam_degree: int) -> np.ndarray:
+        # forward + backward ALWAYS run at active_deg, so only band 1 receives a
+        # non-zero gradient (higher bands are provably zero). ``adam_degree``
+        # independently sets how many rest floats the Adam step iterates:
+        #   active_deg  -> capped run (Adam touches only the 9 active floats)
+        #   full degree -> reference run (Adam iterates all 45 rest floats)
+        # Because the inactive-band gradients are exactly zero, the two runs must
+        # produce byte-identical features_rest — that's the property under test.
+        # The phases are driven separately (not via train_step) precisely because
+        # production ties forward/backward/adam to a single sh_degree; the test
+        # needs them decoupled to exercise the active-band cap in isolation.
         p = _make_pipeline(backend, sh_degree=3, width=W, height=H)
         p.set_primitive_from_numpy(
             means=means, log_scales=log_scales, rot_quats=rot, opacities=opac,
             color_logits=np.zeros((1, 3), np.float32))
         p.set_active_sh_degree(active_deg)
         p.set_target_image(target)
-        # cap_active=False forces the full-width reference (active_rest_floats
-        # defaults to the configured width inside AdamOptimizer.step).
-        p._bench_force_full_rest_adam = not cap_active
         lrs = AdamLRs()
         for _ in range(40):
-            p.train_step(cam, lrs=lrs)
+            p.step_split_for_active_band_test(cam, lrs=lrs, adam_degree=adam_degree)
         p.device.wait_for_idle()
         return _read_features_rest(p, 1)[0]
 
-    capped = _run(cap_active=True)
-    full = _run(cap_active=False)
+    capped = _run(adam_degree=active_deg)
+    full = _run(adam_degree=3)
 
     rest_per_band = 3
     n_active = ((active_deg + 1) ** 2 - 1) * rest_per_band  # 9 floats

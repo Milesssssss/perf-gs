@@ -12,8 +12,23 @@ from __future__ import annotations
 import numpy as np
 
 from trainer.backend.memory.buffers import GRAD_SCALAR_COMPONENTS
+from trainer.config.config import (
+    AdamLRs,
+    DensificationProperties,
+    IterationContext,
+    IterationContextualVariables,
+)
 from trainer.data.dataset import Camera
 from trainer.backend.render.pipeline import Pipeline
+
+
+class _CameraEntry:
+    """Minimal stand-in for ColmapImageEntry: _run_forward only reads
+    ``.camera`` off the context's camera_entry."""
+    __test__ = False
+
+    def __init__(self, camera: Camera) -> None:
+        self.camera = camera
 
 
 class TestPipeline(Pipeline):
@@ -22,6 +37,38 @@ class TestPipeline(Pipeline):
     # Not a pytest test class despite the ``Test`` prefix — it's a Pipeline
     # subclass. Tells pytest's collector to skip it (avoids a collection warning).
     __test__ = False
+
+    def train_step(self, camera: Camera, lrs: "AdamLRs | None" = None,
+                   active_sh_degree: int | None = None,
+                   hardness_value: float = 1.0,
+                   structure_tensor=None,
+                   structure_kwargs: dict | None = None) -> None:
+        """Test convenience: drive one ``Pipeline.train_step`` from a bare
+        (camera, lrs) pair by assembling the IterationContext the production
+        signature now requires. Production builds this context in the training
+        loop; tests only care about the camera + LRs (+ optional SH degree /
+        structure inputs), so this shim fills the rest with inert defaults.
+
+        ``active_sh_degree=None`` keeps the pipeline's current applied degree
+        (set via ``set_active_sh_degree``), matching how tests stage SH state
+        before stepping."""
+        degree = self._active_sh_degree if active_sh_degree is None else int(active_sh_degree)
+        context = IterationContext(
+            step_number=self.iteration + 1,
+            camera_index=0,
+            camera_entry=_CameraEntry(camera),
+            learning_rates=lrs if lrs is not None else AdamLRs(),
+            events=None,
+            iteration_contextual_variables=IterationContextualVariables(
+                hardness_value=hardness_value,
+                sh_degree=degree,
+                densification_variables=DensificationProperties(
+                    structure_tensor_texture=structure_tensor,
+                    structure_kwargs=structure_kwargs,
+                ),
+            ),
+        )
+        super().train_step(context)
 
     def set_primitive_from_numpy(self, **snapshot) -> None:
         """Re-load a primitive snapshot into an already-built pipeline (resets
@@ -45,9 +92,67 @@ class TestPipeline(Pipeline):
             self.rasterize(camera)
             self._run_loss()
 
-    def backward(self) -> None:
-        """Run the backward rasterizer. Assumes forward + loss have run."""
-        self._run_backward()
+    def step_split_for_active_band_test(self, camera: Camera, lrs: "AdamLRs",
+                                         adam_degree: int) -> None:
+        """One full train step where the FORWARD/BACKWARD run at the pipeline's
+        applied ``_active_sh_degree`` but the Adam-rest width is driven by a
+        SEPARATE ``adam_degree``. Production ties all three to one sh_degree;
+        this split lets the active-band-Adam test verify that iterating the full
+        rest width vs only the active head is bit-identical when the inactive
+        bands have exactly-zero gradient. Test-only — no production caller."""
+        forward_ctx = IterationContextualVariables(
+            hardness_value=self._extinction_hardness,
+            sh_degree=self._active_sh_degree,
+        )
+        adam_ctx = IterationContext(
+            step_number=self.iteration + 1,
+            camera_index=0,
+            camera_entry=_CameraEntry(camera),
+            learning_rates=lrs,
+            events=None,
+            iteration_contextual_variables=IterationContextualVariables(
+                hardness_value=self._extinction_hardness,
+                sh_degree=int(adam_degree),
+            ),
+        )
+        backward_ctx = IterationContext(
+            step_number=self.iteration + 1,
+            camera_index=0,
+            camera_entry=_CameraEntry(camera),
+            learning_rates=lrs,
+            events=None,
+            iteration_contextual_variables=forward_ctx,
+        )
+        with self.recording("train_step"):
+            self._clear_2d_grad_seeds()
+            self._run_forward(camera, forward_ctx)
+            self._run_loss()
+            self._run_backward(backward_ctx)
+            self._run_regularization()
+            self._adam.step(adam_ctx)
+
+    def backward(self, structure_tensor=None, structure_kwargs: dict | None = None) -> None:
+        """Run the backward rasterizer. Assumes forward + loss have run.
+
+        Builds the minimal IterationContext ``_run_backward`` reads (SH degree
+        + hardness from the pipeline's applied render state, plus optional
+        structure-accumulation inputs)."""
+        context = IterationContext(
+            step_number=self.iteration + 1,
+            camera_index=0,
+            camera_entry=None,
+            learning_rates=AdamLRs(),
+            events=None,
+            iteration_contextual_variables=IterationContextualVariables(
+                hardness_value=self._extinction_hardness,
+                sh_degree=self._active_sh_degree,
+                densification_variables=DensificationProperties(
+                    structure_tensor_texture=structure_tensor,
+                    structure_kwargs=structure_kwargs,
+                ),
+            ),
+        )
+        self._run_backward(context)
 
     def regularize(self) -> None:
         """Run ONLY the opacity/scale regularization pass (adds its gradient

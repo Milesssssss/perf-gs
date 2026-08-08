@@ -68,7 +68,7 @@ def test_cluster_cull_kills_offscreen_cluster(backend: str) -> None:
     # out-cluster (z=-5) is behind — a strict frustum cull.
     cam = simple_camera(width=128, height=128,
                         eye=(0.0, 0.0, 0.0), target=(0.0, 0.0, 1.0))
-    pipeline._run_forward(cam)
+    pipeline.rasterize(cam)
     pipeline.device.wait_for_idle()
 
     # Read cluster_visible.
@@ -112,7 +112,7 @@ def test_cluster_cull_off_is_noop(backend: str) -> None:
     )
     cam = simple_camera(width=128, height=128,
                         eye=(0.0, 0.0, 0.0), target=(0.0, 0.0, 1.0))
-    pipeline._run_forward(cam)
+    pipeline.rasterize(cam)
     pipeline.device.wait_for_idle()
 
     # cluster_visible must remain all-ones (never dispatched cull kernel).

@@ -54,7 +54,6 @@ class LossConfig:
 @dataclass(frozen=True)
 class RegularizationConfig:
     """Per-primitive opacity/scale regularization weights."""
-
     opacity_weight: float = 0.0
     scale_weight: float = 0.0
 

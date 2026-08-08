@@ -14,7 +14,6 @@ import numpy as np
 import pytest
 
 from _pipeline_testkit import TestPipeline
-from trainer.backend.render.pipeline import Pipeline
 from trainer.config.config import AdamLRs, LossConfig
 from trainer.data.dataset import simple_camera
 from trainer.backend.compute.device import create_device
@@ -90,9 +89,12 @@ def test_construction_with_initial_state_primes_pipeline(backend: str) -> None:
         color_logits=np.array([[1.5, -1.5, -1.5], [-1.5, 1.5, -1.5],
                                [-1.5, -1.5, 1.5]], dtype=np.float32),
     )
-    p = Pipeline(device=device, width=16, height=16, max_splats=16,
-                 loss_config=LossConfig(ssim_weight=0.0, alpha_weight=0.0),
-                 initial_state=state)
+    # TestPipeline is a drop-in Pipeline subclass; it adds the (camera, lrs)
+    # train_step shim while still driving the real Pipeline.train_step. This
+    # test targets construction-with-initial_state, not the raw ctor per se.
+    p = TestPipeline(device=device, width=16, height=16, max_splats=16,
+                     loss_config=LossConfig(ssim_weight=0.0, alpha_weight=0.0),
+                     initial_state=state)
     cam = simple_camera(width=16, height=16, eye=(0.0, 0.0, 0.0),
                         target=(0.0, 0.0, 1.0), up=(0.0, 1.0, 0.0),
                         fovy_degrees=60.0)

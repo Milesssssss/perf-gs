@@ -23,7 +23,7 @@ import numpy as np
 import pytest
 
 from _pipeline_testkit import TestPipeline
-from trainer.config.config import CompositorConfig, LossConfig
+from trainer.config.config import LossConfig
 from trainer.data.dataset import simple_camera
 from trainer.backend.compute.device import create_device
 
@@ -48,11 +48,14 @@ def _setup(backend: str, w: int, h: int, hardness: float):
         device = create_device(backend=backend)
     except Exception as exc:  # pragma: no cover - backend availability
         pytest.skip(f"backend {backend!r} unavailable: {exc}")
-    return TestPipeline(
+    pipeline = TestPipeline(
         device=device, width=w, height=h, max_splats=16,
         loss_config=LossConfig(ssim_weight=0.0, alpha_weight=0.0),
-        compositor_config=CompositorConfig(extinction_hardness=hardness),
     )
+    # Hardness is applied render-state now (the schedule owns it in production);
+    # set it directly for the test's fixed-k forward/backward.
+    pipeline.set_extinction_hardness(hardness)
+    return pipeline
 
 
 def _loss_for(pipeline: TestPipeline, scene: dict, camera) -> float:
