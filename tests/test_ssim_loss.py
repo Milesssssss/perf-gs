@@ -153,7 +153,9 @@ def test_ssim_grad_matches_reference(backend: str):
 
     # Rendered image the shader saw (sRGB in .rgb).
     x = pipeline.buffers.output_image.to_numpy()[..., :3].astype(np.float64)
-    y = target.astype(np.float64)
+    # target_image is rgba8_unorm: the shader reads the uint8-quantized target
+    # (round/255), so the reference uses that same quantized value.
+    y = np.rint(target.astype(np.float64) * 255.0).clip(0, 255) / 255.0
 
     dL_dC_gpu = pipeline.buffers.dL_dC_texture.to_numpy()[..., :3].astype(np.float64)
     dL_dC_ref = _ssim_grad_reference(x, y)

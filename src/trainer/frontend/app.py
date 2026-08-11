@@ -980,9 +980,13 @@ class StructureTextureProvider:
 
     def _create_structure_texture(self, label: str) -> Any:
         import slangpy as spy
+        # rgba16_float (64-bit) instead of rgba32_float (128-bit): the field is
+        # 3 trace/batch-normalized components (Sxx, Sxy, Syy) in ~[0,1] feeding a
+        # coarse eigenvalue->eta gate (thresholds 0.1/1.0), so fp16 precision is
+        # ample. Shader reads it as Texture2D<float4>.xyz unchanged. 2x smaller.
         return self._device.create_texture(
             type=spy.TextureType.texture_2d,
-            format=spy.Format.rgba32_float,
+            format=spy.Format.rgba16_float,
             width=self._scene.width, height=self._scene.height,
             usage=spy.TextureUsage.shader_resource | spy.TextureUsage.unordered_access,
             label=label,
@@ -1043,12 +1047,15 @@ class StructureTextureProvider:
     def _upload(self, field: np.ndarray, label: str) -> Any:
         import slangpy as spy
 
+        # rgba16_float (see _create_structure_texture): pack the 3 components as
+        # fp16 with alpha=0. copy_from_numpy matches by byte size, so the array
+        # dtype MUST be float16 for this format.
         packed = np.zeros(
-            (self._scene.height, self._scene.width, 4), dtype=np.float32)
+            (self._scene.height, self._scene.width, 4), dtype=np.float16)
         packed[..., :3] = field
         texture = self._device.create_texture(
             type=spy.TextureType.texture_2d,
-            format=spy.Format.rgba32_float,
+            format=spy.Format.rgba16_float,
             width=self._scene.width,
             height=self._scene.height,
             usage=spy.TextureUsage.shader_resource | spy.TextureUsage.unordered_access,

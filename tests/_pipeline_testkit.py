@@ -180,6 +180,10 @@ class TestPipeline(TrainingPipeline):
         finite-difference gradient tests stay consistent with the shader."""
         C = self.buffers.output_image.to_numpy()[..., :3]
         T = self.buffers.target_image.to_numpy()[..., :3]   # sRGB, no linearization
+        # target_image is rgba8_unorm: readback is uint8 [0,255]; the shader
+        # sees it normalized to [0,1], so match that here for the L1 compare.
+        if T.dtype == np.uint8:
+            T = T.astype(np.float32) / 255.0
         diff = C - T
         return float(np.sum(np.abs(diff)))
 

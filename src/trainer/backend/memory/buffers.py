@@ -313,7 +313,12 @@ class GaussianBuffers:
     gaussian_count_per_pixel: spy.Texture = field(init=False)  # r32_uint
 
     # --- v1 training resources ---
-    target_image: spy.Texture = field(init=False)          # rgba32_float, SRV (read-only in shaders)
+    # rgba8_unorm: the GT is an 8-bit sRGB PNG (loaded as uint8/255), so 32-bit
+    # float storage was pure waste. Shaders read it as RWTexture2D<float4> via
+    # [] and get the same normalized [0,1] sRGB values (unorm auto-divides by
+    # 255); the loss compares in sRGB space directly, so UNORM (NOT _srgb) is
+    # the lossless match. 4x smaller than rgba32_float.
+    target_image: spy.Texture = field(init=False)          # rgba8_unorm, sRGB [0,1] in .rgb
     dL_dC_texture: spy.Texture = field(init=False)         # rgba32_float, UAV+SRV
     # SSIM two-pass back-projection maps (m1/m2/m3), only used when lambda_ssim>0.
     ssim_m1: spy.Texture = field(init=False)  # rgba32_float, WxH
@@ -676,7 +681,7 @@ def allocate(
     buffers.gaussian_count_per_pixel = allocator.tex(spy.Format.r32_uint, "gaussian_count_per_pixel")
 
     # --- v1 training resources ---
-    buffers.target_image = allocator.tex(spy.Format.rgba32_float, "target_image")
+    buffers.target_image = allocator.tex(spy.Format.rgba8_unorm, "target_image")
     buffers.dL_dC_texture = allocator.tex(spy.Format.rgba32_float, "dL_dC")
     buffers.ssim_m1 = allocator.tex(spy.Format.rgba32_float, "ssim_m1")
     buffers.ssim_m2 = allocator.tex(spy.Format.rgba32_float, "ssim_m2")

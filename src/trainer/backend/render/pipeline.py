@@ -45,6 +45,19 @@ from trainer.config.config import IterationContext, IterationContextualVariables
 
 _RADIX_SCAN_DIM = 128
 
+
+def _srgb01_to_u8(rgba: np.ndarray) -> np.ndarray:
+    """Quantize a float [0,1] sRGB RGBA image to contiguous uint8 for upload
+    into an rgba8_unorm texture (round-to-nearest, clamped). If the input is
+    already uint8 it's passed through unchanged. The GT originates as uint8/255,
+    so this is lossless for un-resized pixels and re-quantizes interpolated ones
+    to the source's own 1/255 precision."""
+    if rgba.dtype == np.uint8:
+        return np.ascontiguousarray(rgba)
+    u8 = np.clip(np.rint(rgba.astype(np.float32) * 255.0), 0, 255).astype(np.uint8)
+    return np.ascontiguousarray(u8)
+
+
 class _RecordingTransaction:
     """A recorded batch plus host-state commits that run after submit succeeds."""
 
@@ -463,61 +476,55 @@ class TrainingPipeline:
         this once per iter if you don't want to manage per-camera target
         textures yourself.
 
-        The loss kernel performs ``srgb_to_linear`` on read. We pad the
-        image to RGBA because our texture format is rgba32_float.
+        Target is stored rgba8_unorm (the GT is an 8-bit sRGB PNG); shaders
+        read the same [0,1] sRGB values (unorm auto-normalizes) and compare in
+        sRGB space directly. Padded to RGBA with alpha=1.
 
         For training loops, prefer :meth:`create_target_texture` to
         pre-upload every target once and pass the texture reference
-        into :meth:`set_target_texture` each iter — avoids an 8 MB
-        upload per step.
+        into :meth:`set_target_texture` each iter — avoids a re-upload
+        per step.
         """
         assert rgb.shape == (self.height, self.width, 3), (
             f"target shape {rgb.shape} != ({self.height}, {self.width}, 3)"
         )
         rgba = np.concatenate(
-            [rgb.astype(np.float32), np.ones((self.height, self.width, 1), np.float32)],
+            [rgb, np.ones((self.height, self.width, 1), rgb.dtype)],
             axis=-1,
         )
-        self.buffers.target_image.copy_from_numpy(np.ascontiguousarray(rgba))
+        self.buffers.target_image.copy_from_numpy(_srgb01_to_u8(rgba))
         self._active_target = self.buffers.target_image
 
     def create_target_texture(self, img: np.ndarray) -> spy.Texture:
-        """Create a new rgba32_float target texture and upload into it.
+        """Create a new rgba8_unorm target texture and upload into it.
 
         Accepts (H, W, 3) RGB or (H, W, 4) RGBA. RGB is padded with
-        alpha=1.
+        alpha=1. Stored rgba8_unorm: the GT originates as an 8-bit PNG
+        (uint8/255), so 8-bit storage is lossless vs. the former rgba32_float
+        (4x smaller) — the only change is resized/interpolated pixels quantize
+        back to 1/255, which is the source's own precision.
 
-        For RGBA inputs the RGB target is the STRAIGHT (un-premultiplied)
-        sRGB color and the alpha channel is the raw GT coverage. This
-        matches gsplat's objective: it compares the premultiplied-over-black
-        render against the straight gt_rgb via L1, with a separate alpha
-        (coverage) loss. Premultiplying the RGB target instead (target = a*c)
-        is satisfiable at LOW coverage, so the RGB loss stops pushing the
-        silhouette outward — measured as ~0.15 sRGB darker edges and a
-        6-8% coverage shortfall (smaller silhouette) vs gsplat. Keeping the
-        target straight lets the RGB residual drive edge coverage/brightness
-        up to full, as gsplat does.
         """
         if img.ndim == 3 and img.shape[2] == 4:
             assert img.shape[:2] == (self.height, self.width)
-            rgba = img.astype(np.float32).copy()
+            rgba = img
             # Straight sRGB RGB + raw alpha — no premultiply (see docstring).
         else:
             assert img.shape == (self.height, self.width, 3), (
                 f"target shape {img.shape} != ({self.height}, {self.width}, 3)"
             )
             rgba = np.concatenate(
-                [img.astype(np.float32), np.ones((self.height, self.width, 1), np.float32)],
+                [img, np.ones((self.height, self.width, 1), img.dtype)],
                 axis=-1,
             )
         tex = self.device.create_texture(
             type=spy.TextureType.texture_2d,
-            format=spy.Format.rgba32_float,
+            format=spy.Format.rgba8_unorm,
             width=self.width, height=self.height,
             usage=spy.TextureUsage.shader_resource | spy.TextureUsage.unordered_access,
             label="target_image_cached",
         )
-        tex.copy_from_numpy(np.ascontiguousarray(rgba))
+        tex.copy_from_numpy(_srgb01_to_u8(rgba))
         return tex
 
     def set_target_texture(self, tex: spy.Texture) -> None:
