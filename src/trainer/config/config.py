@@ -88,4 +88,4 @@ class AdamLRs:
     rot: float = 1e-3
     opacity: float = 2.5e-2
     color: float = 2.5e-3  # in reality this is the SH0 LR
-    sh_rest: float = 0.005 / 20.0 #TODO lr is too low for the 3k iters, fix this
+    sh_rest: float = 0.0025 / 20.0 #TODO lr is too low for the 3k iters, fix this

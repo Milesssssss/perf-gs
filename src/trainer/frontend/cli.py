@@ -85,15 +85,14 @@ def build_parser() -> argparse.ArgumentParser:
                     help="prune splats whose max 3D scale exceeds this * scene_extent "
                          "(gsplat prune_scale3d). Only active after the first opacity reset.")
     parser.add_argument("--reset-every", type=int, default=1200,
-                    help="opacity-reset interval (gsplat reset_every). Big-scale prune is "
-                         "disabled until after the first reset.")
+                    help="opacity-reset interval. Big-scale prune is disabled until after the first reset.")
     parser.add_argument("--opacity-reg", type=float, default=0.00)
     parser.add_argument("--scale-reg", type=float, default=0.00)
     parser.add_argument("--w-alpha", type=float, default=0.0,
                     help="alpha loss weight; set > 0 for RGBA targets (e.g. 1.0)")
     parser.add_argument("--lambda-ssim", type=float, default=0.2,
                     help="SSIM loss weight (3DGS default 0.2); 0 = pure L2")
-    parser.add_argument("--max-splats", type=int, default=8_000_000)
+    parser.add_argument("--max-splats", type=int, default=10_000_000)
     parser.add_argument("--z-near-cull", type=float, default=0.01,
                     help="view-space depth floor for bin cull; raise for scenes "
                          "where points can land near a camera pose (e.g. 0.2)")
@@ -236,7 +235,7 @@ def build_parser() -> argparse.ArgumentParser:
                          "original bit-identical path. 1-3 enables higher bands, stored in "
                          "a separate features_rest buffer allocated only when >0, activated "
                          "one band every --sh-band-interval iters (oneupSHdegree).")
-    parser.add_argument("--sh-band-interval", type=int, default=0,
+    parser.add_argument("--sh-band-interval", type=int, default=250,
                     help="Iterations between activating successive SH bands (classic 3DGS "
                          "oneupSHdegree). Only used with --sh-degree > 0. "
                          "0 (default) = AUTO: scale to --iters so the last band turns on "
