@@ -65,6 +65,9 @@ def test_device_factory_passes_resolved_specialization(monkeypatch) -> None:
     assert create_training_device(args) is sentinel
     assert captured == {
         "backend": "vulkan",
+        # Resolved from --nsight-debug-names (default None -> off unless
+        # --capture-external); absent on this bare Namespace so it's False.
+        "enable_debug": False,
         "shader_debug_info": False,
         "defines": {"BACKWARD_PIXEL_STRIDE": "2u"},
     }

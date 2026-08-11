@@ -293,29 +293,50 @@ def densify_structure_aware(pipeline: TrainingPipeline, cfg: StructureConfig) ->
             max_splats=pipeline.max_splats,
         )
         pipeline.scan_service.scan(pipeline.max_splats, b.valid_mask_buffer)
-        pipeline.dispatch(pipeline.k_scatter_compact, "scatter_compact",
+        # Shared-arena compaction: compact each resource into the arena, then
+        # copy it back into the live buffer (commits in place; no pointer swap).
+        # sgl auto-barriers scatter->copy and copy->next-scatter.
+        arena = b.scratch_arena
+        pipeline.dispatch(pipeline.k_scatter_compact_gaussian, "scatter_compact_gaussian",
             thread_count=[pipeline.max_splats, 1, 1],
             gaussians_in=b.gaussians.storage,
+            valid_mask=b.valid_mask_buffer.storage,
+            scan=b.scan_buffer.storage,
+            gaussians_out=arena.storage,
+            max_splats=pipeline.max_splats,
+        )
+        pipeline.copy_arena_back(arena, b.gaussians, b.gaussians.storage.size)
+        pipeline.dispatch(pipeline.k_scatter_compact_adam, "scatter_compact_adam",
+            thread_count=[pipeline.max_splats, 1, 1],
             adam_state_in=b.adam_state.storage,
             valid_mask=b.valid_mask_buffer.storage,
             scan=b.scan_buffer.storage,
-            gaussians_out=b.gaussians_scratch.storage,
-            adam_state_out=b.adam_state_scratch.storage,
+            adam_state_out=arena.storage,
             max_splats=pipeline.max_splats,
         )
+        pipeline.copy_arena_back(arena, b.adam_state, b.adam_state.storage.size)
         # SH: carry features_rest + its Adam moments through the SAME compaction.
         if b.sh_enabled:
-            pipeline.dispatch(pipeline.k_scatter_compact_sh, "scatter_compact_sh",
+            pipeline.dispatch(pipeline.k_scatter_compact_features, "scatter_compact_features",
                 thread_count=[pipeline.max_splats, 1, 1],
                 features_rest_in=b.features_rest.storage,
-                adam_rest_in=b.adam_rest_state.storage,
                 valid_mask=b.valid_mask_buffer.storage,
                 scan=b.scan_buffer.storage,
-                features_rest_out=b.sh.features_rest_scratch.storage,
-                adam_rest_out=b.sh.adam_rest_scratch.storage,
+                features_rest_out=arena.storage,
                 rest_floats=b.sh.rest_floats,
                 max_splats=pipeline.max_splats,
             )
+            pipeline.copy_arena_back(arena, b.features_rest, b.features_rest.storage.size)
+            pipeline.dispatch(pipeline.k_scatter_compact_adam_rest, "scatter_compact_adam_rest",
+                thread_count=[pipeline.max_splats, 1, 1],
+                adam_rest_in=b.adam_rest_state.storage,
+                valid_mask=b.valid_mask_buffer.storage,
+                scan=b.scan_buffer.storage,
+                adam_rest_out=arena.storage,
+                rest_floats=b.sh.rest_floats,
+                max_splats=pipeline.max_splats,
+            )
+            pipeline.copy_arena_back(arena, b.adam_rest_state, b.adam_rest_state.storage.size)
         # P9: final count = scan_total (GPU copy — no readback).
         pipeline.dispatch(pipeline.k_densify_snapshot, "densify_snapshot",
             thread_count=[1, 1, 1],
@@ -326,20 +347,17 @@ def densify_structure_aware(pipeline: TrainingPipeline, cfg: StructureConfig) ->
         # P10: post-densify opacity cap (SADGS gaussian_model.py:1046 applies
         # inverse_sigmoid(min(get_opacity, 0.8)) to ALL survivors after the
         # structure prune). resetOpacity does min(logit, logit(cap)) which is
-        # exactly that cap. Runs on the just-compacted scratch buffer; host
-        # ownership changes only after submit succeeds. Skipped when
-        # opacity_cap <= 0 (ablation off).
+        # exactly that cap. Now runs on the LIVE buffers (compaction already
+        # copied back in place — no swap). Skipped when opacity_cap <= 0.
         if cfg.opacity_cap and cfg.opacity_cap > 0.0:
             pipeline.dispatch(pipeline.k_opacity_reset, "opacity_cap",
                 thread_count=[pipeline.max_splats, 1, 1],
-            gaussians=b.gaussians_scratch.storage,
-            adam_state=b.adam_state_scratch.storage,
+                gaussians=b.gaussians.storage,
+                adam_state=b.adam_state.storage,
                 num_gaussians_counter=b.num_gaussians_counter.storage,
                 reset_value=float(cfg.opacity_cap),
                 mode=0,   # CLAMP: min(logit, logit(0.8)) == inverse_sigmoid(min(a,0.8))
             )
-            recording.after_submit(
-                lambda: b.swap_primitive_storage(carry_sh=b.sh_enabled))
 
     # Overbudget telemetry. The structure decision fires only every
     # sad_structure_every (~500) iters and is already a heavy multi-dispatch, so
@@ -466,17 +484,56 @@ def morton_sort(pipeline: TrainingPipeline, world_min: np.ndarray,
 
         pipeline.radix_sort_pairs()
 
-        pipeline.dispatch(pipeline.k_morton_scatter, "morton_scatter",
+        # Shared-arena Morton re-sort: permute each resource into the arena, then
+        # copy the arena back into the live buffer, reusing the arena for the
+        # next resource. sgl auto-barriers scatter->copy and copy->next-scatter.
+        # (Single-output kernels + one arena replace the old two full-size
+        # scratch buffers + pointer swap.) Eta keeps its own dedicated scratch.
+        arena = b.scratch_arena
+        pipeline.dispatch(pipeline.k_morton_scatter_gaussian, "morton_scatter_gaussian",
             thread_count=[pipeline.max_splats, 1, 1],
             gaussians_in=b.gaussians.storage,
+            sorted_values=b.sort_values_a.storage,
+            count_buf=b.scan_total.storage,
+            gaussians_out=arena.storage,
+            max_splats=pipeline.max_splats,
+        )
+        pipeline.copy_arena_back(arena, b.gaussians, b.gaussians.storage.size)
+
+        pipeline.dispatch(pipeline.k_morton_scatter_adam, "morton_scatter_adam",
+            thread_count=[pipeline.max_splats, 1, 1],
             adam_state_in=b.adam_state.storage,
             sorted_values=b.sort_values_a.storage,
             count_buf=b.scan_total.storage,
-            gaussians_out=b.gaussians_scratch.storage,
-            adam_state_out=b.adam_state_scratch.storage,
+            adam_state_out=arena.storage,
             max_splats=pipeline.max_splats,
         )
+        pipeline.copy_arena_back(arena, b.adam_state, b.adam_state.storage.size)
 
+        if b.sh_enabled:
+            pipeline.dispatch(pipeline.k_morton_scatter_features, "morton_scatter_features",
+                thread_count=[pipeline.max_splats, 1, 1],
+                features_rest_in=b.features_rest.storage,
+                sorted_values=b.sort_values_a.storage,
+                count_buf=b.scan_total.storage,
+                features_rest_out=arena.storage,
+                rest_floats=b.sh.rest_floats,
+                max_splats=pipeline.max_splats,
+            )
+            pipeline.copy_arena_back(arena, b.features_rest, b.features_rest.storage.size)
+
+            pipeline.dispatch(pipeline.k_morton_scatter_adam_rest, "morton_scatter_adam_rest",
+                thread_count=[pipeline.max_splats, 1, 1],
+                adam_rest_in=b.adam_rest_state.storage,
+                sorted_values=b.sort_values_a.storage,
+                count_buf=b.scan_total.storage,
+                adam_rest_out=arena.storage,
+                rest_floats=b.sh.rest_floats,
+                max_splats=pipeline.max_splats,
+            )
+            pipeline.copy_arena_back(arena, b.adam_rest_state, b.adam_rest_state.storage.size)
+
+        # Eta keeps its dedicated scratch + pointer swap (small, 0.22 GB @10M).
         if carry_eta:
             pipeline.dispatch(pipeline.k_morton_scatter_eta, "morton_scatter_eta",
                 thread_count=[pipeline.max_splats, 1, 1],
@@ -485,18 +542,4 @@ def morton_sort(pipeline: TrainingPipeline, world_min: np.ndarray,
                 **b.eta_scatter_kwargs(),
                 max_splats=pipeline.max_splats,
             )
-
-        if b.sh_enabled:
-            pipeline.dispatch(pipeline.k_morton_scatter_sh, "morton_scatter_sh",
-                thread_count=[pipeline.max_splats, 1, 1],
-                features_rest_in=b.features_rest.storage,
-                adam_rest_in=b.adam_rest_state.storage,
-                sorted_values=b.sort_values_a.storage,
-                count_buf=b.scan_total.storage,
-                features_rest_out=b.sh.features_rest_scratch.storage,
-                adam_rest_out=b.sh.adam_rest_scratch.storage,
-                rest_floats=b.sh.rest_floats,
-                max_splats=pipeline.max_splats,
-            )
-
-        recording.after_submit(lambda: b.swap_primitive_storage(carry_eta=carry_eta, carry_sh=b.sh_enabled))
+            recording.after_submit(lambda: b.swap_eta())

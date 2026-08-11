@@ -188,12 +188,18 @@ class TrainingPipeline:
                 scatter_compact_eta=self.k_scatter_compact_eta,
                 split_and_clone_sh=self.k_split_and_clone_sh,
                 scatter_compact_sh=self.k_scatter_compact_sh,
+                scatter_compact_gaussian=self.k_scatter_compact_gaussian,
+                scatter_compact_adam=self.k_scatter_compact_adam,
+                scatter_compact_features=self.k_scatter_compact_features,
+                scatter_compact_adam_rest=self.k_scatter_compact_adam_rest,
+                scatter_compact_eta_only=self.k_scatter_compact_eta_only,
             ),
             commands=CommandInterface(
                 dispatch=self.dispatch,
                 dispatch_indirect=self.dispatch_indirect,
                 recording=self.recording,
                 marker_group=self.marker_group,
+                copy_arena_back=self.copy_arena_back,
             ),
             width=self.width,
             height=self.height,
@@ -297,6 +303,15 @@ class TrainingPipeline:
             transient = self.runtime.command_batch(marker)
             transient.dispatch_indirect(kernel, marker, args_buf, offset, **kwargs)
             self.last_submit_id = self.runtime.submit(transient).submit_id
+
+    def copy_arena_back(self, arena, dst: spy.NDBuffer, nbytes: int) -> None:
+        """Record an arena->live buffer byte copy into the active batch (commits
+        one resource's compaction/re-sort; see ScratchArena.copy_back). Must be
+        called with a batch active (inside a recording), which the densify /
+        morton paths always are; sgl auto-synchronizes the preceding scatter
+        write and the subsequent arena reuse."""
+        assert self._batch is not None, "copy_arena_back requires an active batch"
+        arena.copy_back(self._batch.encoder, dst, nbytes)
 
     @contextlib.contextmanager
     def _marker_group(self, label: str):
@@ -605,6 +620,7 @@ class TrainingPipeline:
         return src_lo, src_hi, src_v
 
     def _run_forward(self, camera: Camera, contextual: IterationContextualVariables) -> None:
+        # TODO: we should use a const buffer but cest la vie
         self._upload_camera(camera)
         hardness_value = contextual.hardness_value
         buffers = self.buffers

@@ -138,6 +138,43 @@ void mortonScatter(
     adam_state_out[i] = adam_state_in[src];
 }
 
+// Single-output Morton scatter variants for the shared-scratch-arena path
+// (see buffers.ScratchArena / morton_sort in densify.py). Same permutation
+// contract as mortonScatter: out[i] = in[sorted_values[i]] for i in [0, n).
+// The caller scatters one resource into the arena, copies the arena back into
+// the live buffer, then reuses the arena for the next resource.
+[shader("compute")]
+[numthreads(256, 1, 1)]
+void mortonScatterGaussian(
+    uint3 dtid: SV_DispatchThreadID,
+    StructuredBuffer<Gaussian3D> gaussians_in,
+    StructuredBuffer<uint>       sorted_values,
+    StructuredBuffer<uint>       count_buf,
+    RWStructuredBuffer<Gaussian3D> gaussians_out,
+    uniform uint max_splats)
+{
+    uint i = dtid.x;
+    if (i >= max_splats) return;
+    if (i >= count_buf[0]) return;
+    gaussians_out[i] = gaussians_in[sorted_values[i]];
+}
+
+[shader("compute")]
+[numthreads(256, 1, 1)]
+void mortonScatterAdam(
+    uint3 dtid: SV_DispatchThreadID,
+    StructuredBuffer<AdamState> adam_state_in,
+    StructuredBuffer<uint>      sorted_values,
+    StructuredBuffer<uint>      count_buf,
+    RWStructuredBuffer<AdamState> adam_state_out,
+    uniform uint max_splats)
+{
+    uint i = dtid.x;
+    if (i >= max_splats) return;
+    if (i >= count_buf[0]) return;
+    adam_state_out[i] = adam_state_in[sorted_values[i]];
+}
+
 // Permute the slot-indexed SAD-GS eta accumulators by the SAME sorted_values
 // permutation mortonScatter applies to the gaussians, so the eta window
 // survives a Morton re-sort instead of being reset. Pure permutation (Morton
@@ -209,6 +246,49 @@ void mortonScatterSH(
     uint fd = i * fu, fs = src * fu;
     for (uint c = 0u; c < fu; ++c)
         features_rest_out[fd + c] = features_rest_in[fs + c];
+    // adam_rest SoA float32: word c of gaussian g at c*max_splats + g.
+    uint au = rest_floats * 2u;
+    for (uint c = 0u; c < au; ++c)
+        adam_rest_out[c * max_splats + i] = adam_rest_in[c * max_splats + src];
+}
+
+// Single-output SH Morton scatter variants for the shared-scratch-arena path.
+[shader("compute")]
+[numthreads(256, 1, 1)]
+void mortonScatterFeatures(
+    uint3 dtid: SV_DispatchThreadID,
+    StructuredBuffer<uint> features_rest_in,
+    StructuredBuffer<uint> sorted_values,
+    StructuredBuffer<uint> count_buf,
+    RWStructuredBuffer<uint> features_rest_out,
+    uniform uint rest_floats,
+    uniform uint max_splats)
+{
+    uint i = dtid.x;
+    if (i >= max_splats) return;
+    if (i >= count_buf[0]) return;
+    uint src = sorted_values[i];
+    uint fu = halfFeatUints(rest_floats);
+    uint fd = i * fu, fs = src * fu;
+    for (uint c = 0u; c < fu; ++c)
+        features_rest_out[fd + c] = features_rest_in[fs + c];
+}
+
+[shader("compute")]
+[numthreads(256, 1, 1)]
+void mortonScatterAdamRest(
+    uint3 dtid: SV_DispatchThreadID,
+    StructuredBuffer<uint> adam_rest_in,
+    StructuredBuffer<uint> sorted_values,
+    StructuredBuffer<uint> count_buf,
+    RWStructuredBuffer<uint> adam_rest_out,
+    uniform uint rest_floats,
+    uniform uint max_splats)
+{
+    uint i = dtid.x;
+    if (i >= max_splats) return;
+    if (i >= count_buf[0]) return;
+    uint src = sorted_values[i];
     // adam_rest SoA float32: word c of gaussian g at c*max_splats + g.
     uint au = rest_floats * 2u;
     for (uint c = 0u; c < au; ++c)

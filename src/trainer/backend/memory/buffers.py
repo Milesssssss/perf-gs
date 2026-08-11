@@ -119,6 +119,36 @@ class AdamResources:
 
 
 @dataclass
+class ScratchArena:
+    """One raw scratch buffer shared across all compaction / Morton re-sort
+    destinations (gaussians, adam_state, features_rest, adam_rest).
+
+    Sized (bytes) to the LARGEST single resource routed through it. The scatter
+    kernels are single-output, so only ONE resource occupies the arena at a
+    time: scatter resource -> arena, copy arena -> live buffer, reuse. ``buffer``
+    is a uint NDBuffer; ``storage`` re-types cleanly to any element type at bind
+    (a raw VkBuffer carries no element type — the shader param supplies it),
+    verified for Gaussian3D / AdamState / uint. ``capacity_bytes`` is the usable
+    byte span (>= every routed resource's byte size)."""
+    buffer: spy.NDBuffer
+    capacity_bytes: int
+
+    @property
+    def storage(self):
+        """Bind target for a scatter kernel's ``*_out`` parameter."""
+        return self.buffer.storage
+
+    def copy_back(self, encoder, dst: spy.NDBuffer, nbytes: int) -> None:
+        """Copy the just-scattered ``nbytes`` from the arena into the live
+        buffer ``dst`` (byte-for-byte; commits the compaction/re-sort for that
+        resource). sgl auto-inserts the scatter->copy dependency barrier, and
+        the following scatter->arena reuse is likewise auto-synchronized."""
+        assert nbytes <= self.capacity_bytes, (
+            f"scratch arena too small: need {nbytes}, have {self.capacity_bytes}")
+        encoder.copy_buffer(dst.storage, 0, self.buffer.storage, 0, nbytes)
+
+
+@dataclass
 class ScanResources:
     work: spy.NDBuffer | None
     block_sums: spy.NDBuffer
@@ -130,28 +160,21 @@ class ScanResources:
 class DensificationResources:
     grad_mean_2d_mag: spy.NDBuffer
     visibility_count: spy.NDBuffer
-    primitive_scratch: spy.NDBuffer
-    adam_scratch: spy.NDBuffer
+    # Shared scratch arena for compaction / Morton re-sort. One raw buffer sized
+    # (bytes) to the LARGEST single resource that routes through it (adam_rest at
+    # sh_degree>0, else adam_state), re-typed per resource at bind time (see
+    # ScratchArena / _make_labeled_ndbuffer). Replaces the former dedicated
+    # primitive_scratch/adam_scratch/features_rest_scratch/adam_rest_scratch:
+    # the scatter kernels are split into single-output variants that scatter one
+    # resource into this arena, after which the caller copies the arena back into
+    # the live buffer, then reuses the arena for the next resource. Saves ~2.4 GB
+    # at max_splats=10M, sh_degree=3 (was 2x each of those four buffers).
+    scratch_arena: "ScratchArena"
     actions: spy.NDBuffer
     valid_mask: spy.NDBuffer
     pre_count: spy.NDBuffer
     post_count: spy.NDBuffer
     dispatch_args: spy.NDBuffer
-
-    def commit_compaction(
-        self,
-        primitive: PrimitiveStorage,
-        adam: AdamResources,
-        eta: "EtaResources | None" = None,
-        sh: "SphericalHarmonicsResources | None" = None,
-    ) -> None:
-        primitive.values, self.primitive_scratch = \
-            self.primitive_scratch, primitive.values
-        adam.state, self.adam_scratch = self.adam_scratch, adam.state
-        if eta is not None:
-            eta.swap()
-        if sh is not None:
-            sh.swap()
 
 
 @dataclass
@@ -189,16 +212,12 @@ class SphericalHarmonicsResources:
     rest_floats: int
     feat_uints: int
     features_rest: spy.NDBuffer
-    features_rest_scratch: spy.NDBuffer
     features_rest_grad: spy.NDBuffer
     adam_rest: spy.NDBuffer
-    adam_rest_scratch: spy.NDBuffer
-
-    def swap(self) -> None:
-        self.features_rest, self.features_rest_scratch = \
-            self.features_rest_scratch, self.features_rest
-        self.adam_rest, self.adam_rest_scratch = \
-            self.adam_rest_scratch, self.adam_rest
+    # features_rest / adam_rest are compacted + Morton-permuted via the shared
+    # ScratchArena (single-output scatter -> arena -> copy back), so no dedicated
+    # scratch buffers here anymore. features_rest_grad is per-iter gradient
+    # accumulation, untouched by compaction.
 
 
 @dataclass
@@ -406,9 +425,8 @@ class GaussianBuffers:
         lambda self: self._require_densification().grad_mean_2d_mag)
     visibility_count_accum = property(
         lambda self: self._require_densification().visibility_count)
-    gaussians_scratch = property(
-        lambda self: self._require_densification().primitive_scratch)
-    adam_state_scratch = property(lambda self: self._require_densification().adam_scratch)
+    scratch_arena = property(
+        lambda self: self._require_densification().scratch_arena)
     action_buffer = property(lambda self: self._require_densification().actions)
     valid_mask_buffer = property(lambda self: self._require_densification().valid_mask)
     densify_pre_count = property(lambda self: self._require_densification().pre_count)
@@ -457,23 +475,11 @@ class GaussianBuffers:
 
     def swap_eta(self) -> None:
         """Swap the eta primary<->scratch references after an eta-carrying
-        scatter, mirroring the gaussians/adam_state swap. The just-written
-        scratch becomes the live buffer set."""
+        scatter. Eta keeps its own dedicated scratch (it is small, 0.22 GB at
+        10M) and uses the pointer-swap idiom; gaussians / adam / SH instead
+        route through the shared ScratchArena and commit via arena->live copy,
+        so they no longer participate in a swap."""
         self._require_eta().swap()
-
-    def swap_primitive_storage(self, *, carry_eta: bool = False,
-                               carry_sh: bool = False) -> None:
-        """Commit a completed scatter/permutation as the new live storage.
-
-        Call only after the command buffer that wrote the scratch resources was
-        submitted successfully. Keeping Gaussian values, Adam moments, and
-        optional eta / SH accumulators in one operation prevents partial
-        ownership transitions.
-        """
-        eta = self._require_eta() if carry_eta else None
-        sh = self._require_sh() if carry_sh else None
-        self._require_densification().commit_compaction(
-            self.primitive, self._require_adam(), eta, sh)
 
 #TODO_refactor: same thing here, the _ShaderTypes has a hard contract with the Slang module.
 @dataclass
@@ -549,6 +555,36 @@ class _Alloc:
                 spy.TextureUsage.shader_resource | spy.TextureUsage.unordered_access),
             label=label,
         )
+
+
+def scratch_resource_bytes(types: "_ShaderTypes", max_splats: int,
+                           sh_rest_floats: int) -> int:
+    """Max byte size across every resource that routes through the shared
+    ScratchArena: gaussians, adam_state, and (SH on) features_rest, adam_rest.
+
+    Element strides come from reflection so this can never drift from the shader
+    struct layouts. Byte formulas mirror the live-buffer allocations:
+      features_rest : max_splats * ((sh_rest_floats+1)//2) uints * 4
+      adam_rest     : max_splats * sh_rest_floats * 2 uints  * 4
+    """
+    g_stride = int(types.gaussian.buffer_layout.reflection.stride)
+    a_stride = int(types.adam.buffer_layout.reflection.stride)
+    candidates = [max_splats * g_stride, max_splats * a_stride]
+    if sh_rest_floats > 0:
+        feat_uints = (sh_rest_floats + 1) // 2
+        candidates.append(max_splats * feat_uints * 4)
+        candidates.append(max_splats * sh_rest_floats * 2 * 4)
+    return max(candidates)
+
+
+def _make_scratch_arena(allocator: "_Alloc", types: "_ShaderTypes",
+                        max_splats: int, sh_rest_floats: int) -> ScratchArena:
+    """Allocate the shared scratch arena as a uint buffer big enough (bytes) for
+    the largest routed resource. Rounded up to a whole uint."""
+    nbytes = scratch_resource_bytes(types, max_splats, sh_rest_floats)
+    n_uints = (nbytes + 3) // 4
+    buf = allocator.uint_buffer("densification.scratch_arena", n_uints)
+    return ScratchArena(buffer=buf, capacity_bytes=n_uints * 4)
 
 
 def allocate(
@@ -664,8 +700,12 @@ def allocate(
     buffers.adam = AdamResources(adam_state)
 
     # --- v2 densification scratch + pipeline state ---
-    primitive_scratch = allocator.typed_buffer("densification.primitive_scratch", types.gaussian, max_splats)
-    adam_scratch = allocator.typed_buffer("densification.adam_scratch", types.adam, max_splats)
+    # Shared scratch arena: sized to the largest single resource that routes
+    # through it. Candidates (bytes): gaussians, adam_state, and (SH on)
+    # features_rest, adam_rest. adam_rest dominates at sh_degree>0. See
+    # ScratchArena. Replaces the four former dedicated *_scratch buffers.
+    scratch_arena = _make_scratch_arena(
+        allocator, types, max_splats, sh_rest_floats)
     actions = allocator.uint_buffer("densification.actions", max_splats)
     valid_mask = allocator.uint_buffer("densification.valid_mask", max_splats)
     scan_work = allocator.uint_buffer("scan.work", max_splats)
@@ -682,8 +722,7 @@ def allocate(
     buffers.densification = DensificationResources(
         grad_mean_2d_mag=grad_mean_2d_mag,
         visibility_count=visibility_count,
-        primitive_scratch=primitive_scratch,
-        adam_scratch=adam_scratch,
+        scratch_arena=scratch_arena,
         actions=actions,
         valid_mask=valid_mask,
         pre_count=pre_count,
@@ -718,13 +757,12 @@ def allocate(
             rest_floats=sh_rest_floats,
             feat_uints=feat_uints,
             features_rest=allocator.uint_buffer("sh.features_rest", max_splats * feat_uints),
-            features_rest_scratch=allocator.uint_buffer("sh.features_rest_scratch", max_splats * feat_uints),
             features_rest_grad=allocator.uint_buffer("sh.features_rest_grad", max_splats * feat_uints),
             # Adam moments FLOAT32 (2 uints/coeff: m, v). fp16 underflowed the tiny
             # SH-rest v=g^2(~1e-12) to 0, crushing the step ~1000x. Stride is
-            # 2*sh_rest_floats. Costs ~2x this buffer (~+3.6GB at max_splats=10M).
+            # 2*sh_rest_floats. Compacted/re-sorted via the shared ScratchArena
+            # (no dedicated scratch — this was the ~3.3GB duplicate at 10M).
             adam_rest=allocator.uint_buffer("sh.adam_rest", max_splats * sh_rest_floats * 2),
-            adam_rest_scratch=allocator.uint_buffer("sh.adam_rest_scratch", max_splats * sh_rest_floats * 2),
         )
 
     # --- Cluster-Cull-Compact scratch ---
@@ -861,10 +899,8 @@ def allocate_viewer(
             rest_floats=sh_rest_floats,
             feat_uints=feat_uints,
             features_rest=allocator.uint_buffer("sh.features_rest", max_splats * feat_uints),
-            features_rest_scratch=allocator.uint_buffer("sh.features_rest_scratch", 1),
             features_rest_grad=allocator.uint_buffer("sh.features_rest_grad", 1),
             adam_rest=allocator.uint_buffer("sh.adam_rest", 1),
-            adam_rest_scratch=allocator.uint_buffer("sh.adam_rest_scratch", 1),
         )
 
     buffers.num_gaussians_counter.copy_from_numpy(np.zeros(1, dtype=np.uint32))

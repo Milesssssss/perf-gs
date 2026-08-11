@@ -32,6 +32,12 @@ class SimpleDensifyKernels:
     scatter_compact_eta: Any
     split_and_clone_sh: Any = None
     scatter_compact_sh: Any = None
+    # Single-output compaction variants for the shared-scratch-arena path.
+    scatter_compact_gaussian: Any = None
+    scatter_compact_adam: Any = None
+    scatter_compact_features: Any = None
+    scatter_compact_adam_rest: Any = None
+    scatter_compact_eta_only: Any = None
 
 
 @dataclass(frozen=True)
@@ -40,6 +46,9 @@ class CommandInterface:
     dispatch_indirect: Callable[..., None]
     recording: Callable[..., Any]
     marker_group: Callable[..., Any]
+    # Records an arena->live byte copy into the active batch (see
+    # Pipeline.copy_arena_back / ScratchArena.copy_back).
+    copy_arena_back: Callable[..., None] = None
 
 
 class SimpleDensifier:
@@ -163,48 +172,68 @@ class SimpleDensifier:
                 total_buf=self.scan.resources.total,
             )
 
+            # Shared-arena compaction: compact each resource into the arena, then
+            # copy it back into the live buffer (commits in place; no swap).
+            # gaussians + adam always; SH pair when enabled; eta via its
+            # dedicated eta-only kernel + scratch swap (kept small, not arena'd).
+            arena = resources.scratch_arena
+            commands.dispatch(
+                kernels.scatter_compact_gaussian, "scatter_compact_gaussian",
+                thread_count=[self.max_primitives, 1, 1],
+                gaussians_in=primitive.values.storage,
+                valid_mask=resources.valid_mask.storage,
+                scan=self.scan.resources.work.storage,
+                gaussians_out=arena.storage,
+                max_splats=self.max_primitives,
+            )
+            commands.copy_arena_back(arena, primitive.values, primitive.values.storage.size)
+            commands.dispatch(
+                kernels.scatter_compact_adam, "scatter_compact_adam",
+                thread_count=[self.max_primitives, 1, 1],
+                adam_state_in=adam.state.storage,
+                valid_mask=resources.valid_mask.storage,
+                scan=self.scan.resources.work.storage,
+                adam_state_out=arena.storage,
+                max_splats=self.max_primitives,
+            )
+            commands.copy_arena_back(arena, adam.state, adam.state.storage.size)
+
             if carry_eta:
                 commands.dispatch(
-                    kernels.scatter_compact_eta, "scatter_compact_eta",
+                    kernels.scatter_compact_eta_only, "scatter_compact_eta_only",
                     thread_count=[self.max_primitives, 1, 1],
-                    gaussians_in=primitive.values.storage,
-                    adam_state_in=adam.state.storage,
                     valid_mask=resources.valid_mask.storage,
                     scan=self.scan.resources.work.storage,
                     action=resources.actions.storage,
                     pre_count_buf=resources.pre_count.storage,
                     **self.eta.scatter_kwargs(),
-                    gaussians_out=resources.primitive_scratch.storage,
-                    adam_state_out=resources.adam_scratch.storage,
-                    max_splats=self.max_primitives,
-                )
-            else:
-                commands.dispatch(
-                    kernels.scatter_compact, "scatter_compact",
-                    thread_count=[self.max_primitives, 1, 1],
-                    gaussians_in=primitive.values.storage,
-                    adam_state_in=adam.state.storage,
-                    valid_mask=resources.valid_mask.storage,
-                    scan=self.scan.resources.work.storage,
-                    gaussians_out=resources.primitive_scratch.storage,
-                    adam_state_out=resources.adam_scratch.storage,
                     max_splats=self.max_primitives,
                 )
 
             # SH: carry features_rest + its Adam moments through the same compaction.
             if self.sh is not None:
                 commands.dispatch(
-                    kernels.scatter_compact_sh, "scatter_compact_sh",
+                    kernels.scatter_compact_features, "scatter_compact_features",
                     thread_count=[self.max_primitives, 1, 1],
                     features_rest_in=self.sh.features_rest.storage,
-                    adam_rest_in=self.sh.adam_rest.storage,
                     valid_mask=resources.valid_mask.storage,
                     scan=self.scan.resources.work.storage,
-                    features_rest_out=self.sh.features_rest_scratch.storage,
-                    adam_rest_out=self.sh.adam_rest_scratch.storage,
+                    features_rest_out=arena.storage,
                     rest_floats=self.sh.rest_floats,
                     max_splats=self.max_primitives,
                 )
+                commands.copy_arena_back(arena, self.sh.features_rest, self.sh.features_rest.storage.size)
+                commands.dispatch(
+                    kernels.scatter_compact_adam_rest, "scatter_compact_adam_rest",
+                    thread_count=[self.max_primitives, 1, 1],
+                    adam_rest_in=self.sh.adam_rest.storage,
+                    valid_mask=resources.valid_mask.storage,
+                    scan=self.scan.resources.work.storage,
+                    adam_rest_out=arena.storage,
+                    rest_floats=self.sh.rest_floats,
+                    max_splats=self.max_primitives,
+                )
+                commands.copy_arena_back(arena, self.sh.adam_rest, self.sh.adam_rest.storage.size)
 
             commands.dispatch(
                 kernels.snapshot_count, "densify_snapshot",
@@ -212,8 +241,9 @@ class SimpleDensifier:
                 src=self.scan.resources.total.storage,
                 dst=primitive.active_count.storage,
             )
-            commit_eta = self.eta if carry_eta else None
-            recording.after_submit(
-                lambda: resources.commit_compaction(primitive, adam, commit_eta, self.sh))
+            # Only eta still uses the pointer-swap commit (its scratch is kept);
+            # gaussians / adam / SH already committed in place via copy-back.
+            if carry_eta:
+                recording.after_submit(lambda: self.eta.swap())
 
         return {"pre_count": None, "post_split_count": None, "final_count": None}

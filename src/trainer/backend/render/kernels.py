@@ -71,6 +71,12 @@ KERNEL_SPECS: tuple[tuple[str, str, str], ...] = (
     ("scatter_compact",      "densify/scatter_compact.slang",                  "scatterCompact"),
     ("scatter_compact_eta",  "densify/scatter_compact.slang",                  "scatterCompactEta"),
     ("scatter_compact_sh",   "densify/scatter_compact.slang",                  "scatterCompactSH"),
+    # Single-output compaction variants (shared-scratch-arena path).
+    ("scatter_compact_gaussian", "densify/scatter_compact.slang",              "scatterCompactGaussian"),
+    ("scatter_compact_adam",     "densify/scatter_compact.slang",              "scatterCompactAdam"),
+    ("scatter_compact_features", "densify/scatter_compact.slang",              "scatterCompactFeatures"),
+    ("scatter_compact_adam_rest", "densify/scatter_compact.slang",             "scatterCompactAdamRest"),
+    ("scatter_compact_eta_only", "densify/scatter_compact.slang",              "scatterCompactEtaOnly"),
     ("opacity_reset",        "densify/opacity_reset.slang",                    "resetOpacity"),
     ("densify_snapshot",     "densify/densify_dispatch.slang",                 "snapshotCount"),
     ("densify_prepare_args", "densify/densify_dispatch.slang",                 "prepareDensifyArgs"),
@@ -84,6 +90,11 @@ KERNEL_SPECS: tuple[tuple[str, str, str], ...] = (
     ("morton_scatter",       "densify/morton_sort.slang",                      "mortonScatter"),
     ("morton_scatter_eta",   "densify/morton_sort.slang",                      "mortonScatterEta"),
     ("morton_scatter_sh",    "densify/morton_sort.slang",                      "mortonScatterSH"),
+    # Single-output Morton scatter variants (shared-scratch-arena path).
+    ("morton_scatter_gaussian", "densify/morton_sort.slang",                   "mortonScatterGaussian"),
+    ("morton_scatter_adam",     "densify/morton_sort.slang",                   "mortonScatterAdam"),
+    ("morton_scatter_features", "densify/morton_sort.slang",                   "mortonScatterFeatures"),
+    ("morton_scatter_adam_rest", "densify/morton_sort.slang",                  "mortonScatterAdamRest"),
     # single-pass structure-densify decision
     ("decide_actions_structure",           "densify/decide_actions_structure.slang", "decideActionsStructure"),
     # common

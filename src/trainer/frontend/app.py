@@ -1261,9 +1261,9 @@ def create_training_device(args: argparse.Namespace) -> Any:
     # VK_EXT_debug_utils extension is enabled, and sgl enables it only when debug
     # layers are on. Default that on under external capture so the labels set in
     # buffers.allocate() / create_texture actually reach Nsight; None = auto.
-    debug_names = args.nsight_debug_names
+    debug_names = getattr(args, "nsight_debug_names", None)
     if debug_names is None:
-        debug_names = bool(args.capture_external)
+        debug_names = bool(getattr(args, "capture_external", False))
     device = create_device(
         backend=args.backend,
         enable_debug=debug_names,
