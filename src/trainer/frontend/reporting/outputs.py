@@ -78,12 +78,6 @@ class RunArtifacts:
         )
 
     def close_all(self) -> None:
-        """Close every open stream (optional ones only if present).
-
-        Idempotent: safe to call from both the Nsight capture-exit path and the
-        normal teardown. Streams are line-buffered, so no data is lost if a
-        stream was already flushed.
-        """
         for stream in (
             self.log_txt, self.log_json, self.densify_json, self.eval_curve_json, self.psnr_curve_json,
             self.bin_viz_json, self.profile_json

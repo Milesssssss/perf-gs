@@ -129,33 +129,14 @@ class StructureTensorGPU:
         self._d(enc, self.k_blurV, src=self.scratchA, dst=dst,
                 dim=self._dim, sigma=float(sigma), radius=int(radius))
 
-    # --- main entry -------------------------------------------------------
-    def compute(self, image_srgb: np.ndarray) -> np.ndarray:
-        """Aggregated structure tensor S-bar for one image.
-
-        ``image_srgb`` is (H, W, 3) or (H, W, 4) RAW sRGB in [0, 1] (alpha
-        ignored). Returns (H, W, 3) float32 packing (Sxx, Sxy, Syy) — matching
-        the CPU reference's convention exactly. The image resolution must equal
-        the (width, height) this instance was built for."""
-        img = np.asarray(image_srgb, dtype=np.float32)
-        if img.ndim != 3 or img.shape[2] < 3:
-            raise ValueError(f"expected (H, W, >=3) image, got {img.shape}")
-        H, W = img.shape[:2]
-        if (W, H) != (self.width, self.height):
-            raise ValueError(
-                f"image {W}x{H} != instance {self.width}x{self.height}; "
-                "build a StructureTensorGPU per resolution")
-
-        rgba = np.zeros((H, W, 4), dtype=np.float32)
-        rgba[..., :3] = img[..., :3]
-        self.img_tex.copy_from_numpy(np.ascontiguousarray(rgba))
-
-        batch = self.runtime.command_batch("structure_tensor")
-        enc = batch.encoder
-
-        # 1) Base orientation tensor at the finest scale, then normalized by the
+    # --- pass recording (no submit / no host transfer) -------------------
+    def _record_passes(self, enc, src_tex: spy.Texture, dst_tex: spy.Texture) -> None:
+        """Record the full structure-tensor pipeline into ``enc``, reading the
+        sRGB image from ``src_tex`` (rgb in .xyz) and writing S-bar into
+        ``dst_tex``. Pure GPU — no uploads, readbacks, or submits."""
+        # 1) Base orientation tensor at the finest scale, normalized by the
         #    batch-max trace (SADGS _structure_tensor).
-        self._blur(enc, self.img_tex, self.scratchB, self.sigma_base)  # smooth by sigma_base
+        self._blur(enc, src_tex, self.scratchB, self.sigma_base)       # smooth by sigma_base
         self._d(enc, self.k_sobelTensor, smoothed=self.scratchB,
                 tensorOut=self.base_tex, dim=self._dim)
         self._blur(enc, self.base_tex, self.base_tex, 1.0)             # integrate by rho=1
@@ -168,7 +149,7 @@ class StructureTensorGPU:
 
         # 2) Multi-scale aggregation over the DoG bands.
         self._d(enc, self.k_clearAccum, accum=self.accum_tex, dim=self._dim)
-        cur = self.img_tex
+        cur = src_tex
         sigma_accum = 0.0
         for level in range(self.num_levels):
             target_sigma = self.sigma_base ** level
@@ -191,9 +172,43 @@ class StructureTensorGPU:
             cur = nxt
             sigma_accum = target_sigma
 
-        self._d(enc, self.k_finalize, accum=self.accum_tex, fieldOut=self.out_tex,
+        self._d(enc, self.k_finalize, accum=self.accum_tex, fieldOut=dst_tex,
                 dim=self._dim, min_energy=float(MIN_ENERGY))
 
+    # --- all-GPU entry: record into a caller batch, write to dst_tex ------
+    def record_into(self, enc, src_tex: spy.Texture, dst_tex: spy.Texture) -> None:
+        """Record the pipeline into an EXTERNAL encoder/batch, GPU src -> GPU dst.
+        No submit, no host transfer — the caller batches many views into one
+        submission and syncs once. This is the fast scene-build path (avoids the
+        per-image upload + wait_for_idle + readback + re-upload round-trip)."""
+        self._record_passes(enc, src_tex, dst_tex)
+
+    # --- main entry (parity/oracle: uploads + reads back one image) -------
+    def compute(self, image_srgb: np.ndarray) -> np.ndarray:
+        """Aggregated structure tensor S-bar for one image.
+
+        ``image_srgb`` is (H, W, 3) or (H, W, 4) RAW sRGB in [0, 1] (alpha
+        ignored). Returns (H, W, 3) float32 packing (Sxx, Sxy, Syy) — matching
+        the CPU reference's convention exactly. The image resolution must equal
+        the (width, height) this instance was built for.
+
+        This variant uploads + reads back one image (used by the parity tests).
+        For a whole scene prefer :meth:`record_into` from GPU target textures."""
+        img = np.asarray(image_srgb, dtype=np.float32)
+        if img.ndim != 3 or img.shape[2] < 3:
+            raise ValueError(f"expected (H, W, >=3) image, got {img.shape}")
+        H, W = img.shape[:2]
+        if (W, H) != (self.width, self.height):
+            raise ValueError(
+                f"image {W}x{H} != instance {self.width}x{self.height}; "
+                "build a StructureTensorGPU per resolution")
+
+        rgba = np.zeros((H, W, 4), dtype=np.float32)
+        rgba[..., :3] = img[..., :3]
+        self.img_tex.copy_from_numpy(np.ascontiguousarray(rgba))
+
+        batch = self.runtime.command_batch("structure_tensor")
+        self._record_passes(batch.encoder, self.img_tex, self.out_tex)
         self.runtime.submit(batch)
         self.runtime.wait_for_idle()
 

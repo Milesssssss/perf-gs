@@ -139,6 +139,7 @@ class ViewerSession:
         try:
             thread = self._viewer._thread
             if thread is not None:
+                # We just wait until the user closes/kills the window 
                 thread.join()
         except KeyboardInterrupt:
             self._viewer.stop()

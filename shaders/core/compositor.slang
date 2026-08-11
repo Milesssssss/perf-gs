@@ -56,8 +56,7 @@ struct Compositor
 #else
         if (hardness == 1.0)
         {
-            // alpha-over: weight'=1, transmittance'/transmittance = -1/(1-a).
-            // Exact 3DGS backward (bit-identical to the previous hardcode).
+            // alpha-over: weight'=1, transmittance'/transmittance = -1/(1-a)
             float oneMinusA = 1.0 - a;
             return dLdc * T_i - dLdCbehind / oneMinusA + dL_dA * (T_final / oneMinusA);
         }

@@ -412,7 +412,8 @@ class TrainingPipeline:
         too large to host-fill at a big --max-splats). All fp16-packed uint32."""
         sh = self.buffers.sh
         feat_count = self.max_splats * sh.feat_uints
-        adam_count = self.max_splats * sh.rest_floats
+        # adam_rest is float32 (2 uints/coeff: m, v) -> 2*rest_floats uints.
+        adam_count = self.max_splats * sh.rest_floats * 2
         self._dispatch(self.k_clear_uint_buffer, "clear_features_rest",
             thread_count=[feat_count, 1, 1],
             buffer=sh.features_rest.storage, count=feat_count)

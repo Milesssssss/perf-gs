@@ -150,7 +150,13 @@ void adamStep(
 #include "generated/sh_types.slang"
 #include "../common/half_pack.slang"
 
-static const float SH_V_FLOOR = 1e-6;
+// SH-rest Adam v-floor. Moments are FLOAT32 (see below): the post-inv_pixels
+// SH-rest gradient is tiny (~1e-6), so v = g^2 ~ 1e-12 UNDERFLOWED fp16 to 0, and
+// a 1e-6 floor then crushed the Adam step ~1000x (measured: SH3 == SH0; float32
+// moments give +1.15 dB deg0->deg3). Keep inv_pixels (step normalization /
+// resolution-independence, same as the main params) and just store the moments
+// in float32 so the small v is representable. Floor only guards a literal zero.
+static const float SH_V_FLOOR = 1e-15;
 
 [shader("compute")]
 [numthreads(256, 1, 1)]
@@ -166,7 +172,8 @@ void adamStepRest(
     uniform float bias_correction2,
     uniform float pixels_per_step,
     uniform uint rest_floats,
-    uniform uint active_rest_floats)
+    uniform uint active_rest_floats,
+    uniform uint max_splats)
 {
     uint idx = dtid.x;
     if (idx >= num_gaussians_counter[0]) return;
@@ -176,7 +183,6 @@ void adamStepRest(
     uint active = min(active_rest_floats, rest_floats);
     uint fu = halfFeatUints(active);     // only the active coeff uints
     uint pbase = idx * halfFeatUints(rest_floats);  // packed features stride
-    uint abase = idx * rest_floats;      // adam uints (one (m,v) each)
 
     for (uint u = 0u; u < fu; ++u)
     {
@@ -192,11 +198,13 @@ void adamStepRest(
             if (s >= active) break;
             float g = ((lane == 0u) ? g_pair.x : g_pair.y) * inv_pixels;
             if (isnan(g) || isinf(g)) continue;
-            float2 mv = unpackHalf2x(adam_rest[abase + s]);
-            float m = mv.x, v = mv.y;
-            p_out[lane] = adam_scalar((lane == 0u) ? p_pair.x : p_pair.y, g, m, v,
-                                      lr_rest, bias_correction1, bias_correction2);
-            adam_rest[abase + s] = packHalf2x(m, max(v, SH_V_FLOOR));
+            uint m_addr = (s * 2u) * max_splats + idx;
+            uint v_addr = (s * 2u + 1u) * max_splats + idx;
+            float m = asfloat(adam_rest[m_addr]);
+            float v = asfloat(adam_rest[v_addr]);
+            p_out[lane] = adam_scalar((lane == 0u) ? p_pair.x : p_pair.y, g, m, v, lr_rest, bias_correction1, bias_correction2);
+            adam_rest[m_addr] = asuint(m);
+            adam_rest[v_addr] = asuint(max(v, SH_V_FLOOR));
         }
         features_rest[pbase + u] = packHalf2x(p_out[0], p_out[1]);
     }

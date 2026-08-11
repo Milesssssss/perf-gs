@@ -22,6 +22,8 @@ from dataclasses import dataclass, field
 
 import numpy as np
 import slangpy as spy
+from slangpy.core.native import NativeNDBuffer, NativeNDBufferDesc, Shape
+from slangpy.reflection.lookup import resolve_element_type, resolve_program_layout
 
 # Authoritative host<->shader layout + execution constants (single source of
 # truth; the same schema generates the Slang side). See trainer/contracts.py.
@@ -58,6 +60,50 @@ DEFAULT_MAX_SORT_PAIRS = 12_000_000
 def _ceil_div(a: int, b: int) -> int:
     """Ceiling division ``ceil(a / b)`` for non-negative ints."""
     return (a + b - 1) // b
+
+
+_DEFAULT_BUFFER_USAGE = (
+    spy.BufferUsage.shader_resource | spy.BufferUsage.unordered_access)
+
+
+def _make_labeled_ndbuffer(device, dtype, shape, label, usage):
+    """Create an NDBuffer whose underlying VkBuffer carries a debug ``label``.
+
+    ``spy.NDBuffer`` has no label parameter and its VkBuffer is created
+    internally, so we reproduce its construction (resolve the element type,
+    build the same NativeNDBufferDesc) but pass the storage buffer in
+    pre-created WITH a label. Vulkan records a resource's ``VK_EXT_debug_utils``
+    object name only AT CREATION — mutating ``storage.desc.label`` afterwards
+    does not rename the live VkBuffer — so the label must be set here for
+    Nsight's Memory / Object Browser views to show it (textures already do this
+    via ``create_texture(label=)``). No extra allocation vs. a plain NDBuffer:
+    exactly one VkBuffer of the same size is created.
+
+    Best-effort: if any of slangpy's internal reflection/native API shifts
+    across versions, fall back to an unlabeled ``spy.NDBuffer`` so allocation
+    can never break just because naming failed.
+    """
+    try:
+        program_layout = resolve_program_layout(device, dtype, None)
+        element_type = resolve_element_type(program_layout, dtype)
+        element_count = 1
+        for dim in shape:
+            element_count *= dim
+        shp = Shape(tuple(shape))
+        desc = NativeNDBufferDesc()
+        desc.usage = usage
+        desc.memory_type = spy.MemoryType.device_local
+        desc.shape = shp
+        desc.strides = shp.calc_contiguous_strides()
+        desc.dtype = element_type
+        desc.element_layout = element_type.buffer_layout.reflection
+        size = element_count * element_type.buffer_layout.reflection.stride
+        buffer = device.create_buffer(
+            size=size, usage=usage,
+            memory_type=spy.MemoryType.device_local, label=label)
+        return NativeNDBuffer(device, desc, buffer)
+    except Exception:
+        return spy.NDBuffer(device=device, dtype=dtype, shape=shape, usage=usage)
 
 
 @dataclass
@@ -471,26 +517,26 @@ class _Alloc:
     width: int
     height: int
 
-    def typed_buffer(self, dtype, *shape) -> spy.NDBuffer:
-        return spy.NDBuffer(device=self.device, dtype=dtype, shape=shape)
+    def typed_buffer(self, label: str, dtype, *shape) -> spy.NDBuffer:
+        # ``label`` names the VkBuffer for Nsight's Memory view; see
+        # _make_labeled_ndbuffer. Pass the destination field's name.
+        return _make_labeled_ndbuffer(
+            self.device, dtype, shape, label, _DEFAULT_BUFFER_USAGE)
 
-    def uint_buffer(self, *shape) -> spy.NDBuffer:
-        return self.typed_buffer("uint", *shape)
+    def uint_buffer(self, label: str, *shape) -> spy.NDBuffer:
+        return self.typed_buffer(label, "uint", *shape)
 
-    def i64_buffer(self, *shape) -> spy.NDBuffer:
-        return self.typed_buffer("int64_t", *shape)
+    def i64_buffer(self, label: str, *shape) -> spy.NDBuffer:
+        return self.typed_buffer(label, "int64_t", *shape)
 
-    def indirect_buffer(self) -> spy.NDBuffer:
+    def indirect_buffer(self, label: str) -> spy.NDBuffer:
         # Indirect-arg buffers need BufferUsage.indirect_argument in addition
         # to shader_resource | unordered_access (the NDBuffer default) so the
         # kernel can WRITE the args AND the driver can READ them as dispatch
         # args (uint[3] = groups_x, 1, 1).
-        return spy.NDBuffer(
-            device=self.device, dtype="uint", shape=(3,),
-            usage=(spy.BufferUsage.shader_resource
-                   | spy.BufferUsage.unordered_access
-                   | spy.BufferUsage.indirect_argument),
-        )
+        return _make_labeled_ndbuffer(
+            self.device, "uint", (3,), label,
+            _DEFAULT_BUFFER_USAGE | spy.BufferUsage.indirect_argument)
 
     def tex(self, fmt: spy.Format, label: str,
             usage: spy.TextureUsage | None = None) -> spy.Texture:
@@ -553,42 +599,42 @@ def allocate(
     )
 
     # --- always-live gaussian state ---
-    primitive_values = allocator.typed_buffer(types.gaussian, max_splats)
-    active_count = allocator.uint_buffer(1)
+    primitive_values = allocator.typed_buffer("primitive.values", types.gaussian, max_splats)
+    active_count = allocator.uint_buffer("primitive.active_count", 1)
 
     # --- per-frame forward scratch / output ---
-    buffers.projected_2d = allocator.typed_buffer(types.projected, max_splats)
+    buffers.projected_2d = allocator.typed_buffer("projected_2d", types.projected, max_splats)
     # Compact per-gaussian blend gather record (mean/cov2d/opacity/sh0), packed
     # by bin_count and consumed by the blend backward. GPU-internal scratch.
-    buffers.blend_data = allocator.typed_buffer(types.blend, max_splats)
+    buffers.blend_data = allocator.typed_buffer("blend_data", types.blend, max_splats)
 
     # v2.x uncapped-binning resources.
-    buffers.tile_count_per_gaussian = allocator.uint_buffer(max_splats)
-    buffers.tile_offset_per_gaussian = allocator.uint_buffer(max_splats)
-    buffers.sort_keys_lo_a = allocator.uint_buffer(max_sort_pairs)
-    buffers.sort_keys_hi_a = allocator.uint_buffer(max_sort_pairs)
-    buffers.sort_values_a = allocator.uint_buffer(max_sort_pairs)
-    buffers.sort_keys_lo_b = allocator.uint_buffer(max_sort_pairs)
-    buffers.sort_keys_hi_b = allocator.uint_buffer(max_sort_pairs)
-    buffers.sort_values_b = allocator.uint_buffer(max_sort_pairs)
-    buffers.radix_global_hist = allocator.uint_buffer(RADIX_GLOBAL_HIST_SIZE)
-    buffers.radix_pass_hist = allocator.uint_buffer(256 * max_blocks)
-    buffers.radix_dispatch_args = allocator.indirect_buffer()
-    buffers.tile_start = allocator.uint_buffer(num_tiles)
-    buffers.tile_end = allocator.uint_buffer(num_tiles)
+    buffers.tile_count_per_gaussian = allocator.uint_buffer("tile_count_per_gaussian", max_splats)
+    buffers.tile_offset_per_gaussian = allocator.uint_buffer("tile_offset_per_gaussian", max_splats)
+    buffers.sort_keys_lo_a = allocator.uint_buffer("sort_keys_lo_a", max_sort_pairs)
+    buffers.sort_keys_hi_a = allocator.uint_buffer("sort_keys_hi_a", max_sort_pairs)
+    buffers.sort_values_a = allocator.uint_buffer("sort_values_a", max_sort_pairs)
+    buffers.sort_keys_lo_b = allocator.uint_buffer("sort_keys_lo_b", max_sort_pairs)
+    buffers.sort_keys_hi_b = allocator.uint_buffer("sort_keys_hi_b", max_sort_pairs)
+    buffers.sort_values_b = allocator.uint_buffer("sort_values_b", max_sort_pairs)
+    buffers.radix_global_hist = allocator.uint_buffer("radix_global_hist", RADIX_GLOBAL_HIST_SIZE)
+    buffers.radix_pass_hist = allocator.uint_buffer("radix_pass_hist", 256 * max_blocks)
+    buffers.radix_dispatch_args = allocator.indirect_buffer("radix_dispatch_args")
+    buffers.tile_start = allocator.uint_buffer("tile_start", num_tiles)
+    buffers.tile_end = allocator.uint_buffer("tile_end", num_tiles)
 
-    buffers.bucket_count = allocator.uint_buffer(num_tiles)
-    buffers.bucket_offsets = allocator.uint_buffer(num_tiles)
-    buffers.bucket_offset_total = allocator.uint_buffer(1)
+    buffers.bucket_count = allocator.uint_buffer("bucket_count", num_tiles)
+    buffers.bucket_offsets = allocator.uint_buffer("bucket_offsets", num_tiles)
+    buffers.bucket_offset_total = allocator.uint_buffer("bucket_offset_total", 1)
     buffers.raster_checkpoints = allocator.typed_buffer(
-        "uint2", max_buckets * TILE_AREA)
+        "raster_checkpoints", "uint2", max_buckets * TILE_AREA)
 
     # Live-bucket compaction (flat warp-per-bucket backward).
-    buffers.live_bucket_count = allocator.uint_buffer(num_tiles)
-    buffers.live_bucket_offsets = allocator.uint_buffer(num_tiles)
-    buffers.live_bucket_total = allocator.uint_buffer(1)
-    buffers.live_buckets = allocator.typed_buffer("uint2", max_buckets)
-    buffers.bucket_dispatch_args = allocator.indirect_buffer()
+    buffers.live_bucket_count = allocator.uint_buffer("live_bucket_count", num_tiles)
+    buffers.live_bucket_offsets = allocator.uint_buffer("live_bucket_offsets", num_tiles)
+    buffers.live_bucket_total = allocator.uint_buffer("live_bucket_total", 1)
+    buffers.live_buckets = allocator.typed_buffer("live_buckets", "uint2", max_buckets)
+    buffers.bucket_dispatch_args = allocator.indirect_buffer("bucket_dispatch_args")
 
     buffers.output_image = allocator.tex(spy.Format.rgba32_float, "output_image")
     buffers.gaussian_count_per_pixel = allocator.tex(spy.Format.r32_uint, "gaussian_count_per_pixel")
@@ -600,39 +646,39 @@ def allocate(
     buffers.ssim_m2 = allocator.tex(spy.Format.rgba32_float, "ssim_m2")
     buffers.ssim_m3 = allocator.tex(spy.Format.rgba32_float, "ssim_m3")
 
-    buffers.grad_buffers = {name: allocator.i64_buffer(max_splats) for name in GRAD_SCALAR_COMPONENTS}
-    buffers.grad_2d_seed_buffers = {name: allocator.i64_buffer(max_splats) for name in GRAD_2D_SEED_COMPONENTS}
+    buffers.grad_buffers = {name: allocator.i64_buffer(f"grad_buffers[{name}]", max_splats) for name in GRAD_SCALAR_COMPONENTS}
+    buffers.grad_2d_seed_buffers = {name: allocator.i64_buffer(f"grad_2d_seed_buffers[{name}]", max_splats) for name in GRAD_2D_SEED_COMPONENTS}
 
-    adam_state = allocator.typed_buffer(types.adam, max_splats)
-    buffers.training_step = allocator.uint_buffer(1)
+    adam_state = allocator.typed_buffer("adam.state", types.adam, max_splats)
+    buffers.training_step = allocator.uint_buffer("training_step", 1)
 
     # --- v2 densification tracking ---
-    grad_mean_2d_mag = allocator.i64_buffer(max_splats)
-    visibility_count = allocator.uint_buffer(max_splats)
-    buffers.grad_2d_x_iter = allocator.i64_buffer(max_splats)
-    buffers.grad_2d_y_iter = allocator.i64_buffer(max_splats)
+    grad_mean_2d_mag = allocator.i64_buffer("densification.grad_mean_2d_mag", max_splats)
+    visibility_count = allocator.uint_buffer("densification.visibility_count", max_splats)
+    buffers.grad_2d_x_iter = allocator.i64_buffer("grad_2d_x_iter", max_splats)
+    buffers.grad_2d_y_iter = allocator.i64_buffer("grad_2d_y_iter", max_splats)
 
     # --- Mip-Splatting 3D smoothing filter (per-gaussian scalar) ---
-    filter_3d = allocator.typed_buffer("float", max_splats)
+    filter_3d = allocator.typed_buffer("primitive.filter_3d", "float", max_splats)
     buffers.primitive = PrimitiveStorage(primitive_values, active_count, filter_3d)
     buffers.adam = AdamResources(adam_state)
 
     # --- v2 densification scratch + pipeline state ---
-    primitive_scratch = allocator.typed_buffer(types.gaussian, max_splats)
-    adam_scratch = allocator.typed_buffer(types.adam, max_splats)
-    actions = allocator.uint_buffer(max_splats)
-    valid_mask = allocator.uint_buffer(max_splats)
-    scan_work = allocator.uint_buffer(max_splats)
-    scan_block_sums = allocator.uint_buffer(num_l1_blocks)
-    scan_block_sums_l2 = allocator.uint_buffer(num_l2_blocks)
-    scan_total = allocator.uint_buffer(1)
+    primitive_scratch = allocator.typed_buffer("densification.primitive_scratch", types.gaussian, max_splats)
+    adam_scratch = allocator.typed_buffer("densification.adam_scratch", types.adam, max_splats)
+    actions = allocator.uint_buffer("densification.actions", max_splats)
+    valid_mask = allocator.uint_buffer("densification.valid_mask", max_splats)
+    scan_work = allocator.uint_buffer("scan.work", max_splats)
+    scan_block_sums = allocator.uint_buffer("scan.block_sums", num_l1_blocks)
+    scan_block_sums_l2 = allocator.uint_buffer("scan.block_sums_l2", num_l2_blocks)
+    scan_total = allocator.uint_buffer("scan.total", 1)
     buffers.scan = ScanResources(
         scan_work, scan_block_sums, scan_block_sums_l2, scan_total)
 
     # --- densify_simple wait-free dispatch state ---
-    pre_count = allocator.uint_buffer(1)
-    post_count = allocator.uint_buffer(1)
-    densify_dispatch_args = allocator.indirect_buffer()
+    pre_count = allocator.uint_buffer("densification.pre_count", 1)
+    post_count = allocator.uint_buffer("densification.post_count", 1)
+    densify_dispatch_args = allocator.indirect_buffer("densification.dispatch_args")
     buffers.densification = DensificationResources(
         grad_mean_2d_mag=grad_mean_2d_mag,
         visibility_count=visibility_count,
@@ -645,21 +691,21 @@ def allocate(
         dispatch_args=densify_dispatch_args,
     )
     # Adam indirect-dispatch args (populated every iter from num_gaussians_counter).
-    buffers.adam_dispatch_args = allocator.indirect_buffer()
+    buffers.adam_dispatch_args = allocator.indirect_buffer("adam_dispatch_args")
 
     # --- structure-aware densification (SAD-GS) ---
     buffers.eta = EtaResources(
-        components={name: allocator.uint_buffer(max_splats) for name in ETA_ACCUM_COMPONENTS},
-        n_total=allocator.uint_buffer(max_splats),
+        components={name: allocator.uint_buffer(f"eta.components[{name}]", max_splats) for name in ETA_ACCUM_COMPONENTS},
+        n_total=allocator.uint_buffer("eta.n_total", max_splats),
         scratch_components={
-            name: allocator.uint_buffer(max_splats) for name in ETA_ACCUM_COMPONENTS},
-        scratch_n_total=allocator.uint_buffer(max_splats),
+            name: allocator.uint_buffer(f"eta.scratch_components[{name}]", max_splats) for name in ETA_ACCUM_COMPONENTS},
+        scratch_n_total=allocator.uint_buffer("eta.scratch_n_total", max_splats),
     )
-    buffers.split_factor_x = allocator.uint_buffer(max_splats)
-    buffers.split_factor_y = allocator.uint_buffer(max_splats)
-    buffers.split_factor_z = allocator.uint_buffer(max_splats)
+    buffers.split_factor_x = allocator.uint_buffer("split_factor_x", max_splats)
+    buffers.split_factor_y = allocator.uint_buffer("split_factor_y", max_splats)
+    buffers.split_factor_z = allocator.uint_buffer("split_factor_z", max_splats)
     # Requested-tail-growth counter for the structure densify overbudget warning.
-    buffers.densify_children_sum = allocator.uint_buffer(1)
+    buffers.densify_children_sum = allocator.uint_buffer("densify_children_sum", 1)
 
     # --- optional view-dependent SH rest coefficients ---
     # Allocated only when sh_degree > 0. All SH buffers are fp16-packed into
@@ -671,18 +717,21 @@ def allocate(
         buffers.sh = SphericalHarmonicsResources(
             rest_floats=sh_rest_floats,
             feat_uints=feat_uints,
-            features_rest=allocator.uint_buffer(max_splats * feat_uints),
-            features_rest_scratch=allocator.uint_buffer(max_splats * feat_uints),
-            features_rest_grad=allocator.uint_buffer(max_splats * feat_uints),
-            adam_rest=allocator.uint_buffer(max_splats * sh_rest_floats),
-            adam_rest_scratch=allocator.uint_buffer(max_splats * sh_rest_floats),
+            features_rest=allocator.uint_buffer("sh.features_rest", max_splats * feat_uints),
+            features_rest_scratch=allocator.uint_buffer("sh.features_rest_scratch", max_splats * feat_uints),
+            features_rest_grad=allocator.uint_buffer("sh.features_rest_grad", max_splats * feat_uints),
+            # Adam moments FLOAT32 (2 uints/coeff: m, v). fp16 underflowed the tiny
+            # SH-rest v=g^2(~1e-12) to 0, crushing the step ~1000x. Stride is
+            # 2*sh_rest_floats. Costs ~2x this buffer (~+3.6GB at max_splats=10M).
+            adam_rest=allocator.uint_buffer("sh.adam_rest", max_splats * sh_rest_floats * 2),
+            adam_rest_scratch=allocator.uint_buffer("sh.adam_rest_scratch", max_splats * sh_rest_floats * 2),
         )
 
     # --- Cluster-Cull-Compact scratch ---
     max_clusters = _ceil_div(max_splats, CLUSTER_SIZE)
-    buffers.cluster_aabb_min = allocator.typed_buffer("float4", max_clusters)
-    buffers.cluster_aabb_max = allocator.typed_buffer("float4", max_clusters)
-    buffers.cluster_visible = allocator.uint_buffer(max_clusters)
+    buffers.cluster_aabb_min = allocator.typed_buffer("cluster_aabb_min", "float4", max_clusters)
+    buffers.cluster_aabb_max = allocator.typed_buffer("cluster_aabb_max", "float4", max_clusters)
+    buffers.cluster_visible = allocator.uint_buffer("cluster_visible", max_clusters)
     # Seed cluster_visible = all-ones so bin_count's early-out is a no-op
     # until (and unless) the cluster-cull kernel writes real flags. Lets
     # runs without --cluster-cull skip the two cull dispatches entirely
@@ -738,50 +787,50 @@ def allocate_viewer(
     )
 
     # Gaussian state (blit target from trainer).
-    primitive_values = allocator.typed_buffer(types.gaussian, max_splats)
-    active_count = allocator.uint_buffer(1)
+    primitive_values = allocator.typed_buffer("primitive.values", types.gaussian, max_splats)
+    active_count = allocator.uint_buffer("primitive.active_count", 1)
     # bin_count binds filter_3D unconditionally (see pipeline._run_forward). The
     # viewer never computes the mip 3D filter and renders with mip_enabled=0, so
     # the shader ignores the contents — but the buffer must still exist for the
     # bind. Allocate it (zero cost vs. the sort/scan buffers) so the shared
     # forward path doesn't AttributeError on b.filter_3D.
-    filter_3d = allocator.typed_buffer("float", max_splats)
+    filter_3d = allocator.typed_buffer("primitive.filter_3d", "float", max_splats)
     buffers.primitive = PrimitiveStorage(primitive_values, active_count, filter_3d)
 
     # Forward scratch.
-    buffers.projected_2d = allocator.typed_buffer(types.projected, max_splats)
-    buffers.blend_data = allocator.typed_buffer(types.blend, max_splats)
+    buffers.projected_2d = allocator.typed_buffer("projected_2d", types.projected, max_splats)
+    buffers.blend_data = allocator.typed_buffer("blend_data", types.blend, max_splats)
 
     # Binning.
-    buffers.tile_count_per_gaussian = allocator.uint_buffer(max_splats)
-    buffers.tile_offset_per_gaussian = allocator.uint_buffer(max_splats)
+    buffers.tile_count_per_gaussian = allocator.uint_buffer("tile_count_per_gaussian", max_splats)
+    buffers.tile_offset_per_gaussian = allocator.uint_buffer("tile_offset_per_gaussian", max_splats)
 
     # Sort ping-pong.
-    buffers.sort_keys_lo_a = allocator.uint_buffer(max_sort_pairs)
-    buffers.sort_keys_hi_a = allocator.uint_buffer(max_sort_pairs)
-    buffers.sort_values_a = allocator.uint_buffer(max_sort_pairs)
-    buffers.sort_keys_lo_b = allocator.uint_buffer(max_sort_pairs)
-    buffers.sort_keys_hi_b = allocator.uint_buffer(max_sort_pairs)
-    buffers.sort_values_b = allocator.uint_buffer(max_sort_pairs)
-    buffers.radix_global_hist = allocator.uint_buffer(RADIX_GLOBAL_HIST_SIZE)
-    buffers.radix_pass_hist = allocator.uint_buffer(256 * max_blocks)
-    buffers.radix_dispatch_args = allocator.indirect_buffer()
+    buffers.sort_keys_lo_a = allocator.uint_buffer("sort_keys_lo_a", max_sort_pairs)
+    buffers.sort_keys_hi_a = allocator.uint_buffer("sort_keys_hi_a", max_sort_pairs)
+    buffers.sort_values_a = allocator.uint_buffer("sort_values_a", max_sort_pairs)
+    buffers.sort_keys_lo_b = allocator.uint_buffer("sort_keys_lo_b", max_sort_pairs)
+    buffers.sort_keys_hi_b = allocator.uint_buffer("sort_keys_hi_b", max_sort_pairs)
+    buffers.sort_values_b = allocator.uint_buffer("sort_values_b", max_sort_pairs)
+    buffers.radix_global_hist = allocator.uint_buffer("radix_global_hist", RADIX_GLOBAL_HIST_SIZE)
+    buffers.radix_pass_hist = allocator.uint_buffer("radix_pass_hist", 256 * max_blocks)
+    buffers.radix_dispatch_args = allocator.indirect_buffer("radix_dispatch_args")
 
     # Tile ranges + bucket CSR (used by identify_tile_ranges + bucket_count + forward).
-    buffers.tile_start = allocator.uint_buffer(num_tiles)
-    buffers.tile_end = allocator.uint_buffer(num_tiles)
-    buffers.bucket_count = allocator.uint_buffer(num_tiles)
-    buffers.bucket_offsets = allocator.uint_buffer(num_tiles)
-    buffers.bucket_offset_total = allocator.uint_buffer(1)
+    buffers.tile_start = allocator.uint_buffer("tile_start", num_tiles)
+    buffers.tile_end = allocator.uint_buffer("tile_end", num_tiles)
+    buffers.bucket_count = allocator.uint_buffer("bucket_count", num_tiles)
+    buffers.bucket_offsets = allocator.uint_buffer("bucket_offsets", num_tiles)
+    buffers.bucket_offset_total = allocator.uint_buffer("bucket_offset_total", 1)
     buffers.raster_checkpoints = allocator.typed_buffer(
-        "uint2", max_buckets * TILE_AREA)
+        "raster_checkpoints", "uint2", max_buckets * TILE_AREA)
 
     # Live-bucket compaction (flat warp-per-bucket backward).
-    buffers.live_bucket_count = allocator.uint_buffer(num_tiles)
-    buffers.live_bucket_offsets = allocator.uint_buffer(num_tiles)
-    buffers.live_bucket_total = allocator.uint_buffer(1)
-    buffers.live_buckets = allocator.typed_buffer("uint2", max_buckets)
-    buffers.bucket_dispatch_args = allocator.indirect_buffer()
+    buffers.live_bucket_count = allocator.uint_buffer("live_bucket_count", num_tiles)
+    buffers.live_bucket_offsets = allocator.uint_buffer("live_bucket_offsets", num_tiles)
+    buffers.live_bucket_total = allocator.uint_buffer("live_bucket_total", 1)
+    buffers.live_buckets = allocator.typed_buffer("live_buckets", "uint2", max_buckets)
+    buffers.bucket_dispatch_args = allocator.indirect_buffer("bucket_dispatch_args")
 
     # Render outputs.
     buffers.output_image = allocator.tex(spy.Format.rgba32_float, "output_image")
@@ -790,9 +839,9 @@ def allocate_viewer(
     # Scan scratch (needed for tile-offset scan + bucket-offset scan).
     buffers.scan = ScanResources(
         work=None,
-        block_sums=allocator.uint_buffer(num_l1_blocks),
-        block_sums_l2=allocator.uint_buffer(num_l2_blocks),
-        total=allocator.uint_buffer(1),
+        block_sums=allocator.uint_buffer("scan.block_sums", num_l1_blocks),
+        block_sums_l2=allocator.uint_buffer("scan.block_sums_l2", num_l2_blocks),
+        total=allocator.uint_buffer("scan.total", 1),
     )
 
     # bin_count reads cluster_visible unconditionally. The viewer never
@@ -800,7 +849,7 @@ def allocate_viewer(
     # the trainer's forward), so seed all-ones so the viewer's bin_count
     # skip check is a no-op.
     max_clusters_v = _ceil_div(max_splats, CLUSTER_SIZE)
-    buffers.cluster_visible = allocator.uint_buffer(max_clusters_v)
+    buffers.cluster_visible = allocator.uint_buffer("cluster_visible", max_clusters_v)
     buffers.cluster_visible.copy_from_numpy(
         np.ones(max_clusters_v, dtype=np.uint32))
 
@@ -811,12 +860,13 @@ def allocate_viewer(
         buffers.sh = SphericalHarmonicsResources(
             rest_floats=sh_rest_floats,
             feat_uints=feat_uints,
-            features_rest=allocator.uint_buffer(max_splats * feat_uints),
-            features_rest_scratch=allocator.uint_buffer(1),
-            features_rest_grad=allocator.uint_buffer(1),
-            adam_rest=allocator.uint_buffer(1),
-            adam_rest_scratch=allocator.uint_buffer(1),
+            features_rest=allocator.uint_buffer("sh.features_rest", max_splats * feat_uints),
+            features_rest_scratch=allocator.uint_buffer("sh.features_rest_scratch", 1),
+            features_rest_grad=allocator.uint_buffer("sh.features_rest_grad", 1),
+            adam_rest=allocator.uint_buffer("sh.adam_rest", 1),
+            adam_rest_scratch=allocator.uint_buffer("sh.adam_rest_scratch", 1),
         )
 
     buffers.num_gaussians_counter.copy_from_numpy(np.zeros(1, dtype=np.uint32))
+
     return buffers

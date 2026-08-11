@@ -36,18 +36,30 @@ def _read_features_grad(p: TestPipeline, n: int) -> np.ndarray:
     return buffer_io.unpack_features_rest(packed, n, sh.rest_floats)
 
 
-def _pack_adam_mv(m: np.ndarray, v: np.ndarray) -> np.ndarray:
-    """(N, rest_floats) m/v float -> (N*rest_floats,) uint32, one (m, v)/uint."""
-    mh = m.astype(np.float16).view(np.uint16).astype(np.uint32)
-    vh = v.astype(np.float16).view(np.uint16).astype(np.uint32)
-    return (mh | (vh << 16)).reshape(-1)
+def _pack_adam_mv(m: np.ndarray, v: np.ndarray, max_splats: int) -> np.ndarray:
+    """(N, rest_floats) m/v float -> flat uint32 in adam_rest's SoA float32 layout:
+    word k of gaussian g lives at k*max_splats + g, k in [0, 2*rest_floats)
+    (m at 2s, v at 2s+1). Returns the full max_splats * 2*rest_floats flat array."""
+    N, rf = m.shape
+    flat = np.zeros(max_splats * rf * 2, dtype=np.uint32)
+    m32 = m.astype(np.float32).view(np.uint32)
+    v32 = v.astype(np.float32).view(np.uint32)
+    idx = np.arange(N)
+    for s in range(rf):
+        flat[(2 * s) * max_splats + idx] = m32[:, s]
+        flat[(2 * s + 1) * max_splats + idx] = v32[:, s]
+    return flat
 
 
 def _read_adam_m(p: TestPipeline, n: int) -> np.ndarray:
     rf = p.buffers.sh.rest_floats
-    raw = np.frombuffer(p.buffers.adam_rest_state.to_numpy().tobytes(),
-                        dtype=np.uint32)[: n * rf].reshape(n, rf)
-    return (raw & 0xFFFF).astype(np.uint16).view(np.float16).astype(np.float32)
+    ms = p.max_splats
+    raw = np.frombuffer(p.buffers.adam_rest_state.to_numpy().tobytes(), dtype=np.float32)
+    out = np.empty((n, rf), dtype=np.float32)
+    idx = np.arange(n)
+    for s in range(rf):
+        out[:, s] = raw[(2 * s) * ms + idx]     # m word (SoA)
+    return out
 
 
 def _make_pipeline(backend: str, sh_degree: int, width: int = 48,
@@ -375,7 +387,7 @@ def test_sh_features_rest_survives_morton_sort(backend: str) -> None:
     m = np.zeros((max_splats, rest_floats), np.float32)
     m[:n, 0] = np.arange(n)
     p.buffers.adam_rest_state.copy_from_numpy(
-        _pack_adam_mv(m, np.zeros_like(m)))
+        _pack_adam_mv(m, np.zeros_like(m), p.max_splats))
 
     world_min = means.min(axis=0) - 1.0
     world_max = means.max(axis=0) + 1.0
@@ -446,7 +458,7 @@ def test_sh_densify_clone_inherits_rest(backend: str) -> None:
     # Stamp the parent's rest-Adam non-zero so we can prove the child gets fresh.
     m = np.zeros((64, rest_floats), np.float32)
     m[0] = 7.0
-    p.buffers.adam_rest_state.copy_from_numpy(_pack_adam_mv(m, m))
+    p.buffers.adam_rest_state.copy_from_numpy(_pack_adam_mv(m, m, p.max_splats))
 
     _force_clone_eta(p, 0)
     cfg = StructureConfig(tau_split=0.8, tau_prune=0.8, split_power=0.5,

@@ -132,8 +132,6 @@ class ShaderSpecialization:
 
     @classmethod
     def from_args(cls, args: argparse.Namespace) -> "ShaderSpecialization":
-        # The hardness SCHEDULE only ever ramps UP toward the target and starts
-        # at 1.0, so target <= 1 means hardness == 1 for the whole run.
         return cls(
             backward_pixel_stride=args.backward_pixel_stride,
             hardness_is_one=(float(args.extinction_hardness) <= 1.0),
@@ -254,19 +252,6 @@ class TrainingApplication:
         self._training_runtime.viewer.hold_after_training(self._training_runtime.pipeline)
         self._training_runtime.artifacts.close_all()
 
-        PsNRPlotWriter.write(
-            enabled=self.args.psnr_curve,
-            records=result.psnr_curve,
-            args=self.args,
-            paths=self.paths,
-            run_name=self.run_name,
-            scene=self._sceneContext,
-        )
-
-        if self.args.profile_run:
-            print("[profile-run] finished; skipping final metrics / PLY export.")
-            return
-
         run_post_training(
             pipeline=self._training_runtime.pipeline,
             scene=self._sceneContext.colmapScene,
@@ -281,6 +266,7 @@ class TrainingApplication:
             train_wall_s=result.wall_time_seconds,
             completed_iters=result.iterations,
             t_start=result.started_at,
+            psnr_curve=result.psnr_curve
         )
 
     def _prepare_targets(self) -> None:
@@ -324,6 +310,8 @@ class TrainingApplication:
             scene=self._sceneContext,
             targets=self._targets.srgb,
             densify_mode=self._densify_mode,
+            target_textures=self.target_textures,
+            pipeline=self._pipeline,
         ).load()
 
     def _start_viewer(self, scene: SceneContext) -> None:
@@ -369,7 +357,8 @@ class TrainingApplication:
         self.appearance_schedule = AppearanceSchedule(
             appearanceConfig=AppearanceConfig(
                 sh_degree=self.args.sh_degree,
-                band_interval=self.args.sh_band_interval
+                band_interval=_resolve_sh_band_interval(
+                    self.args.sh_band_interval, self.args.iters, self.args.sh_degree),
             )
         )
 
@@ -909,18 +898,32 @@ class StructureTextureProvider:
 
     def __init__(self, *, args: argparse.Namespace, device: Any,
                  scene: SceneContext, targets: list[np.ndarray],
-                 densify_mode: DensificationMode) -> None:
+                 densify_mode: DensificationMode,
+                 target_textures: list[Any] | None = None,
+                 pipeline: Any = None) -> None:
         self._args = args
         self._device = device
         self._scene = scene
         self._targets = targets
         self._densify_mode = densify_mode
+        # Pre-uploaded GPU target textures (rgba32_float, straight sRGB). When
+        # present, the GPU compute path reads these directly instead of
+        # re-uploading each image from numpy — enabling an all-GPU, no-readback
+        # build.
+        self._target_textures = target_textures
+        self._pipeline = pipeline
 
     def load(self) -> list[Any]:
         if self._densify_mode != DensificationMode.STRUCTURE_AWARE:
             return []
 
         cached_fields = self._load_cache()
+        if cached_fields is None and self._target_textures is not None:
+            gpu = self._create_gpu_computer()
+            if gpu is not None:
+                return self._build_on_gpu(gpu)
+
+        # Fallbacks: disk cache (upload each) or CPU compute (slow).
         gpu_computer = None
         if cached_fields is None:
             gpu_computer = self._create_gpu_computer()
@@ -946,6 +949,44 @@ class StructureTextureProvider:
             print(f"[SAD] computed {self._scene.camera_count} fields on {method} "
                   f"in {time.time() - started:.1f}s", flush=True)
         return textures
+
+    def _build_on_gpu(self, gpu) -> list[Any]:
+        """All-GPU build: create the destination structure textures, then record
+        every view's passes (reading the pre-uploaded target textures) into a
+        single command batch and sync ONCE. No per-image numpy upload/readback —
+        the ~154ms/image round-trip was the readback + re-upload + per-image
+        wait_for_idle, none of which the GPU-only field needs."""
+        n = self._scene.camera_count
+        started = time.time()
+        dst = [self._create_structure_texture(f"structure_tensor_{i}") for i in range(n)]
+
+        # Chunk views across submissions. Recording ALL views into one submit is a
+        # single very long GPU job that trips the OS GPU watchdog (TDR ->
+        # "Vulkan returned a failure"); bounding each submit's duration avoids that
+        # while keeping the all-GPU, no-readback win (still no per-image numpy
+        # round-trip). Views within a chunk share the scratch textures and run in
+        # order (RAW hazards handled by the in-order encoder); chunks are
+        # independent (each writes its own dst textures).
+        CHUNK = 16
+        for base in range(0, n, CHUNK):
+            batch = gpu.runtime.command_batch("structure_tensor_scene")
+            for i in range(base, min(base + CHUNK, n)):
+                gpu.record_into(batch.encoder, self._target_textures[i], dst[i])
+            gpu.runtime.submit(batch)
+            gpu.runtime.wait_for_idle()
+        print(f"[SAD] computed {n} fields on GPU (all-GPU, no readback, "
+              f"chunk={CHUNK}) in {time.time() - started:.1f}s", flush=True)
+        return dst
+
+    def _create_structure_texture(self, label: str) -> Any:
+        import slangpy as spy
+        return self._device.create_texture(
+            type=spy.TextureType.texture_2d,
+            format=spy.Format.rgba32_float,
+            width=self._scene.width, height=self._scene.height,
+            usage=spy.TextureUsage.shader_resource | spy.TextureUsage.unordered_access,
+            label=label,
+        )
 
     def _load_cache(self) -> np.ndarray | None:
         from trainer.backend.densify.structure_analysis import cache_path
@@ -1216,18 +1257,47 @@ def load_scene_context(args: argparse.Namespace) -> SceneContext:
 
 def create_training_device(args: argparse.Namespace) -> Any:
     specialization = ShaderSpecialization.from_args(args)
+    # Vulkan only records debug object names (buffer/texture labels) when the
+    # VK_EXT_debug_utils extension is enabled, and sgl enables it only when debug
+    # layers are on. Default that on under external capture so the labels set in
+    # buffers.allocate() / create_texture actually reach Nsight; None = auto.
+    debug_names = args.nsight_debug_names
+    if debug_names is None:
+        debug_names = bool(args.capture_external)
     device = create_device(
         backend=args.backend,
+        enable_debug=debug_names,
         shader_debug_info=args.profile_run,
         defines=specialization.compiler_defines(),
     )
     if args.profile_run:
         print("[profile-run] shaders compiled with source-level debug info "
               "(SPIR-V NonSemantic.Shader.DebugInfo) for Nsight correlation.")
+    if debug_names:
+        print("[profile-run] Vulkan debug layers ON so resource debug names "
+              "(VK_EXT_debug_utils) reach Nsight's Object Browser / Memory view.")
     return device
 
 def create_gpu_queue_lock(*, viewer_enabled: bool) -> Any:
     return threading.RLock() if viewer_enabled else None
+
+
+def _resolve_sh_band_interval(cli_interval: int, iters: int, sh_degree: int) -> int:
+    """Band-activation interval for the SH schedule.
+
+    ``--sh-band-interval 0`` (the default) => AUTO: scale to the run length so all
+    SH bands activate within the first ~half of training and actually get trained.
+    The classic 3DGS constant (1000) assumes a 30k-iter run (deg-3 by iter 3000,
+    then 27k iters to refine); on a 3k run it leaves degree 3 with ~1 iter of
+    training (measured: SH3 ~= SH0). Auto puts the last band on by iters//2:
+    interval = max(1, iters // (2 * sh_degree)). A positive CLI value overrides
+    (explicit control / reproducing the reference constant).
+    """
+    if cli_interval > 0:
+        return cli_interval
+    if sh_degree <= 0:
+        return max(1, iters)          # unused (schedule returns 0), keep non-zero
+    return max(1, iters // (2 * sh_degree))
 
 def create_pipeline(*, args: argparse.Namespace, device: Any, gpu_lock: Any,
                     scene: SceneContext, lambda_l2: float,
@@ -1256,7 +1326,8 @@ def create_pipeline(*, args: argparse.Namespace, device: Any, gpu_lock: Any,
         ),
         appearance_config=AppearanceConfig(
             sh_degree=args.sh_degree,
-            band_interval=args.sh_band_interval,
+            band_interval=_resolve_sh_band_interval(
+                args.sh_band_interval, args.iters, args.sh_degree),
         ),
         initial_state=initial_state,
     )

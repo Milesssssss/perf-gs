@@ -112,6 +112,7 @@ class AdamOptimizer:
                     pixels_per_step=float(self._width * self._height),
                     rest_floats=rest_floats,
                     active_rest_floats=active_rest,
+                    max_splats=self._max_splats,
                 )
 
     def clear_state(self):

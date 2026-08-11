@@ -279,23 +279,8 @@ class Viewer:
         # Reflects the trainer's state so the panel can show "training" vs
         # "inspecting init". The trainer sets this True once it starts looping.
         self._training_active = False
-        #
-        # NOTE ON OVERFLOW SAFETY: bin_emit now hard-guards its writes against
-        # this cap and prepareDispatchArgs clamps scan_total to it, so a
-        # viewpoint that emits MORE pairs than this simply drops the excess
-        # (a few splats go missing from that one frame) instead of overrunning
-        # the sort buffers into tile_start/tile_end — which previously produced
-        # view-dependent alternating BLACK TILES from certain camera positions
-        # (close-ups where many large splats each cover many tiles). The cap is
-        # therefore a quality/VRAM knob, not a crash boundary.
-        #
-        # The old hard 4M ceiling was too tight for close-ups of multi-million
-        # splat scenes (a near view can put most splats on-screen, each
-        # covering many tiles). Scale generously with max_splats — ~6 pairs per
-        # splat, which comfortably covers realistic close-up coverage — with an
-        # 8M ceiling so a 6.5M-splat scene gets ~8M pairs (~192 MB of sort
-        # buffers) rather than being starved at 4M. Pass an explicit
-        # max_sort_pairs to override for tight-VRAM setups.
+
+        # NOTE can cut out splats
         if max_sort_pairs is None:
             max_sort_pairs = min(5_000_000, max(2_000_000, max_splats * 6))
         self._pipeline = TrainingPipeline(
@@ -305,10 +290,10 @@ class Viewer:
             viewer_only=True,
             appearance_config=AppearanceConfig(sh_degree=sh_degree),
         )
-        # View-dependent color at the trained degree (higher bands are ~0 early
-        # in training, so full-degree evaluation matches the trainer's render).
+
         if sh_degree > 0:
             self._pipeline.set_active_sh_degree(sh_degree)
+
         self._has_data = False
         self._update_pending = False
 
@@ -321,8 +306,6 @@ class Viewer:
         encoder = batch.encoder
         encoder.copy_buffer(dst_g, 0, src_g, 0, src_g.size)
         encoder.copy_buffer(dst_n, 0, src_n, 0, src_n.size)
-        # View-dependent SH: mirror the higher-band coefficients so the viewer
-        # evaluates the same view-dependent color as the trainer.
         if train_pipeline.buffers.sh_enabled and self._pipeline.buffers.sh_enabled:
             src_r = train_pipeline.buffers.features_rest.storage
             dst_r = self._pipeline.buffers.features_rest.storage
@@ -516,7 +499,11 @@ class Viewer:
                 encoder = batch.encoder
                 self._pipeline._encoder = encoder
                 try:
-                    self._pipeline._run_forward(camera)
+                    # Public forward wrapper: supplies the IterationContextualVariables
+                    # (hardness + active SH degree) from the pipeline's stored render
+                    # state. Calling the private _run_forward(camera) directly is stale
+                    # — it now requires the `contextual` arg and threw every frame.
+                    self._pipeline.rasterize(camera)
                 finally:
                     self._pipeline._encoder = None
                 if surface_tex is not None:

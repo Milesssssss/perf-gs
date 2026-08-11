@@ -93,7 +93,7 @@ def build_parser() -> argparse.ArgumentParser:
                     help="alpha loss weight; set > 0 for RGBA targets (e.g. 1.0)")
     parser.add_argument("--lambda-ssim", type=float, default=0.2,
                     help="SSIM loss weight (3DGS default 0.2); 0 = pure L2")
-    parser.add_argument("--max-splats", type=int, default=10_000_000)
+    parser.add_argument("--max-splats", type=int, default=8_000_000)
     parser.add_argument("--z-near-cull", type=float, default=0.01,
                     help="view-space depth floor for bin cull; raise for scenes "
                          "where points can land near a camera pose (e.g. 0.2)")
@@ -236,9 +236,13 @@ def build_parser() -> argparse.ArgumentParser:
                          "original bit-identical path. 1-3 enables higher bands, stored in "
                          "a separate features_rest buffer allocated only when >0, activated "
                          "one band every --sh-band-interval iters (oneupSHdegree).")
-    parser.add_argument("--sh-band-interval", type=int, default=1000,
+    parser.add_argument("--sh-band-interval", type=int, default=0,
                     help="Iterations between activating successive SH bands (classic 3DGS "
-                         "oneupSHdegree). Only used with --sh-degree > 0.")
+                         "oneupSHdegree). Only used with --sh-degree > 0. "
+                         "0 (default) = AUTO: scale to --iters so the last band turns on "
+                         "by iters//2 (interval = iters // (2*sh_degree)); the classic "
+                         "constant 1000 assumes a 30k-iter run and starves the top bands "
+                         "on short runs. Pass a positive value to override.")
     parser.add_argument("--sample-mode", type=str, default="sadgs", choices=["ours", "sadgs"],
                     help="per-iteration train-camera draw. 'ours' (default): "
                          "np.random.default_rng(seed).integers over the name-sorted "
@@ -286,6 +290,19 @@ def build_parser() -> argparse.ArgumentParser:
                          "process exits. Must comfortably exceed the CLI's "
                          "start-after + limit-to window so the trace lands "
                          "entirely inside the frozen steady state.")
+    parser.add_argument("--nsight-debug-names",
+                    action=argparse.BooleanOptionalAction, default=None,
+                    help="Enable Vulkan debug layers so buffer/texture debug "
+                         "labels (VK_EXT_debug_utils object names) reach the "
+                         "driver and show up in Nsight's Object Browser / Memory "
+                         "view as e.g. 'primitive.values' instead of "
+                         "'Buffer_217'. sgl only enables VK_EXT_debug_utils when "
+                         "debug layers are on, so without this every resource is "
+                         "synthetic. Adds Vulkan validation overhead, so it is "
+                         "OFF for normal runs and defaults ON under "
+                         "--capture-external (a Graphics Capture is the whole "
+                         "point of naming). Pass --no-nsight-debug-names to "
+                         "force it off even during capture.")
     parser.add_argument("--flat-bucket-backward",
                     action=argparse.BooleanOptionalAction, default=True,
                     help="Use the flat warp-per-bucket backward (live-bucket "

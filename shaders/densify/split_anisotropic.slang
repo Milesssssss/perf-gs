@@ -196,7 +196,7 @@ void splitAnisotropicSH(
         {
             gaussians[tail] = parent;
             adam_state[tail] = _zero_adam();
-            shInheritRest(tail, i, rest_floats, features_rest, adam_rest);
+            shInheritRest(tail, i, rest_floats, max_splats, features_rest, adam_rest);
         }
         return;
     }
@@ -223,7 +223,7 @@ void splitAnisotropicSH(
             dst = i;   // child-0 overwrites parent slot: keep features_rest, fresh Adam.
             gaussians[dst] = c;
             adam_state[dst] = _zero_adam();
-            shZeroRestAdam(dst, rest_floats, adam_rest);
+            shZeroRestAdam(dst, rest_floats, max_splats, adam_rest);
         }
         else
         {
@@ -235,7 +235,7 @@ void splitAnisotropicSH(
             }
             gaussians[dst] = c;
             adam_state[dst] = _zero_adam();
-            shInheritRest(dst, i, rest_floats, features_rest, adam_rest);
+            shInheritRest(dst, i, rest_floats, max_splats, features_rest, adam_rest);
         }
         child_ordinal++;
     }

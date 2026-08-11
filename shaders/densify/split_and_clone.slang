@@ -185,12 +185,12 @@ void splitAndCloneSH(
         {
             gaussians[tail] = c2;
             adam_state[tail] = _zero_adam();
-            shInheritRest(tail, i, rest_floats, features_rest, adam_rest);
+            shInheritRest(tail, i, rest_floats, max_splats, features_rest, adam_rest);
         }
         // Child-1 overwrites the parent slot: keep its features_rest, fresh Adam.
         gaussians[i] = c1;
         adam_state[i] = _zero_adam();
-        shZeroRestAdam(i, rest_floats, adam_rest);
+        shZeroRestAdam(i, rest_floats, max_splats, adam_rest);
     }
     else if (a == ACTION_CLONE)
     {
@@ -202,7 +202,7 @@ void splitAndCloneSH(
         {
             gaussians[tail] = clone;
             adam_state[tail] = _zero_adam();
-            shInheritRest(tail, i, rest_floats, features_rest, adam_rest);
+            shInheritRest(tail, i, rest_floats, max_splats, features_rest, adam_rest);
         }
     }
 }

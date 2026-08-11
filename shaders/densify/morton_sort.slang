@@ -209,7 +209,8 @@ void mortonScatterSH(
     uint fd = i * fu, fs = src * fu;
     for (uint c = 0u; c < fu; ++c)
         features_rest_out[fd + c] = features_rest_in[fs + c];
-    uint ad = i * rest_floats, asrc = src * rest_floats;
-    for (uint c = 0u; c < rest_floats; ++c)
-        adam_rest_out[ad + c] = adam_rest_in[asrc + c];
+    // adam_rest SoA float32: word c of gaussian g at c*max_splats + g.
+    uint au = rest_floats * 2u;
+    for (uint c = 0u; c < au; ++c)
+        adam_rest_out[c * max_splats + i] = adam_rest_in[c * max_splats + src];
 }

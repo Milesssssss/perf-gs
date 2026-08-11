@@ -591,26 +591,8 @@ void backwardRasterizePerSplat(
 }
 
 
-// ===========================================================================
-// FLAT (warp-per-bucket) backward. Same gradient math as
-// backwardRasterizePerSplat; only the work assignment differs.
-//
-// Layout: [numthreads(256)] = 8 INDEPENDENT warp-buckets per workgroup. Warp w
-// (tid / wave) handles the flat live-bucket slot gid.x*8 + w; lane L owns splat
-// local_bucket*32 + L. There is NO bucket loop (one bucket per warp) and NO
-// tile-wide per-pixel LDS staging: the per-pixel constants (dL_dC / T_final /
-// C_total / processed) are read INLINE from the textures as warp-uniform
-// broadcasts. Dropping the ~8 KB tile-wide staging leaves only the per-warp
-// checkpoint stage in LDS, which raises occupancy vs the per-tile kernel (which
-// is LDS-bound at ~50-60%). The tradeoff: a pixel's constants are re-read once
-// per live bucket it contributes to (no cross-bucket amortization), but those
-// are cached, warp-uniform texture reads.
-//
-// The dispatch is INDIRECT over the compacted live-bucket list built by
-// live_buckets.slang (tileMaxProcessed -> scan -> scatterLiveBuckets ->
-// prepareBucketDispatchArgs). live_buckets[slot] = (tile, local_bucket), so
-// there is no in-kernel tile search and saturated buckets are never launched.
-// ===========================================================================
+//This is the de-facto implementation used
+
 [shader("compute")]
 [numthreads(TILE_AREA, 1, 1)]
 void backwardRasterizePerBucket(

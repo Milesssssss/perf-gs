@@ -48,12 +48,30 @@ def run_post_training(
     train_wall_s: float,
     completed_iters: int,
     t_start: float,
+    psnr_curve: list[dict] | None = None,
 ) -> None:
     """Compute + report the final metrics and export the trained PLY."""
+
+    if args.profile_run:
+        print("[profile-run] finished; skipping final metrics / PLY export.")
+        return
+
+    # Deferred import: top-level would create a circular import (app imports this
+    # module at load, before PsNRPlotWriter is defined).
+    from trainer.frontend.app import PsNRPlotWriter
+    PsNRPlotWriter.write(
+        enabled=args.psnr_curve,
+        records=psnr_curve,
+        args=args,
+        paths=run_dir,
+        run_name=run_dir.name,
+        scene=scene,
+    )
+
     # Mip-Splatting: refresh the 3D filter one last time so the final metrics
     # render reflects the FINAL gaussian positions. The periodic recompute above
     # skips the last ~100 iters, so without this the reported PSNR would use a
-    # filter ~100-200 iters stale.
+    # filter ~100-200 iters stale.   
     if args.mip_splatting:
         pipeline.compute_3d_filter()
         #_log_filter3d("final")
@@ -109,14 +127,6 @@ def run_post_training(
                                     if mask.sum() > 0 else 0.0),
             })
 
-        # --- Reported metric = paper metric everywhere ---
-        # PSNR is ALWAYS the arithmetic mean of per-image PSNR (3DGS/SAD-GS
-        # convention; see _psnr_image + scripts/image_metrics.py). The headline
-        # `psnr_srgb` is that mean over the held-out TEST split — THE number to
-        # compare against the SAD-GS / 3DGS tables. We also break it out by
-        # train/all and keep the old dB-of-mean-MSE values only as explicitly
-        # suffixed `*_db_of_mean_mse` fields, so nothing silently reports the
-        # pessimistic aggregation.
         test_set = set(test_indices)
         test_cams = [c for c in per_cam if c["cam_idx"] in test_set]
         train_cams = [c for c in per_cam if c["cam_idx"] not in test_set]
