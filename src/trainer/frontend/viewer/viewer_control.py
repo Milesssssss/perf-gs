@@ -126,6 +126,16 @@ class ViewerSession:
         if self._viewer is not None:
             self._viewer.set_training_active(active)
 
+    def is_paused(self) -> bool:
+        """Whether the viewer's Pause button currently has training suspended."""
+        return self._viewer is not None and self._viewer.is_paused()
+
+    def wait_while_paused(self) -> None:
+        """Block the trainer while the viewer's Pause button is engaged (no-op
+        when live viewing is disabled)."""
+        if self._viewer is not None:
+            self._viewer.wait_while_paused()
+
     def push_snapshot(self, pipeline: "TrainingPipeline") -> None:
         """Push a gaussian snapshot to the viewer (zero-copy GPU->GPU blit)."""
         if self._viewer is not None:

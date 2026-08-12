@@ -14,6 +14,7 @@ from trainer.backend.compute.device import SHADERS_DIR
 from trainer.backend.compute.gpu import GpuRuntime
 from trainer.backend.render.pipeline import TrainingPipeline
 from trainer.config.config import AppearanceConfig, RasterConfig
+from trainer.frontend.viewer.viewer_ui import InputMap, ViewerUI
 
 
 def _build_view_matrix(eye: np.ndarray, forward: np.ndarray, up: np.ndarray) -> np.ndarray:
@@ -196,6 +197,7 @@ class FlyCamera:
         self._ref_up = self._up / (np.linalg.norm(self._up) + 1e-12)
 
     def move(self, keys: set, dt: float):
+        # Move at the mouse-wheel-configured speed (see adjust_speed).
         vel = self.speed * dt
         if "w" in keys:
             self.eye += self._fwd * vel
@@ -210,6 +212,14 @@ class FlyCamera:
             self.eye += self._up * vel
         if "e" in keys:
             self.eye -= self._up * vel
+
+    def adjust_speed(self, steps: float) -> None:
+        """Scale the movement speed by mouse-wheel ``steps`` (~25% per notch,
+        multiplicative), clamped to a sane range. All WASD/QE motion uses this
+        one speed."""
+        if steps:
+            self.speed *= 1.25 ** steps
+            self.speed = float(max(1e-3, min(self.speed, 1e5)))
 
     def rotate(self, dx: float, dy: float):
         """Mouse-look about the reference up (self._ref_up): yaw about ref_up,
@@ -331,6 +341,9 @@ class Viewer:
         self._stop_event = threading.Event()
 
         self._start_event = threading.Event()
+        # Set == training paused; the trainer blocks on wait_while_paused() each
+        # iteration. Toggled by the viewer's Pause/Resume button.
+        self._pause_event = threading.Event()
         # Reflects the trainer's state so the panel can show "training" vs
         # "inspecting init". The trainer sets this True once it starts looping.
         self._training_active = False
@@ -404,6 +417,23 @@ class Viewer:
         """Trainer tells the viewer it has begun (drives the panel label)."""
         self._training_active = active
 
+    def is_paused(self) -> bool:
+        """True while the Pause button has training suspended."""
+        return self._pause_event.is_set()
+
+    def toggle_pause(self) -> None:
+        """Flip pause/resume (called from the panel button)."""
+        (self._pause_event.clear if self._pause_event.is_set()
+         else self._pause_event.set)()
+
+    def wait_while_paused(self, poll: float = 0.05) -> None:
+        """Block the caller (the trainer) while paused, releasing if the viewer
+        window closes so a paused+closed viewer can't hang training forever."""
+        while self._pause_event.is_set():
+            if self._stop_event.is_set() or (self._thread and not self._thread.is_alive()):
+                break
+            time.sleep(poll)
+
     def start(self):
         self._stop_event.clear()
         self._thread = threading.Thread(target=self._run, daemon=True)
@@ -434,52 +464,79 @@ class Viewer:
         surface.configure(width=self.width, height=self.height, format=present_format)
         needs_reconfigure = False
 
-        # --- ImGui panel: status + Start Training button ---
-        ui = spy.ui.Context(self.device)
-        ui_panel = spy.ui.Window(ui.screen, "Trainer", position=spy.float2(10, 10),
-                                 size=spy.float2(240, 0))
-        spy.ui.Text(ui_panel, "WASD move | QE up/down | drag look | R/T roll | Y set-up")
-        spy.ui.Text(ui_panel, "C / V: snap test cam  |  P: save frame PNG")
-        status_text = spy.ui.Text(ui_panel, "inspecting init")
-        testcam_text = spy.ui.Text(ui_panel, "free-fly")
-
-        def _on_start():
-            self._start_event.set()
-        spy.ui.Button(ui_panel, "Start Training", callback=_on_start)
-
         cam = FlyCamera()
-        keys_held: set = set()
-        mouse_captured = False
-        last_mouse_x, last_mouse_y = 0.0, 0.0
-        last_time = time.perf_counter()
 
-        # Test-camera snap: C / V cycle through the held-out test cameras,
-        # snapping the fly-cam onto each pose and matching its vertical FOV so a
-        # viewer frame lines up with the eval render at the SAME view. Because
-        # higher-order SH is only constrained at trained views, this makes it
-        # easy to tell OOD extrapolation (weird only once you fly off a test
-        # pose) from a genuine bug (wrong even while parked on a test camera).
-        # snap_idx[0] == -1 means free-fly; a 1-elem list lets both the key and
-        # mouse callbacks mutate it without `nonlocal` gymnastics.
+        # Interaction state shared by the input callbacks and the render loop.
+        #   snap_idx : current test-camera index, -1 == free-fly
+        #   snapped  : exact-proj Camera to render while parked (None => fly-cam)
+        #   grab     : request to save the next frame to a PNG (P key)
+        #   syncing  : guard so programmatic combo updates don't re-fire select
+        st = {"snap_idx": -1, "snapped": None, "grab": False, "syncing": False}
         test_cams = self._test_cameras
-        snap_idx = [-1]
-        # When parked on a test camera we render its EXACT view+proj (not a
-        # reconstructed centered perspective) so the frame is pixel-faithful to
-        # the eval render — same intrinsics, including any off-center principal
-        # point. None => free-fly (use the FlyCamera's own perspective).
-        snapped_cam = [None]
-        grab_requested = [False]
+        cam_combo = None  # assigned in the panel build below when cameras exist
 
-        def _save_frame() -> None:
-            """Write the last rendered frame to a PNG so it can be diffed
-            offline against the eval output (outputs/<run>/cams/cam_XX/...).
-            Use while parked (P) to compare the viewer vs eval at one test cam."""
+        # --- Actions driven FROM the UI / keyboard. ---
+        def apply_snap(idx: int) -> None:
+            """Snap to test-camera ``idx`` (-1 => free-fly). Single source of
+            truth for C/V, the camera dropdown, and 'left on manual nav'; keeps
+            the dropdown selection in sync."""
+            if idx < 0 or not test_cams:
+                st["snap_idx"], st["snapped"] = -1, None
+                ui.set("camera", "Free-fly")
+            else:
+                idx %= len(test_cams)
+                name, tcam = test_cams[idx]
+                cam.set_from_view_matrix(tcam.view_matrix)  # so WASD continues here
+                fovy = _fovy_from_proj(tcam.proj_matrix)
+                if fovy is not None:
+                    self.fovy = fovy
+                # Render the test camera EXACTLY (view+proj) when its resolution
+                # matches the render target; else fall back to the fly-cam
+                # perspective. Exact proj removes the last raster-side difference
+                # vs eval (principal point, exact fx/fy).
+                st["snap_idx"] = idx
+                st["snapped"] = (tcam if tuple(tcam.image_size) == (self.width, self.height)
+                                 else None)
+                ui.set("camera", f"Cam {idx + 1}/{len(test_cams)}: {name}")
+                print(f"[Viewer] snapped to test cam {idx + 1}/{len(test_cams)} "
+                      f"({name}), exact_proj={st['snapped'] is not None}, fovy={self.fovy:.1f} deg")
+            if cam_combo is not None:  # reflect state in the dropdown (no re-fire)
+                st["syncing"] = True
+                cam_combo.value = st["snap_idx"] + 1
+                st["syncing"] = False
+
+        def snap_delta(step: int) -> None:
+            if not test_cams:
+                print("[Viewer] no test cameras available to snap to")
+                return
+            apply_snap((st["snap_idx"] + step) % len(test_cams))
+
+        def leave_snap() -> None:
+            """Manual navigation drops the 'parked on a test cam' state."""
+            if st["snap_idx"] != -1:
+                apply_snap(-1)
+
+        def on_cam_select(value: int) -> None:
+            if not st["syncing"]:            # ignore our own programmatic updates
+                apply_snap(int(value) - 1)   # 0 => free-fly, k => camera k-1
+
+        def on_pause_toggle() -> None:
+            self.toggle_pause()
+            pause_btn.label = "Resume training" if self.is_paused() else "Pause training"
+
+        def set_up_ref() -> None:
+            cam.set_ref_up_to_current()
+            print("[Viewer] up reference set to current view")
+
+        def save_frame() -> None:
+            """Write the last rendered frame to a PNG for offline diffing against
+            the eval output (outputs/<run>/cams/cam_XX/...)."""
             try:
                 from PIL import Image
                 img = self._pipeline.read_output_image()[..., :3]
                 png = (np.clip(img, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8)
-                if snap_idx[0] != -1:
-                    name = test_cams[snap_idx[0]][0]
+                if st["snap_idx"] != -1:
+                    name = test_cams[st["snap_idx"]][0]
                     label = "testcam_" + name.replace("/", "_").replace("\\", "_")
                 else:
                     name, label = "(free-fly)", "freefly"
@@ -489,88 +546,69 @@ class Viewer:
             except Exception as e:
                 print(f"[Viewer] frame grab failed: {e}")
 
-        def snap_to_test(delta: int) -> None:
-            if not test_cams:
-                print("[Viewer] no test cameras available to snap to")
-                return
-            snap_idx[0] = (snap_idx[0] + delta) % len(test_cams)
-            name, tcam = test_cams[snap_idx[0]]
-            cam.set_from_view_matrix(tcam.view_matrix)  # so WASD continues here
-            fovy = _fovy_from_proj(tcam.proj_matrix)
-            if fovy is not None:
-                self.fovy = fovy
-            # Render the test camera EXACTLY (view+proj) when its resolution
-            # matches the viewer's render target; else fall back to the
-            # FlyCamera perspective (fovy-matched above). Exact proj removes the
-            # last raster-side difference vs eval (principal point, exact fx/fy).
-            snapped_cam[0] = (tcam if tuple(tcam.image_size) == (self.width, self.height)
-                              else None)
-            testcam_text.text = f"test cam {snap_idx[0] + 1}/{len(test_cams)}: {name}"
-            print(f"[Viewer] snapped to test cam {snap_idx[0] + 1}/{len(test_cams)} "
-                  f"({name}), exact_proj={snapped_cam[0] is not None}, fovy={self.fovy:.1f} deg")
+        # --- Panel. Real widgets (dropdown / buttons) + live fields; EXTEND by
+        #     adding a control here and, if it shows state, a ui.set(...) call. ---
+        ui = ViewerUI(self.device, title="3DGS Viewer", anchor="left", thickness=300.0)
+        ui.text("CAMERA")
+        if test_cams:
+            items = ["Free-fly"] + [f"{i + 1:02d}  {n}" for i, (n, _) in enumerate(test_cams)]
+            cam_combo = ui.combo("snap", items, 0, on_cam_select)
+        else:
+            ui.text("  (no test cameras)")
+        ui.field("camera", "Free-fly")
+        ui.field("speed", f"Move speed: {cam.speed:.2f}")
+        ui.text("")
+        ui.text("TRAINING")
+        ui.field("status", "inspecting init")
+        start_btn = ui.button("Start Training", self._start_event.set)
+        pause_btn = ui.button("Pause training", on_pause_toggle)
+        ui.text("")
+        ui.text("CONTROLS")
+        ui.text("  WASD / QE  move      drag  look")
+        ui.text("  R / T      roll      Y     set up")
+        ui.text("  C / V      snap cam  P     save PNG")
+        ui.text("  wheel      move speed")
 
-        def leave_test_cam() -> None:
-            """Manual navigation drops the 'parked on a test cam' label."""
-            if snap_idx[0] != -1:
-                snap_idx[0] = -1
-                snapped_cam[0] = None
-                testcam_text.text = "free-fly"
+        # --- Keyboard bindings. EXTEND controls by adding a hold/press line. ---
+        MOVE_TAGS = {"w", "a", "s", "d", "q", "e", "r", "t"}
+        roll_speed = 60.0  # deg/sec while R/T held
+        mouse = {"captured": False, "x": 0.0, "y": 0.0}
+        keys = InputMap().hold_many([
+            (spy.KeyCode.w, "w"), (spy.KeyCode.a, "a"), (spy.KeyCode.s, "s"),
+            (spy.KeyCode.d, "d"), (spy.KeyCode.q, "q"), (spy.KeyCode.e, "e"),
+            (spy.KeyCode.r, "r"), (spy.KeyCode.t, "t"),  # R/T roll
+        ])
+        keys.press(spy.KeyCode.c, lambda: snap_delta(+1))
+        keys.press(spy.KeyCode.v, lambda: snap_delta(-1))
+        keys.press(spy.KeyCode.p, lambda: st.__setitem__("grab", True))
+        keys.press(spy.KeyCode.y, set_up_ref)
+        keys.press(spy.KeyCode.escape, lambda: mouse.__setitem__("captured", False))
 
-        # Q/E move along the camera's own up vector (roll-aware), so up/down
-        # follows whatever roll R/T has applied. R/T roll the view about the
-        # forward axis.
-        key_map = {
-            spy.KeyCode.w: "w", spy.KeyCode.a: "a",
-            spy.KeyCode.s: "s", spy.KeyCode.d: "d",
-            spy.KeyCode.q: "q", spy.KeyCode.e: "e",
-            spy.KeyCode.r: "r", spy.KeyCode.t: "t",  # roll left / right
-        }
-        roll_speed = 60.0  # degrees/sec while R/T held
-
+        # --- Mouse: look (drag) + scroll-to-speed. Camera control, not a widget,
+        #     so it stays here; the UI only reports whether it ate the event. ---
         def on_key(event):
-            nonlocal keys_held, mouse_captured
-            if ui.handle_keyboard_event(event):
+            if ui.handle_keyboard(event):
                 return  # UI consumed it (typing in a widget)
-            k = key_map.get(event.key)
-            if event.is_key_press() or event.is_key_repeat():
-                if k:
-                    keys_held.add(k)
-                if event.key == spy.KeyCode.escape:
-                    mouse_captured = False
-            elif event.is_key_release():
-                if k:
-                    keys_held.discard(k)
-            # Discrete, press-only (no auto-repeat) actions: snap to the next /
-            # previous held-out test camera.
-            if event.is_key_press():
-                if event.key == spy.KeyCode.c:
-                    snap_to_test(+1)
-                elif event.key == spy.KeyCode.v:
-                    snap_to_test(-1)
-                elif event.key == spy.KeyCode.p:
-                    grab_requested[0] = True
-                elif event.key == spy.KeyCode.y:
-                    cam.set_ref_up_to_current()
-                    print("[Viewer] up reference set to current view")
+            keys.handle(event)
 
         def on_mouse(event):
-            nonlocal mouse_captured, last_mouse_x, last_mouse_y
-            if ui.handle_mouse_event(event):
-                mouse_captured = False  # don't drive the camera from panel clicks
+            if ui.handle_mouse(event):
+                mouse["captured"] = False  # don't drive the camera from panel clicks
+                return
+            if event.is_scroll():
+                cam.adjust_speed(float(event.scroll.y))
+                ui.set("speed", f"Move speed: {cam.speed:.2f}")
                 return
             if event.is_button_down():
-                mouse_captured = True
-                last_mouse_x = event.pos[0]
-                last_mouse_y = event.pos[1]
+                mouse.update(captured=True, x=event.pos[0], y=event.pos[1])
             elif event.is_button_up():
-                mouse_captured = False
-            elif event.is_move() and mouse_captured:
-                dx = event.pos[0] - last_mouse_x
-                dy = event.pos[1] - last_mouse_y
-                last_mouse_x = event.pos[0]
-                last_mouse_y = event.pos[1]
+                mouse["captured"] = False
+            elif event.is_move() and mouse["captured"]:
+                dx = event.pos[0] - mouse["x"]
+                dy = event.pos[1] - mouse["y"]
+                mouse["x"], mouse["y"] = event.pos[0], event.pos[1]
                 cam.rotate(dx, dy)
-                leave_test_cam()
+                leave_snap()
 
         def on_resize(w, h):
             nonlocal needs_reconfigure
@@ -583,6 +621,7 @@ class Viewer:
         configured = True
         watcher = _ShaderWatcher(
             self.device, self._pipeline, self.runtime) if self.hot_reload else None
+        last_time = time.perf_counter()
 
         while not window.should_close() and not self._stop_event.is_set():
             window.process_events()
@@ -627,34 +666,40 @@ class Viewer:
             now = time.perf_counter()
             dt = min(now - last_time, 0.1)
             last_time = now
-            cam.move(keys_held, dt)
-            if "r" in keys_held:
+            cam.move(keys.held, dt)
+            if "r" in keys.held:
                 cam.roll_by(+roll_speed * dt)
-            if "t" in keys_held:
+            if "t" in keys.held:
                 cam.roll_by(-roll_speed * dt)
-            if keys_held & {"w", "a", "s", "d", "q", "e", "r", "t"}:
-                leave_test_cam()
+            if keys.held & MOVE_TAGS:
+                leave_snap()
 
-            status_text.text = ("training" if self._training_active else "inspecting init — press Start Training")
+            paused = self.is_paused()
+            ui.set("status", ("paused" if paused else "training") if self._training_active
+                   else "inspecting init — press Start Training")
+            start_btn.enabled = not self._training_active   # only before training
+            pause_btn.enabled = self._training_active        # only during training
+            ui.layout(window.width, window.height)  # keep the panel docked
 
             if not self._has_data:
+                # Pump the UI so the Start button works before the first snapshot.
                 try:
                     with self.runtime.queue_scope():
                         surface_tex = surface.acquire_next_image()
                         if surface_tex is not None:
                             batch = self.runtime.command_batch("viewer_ui")
                             encoder = batch.encoder
-                            ui.begin_frame(window.width, window.height)
-                            ui.end_frame(surface_tex, encoder)
+                            ui.begin(window.width, window.height)
+                            ui.end(surface_tex, encoder)
                             self.runtime.submit(batch, after_submit=surface.present)
                 except Exception:
                     pass
-                time.sleep(0.016) #TODO: this is bullshit
+                time.sleep(0.016)
                 continue
 
             # Parked on a test camera -> render it EXACTLY (pixel-faithful to
             # eval); otherwise the free-fly perspective.
-            camera = (snapped_cam[0] if snapped_cam[0] is not None
+            camera = (st["snapped"] if st["snapped"] is not None
                       else cam.get_camera(self.width, self.height, self.fovy))
             try:
                 surface_tex = surface.acquire_next_image()
@@ -668,16 +713,16 @@ class Viewer:
                 if surface_tex is not None:
                     encoder.blit(surface_tex, self._pipeline.buffers.output_image)
                     # Draw the panel on top, same swapchain image + encoder.
-                    ui.begin_frame(window.width, window.height)
-                    ui.end_frame(surface_tex, encoder)
+                    ui.begin(window.width, window.height)
+                    ui.end(surface_tex, encoder)
 
                 present = surface.present if surface_tex is not None else None
                 submit = self.runtime.submit(batch, after_submit=present)
 
                 self.runtime.wait_for_submit(submit)
-                if grab_requested[0]:
-                    grab_requested[0] = False
-                    _save_frame()
+                if st["grab"]:
+                    st["grab"] = False
+                    save_frame()
             except Exception as e:
                 if not getattr(self, '_err_printed', False):
                     print(f"[Viewer] frame error: {e}")

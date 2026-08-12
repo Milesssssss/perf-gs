@@ -570,6 +570,7 @@ class TrainingLoop:
         self._begin_training_loop()
 
         while self._should_continue():
+            self.runtime.viewer.wait_while_paused()  # honor the viewer Pause button
             it_context = self._next_iteration()
             self._prepare_iteration(it_context)
             self._capture_if_requested(it_context)
