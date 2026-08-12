@@ -545,18 +545,31 @@ class Viewer:
             if watcher:
                 watcher.poll()
 
-            #TODO: aspect ratio is fucked, we should be able to rescale only with a correct ratio
+            # Preserve the render's aspect ratio on resize. output_image is a
+            # FIXED (self.width x self.height) render, and a full-extent blit
+            # onto a surface with a different aspect is exactly what stretched
+            # the image. Fit the render aspect inside the requested window and
+            # SNAP the window to it, so the swapchain we blit into always shares
+            # the render aspect (uniform scale, no distortion). The >1px guard
+            # stops a resize/rounding feedback loop.
             if needs_reconfigure:
                 needs_reconfigure = False
                 configured = False
-                new_w, new_h = window.width, window.height
-                if new_w > 0 and new_h > 0:
+                req_w, req_h = window.width, window.height
+                if req_w > 0 and req_h > 0:
+                    ar = self.width / self.height
+                    if req_w / req_h > ar:       # too wide -> clamp width to height
+                        cw, ch = max(1, round(req_h * ar)), req_h
+                    else:                         # too tall -> clamp height to width
+                        cw, ch = req_w, max(1, round(req_w / ar))
                     try:
+                        if abs(cw - req_w) > 1 or abs(ch - req_h) > 1:
+                            window.resize(cw, ch)  # snap; re-triggers on_resize once
                         with self.runtime.queue_scope():
                             self.runtime.wait_for_idle()
                             surface.unconfigure()
                             self.runtime.wait_for_idle()
-                            surface.configure(width=new_w, height=new_h,
+                            surface.configure(width=cw, height=ch,
                                               format=present_format)
                         configured = True
                     except Exception as e:

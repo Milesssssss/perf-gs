@@ -16,7 +16,7 @@ from trainer.config.config_types import DensificationMode
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--scene", type=str, default="datasets/360_v2/bicycle")
+    parser.add_argument("--scene", type=str, default="datasets/360_v2/bonsai")
     parser.add_argument("--iters", type=int, default=3000)
     parser.add_argument("--position-lr-max-steps", type=int, default=3000,
                     help="horizon for the exponential mean-LR decay (3DGS "
