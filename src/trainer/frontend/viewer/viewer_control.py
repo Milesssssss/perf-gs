@@ -31,6 +31,7 @@ if TYPE_CHECKING:
     import slangpy as spy
 
     from trainer.backend.render.pipeline import TrainingPipeline
+    from trainer.data.dataset import Camera
     from trainer.frontend.viewer.viewer import Viewer
 
 
@@ -56,6 +57,7 @@ class ViewerSession:
         fovy: float,
         gpu_lock,
         pipeline: "TrainingPipeline",
+        test_cameras: "list[tuple[str, Camera]] | None" = None,
     ) -> "ViewerSession":
         """Build the viewer and push the initialized gaussians, but DO NOT start
         the render thread yet.
@@ -70,6 +72,9 @@ class ViewerSession:
             device=device, width=width, height=height,
             max_splats=max_splats, fovy=fovy, gpu_lock=gpu_lock,
             sh_degree=pipeline.appearance_config.sh_degree,
+            mip_enabled=pipeline.raster_config.mip_enabled,
+            mip_kernel_size=pipeline.raster_config.kernel_size,
+            test_cameras=test_cameras,
         )
         viewer.update_gaussians(pipeline)  # show the initialized gaussians
         print("[viewer] created (render thread starts after setup completes).")

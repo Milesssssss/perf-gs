@@ -316,6 +316,15 @@ class TrainingApplication:
 
     def _start_viewer(self, scene: SceneContext) -> None:
         if not self.args.no_viewer:
+            # Held-out test cameras (name, Camera), so the viewer's C/V keys can
+            # snap to the exact poses eval renders from — the direct way to
+            # compare in-viewer SH against the eval render at the same view.
+            images = scene.colmapScene.images
+            test_cameras = [
+                (images[i].image_name, images[i].camera)
+                for i in scene.test_indices
+                if 0 <= i < len(images)
+            ]
             self.viewer = ViewerSession.create(
                 device=self.device,
                 width=scene.width,
@@ -324,6 +333,7 @@ class TrainingApplication:
                 fovy=getattr(self.args, "fovy", 45.0),
                 gpu_lock=self.gpu_lock,
                 pipeline=self._pipeline,
+                test_cameras=test_cameras,
             )
         else:
             self.viewer = ViewerSession(None)

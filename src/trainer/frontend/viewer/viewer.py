@@ -13,15 +13,10 @@ from trainer.data.dataset import Camera
 from trainer.backend.compute.device import SHADERS_DIR
 from trainer.backend.compute.gpu import GpuRuntime
 from trainer.backend.render.pipeline import TrainingPipeline
-from trainer.config.config import AppearanceConfig
+from trainer.config.config import AppearanceConfig, RasterConfig
 
 
 def _build_view_matrix(eye: np.ndarray, forward: np.ndarray, up: np.ndarray) -> np.ndarray:
-    # RIGHT-HANDED basis (det +1), matching the COLMAP view matrices the
-    # splats were trained with. The previous r = cross(forward, up) is the
-    # negation of the right-handed r = cross(up, forward), which flipped the
-    # X axis (det -1) and rendered the scene left-right MIRRORED relative to
-    # the trainer's own renders. Using cross(up, forward) fixes the mirror.
     f = forward / np.linalg.norm(forward)
     r = np.cross(up, f)
     r = r / np.linalg.norm(r)
@@ -50,22 +45,62 @@ def _build_proj_matrix(fovy_deg: float, aspect: float,
     return M
 
 
+def _fovy_from_proj(proj: np.ndarray) -> float | None:
+    """Recover vertical FOV (degrees) from a projection matrix.
+
+    Both ``_build_proj_matrix`` here and the dataset/COLMAP pinhole builders
+    put ``cot(fovy/2)`` in the (1,1) entry (for COLMAP that equals
+    ``2*fy_pixels/H``). Snapping to a test camera reuses its own vertical FOV so
+    the viewer framing is comparable to the eval render at that camera. Returns
+    None if the entry is non-positive (degenerate/unset projection)."""
+    m11 = float(proj[1, 1])
+    if m11 <= 1e-6:
+        return None
+    return math.degrees(2.0 * math.atan(1.0 / m11))
+
+
+def _linear_present_format(surface: spy.Surface) -> spy.Format:
+    """Choose a NON-sRGB swapchain format for presentation.
+
+    ``output_image`` already holds sRGB-ENCODED color (the renderer composites
+    in sRGB — the same values the stored PNGs are written from). Presenting it
+    through an sRGB surface makes the blit re-apply the sRGB OETF, double-
+    encoding the color -> a washed-out viewer while the PNGs look correct.
+    Configuring the surface with the linear twin of its preferred format writes
+    those sRGB values to the display verbatim, matching the PNG path."""
+    def name(f) -> str:
+        return getattr(f, "name", str(f)).lower()
+
+    info = surface.info
+    try:
+        formats = list(info.formats)
+    except Exception:
+        formats = []
+    preferred = info.preferred_format
+    if "srgb" not in name(preferred):
+        return preferred  # already linear — nothing to fix
+
+    twins = {
+        "bgra8_unorm_srgb": "bgra8_unorm",
+        "rgba8_unorm_srgb": "rgba8_unorm",
+        "bgrx8_unorm_srgb": "bgrx8_unorm",
+    }
+    want = twins.get(name(preferred))
+    if want is not None:
+        for f in formats:
+            if name(f) == want:
+                return f
+    # Fallback: any supported non-sRGB 8-bit unorm, then any non-sRGB format.
+    for f in formats:
+        if "srgb" not in name(f) and name(f) in ("bgra8_unorm", "rgba8_unorm", "bgrx8_unorm"):
+            return f
+    for f in formats:
+        if "srgb" not in name(f):
+            return f
+    return preferred
+
+
 class FlyCamera:
-    """Free-fly camera that stores an explicit orthonormal basis
-    (right, up, forward) instead of world-up-locked Euler angles.
-
-    Every rotation is applied incrementally IN THE CAMERA'S CURRENT FRAME:
-    mouse-look yaws about the current ``up`` and pitches about the current
-    ``right``; roll (R/T) spins about the current ``forward``. Because pan uses
-    the live ``up`` — the SAME axis Q/E translate along — a roll stays "baked
-    in": the global up reference becomes the camera's local up, so after rolling
-    the pan and the up/down movement remain in sync (no separate world-up axis
-    to drift out of alignment).
-
-    The constructor still accepts yaw/pitch/roll (for callers and the camera
-    tests); those seed the initial basis with the historical world-up
-    convention, after which only the basis is tracked.
-    """
 
     def __init__(self, eye=None, yaw=0.0, pitch=0.0, roll=0.0, speed=1.0):
         self.eye = np.array(eye if eye is not None else [0.0, 0.0, -2.0], dtype=np.float64)
@@ -73,7 +108,6 @@ class FlyCamera:
         self.sensitivity = 0.2
         self._set_basis_from_euler(yaw, pitch, roll)
 
-    # --- basis construction / maintenance -------------------------------
     def _set_basis_from_euler(self, yaw: float, pitch: float, roll: float) -> None:
         """Seed the (right, up, forward) basis from Euler angles, matching the
         old world-up convention so a given (yaw, pitch, roll) yields the same
@@ -126,9 +160,6 @@ class FlyCamera:
         return self._up
 
     def roll_by(self, degrees: float) -> None:
-        """Roll about the current forward axis (R/T). Positive rolls the view's
-        right toward its up; the up vector rolls WITH the camera, so subsequent
-        pan and Q/E keep using this rolled up (they stay in sync)."""
         a = math.radians(degrees)
         self._right = self._rotate_about(self._right, self._fwd, a)
         self._up = self._rotate_about(self._up, self._fwd, a)
@@ -151,11 +182,6 @@ class FlyCamera:
             self.eye -= self._up * vel
 
     def rotate(self, dx: float, dy: float):
-        """Mouse-look in the camera's CURRENT frame: yaw about the live ``up``,
-        pitch about the live ``right``. Both axes are the actual basis (roll
-        included), so look-around is screen-relative at any roll and stays in
-        sync with the Q/E up/down axis — panning after a roll no longer fights a
-        separate world-up reference."""
         yaw = math.radians(dx * self.sensitivity)     # drag-right -> look right
         pitch = math.radians(-dy * self.sensitivity)  # drag-up -> look up
         # Yaw about current up.
@@ -167,11 +193,6 @@ class FlyCamera:
         self._orthonormalize()
 
     def set_from_view_matrix(self, view: np.ndarray) -> None:
-        """Snap to a world->view matrix (e.g. a dataset camera pose) so
-        subsequent WASD/look/roll continue from it. Our view rows are
-        (right, up, forward) and the translation is -R @ eye, so eye = -R^T @ t
-        and the basis is read straight off the rows — roll included, no Euler
-        round-trip needed."""
         view = np.asarray(view, dtype=np.float64)
         R = view[:3, :3]
         t = view[:3, 3]
@@ -183,11 +204,6 @@ class FlyCamera:
 
     def get_camera(self, width: int, height: int, fovy: float = 45.0,
                    aspect: float | None = None) -> Camera:
-        """Build a Camera at render resolution (width, height). ``aspect``
-        overrides the projection aspect ratio when the display surface has a
-        different aspect than the render buffer (e.g. a fixed-size render blit
-        into a resized window) — passing the window aspect here keeps geometry
-        undistorted instead of stretched."""
         view = _build_view_matrix(
             self.eye.astype(np.float32),
             self._fwd.astype(np.float32),
@@ -253,7 +269,9 @@ class Viewer:
     def __init__(self, device: spy.Device, width: int = 960, height: int = 540,
                  max_splats: int = 500_000, fovy: float = 45.0,
                  hot_reload: bool = False, max_sort_pairs: int | None = None,
-                 gpu_lock=None, sh_degree: int = 0):
+                 gpu_lock=None, sh_degree: int = 0,
+                 mip_enabled: bool = False, mip_kernel_size: float = 0.3,
+                 test_cameras: list[tuple[str, Camera]] | None = None):
         self.device = device
         self.width = width
         self.height = height
@@ -261,20 +279,16 @@ class Viewer:
         self.fovy = fovy
         self.hot_reload = hot_reload
         self.sh_degree = sh_degree
-        # Shared GPU-queue lock (see Pipeline.gpu_lock). The viewer render loop
-        # runs on a background thread and MUST hold this lock around every
-        # queue operation (submit / present / wait_for_idle / acquire) so it
-        # never races the training thread's submits on the shared VkQueue.
+        # Held-out test cameras as (name, Camera) for the C/V snap feature;
+        # empty when the viewer runs without a scene (standalone / tests).
+        self._test_cameras: list[tuple[str, Camera]] = list(test_cameras or [])
+
         import contextlib
         self.gpu_lock = gpu_lock if gpu_lock is not None else contextlib.nullcontext()
         self.runtime = GpuRuntime(device, self.gpu_lock)
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
-        # Set by the in-panel "Start Training" button. The trainer blocks on
-        # start_requested() before entering its loop when it wants the user to
-        # inspect the initialized gaussians first. Same-process handshake, so a
-        # plain Event — no shared-memory flag needed (cf. the old two-process
-        # splat stream).
+
         self._start_event = threading.Event()
         # Reflects the trainer's state so the panel can show "training" vs
         # "inspecting init". The trainer sets this True once it starts looping.
@@ -282,13 +296,19 @@ class Viewer:
 
         # NOTE can cut out splats
         if max_sort_pairs is None:
-            max_sort_pairs = min(5_000_000, max(2_000_000, max_splats * 6))
+            max_sort_pairs = min(12_000_000, max(2_000_000, max_splats * 6))
         self._pipeline = TrainingPipeline(
             device=device, width=width, height=height, max_splats=max_splats,
             max_sort_pairs=max_sort_pairs,
             gpu_lock=self.gpu_lock,
             viewer_only=True,
             appearance_config=AppearanceConfig(sh_degree=sh_degree),
+            # Mirror the trainer's Mip-Splatting raster policy so the viewer
+            # low-passes the same tiny high-frequency gaussians eval does;
+            # without this those splats render raw and show aggressive
+            # higher-order SH color the eval render suppresses.
+            raster_config=RasterConfig(mip_enabled=mip_enabled,
+                                       kernel_size=mip_kernel_size),
         )
 
         if sh_degree > 0:
@@ -310,7 +330,21 @@ class Viewer:
             src_r = train_pipeline.buffers.features_rest.storage
             dst_r = self._pipeline.buffers.features_rest.storage
             encoder.copy_buffer(dst_r, 0, src_r, 0, min(src_r.size, dst_r.size))
+        # Mip-Splatting: copy the per-gaussian 3D smoothing filter so the viewer
+        # applies the SAME low-pass eval does. filter_3D depends on gaussian
+        # positions, so it must be refreshed with every snapshot (post-densify).
+        if self._pipeline.raster_config.mip_enabled:
+            src_f = getattr(train_pipeline.buffers, "filter_3D", None)
+            dst_f = getattr(self._pipeline.buffers, "filter_3D", None)
+            if src_f is not None and dst_f is not None:
+                encoder.copy_buffer(dst_f.storage, 0, src_f.storage, 0,
+                                    min(src_f.storage.size, dst_f.storage.size))
         self.runtime.submit(batch)
+        # Mirror the trainer's CURRENT active SH degree so the viewer shows the
+        # same bands as eval. The degree schedule ramps during training; pinning
+        # the viewer at max over-shows half-trained higher bands eval (at the
+        # scheduled degree) does not.
+        self._pipeline.set_active_sh_degree(train_pipeline._active_sh_degree)
         self._has_data = True
 
     def start_requested(self) -> bool:
@@ -349,7 +383,14 @@ class Viewer:
         window = spy.Window(width=self.width, height=self.height, title="3DGS Viewer")
 
         surface = self.device.create_surface(window)
-        surface.configure(width=self.width, height=self.height)
+        # Present in a NON-sRGB format: output_image already holds sRGB-encoded
+        # color (renderer composites in sRGB, like the stored PNGs), so the blit
+        # must not re-apply the sRGB OETF. A default/sRGB surface double-encodes
+        # -> washed-out viewer while the PNGs look correct.
+        present_format = _linear_present_format(surface)
+        print(f"[Viewer] surface preferred={surface.info.preferred_format} "
+              f"-> presenting as {present_format}")
+        surface.configure(width=self.width, height=self.height, format=present_format)
         needs_reconfigure = False
 
         # --- ImGui panel: status + Start Training button ---
@@ -357,7 +398,9 @@ class Viewer:
         ui_panel = spy.ui.Window(ui.screen, "Trainer", position=spy.float2(10, 10),
                                  size=spy.float2(240, 0))
         spy.ui.Text(ui_panel, "WASD move | QE up/down | drag look | R/T roll")
+        spy.ui.Text(ui_panel, "C / V: snap test cam  |  P: save frame PNG")
         status_text = spy.ui.Text(ui_panel, "inspecting init")
+        testcam_text = spy.ui.Text(ui_panel, "free-fly")
 
         def _on_start():
             self._start_event.set()
@@ -368,6 +411,69 @@ class Viewer:
         mouse_captured = False
         last_mouse_x, last_mouse_y = 0.0, 0.0
         last_time = time.perf_counter()
+
+        # Test-camera snap: C / V cycle through the held-out test cameras,
+        # snapping the fly-cam onto each pose and matching its vertical FOV so a
+        # viewer frame lines up with the eval render at the SAME view. Because
+        # higher-order SH is only constrained at trained views, this makes it
+        # easy to tell OOD extrapolation (weird only once you fly off a test
+        # pose) from a genuine bug (wrong even while parked on a test camera).
+        # snap_idx[0] == -1 means free-fly; a 1-elem list lets both the key and
+        # mouse callbacks mutate it without `nonlocal` gymnastics.
+        test_cams = self._test_cameras
+        snap_idx = [-1]
+        # When parked on a test camera we render its EXACT view+proj (not a
+        # reconstructed centered perspective) so the frame is pixel-faithful to
+        # the eval render — same intrinsics, including any off-center principal
+        # point. None => free-fly (use the FlyCamera's own perspective).
+        snapped_cam = [None]
+        grab_requested = [False]
+
+        def _save_frame() -> None:
+            """Write the last rendered frame to a PNG so it can be diffed
+            offline against the eval output (outputs/<run>/cams/cam_XX/...).
+            Use while parked (P) to compare the viewer vs eval at one test cam."""
+            try:
+                from PIL import Image
+                img = self._pipeline.read_output_image()[..., :3]
+                png = (np.clip(img, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8)
+                if snap_idx[0] != -1:
+                    name = test_cams[snap_idx[0]][0]
+                    label = "testcam_" + name.replace("/", "_").replace("\\", "_")
+                else:
+                    name, label = "(free-fly)", "freefly"
+                path = os.path.abspath(f"viewer_grab_{label}.png")
+                Image.fromarray(png, mode="RGB").save(path)
+                print(f"[Viewer] saved frame for {name} -> {path}")
+            except Exception as e:
+                print(f"[Viewer] frame grab failed: {e}")
+
+        def snap_to_test(delta: int) -> None:
+            if not test_cams:
+                print("[Viewer] no test cameras available to snap to")
+                return
+            snap_idx[0] = (snap_idx[0] + delta) % len(test_cams)
+            name, tcam = test_cams[snap_idx[0]]
+            cam.set_from_view_matrix(tcam.view_matrix)  # so WASD continues here
+            fovy = _fovy_from_proj(tcam.proj_matrix)
+            if fovy is not None:
+                self.fovy = fovy
+            # Render the test camera EXACTLY (view+proj) when its resolution
+            # matches the viewer's render target; else fall back to the
+            # FlyCamera perspective (fovy-matched above). Exact proj removes the
+            # last raster-side difference vs eval (principal point, exact fx/fy).
+            snapped_cam[0] = (tcam if tuple(tcam.image_size) == (self.width, self.height)
+                              else None)
+            testcam_text.text = f"test cam {snap_idx[0] + 1}/{len(test_cams)}: {name}"
+            print(f"[Viewer] snapped to test cam {snap_idx[0] + 1}/{len(test_cams)} "
+                  f"({name}), exact_proj={snapped_cam[0] is not None}, fovy={self.fovy:.1f} deg")
+
+        def leave_test_cam() -> None:
+            """Manual navigation drops the 'parked on a test cam' label."""
+            if snap_idx[0] != -1:
+                snap_idx[0] = -1
+                snapped_cam[0] = None
+                testcam_text.text = "free-fly"
 
         # Q/E move along the camera's own up vector (roll-aware), so up/down
         # follows whatever roll R/T has applied. R/T roll the view about the
@@ -393,6 +499,15 @@ class Viewer:
             elif event.is_key_release():
                 if k:
                     keys_held.discard(k)
+            # Discrete, press-only (no auto-repeat) actions: snap to the next /
+            # previous held-out test camera.
+            if event.is_key_press():
+                if event.key == spy.KeyCode.c:
+                    snap_to_test(+1)
+                elif event.key == spy.KeyCode.v:
+                    snap_to_test(-1)
+                elif event.key == spy.KeyCode.p:
+                    grab_requested[0] = True
 
         def on_mouse(event):
             nonlocal mouse_captured, last_mouse_x, last_mouse_y
@@ -411,6 +526,7 @@ class Viewer:
                 last_mouse_x = event.pos[0]
                 last_mouse_y = event.pos[1]
                 cam.rotate(dx, dy)
+                leave_test_cam()
 
         def on_resize(w, h):
             nonlocal needs_reconfigure
@@ -440,7 +556,8 @@ class Viewer:
                             self.runtime.wait_for_idle()
                             surface.unconfigure()
                             self.runtime.wait_for_idle()
-                            surface.configure(width=new_w, height=new_h)
+                            surface.configure(width=new_w, height=new_h,
+                                              format=present_format)
                         configured = True
                     except Exception as e:
                         print(f"[Viewer] reconfigure failed: {e}")
@@ -458,13 +575,12 @@ class Viewer:
                 cam.roll_by(+roll_speed * dt)
             if "t" in keys_held:
                 cam.roll_by(-roll_speed * dt)
+            if keys_held & {"w", "a", "s", "d", "q", "e", "r", "t"}:
+                leave_test_cam()
 
-            status_text.text = ("training" if self._training_active
-                                 else "inspecting init — press Start Training")
+            status_text.text = ("training" if self._training_active else "inspecting init — press Start Training")
 
             if not self._has_data:
-                # Still pump the UI so the Start button is clickable before the
-                # first gaussian snapshot arrives.
                 try:
                     with self.runtime.queue_scope():
                         surface_tex = surface.acquire_next_image()
@@ -479,30 +595,16 @@ class Viewer:
                 time.sleep(0.016) #TODO: this is bullshit
                 continue
 
-            camera = cam.get_camera(self.width, self.height, self.fovy)
+            # Parked on a test camera -> render it EXACTLY (pixel-faithful to
+            # eval); otherwise the free-fly perspective.
+            camera = (snapped_cam[0] if snapped_cam[0] is not None
+                      else cam.get_camera(self.width, self.height, self.fovy))
             try:
-                # One encoder per frame → ONE VkQueue submit per frame. Setting
-                # pipeline._encoder routes every _run_forward dispatch (~40
-                # kernels: clear/bin/scan/radix×8/tile_ranges/bucket/forward)
-                # through this shared encoder instead of each doing its own
-                # submit. Before this collapse the viewer thread issued ~40
-                # submits per frame and held gpu_lock for the full frame.
-                # Blit + UI share the encoder, so the whole frame is one
-                # commit.
-                #
-                # acquire_next_image is Vulkan-swapchain-only (NOT a queue
-                # submit), so it can — and must — happen outside gpu_lock;
-                # otherwise vsync wait pins the lock for ~16ms per frame
-                # while the queue is idle, starving the trainer thread.
                 surface_tex = surface.acquire_next_image()
                 batch = self.runtime.command_batch("viewer_frame")
                 encoder = batch.encoder
                 self._pipeline._encoder = encoder
                 try:
-                    # Public forward wrapper: supplies the IterationContextualVariables
-                    # (hardness + active SH degree) from the pipeline's stored render
-                    # state. Calling the private _run_forward(camera) directly is stale
-                    # — it now requires the `contextual` arg and threw every frame.
                     self._pipeline.rasterize(camera)
                 finally:
                     self._pipeline._encoder = None
@@ -511,24 +613,14 @@ class Viewer:
                     # Draw the panel on top, same swapchain image + encoder.
                     ui.begin_frame(window.width, window.height)
                     ui.end_frame(surface_tex, encoder)
-                # submit_command_buffer is async (queues work + returns in
-                # ~30us); present() is a queue op too and MUST be under
-                # gpu_lock (Vulkan requires external synchronization of all
-                # queue ops on the same VkQueue).
+
                 present = surface.present if surface_tex is not None else None
                 submit = self.runtime.submit(batch, after_submit=present)
-                # Backpressure: keep at most ONE viewer frame in flight on
-                # the shared VkQueue. Without this, at 60 fps the viewer
-                # queues 5+ frames between trainer iterations; Vulkan
-                # executes the queue in-order, so each trainer iter waits
-                # for all queued viewer frames to drain before its own
-                # work can begin — head-of-line-blocking the trainer down
-                # to ~5 it/s. Waiting on this submit before queueing the
-                # next viewer frame lets the trainer's submits interleave
-                # cleanly (viewer takes ~1 frame slot; trainer takes the
-                # next). Also naturally caps viewer FPS at min(vsync, GPU
-                # capability while sharing with trainer).
+
                 self.runtime.wait_for_submit(submit)
+                if grab_requested[0]:
+                    grab_requested[0] = False
+                    _save_frame()
             except Exception as e:
                 if not getattr(self, '_err_printed', False):
                     print(f"[Viewer] frame error: {e}")
