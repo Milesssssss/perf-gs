@@ -107,6 +107,11 @@ class FlyCamera:
         self.speed = speed
         self.sensitivity = 0.2
         self._set_basis_from_euler(yaw, pitch, roll)
+        # Reference "up" for roll-free mouse-look: yaw rotates about this axis
+        # and right is always rebuilt perpendicular to it, so looking around
+        # never rolls. R/T rotate it (persistent roll); Y (set_ref_up_to_current)
+        # resets it to the current view. Scene-agnostic — NOT tied to world +Y.
+        self._ref_up = self._up.copy()
 
     def _set_basis_from_euler(self, yaw: float, pitch: float, roll: float) -> None:
         """Seed the (right, up, forward) basis from Euler angles, matching the
@@ -141,6 +146,24 @@ class FlyCamera:
         u = np.cross(f, r)          # right x up = forward  ->  up = forward x right
         self._fwd, self._right, self._up = f, r, u
 
+    def _rebuild_from_ref(self) -> None:
+        """Rebuild (right, up) from the current forward and ``self._ref_up``,
+        forcing right PERPENDICULAR to ref_up (horizon level w.r.t. ref_up).
+        All roll lives in ref_up; mouse-look never tilts right out of the ref_up
+        plane, so no drift accumulates no matter the drag path."""
+        f = self._fwd / (np.linalg.norm(self._fwd) + 1e-12)
+        r = np.cross(self._ref_up, f)
+        n = np.linalg.norm(r)
+        if n < 1e-6:
+            # forward ~parallel to ref_up: keep previous right, projected off f.
+            r = self._right - f * np.dot(self._right, f)
+            n = np.linalg.norm(r)
+            if n < 1e-6:
+                r = np.array([1.0, 0.0, 0.0]) - f * float(f[0])
+                n = np.linalg.norm(r)
+        r = r / (n + 1e-12)
+        self._fwd, self._right, self._up = f, r, np.cross(f, r)
+
     @staticmethod
     def _rotate_about(v: np.ndarray, axis: np.ndarray, angle: float) -> np.ndarray:
         """Rodrigues rotation of ``v`` about unit ``axis`` by ``angle`` (rad)."""
@@ -160,10 +183,17 @@ class FlyCamera:
         return self._up
 
     def roll_by(self, degrees: float) -> None:
-        a = math.radians(degrees)
-        self._right = self._rotate_about(self._right, self._fwd, a)
-        self._up = self._rotate_about(self._up, self._fwd, a)
-        self._orthonormalize()
+        """Roll about the forward axis (R/T). Rotates the reference up so the
+        tilt PERSISTS through subsequent mouse-look (which levels to ref_up)."""
+        ref = self._rotate_about(self._ref_up, self._fwd, math.radians(degrees))
+        self._ref_up = ref / (np.linalg.norm(ref) + 1e-12)
+        self._rebuild_from_ref()
+
+    def set_ref_up_to_current(self) -> None:
+        """Y key: adopt the current view's up as the new up reference. Mouse-look
+        then keeps the horizon level to what you're looking at right now, and any
+        roll in the current view becomes the new zero-roll reference."""
+        self._ref_up = self._up / (np.linalg.norm(self._up) + 1e-12)
 
     def move(self, keys: set, dt: float):
         vel = self.speed * dt
@@ -182,15 +212,23 @@ class FlyCamera:
             self.eye -= self._up * vel
 
     def rotate(self, dx: float, dy: float):
+        """Mouse-look about the reference up (self._ref_up): yaw about ref_up,
+        pitch about the current right, then rebuild right PERPENDICULAR to
+        ref_up. Looking around can never roll the view no matter the drag path
+        (right stays in the ref_up plane) — only R/T and Y change the roll
+        reference. Levels to the SCENE's up (whatever ref_up holds), not +Y."""
         yaw = math.radians(dx * self.sensitivity)     # drag-right -> look right
         pitch = math.radians(-dy * self.sensitivity)  # drag-up -> look up
-        # Yaw about current up.
-        self._right = self._rotate_about(self._right, self._up, yaw)
-        self._fwd = self._rotate_about(self._fwd, self._up, yaw)
-        # Pitch about (new) current right.
-        self._up = self._rotate_about(self._up, self._right, pitch)
-        self._fwd = self._rotate_about(self._fwd, self._right, pitch)
-        self._orthonormalize()
+        f = self._rotate_about(self._fwd, self._ref_up, yaw)
+        r = np.cross(self._ref_up, f)
+        n = np.linalg.norm(r)
+        r = r / n if n > 1e-6 else self._right
+        f_pitched = self._rotate_about(f, r, pitch)
+        # Stop pitch from crossing the ref_up pole (keeps right well-defined).
+        if np.linalg.norm(np.cross(self._ref_up, f_pitched)) > math.sin(math.radians(0.5)):
+            f = f_pitched
+        self._fwd = f
+        self._rebuild_from_ref()
 
     def set_from_view_matrix(self, view: np.ndarray) -> None:
         view = np.asarray(view, dtype=np.float64)
@@ -201,6 +239,9 @@ class FlyCamera:
         self._up = R[1].astype(np.float64)
         self._fwd = R[2].astype(np.float64)
         self._orthonormalize()
+        # Level subsequent mouse-look to this camera's up (the scene's up as it
+        # sees it), so looking around from a snapped test cam stays upright.
+        self._ref_up = self._up.copy()
 
     def get_camera(self, width: int, height: int, fovy: float = 45.0,
                    aspect: float | None = None) -> Camera:
@@ -397,7 +438,7 @@ class Viewer:
         ui = spy.ui.Context(self.device)
         ui_panel = spy.ui.Window(ui.screen, "Trainer", position=spy.float2(10, 10),
                                  size=spy.float2(240, 0))
-        spy.ui.Text(ui_panel, "WASD move | QE up/down | drag look | R/T roll")
+        spy.ui.Text(ui_panel, "WASD move | QE up/down | drag look | R/T roll | Y set-up")
         spy.ui.Text(ui_panel, "C / V: snap test cam  |  P: save frame PNG")
         status_text = spy.ui.Text(ui_panel, "inspecting init")
         testcam_text = spy.ui.Text(ui_panel, "free-fly")
@@ -508,6 +549,9 @@ class Viewer:
                     snap_to_test(-1)
                 elif event.key == spy.KeyCode.p:
                     grab_requested[0] = True
+                elif event.key == spy.KeyCode.y:
+                    cam.set_ref_up_to_current()
+                    print("[Viewer] up reference set to current view")
 
         def on_mouse(event):
             nonlocal mouse_captured, last_mouse_x, last_mouse_y
