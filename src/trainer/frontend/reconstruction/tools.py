@@ -169,12 +169,6 @@ class ReconTools:
 
 
 def gpu_flag(exe: str, verb: str) -> str | None:
-    """The ``--<namespace>.use_gpu`` flag ``colmap <verb>`` accepts, or None.
-
-    Read from the binary instead of hardcoded: the namespace changed between
-    COLMAP releases (``SiftExtraction`` -> ``FeatureExtraction``) and an unknown
-    option makes colmap exit non-zero.
-    """
     try:
         help_text = subprocess.run([exe, verb, "--help"], capture_output=True,
                                    text=True, timeout=180, errors="replace",

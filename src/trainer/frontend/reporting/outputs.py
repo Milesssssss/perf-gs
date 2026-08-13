@@ -56,20 +56,22 @@ class RunArtifacts:
         # Per-frame profile records, opened only under --profile-every.
         profile_json = _stream("profile_log.jsonl") if args.profile_every > 0 else None
 
-        # Full-dataset average-PSNR curve, opened only when --eval-every > 0.
-        # One JSON line per eval sweep for post-hoc convergence plotting.
-        eval_curve_json = _stream("eval_curve.jsonl") if args.eval_every > 0 else None
+        # Full-dataset average-PSNR curve, opened only when --eval-every > 0 and
+        # evaluation is not vetoed. One JSON line per eval sweep, for post-hoc
+        # convergence plotting. This stream is ALSO the loop's gate: no stream, no
+        # sweep (see TrainingLoop._run_evaluation_if_due), so --no-evaluation stops
+        # the whole-camera-set render here rather than in the hot path.
+        do_eval = args.eval_every > 0 and args.evaluation
+        eval_curve_json = _stream("eval_curve.jsonl") if do_eval else None
         # Pre-densify PSNR curve (--psnr-curve): a focused TEST-set PSNR sample
         # taken one iter before each densify step, streamed to psnr_curve.jsonl.
         psnr_curve_json = _stream("psnr_curve.jsonl") if args.psnr_curve else None
         # Binning/overlap debug viz (--debug-bin-viz): one JSONL line per
         # rendered eval view. Only when both the flag and --eval-every are on.
-        bin_viz_json = (
-            _stream("binviz.jsonl")
-            if (args.debug_bin_viz and args.eval_every > 0) else None
-        )
-        if args.debug_bin_viz and args.eval_every <= 0:
-            print("[debug-bin-viz] ignored: requires --eval-every > 0.")
+        bin_viz_json = _stream("binviz.jsonl") if (args.debug_bin_viz and do_eval) else None
+        if args.debug_bin_viz and not do_eval:
+            print("[debug-bin-viz] ignored: it records eval views, which need "
+                  "--eval-every > 0 and --evaluation.")
 
         return cls(
             log_txt=log_txt, log_json=log_json, densify_json=densify_json, eval_curve_json=eval_curve_json,

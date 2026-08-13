@@ -36,7 +36,9 @@ class _Device:
         return 17
 
     def wait_for_submit(self, submit_id):
-        assert self.lock.depth > 0
+        # A fence wait needs no exclusive queue access, and holding the queue lock
+        # across it is what stopped training and the viewer from ever overlapping.
+        assert self.lock.depth == 0, "wait_for_submit must not hold the queue lock"
         self.events.append(("wait_submit", submit_id))
 
     def wait_for_idle(self):
@@ -44,7 +46,10 @@ class _Device:
         self.events.append("wait_idle")
 
 
-def test_runtime_holds_lock_for_submit_callback_and_waits() -> None:
+def test_runtime_holds_the_lock_for_queue_operations_only() -> None:
+    """submit (+ its present callback) and the queue-wide idle wait are externally
+    synchronized and take the lock; waiting on ONE submission must not, or whoever
+    waits owns the GPU queue for the whole execution of their own work."""
     lock = _TrackingLock()
     device = _Device(lock)
     runtime = GpuRuntime(device, lock)
@@ -59,6 +64,43 @@ def test_runtime_holds_lock_for_submit_callback_and_waits() -> None:
 
     assert device.events == [
         ("submit", "command-buffer"), "present", ("wait_submit", 17), "wait_idle"]
+    assert lock.depth == 0
+
+
+def test_a_frame_wait_does_not_block_another_threads_submit() -> None:
+    """The actual regression: the viewer blocks on its frame every frame. While it
+    does, a trainer submit on another thread has to get through."""
+    import threading
+
+    lock = threading.RLock()
+    waiting = threading.Event()
+    release = threading.Event()
+    submitted = threading.Event()
+
+    class _BlockingDevice:
+        def submit_command_buffer(self, _command):
+            return 1
+
+        def wait_for_submit(self, _submit_id):
+            waiting.set()
+            release.wait(timeout=5)
+
+        def wait_for_idle(self):
+            pass
+
+    runtime = GpuRuntime(_BlockingDevice(), lock)
+    frame = threading.Thread(target=lambda: runtime.wait_for_submit(1), daemon=True)
+    frame.start()
+    assert waiting.wait(timeout=5)          # the "viewer" is now blocked on its frame
+
+    def trainer_step() -> None:
+        runtime.submit(CommandBatch(_Encoder()))
+        submitted.set()
+
+    threading.Thread(target=trainer_step, daemon=True).start()
+    assert submitted.wait(timeout=5), "a trainer submit was blocked by the frame wait"
+    release.set()
+    frame.join(timeout=5)
 
 
 def test_no_raw_queue_operations_outside_runtime() -> None:

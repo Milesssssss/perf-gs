@@ -244,7 +244,8 @@ class ViewerSession:
             self._viewer.wait_while_paused()
 
     def push_snapshot(self, pipeline: "TrainingPipeline") -> None:
-        """Push a gaussian snapshot to the viewer (zero-copy GPU->GPU blit)."""
+        """Push a gaussian snapshot to the viewer (GPU->GPU copy of the ACTIVE
+        splat range, plus a 4-byte count readback — see ``update_gaussians``)."""
         if self._viewer is not None:
             self._viewer.update_gaussians(pipeline)
 
@@ -254,28 +255,32 @@ class ViewerSession:
             self._viewer.clear_view()
 
     def finish_training(self, pipeline: "TrainingPipeline") -> None:
-        """Publish the end of a run and push its final gaussians — WITHOUT blocking.
+        """Publish the end of the training LOOP and push its final gaussians —
+        WITHOUT blocking.
 
         Split out of :meth:`hold_after_training` for the hub, where the end of a run
         is not the end of the session: the orchestrator goes back to serving the
         panel (export, re-train, another dataset), so it must not be parked in a
-        thread join. Also retires the "running" state of the TRAINING section, which
+        thread join. Retires the "running" state of the TRAINING section, which
         otherwise reads as if the trainer were still going.
+
+        The PHASE is deliberately NOT set here: the loop finishing is not the run
+        finishing — the metrics pass and the .ply export still have to run, and the
+        orchestrator publishes ``PHASE_FINALIZE`` for that and ``PHASE_DONE`` when
+        it is genuinely over (see ``TrainingApplication._run_training_and_post``).
         """
         if self._viewer is not None:
             self._viewer.set_training_active(False)
-        self.state.set_phase(PHASE_DONE)   # retires the progress bar, updates the hint
-        if self._viewer is None:
-            return
-        try:
-            self._viewer.update_gaussians(pipeline)
-        except Exception:
-            pass
+            try:
+                self._viewer.update_gaussians(pipeline)
+            except Exception:
+                pass
 
     def hold_after_training(self, pipeline: "TrainingPipeline") -> None:
         """Push the final state and leave the window live until the user closes
         it (or Ctrl-C, which stops the viewer)."""
         self.finish_training(pipeline)
+        self.state.set_phase(PHASE_DONE)
         self.state.log("training complete — close the viewer window to exit")
         if self._viewer is None:
             return

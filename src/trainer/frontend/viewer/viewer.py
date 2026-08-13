@@ -81,6 +81,22 @@ def _fovy_from_proj(proj: np.ndarray) -> float | None:
     return math.degrees(2.0 * math.atan(1.0 / m11))
 
 
+def _copy_splats(encoder, src, dst, count: int, capacity: int) -> None:
+    """Copy the first ``count`` splats of a per-splat buffer, not the allocation.
+
+    The per-splat stride comes from the buffer's own size: every one of these is
+    allocated as ``capacity`` (``--max-splats``) elements, and their strides differ
+    (56 B of ``Gaussian3D``, the half-packed ``features_rest``, 4 B of
+    ``filter_3D``), so deriving it here keeps the layouts out of this function.
+    ``dst.size`` is respected too — the viewer may be configured with a different
+    capacity than the trainer.
+    """
+    stride = src.size // max(1, capacity)
+    size = min(count * stride, src.size, dst.size)
+    if size > 0:
+        encoder.copy_buffer(dst, 0, src, 0, size)
+
+
 def _linear_present_format(surface: spy.Surface) -> spy.Format:
     """Choose a NON-sRGB swapchain format for presentation.
 
@@ -561,35 +577,52 @@ class Viewer:
               f"sh_degree={sh_degree} mip={mip_enabled}")
         return True
 
+    def live_splat_count(self, train_pipeline: TrainingPipeline) -> int:
+        """The trainer's active splat count, read back to the host.
+
+        ONE uint32. It costs a readback (a staging copy queued behind the work in
+        flight, hence the queue scope), and it buys the snapshot below the right to
+        copy the ACTIVE range instead of the whole allocation — which is sized for
+        ``--max-splats`` and is mostly untouched tail for most of a run.
+        """
+        with self.runtime.queue_scope():
+            counter = train_pipeline.buffers.num_gaussians_counter.to_numpy()
+        return int(counter.view(np.uint32)[0])
+
     def update_gaussians(self, train_pipeline: TrainingPipeline):
-        src_g = train_pipeline.buffers.gaussians.storage
-        dst_g = self._pipeline.buffers.gaussians.storage
-        src_n = train_pipeline.buffers.num_gaussians_counter.storage
-        dst_n = self._pipeline.buffers.num_gaussians_counter.storage
+        src, dst = train_pipeline.buffers, self._pipeline.buffers
+        count = min(self.live_splat_count(train_pipeline), self.max_splats)
         batch = self.runtime.command_batch("viewer_update")
         encoder = batch.encoder
-        encoder.copy_buffer(dst_g, 0, src_g, 0, src_g.size)
-        encoder.copy_buffer(dst_n, 0, src_n, 0, src_n.size)
-        if train_pipeline.buffers.sh_enabled and self._pipeline.buffers.sh_enabled:
-            src_r = train_pipeline.buffers.features_rest.storage
-            dst_r = self._pipeline.buffers.features_rest.storage
-            encoder.copy_buffer(dst_r, 0, src_r, 0, min(src_r.size, dst_r.size))
+        _copy_splats(encoder, src.gaussians.storage, dst.gaussians.storage,
+                     count, src.max_splats)
+        if src.sh_enabled and dst.sh_enabled:
+            _copy_splats(encoder, src.features_rest.storage,
+                         dst.features_rest.storage, count, src.max_splats)
         # Mip-Splatting: copy the per-gaussian 3D smoothing filter so the viewer
         # applies the SAME low-pass eval does. filter_3D depends on gaussian
         # positions, so it must be refreshed with every snapshot (post-densify).
         if self._pipeline.raster_config.mip_enabled:
-            src_f = getattr(train_pipeline.buffers, "filter_3D", None)
-            dst_f = getattr(self._pipeline.buffers, "filter_3D", None)
+            src_f = getattr(src, "filter_3D", None)
+            dst_f = getattr(dst, "filter_3D", None)
             if src_f is not None and dst_f is not None:
-                encoder.copy_buffer(dst_f.storage, 0, src_f.storage, 0,
-                                    min(src_f.storage.size, dst_f.storage.size))
+                _copy_splats(encoder, src_f.storage, dst_f.storage,
+                             count, src.max_splats)
+        # The viewer's count is what we COPIED, written INSIDE this batch rather
+        # than copied from the trainer's counter: the readback above can be a
+        # densify behind by the time we get here, and a count ahead of the copied
+        # range would have the rasterizer walk uninitialized tail. Same batch means
+        # the viewer's next frame sees the count and its data together — one queue,
+        # so a submitted batch is atomic with respect to frames.
+        encoder.upload_buffer_data(dst.num_gaussians_counter.storage, 0,
+                                   np.array([count], dtype=np.uint32))
         self.runtime.submit(batch)
         # Mirror the trainer's CURRENT active SH degree so the viewer shows the
         # same bands as eval. The degree schedule ramps during training; pinning
         # the viewer at max over-shows half-trained higher bands eval (at the
         # scheduled degree) does not.
         self._pipeline.set_active_sh_degree(train_pipeline._active_sh_degree)
-        self._has_data = True
+        self._has_data = count > 0
 
     def preview_points(self, initial_points: dict) -> int:
         """Show a COLMAP-derived initial point cloud in the viewer's own pipeline.

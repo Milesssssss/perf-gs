@@ -62,6 +62,7 @@ GROUPS: tuple[tuple[str, str], ...] = (
     ("loss", "LOSS"),
     ("appearance", "APPEARANCE"),
     ("perf", "PERFORMANCE"),
+    ("eval", "EVALUATION"),
     ("stream", "VIEWER STREAM"),
 )
 
@@ -221,6 +222,19 @@ SETTINGS: tuple[Setting, ...] = (
                  "cost. Injected as a compile-time define.",
             launch_only=True,
             note="compile-time: set it with --backward-pixel-stride"),
+    # ---- EVALUATION: the passes that render the WHOLE camera set.
+    Setting("evaluation", "eval + final metrics", "eval", bool, default=True,
+            help="Run the passes that render every camera: the periodic eval "
+                 "sweep (--eval-every, which lands on the LAST iteration whenever "
+                 "it divides --iters and is most of the wait after training "
+                 "'ends'), the post-training metrics pass and .ply export "
+                 "(--compute-final-metrics), and the held-out test PSNR "
+                 "(--final-test-psnr). On by default. --no-evaluation is a VETO "
+                 "over all three, so a run that only needs the trained model "
+                 "stops paying for them; it does not turn anything on that its "
+                 "own flag left off, and it does not touch the explicit "
+                 "--render-all-every / --psnr-curve opt-ins.",
+            note="off = no full-camera-set renders"),
     # ---- VIEWER STREAM: what the live viewer costs.
     Setting("stream_every", "snapshot every N iters", "stream", int, default=10,
             help="push a gaussian snapshot to the in-process viewer every "

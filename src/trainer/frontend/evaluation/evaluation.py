@@ -111,9 +111,13 @@ def run_eval_sweep(
     t_start: float,
     eval_time_total: float,
     eval_holdout: bool,
+    progress: Callable[[int, int], None] = lambda _done, _total: None,
 ) -> float:
     """Run the held-out TEST-split eval sweep and append a row to
     ``eval_curve.jsonl``; return the updated ``eval_time_total``.
+
+    ``progress(done, total)`` is called per camera, so a caller can say what the
+    sweep is doing — at the last iteration it IS the wait the user sees.
 
     Reports the paper metric — the mean of per-image PSNR/SSIM (NOT dB-of-mean-
     MSE) — over the held-out test cameras (all cams when holdout is off). Sweep
@@ -134,7 +138,8 @@ def run_eval_sweep(
     psnr_srgb_mask_frames = []
     ssim_srgb_frames = []
 
-    for cam_i in test_indices:
+    for done, cam_i in enumerate(test_indices, start=1):
+        progress(done, len(test_indices))
         entry = scene.images[cam_i]
         pipeline.render(entry.camera)
         # Binning/overlap debug viz: read the buffers this forward just filled

@@ -88,17 +88,9 @@ class IterationContext:
 
 @dataclass
 class AdamLRs:
-    """Adam learning rates, matching gsplat defaults:
-        means_lr     = 1.6e-4
-        scales_lr    = 5e-3
-        quats_lr     = 1e-3
-        opacities_lr = 2.5e-2
-        sh0_lr       = 2.5e-3
-    Only ``mean`` has LR decay applied (PLAN.md Q15).
-    """
     mean: float = 1.6e-4
     scale: float = 5e-3
     rot: float = 1e-3
     opacity: float = 2.5e-2
     color: float = 2.5e-3  # in reality this is the SH0 LR
-    sh_rest: float = 0.0025 / 20.0 #TODO lr is too low for the 3k iters, fix this
+    sh_rest: float = 0.0025 / 20.0 #TODO play around more with a more optimal LR value for the sh rests

@@ -34,6 +34,10 @@ EXPECTED_DEFAULTS = {
     "preview_every": 3000,
     "log_every": 0,
     "render_all_every": 0,
+    # Master veto over the whole-camera-set passes (eval sweep, final metrics +
+    # .ply, held-out test PSNR). On by default = every one of them keeps whatever
+    # its own flag says, so this addition changed no existing behaviour.
+    "evaluation": True,
     "eval_every": 3000,
     "eval_holdout": 1,
     "eval_holdout_stride": 8,

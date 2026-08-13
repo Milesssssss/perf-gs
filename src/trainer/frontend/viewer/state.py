@@ -32,10 +32,15 @@ PHASE_IDLE = "idle"
 PHASE_SETUP = "setup"
 PHASE_RECONSTRUCT = "reconstruct"
 PHASE_TRAINING = "training"
+# The last iteration is NOT the end of the run: the final eval sweep, the metrics
+# pass and the .ply export render every camera, which is minutes of work the
+# orchestrator spends outside the loop. Without a phase of its own that time read
+# as a finished run parked at "iter N/N" while no panel command could be served.
+PHASE_FINALIZE = "finalize"
 PHASE_DONE = "done"
 PHASE_ERROR = "error"
 
-_BUSY = (PHASE_SETUP, PHASE_RECONSTRUCT, PHASE_TRAINING)
+_BUSY = (PHASE_SETUP, PHASE_RECONSTRUCT, PHASE_TRAINING, PHASE_FINALIZE)
 
 # Session modes. The hub picks a dataset and drives reconstruct/train from the
 # panel; a plain training run already has its scene from the CLI. Only the hints
@@ -49,6 +54,7 @@ PHASE_LABELS = {
     PHASE_SETUP: "installing recon tools",
     PHASE_RECONSTRUCT: "reconstructing",
     PHASE_TRAINING: "training",
+    PHASE_FINALIZE: "finalizing the run",
     PHASE_DONE: "done",
     PHASE_ERROR: "error",
 }
@@ -180,6 +186,9 @@ class SessionSnapshot:
     # orchestrator when the panel asks for setup (CUDA by default — it is what puts
     # feature matching and bundle adjustment on the GPU at all).
     recon_cuda: bool = True
+    # What the current phase is doing right now, when its own progress number
+    # cannot say it (see :meth:`SessionState.set_activity`).
+    activity: str = ""
     progress: Progress = field(default_factory=Progress)
     stats: TrainingStats = field(default_factory=TrainingStats)
     log: tuple[str, ...] = ()
@@ -236,14 +245,16 @@ class SessionSnapshot:
     def can_configure(self) -> bool:
         """Whether the TRAINING SETUP section is still editable.
 
-        A run resolves its schedules and buffer sizes when it is BUILT, so the
-        settings only mean something up to the moment Train is pressed: they grey
-        out while anything is running, because an edit made then would be silently
-        ignored. Once a run has FINISHED they open back up — the values are read
-        again by the next one, which is how a run is re-launched with new
-        parameters.
+        A run reads these values when it is BUILT, so the only time an edit would
+        be silently ignored is while a run is actually training — that is the only
+        phase that locks. Installing the recon tools and reconstructing a dataset
+        both happen BEFORE any run exists, so there is nothing to protect: the
+        panel stays editable through them (they take minutes, which is exactly when
+        you want to set the run up). Finalizing does not lock either — the values
+        it would clobber belong to the run that just ended, and the next one reads
+        them fresh, which is how Train again re-launches with new parameters.
         """
-        return self.mode == MODE_HUB and not self.busy
+        return self.mode == MODE_HUB and self.phase != PHASE_TRAINING
 
     @property
     def message(self) -> str:
@@ -259,6 +270,8 @@ class SessionSnapshot:
             return "installing reconstruction tools..."
         if self.phase == PHASE_RECONSTRUCT:
             return "reconstructing — this takes a while"
+        if self.phase == PHASE_FINALIZE:
+            return "run finished — writing out its metrics and .ply"
         if self.phase == PHASE_DONE:
             if self.mode == MODE_HUB:
                 return ("training finished — export the .ply, press Train again, "
@@ -390,13 +403,25 @@ class SessionState:
                 progress=Progress(), stats=TrainingStats())
 
     def set_phase(self, phase: str) -> None:
-        """Set the phase; leaving a busy phase also retires its progress bar."""
+        """Set the phase; leaving a busy phase also retires its progress bar.
+
+        Changing phase always clears the activity suffix: it describes work of the
+        phase being left, so carrying it over would caption the new one with it.
+        """
         with self._lock:
             progress = self._snapshot.progress
             if phase not in _BUSY:
                 progress = Progress()
             self._snapshot = replace(self._snapshot, phase=str(phase),
-                                     progress=progress)
+                                     progress=progress, activity="")
+
+    def set_activity(self, activity: str = "") -> None:
+        """Say what the current phase is doing RIGHT NOW, when its own progress
+        number cannot say it — the training bar counts iterations, so the final
+        eval sweep would otherwise sit at ``iter N/N`` with no explanation. Empty
+        clears it."""
+        with self._lock:
+            self._snapshot = replace(self._snapshot, activity=str(activity))
 
     def set_progress(self, label: str = "", fraction: float = 0.0,
                      active: bool = True) -> None:
@@ -434,8 +459,9 @@ class SessionState:
             snap = self._snapshot
         if snap.phase == PHASE_TRAINING and snap.stats.total > 0:
             stats = snap.stats
+            label = f"iter {stats.step}/{stats.total}"
             snap = replace(snap, progress=Progress(
-                label=f"iter {stats.step}/{stats.total}",
+                label=f"{label} — {snap.activity}" if snap.activity else label,
                 fraction=stats.fraction, active=True))
         return snap
 

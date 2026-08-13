@@ -67,6 +67,7 @@ from trainer.frontend.viewer.state import (
     KIND_COLMAP,
     PHASE_DONE,
     PHASE_ERROR,
+    PHASE_FINALIZE,
     PHASE_IDLE,
     PHASE_RECONSTRUCT,
     PHASE_SETUP,
@@ -685,11 +686,15 @@ class TrainingApplication:
         ).launch_training_loop()
 
         # -----Post-training----------------------------------------
+        # Its own phase, with its own progress: everything below renders cameras
+        # and writes files, so it is minutes of work that used to show up as a
+        # finished run stuck at "iter N/N" (see PHASE_FINALIZE).
+        self._publish_finalize("held-out test PSNR", 0.05)
         self._write_final_test_psnr(result)
 
         if self._training_runtime.profiler is not None:
             self._training_runtime.profiler.close()
-            
+
         viewer = self._training_runtime.viewer
         pipeline = self._training_runtime.pipeline
         if hold_viewer:
@@ -698,7 +703,9 @@ class TrainingApplication:
             viewer.finish_training(pipeline)
         self._training_runtime.artifacts.close_all()
 
+        self._publish_finalize("final metrics", 0.15)
         run_post_training(
+            progress=self._publish_finalize,
             pipeline=self._training_runtime.pipeline,
             scene=self._sceneContext.colmapScene,
             args=self.args,
@@ -714,6 +721,20 @@ class TrainingApplication:
             t_start=result.started_at,
             psnr_curve=result.psnr_curve
         )
+        if self.viewer is not None:
+            self._viewer.state.set_phase(PHASE_DONE)   # NOW the run is over
+
+    def _publish_finalize(self, label: str, fraction: float) -> None:
+        """Publish post-training progress (no-op without a viewer).
+
+        Also the callback ``run_post_training`` reports through, so the panel gets
+        a determinate bar for the metrics pass instead of a frozen iteration count.
+        """
+        if self.viewer is None:
+            return
+        state = self._viewer.state
+        state.set_phase(PHASE_FINALIZE)
+        state.set_progress(label, fraction)
 
     def _prepare_target_dataset(self) -> None:
         scene = self._sceneContext
@@ -917,7 +938,9 @@ class TrainingApplication:
         (self.paths.root / "config.json").write_text(json.dumps(config, indent=2))
 
     def _write_final_test_psnr(self, result: TrainingResult) -> None:
-        if not self.args.final_test_psnr or self.args.profile_run:
+        # --no-evaluation vetoes this: it renders every held-out camera.
+        if (not self.args.final_test_psnr or self.args.profile_run
+                or not self.args.evaluation):
             return
         sceneContext = self._sceneContext
         psnr, count = eval_test_psnr_srgb(self._pipeline, sceneContext.colmapScene, sceneContext.test_indices, self._targets.srgb)
@@ -1209,12 +1232,17 @@ class TrainingLoop:
                 return False
 
         if context.step_number > 1 and context.events.render_all:
-            render_all_cameras(
-                self.runtime.pipeline,
-                self.scene.colmapScene,
-                context.step_number,
-                self.paths.cameras,
-            )
+            state = self.runtime.viewer.state
+            state.set_activity("rendering every camera")
+            try:
+                render_all_cameras(
+                    self.runtime.pipeline,
+                    self.scene.colmapScene,
+                    context.step_number,
+                    self.paths.cameras,
+                )
+            finally:
+                state.set_activity("")
 
         self._record_psnr_curve_if_due(context)
         self._run_evaluation_if_due(context)
@@ -1262,19 +1290,28 @@ class TrainingLoop:
         stream = self.runtime.artifacts.eval_curve_json
         if stream is None or not context.events.eval:
             return
-        self.eval_time_total = run_eval_sweep(
-            pipeline=self.runtime.pipeline,
-            scene=self.scene.colmapScene,
-            it=context.step_number,
-            test_indices=self.scene.test_indices,
-            targets_srgb=self.targets.srgb,
-            targets_linear=self.targets.linear,
-            cams_dir=self.paths.cameras,
-            eval_curve_json=stream,
-            t_start=self.started_at,
-            eval_time_total=self.eval_time_total,
-            eval_holdout=bool(self.args.eval_holdout),
-        )
+        # An eval tick renders every held-out camera, which at the LAST iteration
+        # is the whole visible wait after training "ends". The iteration counter
+        # cannot show it (it is pinned at N/N), so the sweep says so itself.
+        state = self.runtime.viewer.state
+        try:
+            self.eval_time_total = run_eval_sweep(
+                pipeline=self.runtime.pipeline,
+                scene=self.scene.colmapScene,
+                it=context.step_number,
+                test_indices=self.scene.test_indices,
+                targets_srgb=self.targets.srgb,
+                targets_linear=self.targets.linear,
+                cams_dir=self.paths.cameras,
+                eval_curve_json=stream,
+                t_start=self.started_at,
+                eval_time_total=self.eval_time_total,
+                eval_holdout=bool(self.args.eval_holdout),
+                progress=lambda done, total:
+                    state.set_activity(f"evaluating camera {done}/{total}"),
+            )
+        finally:
+            state.set_activity("")
 
     def _complete_training_loop(self) -> TrainingResult:
         self.runtime.pipeline.runtime.wait_for_idle()

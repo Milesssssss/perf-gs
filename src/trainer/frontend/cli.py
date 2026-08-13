@@ -46,6 +46,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--log-every", type=int, default=0)
     parser.add_argument("--render-all-every", type=int, default=0,
                     help="dump PNGs for ALL cameras every N iters")
+    _shared(parser, "evaluation")
     parser.add_argument("--eval-every", type=int, default=3000,
                     help="every N iters, render ALL cameras and compute the honest "
                          "average PSNR (same metric as the final_psnr.json summary). "

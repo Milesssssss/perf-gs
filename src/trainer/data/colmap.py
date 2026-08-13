@@ -188,9 +188,7 @@ def _srgb_colors_to_sh0(srgb: np.ndarray) -> np.ndarray:
 
 
 def _find_sparse_dir(scene_dir: Path) -> tuple[Path | None, str]:
-    """Find the COLMAP sparse reconstruction, trying common layouts.
-
-    Returns (directory, format) where format is 'text' or 'bin'.
+    """
     Tries in order:
       sparse/0/text/cameras.txt
       sparse/0/cameras.txt

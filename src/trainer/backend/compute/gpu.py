@@ -104,6 +104,13 @@ class GpuRuntime:
     Submissions are serialized under ``gpu_lock`` (shared with any other thread
     on this device — notably the live viewer). The lock defaults to a no-op so
     single-threaded use is unchanged.
+
+    WHAT THE LOCK COVERS, and what it deliberately does not: it serializes the
+    queue operations that require external synchronization — submitting a command
+    buffer, the viewer's ``present`` paired with it, and the queue-wide
+    ``wait_for_idle``. It does NOT cover waiting for a single submission, which is
+    a fence wait (see :meth:`wait_for_submit`). Blocking on the GPU while holding
+    this lock is what made a live viewer cost multiples of the training speed.
     """
 
     def __init__(self, device: spy.Device,
@@ -131,11 +138,27 @@ class GpuRuntime:
         return SubmitHandle(submit_id)
 
     def wait_for_submit(self, handle: SubmitHandle | int) -> None:
+        """Wait for ONE submission to finish. Deliberately NOT under ``gpu_lock``.
+
+        This is a wait on that submission's fence: it needs no exclusive access to
+        the queue, unlike submit/present/wait_for_idle. Holding the lock here meant
+        whoever waited owned the queue for the entire GPU execution of their own
+        work, in BOTH directions:
+
+          * the viewer waits for its frame every single frame (``render_frame``),
+            which blocked every trainer submit for the duration of that frame;
+          * the trainer waits on its oldest in-flight submit to bound queue depth
+            (:class:`~trainer.frontend.queue_limiter.QueueLimiter`), which blocked
+            the viewer for the duration of a training step.
+
+        Training and rendering could therefore never overlap — with a viewer open
+        the two serialized instead of sharing the GPU.
+        """
         submit_id = handle.submit_id if isinstance(handle, SubmitHandle) else handle
-        with self.gpu_lock:
-            self.device.wait_for_submit(submit_id)
+        self.device.wait_for_submit(submit_id)
 
     def wait_for_idle(self) -> None:
+        """Queue-wide idle wait — this one DOES need the lock (it is a queue op)."""
         with self.gpu_lock:
             self.device.wait_for_idle()
 

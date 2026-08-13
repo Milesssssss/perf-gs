@@ -1,22 +1,3 @@
-"""sRGB ↔ linear color transfer functions.
-
-The single source of truth for the true piecewise sRGB curve, which was
-previously copy-pasted across pipeline.py, v2_train.py, v1_train.py, colmap.py,
-and export.py. These are the exact IEC 61966-2-1 transfer functions.
-
-NOTE: this is the *true* sRGB curve (piecewise, exponent 2.4). It is NOT the
-same as the cheap ``x ** (1/2.2)`` display-gamma approximation used by
-``export.render_to_png`` and ``v1_train._save_srgb_png`` — those are a
-deliberately different (faster, less accurate) approximation and are left
-alone.
-
-``linear_to_srgb`` is the pure transfer function: it does NOT clamp its input
-to [0, 1]. Callers that want a displayable value (e.g. PNG preview) should clip
-to [0, 1] themselves before calling; callers that must round-trip unbounded
-values (e.g. PLY f_dc export, where linear = 0.5 + C0*sh0 can leave [0, 1])
-pass the raw value.
-"""
-
 from __future__ import annotations
 
 import numpy as np

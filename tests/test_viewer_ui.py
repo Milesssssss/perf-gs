@@ -437,6 +437,70 @@ def test_leaving_a_busy_phase_retires_the_progress_bar():
     assert session.snapshot().progress.active is False
 
 
+def test_only_training_locks_the_training_setup():
+    """Installing the tools and reconstructing both happen BEFORE a run exists,
+    so locking the setup then protects nothing — and those are the long waits
+    during which you actually want to set the next run up."""
+    session = st.SessionState(st.MODE_HUB)
+    for phase in (st.PHASE_IDLE, st.PHASE_SETUP, st.PHASE_RECONSTRUCT,
+                  st.PHASE_FINALIZE, st.PHASE_DONE, st.PHASE_ERROR):
+        session.set_phase(phase)
+        assert session.snapshot().can_configure is True, phase
+    session.set_phase(st.PHASE_TRAINING)
+    assert session.snapshot().can_configure is False
+
+
+def test_finalizing_is_busy_so_it_cannot_be_mistaken_for_a_finished_run():
+    """The metrics pass and the .ply export run with the orchestrator parked, so
+    the buttons must stay disabled — pressing them would do nothing until it
+    returned."""
+    session = st.SessionState(st.MODE_HUB)
+    session.set_scene_dir("D:/data/scene")
+    session.set_trained_model(True)
+    session.set_phase(st.PHASE_FINALIZE)
+    snap = session.snapshot()
+    assert snap.busy is True
+    assert (snap.can_train, snap.can_export, snap.can_clear) == (False, False, False)
+    assert snap.phase_label == "finalizing the run"
+    assert "metrics" in snap.hint()
+
+
+def test_the_finalize_bar_reports_the_post_training_steps():
+    session = st.SessionState(st.MODE_HUB)
+    session.publish_training(step=3000, total=3000)
+    session.set_phase(st.PHASE_FINALIZE)
+    session.set_progress("final metrics, camera 40/194", 0.46)
+    progress = session.snapshot().progress
+    assert progress.active is True
+    assert (progress.label, progress.percent()) == ("final metrics, camera 40/194", 46)
+
+
+def test_work_at_the_last_iteration_is_named_instead_of_sitting_at_n_of_n():
+    """THE COMPLAINT: --eval-every divides --iters, so the final iteration runs a
+    full eval sweep over every held-out camera. The bar is pinned at iter N/N by
+    definition, so the sweep has to say what it is doing."""
+    session = st.SessionState(st.MODE_HUB)
+    session.set_phase(st.PHASE_TRAINING)
+    session.publish_training(step=3000, total=3000)
+    assert session.snapshot().progress.label == "iter 3000/3000"
+
+    session.set_activity("evaluating camera 12/194")
+    assert session.snapshot().progress.label == "iter 3000/3000 — evaluating camera 12/194"
+    assert session.snapshot().progress.fraction == 1.0     # the iterations ARE done
+
+    session.set_activity("")
+    assert session.snapshot().progress.label == "iter 3000/3000"
+
+
+def test_changing_phase_drops_a_stale_activity():
+    session = st.SessionState(st.MODE_HUB)
+    session.set_phase(st.PHASE_TRAINING)
+    session.publish_training(step=3000, total=3000)
+    session.set_activity("evaluating camera 12/194")
+    session.set_phase(st.PHASE_FINALIZE)
+    assert session.snapshot().activity == ""
+
+
 def test_log_tail_is_published_into_the_snapshot():
     session = st.SessionState(log_lines=3)
     for i in range(6):
@@ -781,17 +845,20 @@ def test_every_setup_control_reads_and_writes_the_shared_store():
                           else setup.get(setting.setting_name))
 
 
-def test_setup_controls_lock_while_a_run_is_being_built_or_trained():
-    """A run resolves its schedules and buffer sizes when it is BUILT, so an edit
-    made while it runs would be silently ignored — grey them out instead."""
+def test_setup_controls_lock_while_a_run_trains_and_only_then():
+    """A run reads these values when it is BUILT, so training is the one phase
+    where an edit would be silently ignored. Setting up the tools and
+    reconstructing happen before any run exists — locking them out of those (the
+    two longest waits in the hub) protected nothing."""
     session, view, _, panel = _build_setup_section()
-    for phase in (st.PHASE_SETUP, st.PHASE_RECONSTRUCT, st.PHASE_TRAINING):
+    session.set_phase(st.PHASE_TRAINING)
+    view.sample()
+    assert all(w.binds["enabled"]() is False for w in _controls(panel))
+    for phase in (st.PHASE_SETUP, st.PHASE_RECONSTRUCT, st.PHASE_FINALIZE,
+                  st.PHASE_IDLE):
         session.set_phase(phase)
         view.sample()
-        assert all(w.binds["enabled"]() is False for w in _controls(panel))
-    session.set_phase(st.PHASE_IDLE)
-    view.sample()
-    assert all(w.binds["enabled"]() is True for w in _controls(panel))
+        assert all(w.binds["enabled"]() is True for w in _controls(panel)), phase
 
 
 def test_setup_controls_reopen_after_a_run_so_it_can_be_relaunched():

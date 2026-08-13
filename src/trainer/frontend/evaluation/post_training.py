@@ -49,12 +49,25 @@ def run_post_training(
     completed_iters: int,
     t_start: float,
     psnr_curve: list[dict] | None = None,
+    progress: Callable[[str, float], None] = lambda _label, _fraction: None,
 ) -> None:
-    """Compute + report the final metrics and export the trained PLY."""
+    """Compute + report the final metrics and export the trained PLY.
+
+    ``progress(label, fraction)`` is called at each step so a viewer can show what
+    this pass is doing — it renders every camera, which is the bulk of the wait
+    after the last iteration.
+    """
 
     if args.profile_run:
         print("[profile-run] finished; skipping final metrics / PLY export.")
         return
+
+    # --compute-final-metrics renders the WHOLE camera set (and writes the .ply
+    # from the same block), which --no-evaluation vetoes.
+    metrics = args.compute_final_metrics and args.evaluation
+    if args.compute_final_metrics and not args.evaluation:
+        print("[post-training] --no-evaluation: skipping the final metrics pass "
+              "and the .ply export.")
 
     # Deferred import: top-level would create a circular import (app imports this
     # module at load, before PsNRPlotWriter is defined).
@@ -72,7 +85,8 @@ def run_post_training(
     # render reflects the FINAL gaussian positions. The periodic recompute above
     # skips the last ~100 iters, so without this the reported PSNR would use a
     # filter ~100-200 iters stale.   
-    if args.mip_splatting:
+    if args.mip_splatting and metrics:
+        progress("refreshing the 3D filter", 0.2)
         pipeline.compute_3d_filter()
         #_log_filter3d("final")
 
@@ -88,10 +102,16 @@ def run_post_training(
     n_mask_used = 0
 
     #render all cameras in the scene and store them as PNGs in the run_dir/cams/cam_XX/ folder, and compute PSNR/MSE metrics
-    if args.compute_final_metrics:
+    if metrics:
+        progress("rendering every camera", 0.25)
         render_all_cameras(pipeline, scene, args.iters, cams_dir)
 
+        total = max(1, len(scene.images))
         for cam_i, entry in enumerate(scene.images):
+            # 0.35 -> 0.9 of the pass: one render + metrics per camera, and the
+            # only part long enough to be worth interpolating.
+            progress(f"final metrics, camera {cam_i + 1}/{total}",
+                     0.35 + 0.55 * (cam_i / total))
             pipeline.render(entry.camera)
             # Render is sRGB now (INRIA/gsplat/SADGS convention). The sRGB PSNR
             # (this is the paper-reported metric) is a direct compare vs t_srgb;
@@ -170,6 +190,7 @@ def run_post_training(
         (run_dir / "final_psnr.json").write_text(json.dumps(summary, indent=2))
 
         ply_path = run_dir / "output.ply"
+        progress("writing the .ply", 0.92)
         save_ply(pipeline, ply_path)
 
         print(f"done in {time.time() - t_start:.1f}s")
