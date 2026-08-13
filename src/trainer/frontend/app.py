@@ -22,11 +22,11 @@ import numpy as np
 from PIL import Image
 
 from trainer.data.colmap import ColmapImageEntry, load_colmap, load_colmap_image
+from trainer.data.parallel import default_workers_numbers, map_ordered
 from trainer.common.color import srgb_to_linear
 from trainer.config.config import (
     AdamLRs,
     AppearanceConfig,
-    CompositorConfig,
     DensificationProperties,
     LossConfig,
     RasterConfig,
@@ -47,10 +47,11 @@ from trainer.frontend.evaluation.evaluation import (
     render_all_cameras,
     run_eval_sweep,
 )
-from trainer.frontend.lr_schedule import (
+from trainer.frontend.schedule import (
     AppearanceSchedule,
     ExtinctionHardnessSchedule,
     MeanLearningRateSchedule,
+    TrainingSchedule
 )
 from trainer.frontend.reporting.outputs import RunArtifacts
 from trainer.frontend.evaluation.post_training import run_post_training
@@ -61,7 +62,17 @@ from trainer.frontend.training_preflight import (
     resolve_holdout_split,
     resolve_loss_and_lrs,
 )
-from trainer.frontend.schedule import IterationEvents, TrainingSchedule
+
+from trainer.frontend.viewer.state import (
+    KIND_COLMAP,
+    PHASE_DONE,
+    PHASE_ERROR,
+    PHASE_IDLE,
+    PHASE_RECONSTRUCT,
+    PHASE_SETUP,
+    PHASE_TRAINING,
+    SessionState,
+)
 from trainer.frontend.viewer.viewer_control import ViewerSession
 
 from trainer.data.colmap import ColmapDataset
@@ -74,6 +85,21 @@ from trainer.frontend.profiling.profiler import (
 )
 from trainer.frontend.evaluation.evaluation import CameraSampler 
 from trainer.config.config import IterationContext, IterationContextualVariables
+
+def _progress_relay(state: SessionState, parser):
+    """Adapt a subprocess line stream to the session state.
+
+    Every line lands in the log (wrapped, never clipped, by the panel) and is
+    ALSO fed to a stage parser that turns it into a determinate fraction — which
+    is what the viewer's progress bar shows for setup/reconstruction.
+    """
+    def relay(line: str) -> None:
+        state.log(line)
+        parsed = parser.feed(line)
+        if parsed is not None:
+            state.set_progress(parsed.label, parsed.fraction)
+    return relay
+
 
 @dataclass(frozen=True)
 class RunPaths:
@@ -123,6 +149,13 @@ class ShaderSpecialization:
     the run's extinction hardness is fixed at <= 1 (default): the dead pow-based
     hardened-extinction branches compile out, freeing registers in the hottest
     backward loop. Any hardness > 1 run keeps the full runtime path (define off).
+
+    HUB EXCEPTION: defines are fixed when the DEVICE is created, and the hub creates
+    its device before the user has picked the run's hyperparameters — so a hardness
+    raised in the panel would hit a compositor specialized to ignore it. Hub runs
+    therefore always keep the full runtime path (a register-pressure cost paid for
+    the panel being able to set hardness at all). ``--backward-pixel-stride`` has no
+    such escape: it sizes staged arrays, so in the hub it stays a launch-time flag.
     """
 
     backward_pixel_stride: int
@@ -132,9 +165,10 @@ class ShaderSpecialization:
 
     @classmethod
     def from_args(cls, args: argparse.Namespace) -> "ShaderSpecialization":
+        hub = bool(getattr(args, "hub", False))
         return cls(
             backward_pixel_stride=args.backward_pixel_stride,
-            hardness_is_one=(float(args.extinction_hardness) <= 1.0),
+            hardness_is_one=(not hub and float(args.extinction_hardness) <= 1.0),
         )
 
     def compiler_defines(self) -> dict[str, str] | None:
@@ -193,7 +227,19 @@ class TrainingApplication:
 
     def prepare_training_context(self) -> None:
         self.profiling_enabled = apply_profile_session_overrides(self.args)
+        self._create_device()
+        self._prepare_scene(self.args.scene)
+        self._create_pipeline_for_scene(self._sceneContext)
+        self._prepare_textures()
+        self._start_viewer(self.scene_context)
+        self._start_profiler()
+        self._create_training_services()
 
+    def _prepare_scene(self, scene_dir) -> None:
+        """Load the dataset at ``scene_dir`` and resolve everything that depends
+        on it (configs, LRs, GT targets). Shared by the CLI path and the hub
+        (after a dataset is chosen). Does NOT create the device/pipeline/viewer."""
+        self.args.scene = str(scene_dir)
         self.scene_context = load_scene_context(self.args)
 
         self.densify_mode = validate_training_config(
@@ -215,17 +261,412 @@ class TrainingApplication:
          ) = resolve_loss_and_lrs(self.args)
 
         self._write_resolved_config()
-        self._prepare_targets()
-        self._create_rendering_system()
-        self._prepare_optional_features()
-        self._start_viewer(self.scene_context)
-        self._start_profiler()
-        self._create_training_services()
+        self._prepare_target_dataset()
 
     def start_training(self) -> None:
         # ------ prepare for training -------------------------
         self.prepare_training_context()
+        self._run_training_and_post()
 
+    def run_hub(self) -> None:
+        """Interactive hub: bring up a scene-less viewer, let the user drag-drop a
+        dataset and choose Reconstruct (images -> GLOMAP/COLMAP) or Train (a
+        COLMAP dataset) from the panel, then train the chosen dataset in-process
+        feeding the same viewer. CLI training (start_training) is unaffected.
+
+        The session OUTLIVES a run: when training finishes the result stays on
+        screen and in memory, and the panel offers Export .ply, Train again (with
+        the TRAINING SETUP values it now holds), another dataset, or Clear session.
+        Only closing the window ends it.
+
+        The viewer and this method communicate ONLY through ``session.state``: the
+        panel produces one-shot commands, this loop consumes them and publishes
+        phase/progress/log back (see :mod:`trainer.frontend.viewer.state`)."""
+        from trainer.frontend.reconstruction import ReconTools
+        from trainer.frontend.settings import (
+            TrainingSetup,
+            viewer_stream_capacity,
+        )
+
+        self.args.no_viewer = False  # the hub IS the viewer
+        self.profiling_enabled = apply_profile_session_overrides(self.args)
+        self._create_device()
+
+        # The panel's TRAINING SETUP edits this store; it is seeded from the CLI
+        # args and applied back onto them when the user presses Train.
+        setup = TrainingSetup.from_args(self.args)
+        self.viewer = ViewerSession.create_hub(
+            device=self.device,
+            width=self.args.width or 960,
+            height=self.args.height or 540,
+            max_splats=viewer_stream_capacity(self.args.max_splats,
+                                              self.args.stream_max_splats),
+            fovy=getattr(self.args, "fovy", 45.0),
+            gpu_lock=self.gpu_lock,
+            sh_degree=self.args.sh_degree,
+            mip_enabled=self.args.mip_splatting,
+            mip_kernel_size=(self.args.mip_kernel_size if self.args.mip_splatting else 0.3),
+            setup=setup,
+        )
+        self.viewer.start()
+
+        state = self._viewer.state
+        state.set_recon_cuda(self.args.recon_cuda)
+        tools = ReconTools(colmap_bin=self.args.colmap_bin,
+                           glomap_bin=self.args.glomap_bin,
+                           recon_cuda=self.args.recon_cuda)
+        state.set_tools_ready(tools.is_ready())
+        state.log("viewer ready — drag a dataset folder onto the window")
+        print("[hub] viewer up — drag a dataset folder onto the window.")
+
+        # ONE session, MANY runs: a finished run no longer ends the hub. Control
+        # goes straight back to the panel, where the result can be exported, the
+        # same scene re-trained with different parameters, another dataset dropped,
+        # or the whole session cleared. Only closing the window ends this.
+        while True:
+            scene_dir = self._hub_choose_scene(tools)
+            if scene_dir is None:
+                print("[hub] window closed; exiting.")
+                return
+            self._hub_train_scene(scene_dir, setup)
+
+    def _hub_choose_scene(self, tools) -> "str | None":
+        """Service panel commands until a COLMAP scene is ready to train.
+
+        Returns the scene dir, or ``None`` if the user closed the window first.
+        Each command is one small step: the panel owns *when* (and what is
+        enabled — see ``SessionSnapshot.can_*``), this owns *how*.
+        """
+        from trainer.frontend.reconstruction import classify_dataset
+
+        state = self._viewer.state
+        while self._viewer.is_alive():
+            dropped = state.take_dropped()
+            if dropped:
+                kind = classify_dataset(dropped)
+                # A new dataset supersedes the last run's outcome: without this the
+                # status line would still say "training finished" (or "something
+                # failed") over a folder that has not been trained at all.
+                if state.snapshot().phase in (PHASE_DONE, PHASE_ERROR):
+                    state.set_phase(PHASE_IDLE)
+                state.set_dataset(dropped, kind)
+                state.set_scene_dir(dropped if kind == KIND_COLMAP else "")
+                state.log(f"dropped {dropped}")
+                state.log(f"detected: {kind}")
+                if kind == KIND_COLMAP:
+                    self._hub_preview_scene(dropped)
+
+            command = state.take_command()
+            if command == "setup":
+                self._hub_setup_tools(tools)
+            elif command == "reconstruct":
+                self._hub_reconstruct(tools)
+            elif command == "export":
+                self._hub_export_ply()
+            elif command == "clear":
+                self._hub_clear_session()
+            elif command == "train":
+                scene_dir = state.scene_dir
+                if scene_dir:
+                    return scene_dir
+                state.log("no COLMAP dataset ready — reconstruct or drop one first")
+            time.sleep(0.05)
+        return None
+
+    def _hub_train_scene(self, scene_dir: str, setup) -> None:
+        """Build and train ONE run on ``scene_dir``, feeding the running viewer.
+
+        Heavy GPU setup runs with the render thread suspended to avoid queue races.
+        The run is also SURVIVABLE: a failure leaves the hub usable (error phase,
+        commands served again) instead of taking the process down with it, because
+        the end of a run is no longer the end of the session.
+        """
+        state = self._viewer.state
+        print(f"[hub] training on {scene_dir}")
+        state.set_trained_model(False)   # the previous result is about to be dropped
+        state.set_phase(PHASE_TRAINING)
+        state.set_progress("loading scene and building the pipeline", 0.0)
+        state.log(f"preparing training on {scene_dir}")
+        self.viewer.suspend_rendering()
+        try:
+            self._begin_repeat_run()
+            # The panel's settings become the run's args HERE — before anything
+            # reads them — and the viewer's own pipeline is re-shaped to match.
+            self._apply_hub_setup(setup)
+            self._prepare_scene(scene_dir)
+            self._create_pipeline_for_scene(self._sceneContext)
+            self._prepare_textures()
+            self._start_profiler()
+            self._create_training_services()
+        except Exception as error:                     # noqa: BLE001
+            self._hub_run_failed("building the run", error)
+            return
+        finally:
+            self.viewer.resume_rendering()
+
+        self._attach_scene_to_viewer()
+        self.viewer.push_snapshot(self._pipeline)  # show the initial gaussians
+        try:
+            self._run_training_and_post(hold_viewer=False)
+        except Exception as error:                     # noqa: BLE001
+            self._hub_run_failed("training", error)
+            return
+        # The pipeline stays alive and on screen: that is what Export writes out,
+        # and what the viewer keeps showing while the user decides what is next.
+        state.set_trained_model(True)
+        state.log(f"training finished — .ply export goes to {self.paths.root}")
+
+    def _hub_run_failed(self, what: str, error: Exception) -> None:
+        """Report a failed hub run and leave the session usable."""
+        import traceback
+
+        traceback.print_exc()
+        state = self._viewer.state
+        state.set_phase(PHASE_ERROR)
+        state.log(f"{what} failed: {error}")
+        state.log("the hub is still live — drop another dataset, or press Train "
+                  "again after changing the setup")
+        print(f"[hub] {what} failed: {error}")
+
+    def _begin_repeat_run(self) -> None:
+        """Make room for ANOTHER run in the same hub session.
+
+        No-op for the session's first run. For every one after it: a fresh output
+        directory, and the previous run's GPU resources released before the new
+        ones are allocated.
+        """
+        if self.runtime is None:
+            return
+        self._rotate_run_dir()
+        self._release_run_resources()
+
+    def _rotate_run_dir(self) -> None:
+        """Point ``self.paths`` at an unused ``outputs/train/<run>`` directory.
+
+        A run owns its directory: config.json, log.txt/json, test_psnr.json,
+        cams/, output.ply. A second run in the same session writing into the first
+        one's would interleave two sets of numbers under one name, so it gets its
+        own — ``<run_name>_2``, ``_3``, ... for an explicit ``--run-name``, or
+        simply the current timestamp when the name was auto-generated.
+        """
+        base = self.args.run_name or datetime.now().strftime("%Y%m%d_%H%M%S")
+        runs = self.paths.root.parent        # RunPaths owns the layout, not this
+        name, index = base, 1
+        while (runs / name).exists():
+            index += 1
+            name = f"{base}_{index}"
+        self.run_name = name
+        self.paths = RunPaths.create(name)
+        print(f"[hub] next run writes to {self.paths.root}")
+
+    def _release_run_resources(self) -> None:
+        """Drop the finished run's GPU-heavy objects before the next one is built.
+
+        A pipeline plus one rgba32_float target texture per camera (and a structure
+        texture per camera under SAD-GS) is the bulk of what a run allocates, so
+        holding the old set while the new one is created would double the peak —
+        which on a large capture is the difference between fitting in VRAM and not.
+
+        Call with rendering suspended, and only once the queue can be drained: the
+        viewer's own pipeline is a SEPARATE one (it keeps showing the last snapshot
+        after this), but the trainer's buffers must not be released mid-flight.
+        """
+        if self.pipeline is not None:
+            try:
+                self.pipeline.runtime.wait_for_idle()
+            except Exception as error:                 # noqa: BLE001
+                print(f"[hub] draining the queue before release failed: {error}")
+        self.runtime = None
+        self.pipeline = None
+        self.targets = None
+        self.target_textures = []
+        self.structure_textures = []
+        self.scene_context = None
+        self.densify_mode = None        # all four are re-resolved by _prepare_scene
+        self.densify_config = None
+        self.structure_config = None
+        self.base_lrs = None
+        self.profiler = None            # already closed by _run_training_and_post
+
+    def _hub_export_ply(self) -> None:
+        """Write the trained gaussians to ``<run>/output.ply`` from the panel.
+
+        Same file the automatic post-training export writes under
+        ``--compute-final-metrics``; this is the on-demand path, so a run made
+        without that flag is not lost. The absolute path goes to the log, since the
+        panel has no file dialog to show one.
+        """
+        from trainer.backend.export import save_ply
+
+        state = self._viewer.state
+        if self.pipeline is None:
+            state.log("nothing to export yet — train a scene first")
+            return
+        path = self.paths.root / "output.ply"
+        state.log(f"exporting {path.name} …")
+        # save_ply READS BACK the gaussian buffers, so the render thread has to be
+        # off the queue (and off the GIL) for it — see suspend_rendering.
+        self.viewer.suspend_rendering()
+        try:
+            save_ply(self._pipeline, path)
+        except Exception as error:                     # noqa: BLE001
+            state.log(f"export failed: {error}")
+            print(f"[hub] export failed: {error}")
+            return
+        finally:
+            self.viewer.resume_rendering()
+        size_mb = path.stat().st_size / (1024 * 1024)
+        state.log(f"exported {size_mb:,.1f} MB -> {path.resolve()}")
+        print(f"[hub] exported {path.resolve()} ({size_mb:,.1f} MB)")
+
+    def _hub_clear_session(self) -> None:
+        """Forget the dataset and the finished run so the hub can start over.
+
+        The 'work on something else' path: the window, the device and the installed
+        tools stay, everything a run allocated goes, and the panel is back to
+        "drag a dataset folder onto the window". The log survives — it is the record
+        of what just happened, and losing it is worse than a busy panel.
+        """
+        state = self._viewer.state
+        self.viewer.suspend_rendering()
+        try:
+            self._release_run_resources()
+        finally:
+            self.viewer.resume_rendering()
+        self.viewer.clear_view()
+        state.clear_session()
+        state.log("session cleared — drag another dataset onto the window")
+        print("[hub] session cleared")
+
+    def _apply_hub_setup(self, setup) -> None:
+        """Fold the panel's TRAINING SETUP into this run's args.
+
+        Called with rendering suspended, immediately before anything reads the
+        args, so every option the panel offers takes effect for real. The viewer's
+        own pipeline is rebuilt here too: its splat capacity / SH buffers / Mip
+        raster path are fixed at construction, so a changed model needs a new one
+        (no-op when the user left those alone).
+        """
+        from trainer.frontend.settings import viewer_stream_capacity
+
+        state = self._viewer.state
+        for change in setup.apply_to(self.args):
+            state.log(f"[setup] {change}")
+        self.viewer.reconfigure_model(
+            max_splats=viewer_stream_capacity(self.args.max_splats,
+                                              self.args.stream_max_splats),
+            sh_degree=self.args.sh_degree,
+            mip_enabled=self.args.mip_splatting,
+            mip_kernel_size=(self.args.mip_kernel_size
+                             if self.args.mip_splatting else 0.3),
+        )
+
+    def _hub_setup_tools(self, tools) -> None:
+        """Download the colmap/glomap binaries, with a determinate bar."""
+        from trainer.frontend.reconstruction.progress import setup_parser
+
+        state = self._viewer.state
+        state.set_phase(PHASE_SETUP)
+        state.set_progress("starting", 0.0)
+        # The panel's checkbox is the install-time build choice (see ReconTools).
+        tools.recon_cuda = state.recon_cuda
+        ready = tools.setup(progress=_progress_relay(state, setup_parser()))
+        state.set_tools_ready(ready)
+        state.set_phase(PHASE_IDLE if ready else PHASE_ERROR)
+        state.log("reconstruction tools ready" if ready
+                  else "tool setup failed — see the log above")
+
+    def _hub_reconstruct(self, tools) -> None:
+        """Run images -> COLMAP for the dropped dataset, with a determinate bar."""
+        from trainer.frontend.reconstruction import reconstruct
+        from trainer.frontend.reconstruction.progress import reconstruction_parser
+
+        state = self._viewer.state
+        source = state.snapshot().dataset_path
+        if not source:
+            state.log("no dataset to reconstruct — drop a folder of images first")
+            return
+        state.set_phase(PHASE_RECONSTRUCT)
+        state.set_progress("starting", 0.0)
+        out = Path(source) / "reconstruction"
+        result = reconstruct(tools, source, out, matcher=state.matcher,
+                             progress=_progress_relay(state, reconstruction_parser()))
+        if result is None:
+            state.set_phase(PHASE_ERROR)
+            return
+        state.set_dataset(str(result), KIND_COLMAP)
+        state.set_scene_dir(str(result))
+        state.set_phase(PHASE_IDLE)
+        state.log("reconstruction complete")
+        self._hub_preview_scene(str(result))
+
+    def _hub_preview_scene(self, scene_dir: str) -> None:
+        """Put the dataset's SfM point cloud on screen before Train is pressed.
+
+        The same points training initializes from, shown as gaussians in the
+        viewer's own pipeline — so a bad reconstruction (wrong scale, split into
+        two halves, half the views dropped) is visible BEFORE paying for a run,
+        which is the whole point of doing it here rather than after Train.
+
+        Best-effort by design: a scene the loader rejects must leave the hub usable
+        (drop another folder, reconstruct again), not kill the process. Train will
+        surface the same failure with a real traceback if the user insists.
+        """
+        state = self._viewer.state
+        state.log("loading the SfM point cloud …")
+        started = time.time()
+        # Rendering is suspended for the WHOLE thing, load included — not just the
+        # buffer upload. ``load_colmap``'s binary parsers are per-record Python
+        # loops, and the render thread holds the GIL for most of every frame (it
+        # blocks in wait_for_submit and re-evaluates every panel binding), so the
+        # same 0.6s parse takes over 40s next to a live viewer. This is the CPU
+        # sibling of the queue-race reason the training setup path suspends.
+        self.viewer.suspend_rendering()
+        try:
+            dataset = load_colmap(
+                scene_dir,
+                width=self.args.width,
+                height=self.args.height,
+                downsample=self.args.downsample,
+                init_opacity=self.args.init_opacity,
+            )
+            shown = self.viewer.preview_points(dataset.initial_points)
+        except Exception as error:                    # noqa: BLE001
+            state.log(f"cannot preview this dataset: {error}")
+            print(f"[hub] preview failed for {scene_dir}: {error}")
+            return
+        finally:
+            self.viewer.resume_rendering()
+
+        # EVERY camera here, not the eval split _attach_scene_to_viewer installs
+        # once training starts: before a run you want to fly the whole capture and
+        # see which views the reconstruction actually placed.
+        self.viewer.attach_scene(
+            [(entry.image_name, entry.camera) for entry in dataset.images],
+            snap=True)
+        state.log(f"previewing {shown:,} SfM points from {len(dataset.images)} "
+                  f"cameras — press Train to start")
+        print(f"[hub] previewing {shown:,} initial points from {scene_dir} "
+              f"({time.time() - started:.1f}s)")
+
+    def _attach_scene_to_viewer(self) -> None:
+        """Hand the chosen scene's held-out cameras to the hub viewer's dropdown."""
+        scene = self._sceneContext
+        images = scene.colmapScene.images
+        test_cameras = [
+            (images[i].image_name, images[i].camera)
+            for i in scene.test_indices if 0 <= i < len(images)
+        ]
+        self._viewer.attach_scene(test_cameras)
+
+    def _run_training_and_post(self, *, hold_viewer: bool = True) -> None:
+        """Train, then write the run's post-training artifacts.
+
+        ``hold_viewer`` is what the CLI path wants: block on the viewer window so
+        the process outlives the run. The hub passes False — it services the panel
+        itself afterwards, so parking in a thread join there would freeze every
+        post-training action (see :meth:`_hub_train_scene`).
+        """
         # ---- launch training loop --------------------
         result = TrainingLoop(
             args=self.args,
@@ -249,7 +690,12 @@ class TrainingApplication:
         if self._training_runtime.profiler is not None:
             self._training_runtime.profiler.close()
             
-        self._training_runtime.viewer.hold_after_training(self._training_runtime.pipeline)
+        viewer = self._training_runtime.viewer
+        pipeline = self._training_runtime.pipeline
+        if hold_viewer:
+            viewer.hold_after_training(pipeline)
+        else:
+            viewer.finish_training(pipeline)
         self._training_runtime.artifacts.close_all()
 
         run_post_training(
@@ -269,7 +715,7 @@ class TrainingApplication:
             psnr_curve=result.psnr_curve
         )
 
-    def _prepare_targets(self) -> None:
+    def _prepare_target_dataset(self) -> None:
         scene = self._sceneContext
         self.targets = TargetDataset(
             scene=scene.colmapScene,
@@ -277,13 +723,19 @@ class TrainingApplication:
             height=scene.height,
             use_alpha=self.args.w_alpha > 0,
         )
+        # The per-cam GT is the reference every cams/cam_XX/iter_*.png is read
+        # against, so it is written for every run, hub or CLI.
         self.targets.write_ground_truths(self.paths.cameras)
 
-    def _create_rendering_system(self) -> None:
-        scene = self._sceneContext
+    def _create_device(self) -> None:
+        """Create the GPU device + shared queue lock. Split out from pipeline
+        creation so the hub can bring the device (and viewer) up BEFORE a dataset
+        is chosen."""
         self.device = create_training_device(self.args)
         self.gpu_lock = create_gpu_queue_lock(viewer_enabled=not self.args.no_viewer)
 
+    def _create_pipeline_for_scene(self, scene: SceneContext) -> None:
+        """Build the training pipeline for a loaded scene (device must exist)."""
         self.pipeline = create_pipeline(
             args=self.args,
             device=self.device,
@@ -293,17 +745,27 @@ class TrainingApplication:
             lambda_ssim=self.effective_lambda_ssim,
             initial_state=scene.colmapScene.initial_points,
         )
+        self._pipeline.set_mipsplatting_cameras(
+            [scene.colmapScene.images[i].camera for i in scene.train_indices])
 
 
+    def _prepare_textures(self) -> None:
+        """Upload every ground-truth target, then build the structure fields.
 
-        self._pipeline.set_mipsplatting_cameras([scene.colmapScene.images[i].camera for i in scene.train_indices])
-
-
-    def _prepare_optional_features(self) -> None:
+        The per-image CPU work (alpha pad + float->uint8 quantize, ~12 MB of
+        pixels per view) runs on a thread pool while the uploads stay on THIS
+        thread: the device/queue is not thread-safe — it is the same one the
+        viewer shares under ``gpu_lock`` — so only the numpy half is parallel.
+        Results still arrive in camera order, and ``map_ordered``'s bounded
+        lookahead keeps at most a few packed images alive at once.
+        """
         pipeline = self._pipeline
+        targets = self._targets.srgb
         self.target_textures = [
-            pipeline.create_target_texture(target) for target in self._targets.srgb
+            pipeline.upload_target_texture(packed)
+            for packed in map_ordered(pipeline.pack_target_texture, targets)
         ]
+
         self.structure_textures = StructureTextureProvider(
             args=self.args,
             device=self.device,
@@ -325,11 +787,13 @@ class TrainingApplication:
                 for i in scene.test_indices
                 if 0 <= i < len(images)
             ]
+            from trainer.frontend.settings import viewer_stream_capacity
             self.viewer = ViewerSession.create(
                 device=self.device,
                 width=scene.width,
                 height=scene.height,
-                max_splats=self.args.max_splats,
+                max_splats=viewer_stream_capacity(self.args.max_splats,
+                                                  self.args.stream_max_splats),
                 fovy=getattr(self.args, "fovy", 45.0),
                 gpu_lock=self.gpu_lock,
                 pipeline=self._pipeline,
@@ -350,13 +814,17 @@ class TrainingApplication:
     def _create_training_services(self) -> None:
         scene = self._sceneContext
         artifacts = RunArtifacts.create(self.paths.root, self.args)
-        reporter = TrainingReporter(artifacts, self.args, scene)
+        # The reporter publishes into the session state too, so the viewer's
+        # training progress bar / metrics come from the same numbers as the logs.
+        reporter = TrainingReporter(artifacts, self.args, scene,
+                                    state=self._viewer.state)
         reporter.write_header()
 
         self.mean_lr = MeanLearningRateSchedule(
             lr_init=self.base_lrs.mean * scene.extent,
             lr_final=self.base_lrs.mean * 1e-2 * scene.extent,
-            max_steps=self.args.position_lr_max_steps,
+            max_steps=_resolve_position_lr_max_steps(
+                self.args.position_lr_max_steps, self.args.iters),
         )
 
         self.extinction_hardness_schedule = ExtinctionHardnessSchedule(
@@ -829,16 +1297,18 @@ class TargetDataset:
         self._width = width
         self._height = height
         self._use_alpha = use_alpha
-        self._srgb = [
-            load_colmap_image(
-                entry,
-                scene.image_dir,
-                width,
-                height,
-                load_alpha=use_alpha,
-            )
-            for entry in scene.images
-        ]
+        # Decoding the dataset is startup's long pole and OpenCV releases the GIL
+        # while it does it, so the sweep is threaded (in camera order — index i
+        # must stay camera i). Bounded lookahead keeps the peak RAM below
+        # "every image decoded before the first one is consumed".
+        started = time.time()
+        workers = default_workers_numbers(len(scene.images))
+        self._srgb = list(map_ordered(
+            lambda entry: load_colmap_image(
+                entry, scene.image_dir, width, height, load_alpha=use_alpha),
+            scene.images, workers=workers))
+        print(f"[data] loaded {len(self._srgb)} targets at {width}x{height} in "
+              f"{time.time() - started:.1f}s ({workers} decode threads)", flush=True)
         self._linear_cache: dict[int, np.ndarray] = {}
 
     @property
@@ -853,18 +1323,33 @@ class TargetDataset:
         return target
 
     def write_ground_truths(self, cameras_dir: Path) -> None:
-        for camera_index, target in enumerate(self._srgb):
-            camera_dir = cameras_dir / f"cam_{camera_index:02d}"
-            camera_dir.mkdir(parents=True, exist_ok=True)
-            path = camera_dir / "gt.png"
-            if path.exists():
-                continue
-            if self._use_alpha and target.shape[-1] == 4:
-                pixels = (target * 255 + 0.5).clip(0, 255).astype(np.uint8)
-                Image.fromarray(pixels, mode="RGBA").save(path)
-            else:
-                pixels = (target[..., :3] * 255 + 0.5).clip(0, 255).astype(np.uint8)
-                Image.fromarray(pixels, mode="RGB").save(path)
+        """Dump one ``cam_XX/gt.png`` per camera (skipping any already written).
+
+        Threaded like the decode sweep: PNG encoding is the other startup cost
+        that spends its time inside a GIL-releasing C library.
+        """
+        started = time.time()
+        written = sum(map_ordered(
+            lambda pair: self._write_ground_truth(cameras_dir, *pair),
+            enumerate(self._srgb)))
+        if written:
+            print(f"[data] wrote {written} ground-truth PNGs in "
+                  f"{time.time() - started:.1f}s", flush=True)
+
+    def _write_ground_truth(self, cameras_dir: Path, camera_index: int,
+                            target: np.ndarray) -> int:
+        camera_dir = cameras_dir / f"cam_{camera_index:02d}"
+        camera_dir.mkdir(parents=True, exist_ok=True)
+        path = camera_dir / "gt.png"
+        if path.exists():
+            return 0
+        if self._use_alpha and target.shape[-1] == 4:
+            pixels = (target * 255 + 0.5).clip(0, 255).astype(np.uint8)
+            Image.fromarray(pixels, mode="RGBA").save(path)
+        else:
+            pixels = (target[..., :3] * 255 + 0.5).clip(0, 255).astype(np.uint8)
+            Image.fromarray(pixels, mode="RGB").save(path)
+        return 1
 
 
 class OpacityBundleReporter:
@@ -930,54 +1415,35 @@ class StructureTextureProvider:
 
         cached_fields = self._load_cache()
         if cached_fields is None and self._target_textures is not None:
-            gpu = self._create_gpu_computer()
-            if gpu is not None:
-                return self._build_on_gpu(gpu)
+            sadgs_gpu_backend = self._create_sadgs_gpu_backend()
+            if sadgs_gpu_backend is not None:
+                return self._build_on_gpu(sadgs_gpu_backend)
 
-        # Fallbacks: disk cache (upload each) or CPU compute (slow).
-        gpu_computer = None
+        sadgs_gpu_backend = None
         if cached_fields is None:
-            gpu_computer = self._create_gpu_computer()
+            sadgs_gpu_backend = self._create_sadgs_gpu_backend()
         else:
             print(f"[SAD] uploading {self._scene.camera_count} "
                   "structure-tensor textures to GPU...", flush=True)
 
         textures = []
         started = time.time()
-        log_stride = max(1, self._scene.camera_count // 6)
         for camera_index in range(self._scene.camera_count):
-            field = self._field_for(camera_index, cached_fields, gpu_computer)
+            field = self._field_for(camera_index, cached_fields, sadgs_gpu_backend)
             textures.append(self._upload(field, f"structure_tensor_{camera_index}"))
-            if (
-                (camera_index + 1) % log_stride == 0
-                or camera_index == self._scene.camera_count - 1
-            ):
-                print(f"[SAD]   {camera_index + 1:3d}/{self._scene.camera_count} "
-                      f"({time.time() - started:.1f}s elapsed)", flush=True)
 
         if cached_fields is None:
-            method = "GPU" if gpu_computer is not None else "CPU"
+            method = "GPU" if sadgs_gpu_backend is not None else "CPU"
             print(f"[SAD] computed {self._scene.camera_count} fields on {method} "
                   f"in {time.time() - started:.1f}s", flush=True)
         return textures
 
     def _build_on_gpu(self, gpu) -> list[Any]:
-        """All-GPU build: create the destination structure textures, then record
-        every view's passes (reading the pre-uploaded target textures) into a
-        single command batch and sync ONCE. No per-image numpy upload/readback —
-        the ~154ms/image round-trip was the readback + re-upload + per-image
-        wait_for_idle, none of which the GPU-only field needs."""
+
         n = self._scene.camera_count
         started = time.time()
         dst = [self._create_structure_texture(f"structure_tensor_{i}") for i in range(n)]
 
-        # Chunk views across submissions. Recording ALL views into one submit is a
-        # single very long GPU job that trips the OS GPU watchdog (TDR ->
-        # "Vulkan returned a failure"); bounding each submit's duration avoids that
-        # while keeping the all-GPU, no-readback win (still no per-image numpy
-        # round-trip). Views within a chunk share the scratch textures and run in
-        # order (RAW hazards handled by the in-order encoder); chunks are
-        # independent (each writes its own dst textures).
         CHUNK = 16
         for base in range(0, n, CHUNK):
             batch = gpu.runtime.command_batch("structure_tensor_scene")
@@ -1032,15 +1498,15 @@ class StructureTextureProvider:
               flush=True)
         return fields
 
-    def _create_gpu_computer(self) -> Any | None:
+    def _create_sadgs_gpu_backend(self) -> Any | None:
         try:
             from trainer.backend.densify.structure_analysis_gpu import StructureTensorGPU
-            computer = StructureTensorGPU(
+            gpu_backend = StructureTensorGPU(
                 self._device, self._scene.width, self._scene.height)
             print(f"[SAD] no cache; computing {self._scene.camera_count} fields "
                   "on GPU...", flush=True)
-            return computer
-        except Exception as error:  # noqa: BLE001 - GPU failure selects CPU fallback
+            return gpu_backend
+        except Exception as error:
             print(f"[SAD] GPU structure-tensor unavailable ({error}); computing "
                   f"{self._scene.camera_count} fields on CPU (slow)...", flush=True)
             return None
@@ -1077,13 +1543,16 @@ class StructureTextureProvider:
 
 
 class TrainingReporter:
-    """Owns training log formatting and artifact schemas."""
+    """Owns training log formatting, artifact schemas, and the live UI numbers."""
 
     def __init__(self, artifacts: RunArtifacts, args: argparse.Namespace,
-                 scene: SceneContext) -> None:
+                 scene: SceneContext, state: SessionState | None = None) -> None:
         self._artifacts = artifacts
         self._args = args
         self._scene = scene
+        # Where the viewer reads its progress bar / metrics from. Always present
+        # (ViewerSession owns one even under --no-viewer), so no null checks.
+        self._state = state if state is not None else SessionState()
         self._started_at = 0.0
         self._last_time = 0.0
         self._last_iteration = 0
@@ -1103,6 +1572,17 @@ class TrainingReporter:
         self._started_at = started_at
         self._last_time = started_at
         self._last_iteration = 0
+        # Publishing the target iteration count is what makes the viewer's
+        # training bar determinate (fraction = step / total). EVERY field is
+        # published, not just the new ones: in the hub this reporter may follow a
+        # previous run, whose loss/psnr/rate would otherwise still be on screen
+        # until the new run's first log tick replaced them.
+        self._state.publish_training(
+            step=0, total=int(self._args.iters),
+            gaussians=self._scene.initial_gaussian_count, elapsed_s=0.0,
+            it_per_s=0.0, loss=None, psnr=None)
+        self._state.log(f"training started: {self._args.iters} iters at "
+                        f"{self._scene.width}x{self._scene.height}")
 
     def report_throughput(self, context: IterationContext) -> None:
         if context.step_number % 10 != 0:
@@ -1113,6 +1593,10 @@ class TrainingReporter:
         elapsed = now - self._started_at
         print(f"iter {context.step_number}: train step done. It/s:{rate:.1f} "
               f"total training time:{elapsed // 60:.0f}min {elapsed % 60:.1f}sec")
+        # Same cadence as the console line: advances the viewer's progress bar
+        # and its it/s + ETA readouts without touching the per-iteration path.
+        self._state.publish_training(step=context.step_number, it_per_s=rate,
+                                     elapsed_s=elapsed)
         self._last_time = now
         self._last_iteration = context.step_number
 
@@ -1131,6 +1615,8 @@ class TrainingReporter:
                 f"non-finite pixels (out of {rendered.size}). Training aborted.")
             print(message)
             self._artifacts.log_txt.write(f"# ABORT: {message}\n")
+            self._state.set_phase(PHASE_ERROR)  # the panel says so, not just stdout
+            self._state.log(message)
             return False, current_count
 
         clipped = np.clip(rendered, 0.0, 1.0)
@@ -1147,6 +1633,10 @@ class TrainingReporter:
             f"lr_mean={context.learning_rates.mean:.2e}  n_g={count:6d}  "
             f"{rate:5.1f} it/s")
         print(line)
+        self._state.log(line)
+        self._state.publish_training(
+            step=context.step_number, gaussians=count, it_per_s=rate,
+            loss=self._rolling_loss, psnr=psnr_value, elapsed_s=elapsed)
         self._artifacts.log_txt.write(line + "\n")
         self._artifacts.log_json.write(json.dumps({
             "iter": context.step_number,
@@ -1171,8 +1661,10 @@ class TrainingReporter:
         pre_s = outcome.stats.get("pre_count")
         final_s = outcome.stats.get("final_count")
         if pre_s is not None and final_s is not None:
-            print(f"iter {outcome.iteration}: {outcome.kind:9s}| "
-                  f"pre={pre_s} -> post={final_s}")
+            line = (f"iter {outcome.iteration}: {outcome.kind:9s}| "
+                    f"pre={pre_s} -> post={final_s}")
+            print(line)
+            self._state.log(line)
 
     def report_opacity_reset(self, iteration: int) -> None:
         self._artifacts.densify_json.write(json.dumps({
@@ -1185,8 +1677,12 @@ class TrainingReporter:
 
     def report_complete(self, iterations: int, wall_time: float) -> None:
         rate = iterations / max(wall_time, 1e-9)
-        print(f"[train] loop done: {iterations} iters in {wall_time:.1f}s "
-              f"({rate:.1f} it/s)")
+        line = (f"[train] loop done: {iterations} iters in {wall_time:.1f}s "
+                f"({rate:.1f} it/s)")
+        print(line)
+        self._state.log(line)
+        self._state.publish_training(step=iterations, it_per_s=rate,
+                                     elapsed_s=wall_time)
         self._artifacts.log_json.write(json.dumps({
             "event": "train_complete",
             "iters": iterations,
@@ -1300,6 +1796,18 @@ def create_gpu_queue_lock(*, viewer_enabled: bool) -> Any:
     return threading.RLock() if viewer_enabled else None
 
 
+def _resolve_position_lr_max_steps(cli_value: int, iters: int) -> int:
+    """Horizon for the exponential mean-LR decay (3DGS position_lr_max_steps).
+
+    ``--position-lr-max-steps 0`` (the default) => FOLLOW ``--iters``: the decay
+    then always lands on lr_final exactly at the end of the run. Pinning it
+    independently is still possible (a positive value wins), but it is not a choice
+    the hub's TRAINING SETUP offers — a horizon that disagrees with the run length
+    silently either freezes the means early or never reaches the final LR.
+    """
+    return int(iters) if int(cli_value) <= 0 else int(cli_value)
+
+
 def _resolve_sh_band_interval(cli_interval: int, iters: int, sh_degree: int) -> int:
     """Band-activation interval for the SH schedule.
 
@@ -1352,7 +1860,11 @@ def create_pipeline(*, args: argparse.Namespace, device: Any, gpu_lock: Any,
 
 
 def main() -> None:
-    TrainingApplication.from_cli().start_training()
+    app = TrainingApplication.from_cli()
+    if app.args.hub:
+        app.run_hub()          # interactive: pick dataset + reconstruct/train from the UI
+    else:
+        app.start_training()   # CLI: train --scene directly (unchanged)
 
 
 if __name__ == "__main__":

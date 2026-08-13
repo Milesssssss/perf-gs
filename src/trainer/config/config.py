@@ -6,7 +6,6 @@ from dataclasses import dataclass
 from typing import Any
 
 from trainer.data.colmap import ColmapImageEntry
-from trainer.frontend.schedule import IterationEvents
 
 
 @dataclass(frozen=True)
@@ -57,6 +56,20 @@ class RegularizationConfig:
     opacity_weight: float = 0.0
     scale_weight: float = 0.0
 
+@dataclass(frozen=True)
+class IterationEvents:
+    iteration: int
+    densify: bool
+    opacity_reset: bool
+    structure: bool
+    preview: bool
+    render_all: bool
+    log: bool
+    eval: bool
+    psnr_curve: bool
+    morton: bool
+    mip_after_densify: bool   # recompute the 3D filter INSIDE the densify block
+    mip_periodic: bool         # standalone periodic recompute past densify_to
 
 @dataclass(frozen=True)
 class IterationContextualVariables:

@@ -25,9 +25,8 @@ if TYPE_CHECKING:
     import argparse
 
     from trainer.backend.render.pipeline import TrainingPipeline
-    from trainer.frontend.lr_schedule import ExtinctionHardnessSchedule
+    from trainer.frontend.schedule import ExtinctionHardnessSchedule, IterationEvents
     from trainer.frontend.queue_limiter import QueueLimiter
-    from trainer.frontend.schedule import IterationEvents
 
 
 @dataclass

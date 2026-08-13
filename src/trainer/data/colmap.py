@@ -341,11 +341,34 @@ def load_colmap(
     # order happens to already be sequential.
     imgs = sorted(imgs, key=lambda r: r["name"])
 
-    # Sanity: all cameras same native resolution.
-    native_sizes = {(c["width"], c["height"]) for c in cams.values()}
-    if len(native_sizes) != 1:
-        raise ValueError(f"scene has mixed native camera sizes: {native_sizes}")
-    native_w, native_h = next(iter(native_sizes))
+    # Native resolution, PER VIEW. A COLMAP model that went through
+    # image_undistorter has one PINHOLE camera per image, each cropped to that
+    # view's own valid region, so sizes legitimately differ by a few pixels
+    # (e.g. 778x518 / 777x517 / 776x516 across one scene). This used to be a hard
+    # error, which made every undistorted reconstruction unloadable.
+    #
+    # The renderer has ONE target resolution, so the most COMMON native size
+    # becomes the target (that majority of views is then read straight off disk
+    # with no resampling at all) and every camera's intrinsics are scaled by ITS
+    # OWN native size further down. The off-size views are resized on load, which
+    # is exactly what the --downsample path already does for every view.
+    size_counts: dict[tuple[int, int], int] = {}
+    for rec in imgs:
+        cam = cams[rec["camera_id"]]
+        key = (cam["width"], cam["height"])
+        size_counts[key] = size_counts.get(key, 0) + 1
+    # Ties break on pixel count, so the choice never depends on dict order.
+    native_w, native_h = max(size_counts,
+                             key=lambda s: (size_counts[s], s[0] * s[1]))
+    uniform = len(size_counts) == 1
+    if not uniform:
+        spread = ", ".join(f"{w}x{h}x{n}" for (w, h), n in
+                           sorted(size_counts.items(), key=lambda kv: -kv[1]))
+        print(f"[colmap] {len(size_counts)} native camera sizes in this model "
+              f"({spread}) — typical of an undistorted reconstruction. Rendering "
+              f"at the most common size ({native_w}x{native_h}); the other "
+              f"{len(imgs) - size_counts[(native_w, native_h)]} views are "
+              f"resampled on load and keep their own intrinsics.")
 
     if width is None or height is None:
         # When a pre-downsampled images_N directory is used, adopt its ACTUAL
@@ -355,8 +378,11 @@ def load_colmap(
         # made load_image LANCZOS-resize every image on load (~110ms each,
         # ~21s over 194 cams) for nothing. Reading the real size skips that
         # resize entirely and keeps the projection intrinsics exact.
+        # Only when the model agrees on one size: with mixed sizes the first file
+        # on disk is an arbitrary one of them, while the camera records are exactly
+        # what each view was undistorted to.
         disk_w = disk_h = None
-        if img_dir != scene_dir / "images":
+        if uniform and img_dir != scene_dir / "images":
             try:
                 from PIL import Image
                 sample = next(p for p in sorted(img_dir.iterdir())
@@ -369,12 +395,15 @@ def load_colmap(
         if height is None:
             height = disk_h if disk_h is not None else native_h // downsample
 
-    sx = width / native_w
-    sy = height / native_h
-
     image_entries: list[ColmapImageEntry] = []
     for rec in imgs:
         cam = cams[rec["camera_id"]]
+        # Per-camera scale, not one global factor: a view whose native size
+        # differs from the target is stretched to it by load_colmap_image, so its
+        # focal length and principal point must follow ITS OWN size or the
+        # projection silently disagrees with the pixels by a fraction of a pixel.
+        sx = width / cam["width"]
+        sy = height / cam["height"]
         view = _view_matrix(
             rec["qw"], rec["qx"], rec["qy"], rec["qz"],
             rec["tx"], rec["ty"], rec["tz"],
@@ -459,15 +488,70 @@ def load_colmap_image(entry: ColmapImageEntry, image_dir: Path, width: int, heig
 
     Returns sRGB values in [0, 1]. If ``load_alpha`` is True and the image
     has an alpha channel, returns (H, W, 4); otherwise (H, W, 3).
+
+    OpenCV, not PIL: decoding a full dataset is startup's long pole (a 195-view
+    360_v2 scene is ~200 JPEG decodes before the first iteration), and
+    ``cv2.imread`` is several times faster than ``Image.open`` + ``convert`` for
+    the same pixels. Two deliberate differences from the PIL version:
+
+      * ``INTER_AREA`` replaces ``LANCZOS``. This path only ever DOWNsamples
+        (a render target is never bigger than the source), where area averaging
+        is the correct box filter and far cheaper; on the pre-downsampled
+        ``images_N`` directories the resize is skipped entirely anyway.
+      * EXIF orientation is explicitly IGNORED (``IMREAD_IGNORE_ORIENTATION``).
+        PIL's ``Image.open`` never auto-rotates, and rotating here would silently
+        disagree with the COLMAP intrinsics for the same view.
     """
-    from PIL import Image
+    import cv2
     path = image_dir / entry.image_name
-    img = Image.open(path)
-    if load_alpha and img.mode == "RGBA":
-        img = img.convert("RGBA")
+    # IMREAD_COLOR already collapses grayscale/alpha sources to 3-channel 8-bit
+    # BGR, which is exactly what the PIL ``convert("RGB")`` branch did.
+    flags = cv2.IMREAD_IGNORE_ORIENTATION | (
+        cv2.IMREAD_UNCHANGED if load_alpha else cv2.IMREAD_COLOR)
+    array = cv2.imread(str(path), flags)
+    if array is None and path.exists():
+        # cv2.imread() opens through the NARROW (ANSI) file API on Windows, so a
+        # path outside the active code page fails even though the file is right
+        # there. Decoding the bytes ourselves is the documented way around it.
+        array = cv2.imdecode(np.fromfile(path, dtype=np.uint8), flags)
+    if array is None:
+        if not path.exists():
+            raise FileNotFoundError(f"image not found: {path}")
+        raise OSError(f"failed to decode image: {path}")
+
+    channels = 1 if array.ndim == 2 else array.shape[2]
+    if load_alpha and channels == 4:
+        array = cv2.cvtColor(array, cv2.COLOR_BGRA2RGBA)
+    elif channels == 4:
+        array = cv2.cvtColor(array, cv2.COLOR_BGRA2RGB)
+    elif channels == 3:
+        array = cv2.cvtColor(array, cv2.COLOR_BGR2RGB)
+    elif channels == 1:
+        array = cv2.cvtColor(array, cv2.COLOR_GRAY2RGB)
     else:
-        img = img.convert("RGB")
-    if img.size != (width, height):
-        img = img.resize((width, height), Image.LANCZOS)
-    arr = np.asarray(img, dtype=np.float32) / 255.0
-    return arr
+        raise OSError(f"unsupported {channels}-channel image: {path}")
+
+    if (array.shape[1], array.shape[0]) != (width, height):
+        # INTER_AREA degenerates to nearest-neighbour when asked to ENLARGE, and
+        # an undistorted model's off-size views (a pixel or two under the common
+        # target) do enlarge. Shrinking still takes the area path.
+        shrinking = width <= array.shape[1] and height <= array.shape[0]
+        array = cv2.resize(array, (width, height),
+                           interpolation=cv2.INTER_AREA if shrinking
+                           else cv2.INTER_LINEAR)
+    # Resize in the source's own integer precision (as the PIL path did), then
+    # normalize by the dtype's full scale — 8-bit sources divide by 255, and a
+    # 16-bit PNG read through IMREAD_UNCHANGED keeps its extra bits instead of
+    # being silently truncated to 8.
+    #
+    # cv2.multiply, not ``astype(np.float32) / max``: the results are bit-for-bit
+    # identical (checked across 1/3/4 channels and uint8/uint16) but numpy's cast
+    # is one single-threaded pass that HOLDS THE GIL, which is what otherwise caps
+    # the threaded dataset load in TargetDataset. The 4-element scale sidesteps
+    # OpenCV's scalar-broadcast rule (a bare number can mean "channel 0 only").
+    if array.dtype.kind in "ui":
+        scale = 1.0 / float(np.iinfo(array.dtype).max)
+        array = cv2.multiply(array, (scale,) * 4, dtype=cv2.CV_32F)
+    else:
+        array = array.astype(np.float32)
+    return np.ascontiguousarray(array)

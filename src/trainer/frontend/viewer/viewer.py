@@ -14,7 +14,28 @@ from trainer.backend.compute.device import SHADERS_DIR
 from trainer.backend.compute.gpu import GpuRuntime
 from trainer.backend.render.pipeline import TrainingPipeline
 from trainer.config.config import AppearanceConfig, RasterConfig
-from trainer.frontend.viewer.viewer_ui import InputMap, ViewerUI
+from trainer.frontend.viewer.state import (
+    MODE_HUB,
+    PHASE_DONE,
+    PHASE_TRAINING,
+    SessionState,
+)
+from trainer.frontend.viewer.ui import InputMap, Panel
+from trainer.frontend.viewer.ui.sections import (
+    CameraControls,
+    SessionActions,
+    TrainingControls,
+    camera_section,
+    dataset_section,
+    help_section,
+    status_section,
+    training_section,
+    training_setup_section,
+)
+
+# Backdrop behind the panel while there is no scene to show. Written straight
+# into the (non-sRGB) present format, so this is already display-encoded color.
+BACKDROP = spy.float4(0.055, 0.065, 0.080, 1.0)
 
 
 def _build_view_matrix(eye: np.ndarray, forward: np.ndarray, up: np.ndarray) -> np.ndarray:
@@ -264,6 +285,110 @@ class FlyCamera:
         return Camera(view_matrix=view, proj_matrix=proj, image_size=(width, height))
 
 
+#: Key tags whose motion drops the "parked on a test camera" state.
+MOVE_TAGS = frozenset({"w", "a", "s", "d", "q", "e", "r", "t"})
+ROLL_SPEED_DEG_S = 60.0
+
+
+class _CameraRig:
+    """Free-fly camera + held-out test-camera snapping.
+
+    Owns what the render loop used to keep in an ad-hoc dict (which test camera
+    we are parked on, the exact-projection camera to render while parked, the
+    active vertical FOV). C/V, the panel dropdown and manual navigation all go
+    through :meth:`snap_to`, and the panel binds its readouts to :meth:`names` /
+    :meth:`selection` / :meth:`label` — so the selector and the camera can never
+    disagree.
+    """
+
+    def __init__(self, *, fovy: float, render_size: tuple[int, int],
+                 test_cameras: list[tuple[str, Camera]] | None = None) -> None:
+        self.cam = FlyCamera()
+        self.fovy = float(fovy)
+        self._render_size = render_size
+        self.test_cameras: list[tuple[str, Camera]] = list(test_cameras or [])
+        self.index = -1                 # -1 == free-fly
+        self.exact: Camera | None = None  # rendered verbatim while parked
+
+    # ---- panel bindings ----
+    def names(self) -> list[str]:
+        return ["Free-fly"] + [f"{i + 1:02d}  {name}"
+                               for i, (name, _) in enumerate(self.test_cameras)]
+
+    def selection(self) -> int:
+        """Dropdown index: 0 == free-fly, k == test camera k-1."""
+        return self.index + 1
+
+    def label(self) -> str:
+        if self.index < 0 or not self.test_cameras:
+            return "free-fly"
+        name, _ = self.test_cameras[self.index]
+        exact = "exact proj" if self.exact is not None else "fly proj"
+        return f"cam {self.index + 1}/{len(self.test_cameras)}  {name}  ({exact})"
+
+    # ---- state changes ----
+    def set_test_cameras(self, cameras, snap: bool = False) -> None:
+        """Replace the dropdown's camera list. ``snap`` parks on the first one
+        instead of dropping to free-fly — the point-cloud preview needs it, since
+        the fly camera starts at the origin and a scene reconstructed anywhere
+        else would be off-screen with nothing to say the data had loaded."""
+        self.test_cameras = list(cameras or [])
+        self.snap_to(0 if snap and self.test_cameras else -1)
+
+    def snap_to(self, index: int) -> None:
+        """Park on test camera ``index`` (-1 => free-fly)."""
+        if index < 0 or not self.test_cameras:
+            self.index, self.exact = -1, None
+            return
+        index %= len(self.test_cameras)
+        name, target = self.test_cameras[index]
+        self.cam.set_from_view_matrix(target.view_matrix)  # WASD continues here
+        fovy = _fovy_from_proj(target.proj_matrix)
+        if fovy is not None:
+            self.fovy = fovy
+        # Render the test camera EXACTLY (view+proj) when its resolution matches
+        # the render target, else fall back to the fly-cam perspective. Exact
+        # proj removes the last raster-side difference vs eval (principal point,
+        # exact fx/fy).
+        self.index = index
+        self.exact = (target if tuple(target.image_size) == self._render_size
+                      else None)
+        print(f"[Viewer] snapped to test cam {index + 1}/{len(self.test_cameras)} "
+              f"({name}), exact_proj={self.exact is not None}, "
+              f"fovy={self.fovy:.1f} deg")
+
+    def step(self, delta: int) -> None:
+        if not self.test_cameras:
+            print("[Viewer] no test cameras available to snap to")
+            return
+        self.snap_to((self.index + delta) % len(self.test_cameras))
+
+    def leave(self) -> None:
+        """Manual navigation drops the parked state (keeps the current pose)."""
+        if self.index != -1:
+            self.snap_to(-1)
+
+    def advance(self, held: set[str], dt: float) -> None:
+        """Apply one frame of held-key motion (move + roll)."""
+        self.cam.move(held, dt)
+        if "r" in held:
+            self.cam.roll_by(+ROLL_SPEED_DEG_S * dt)
+        if "t" in held:
+            self.cam.roll_by(-ROLL_SPEED_DEG_S * dt)
+        if held & MOVE_TAGS:
+            self.leave()
+
+    def camera(self, width: int, height: int, aspect: float) -> Camera:
+        if self.exact is not None:
+            return self.exact
+        return self.cam.get_camera(width, height, self.fovy, aspect=aspect)
+
+    def current_name(self) -> str:
+        if self.index < 0 or not self.test_cameras:
+            return "(free-fly)"
+        return self.test_cameras[self.index][0]
+
+
 class _ShaderWatcher:
     """Polls .slang files for mtime changes. Calls device.reload_all_programs()
     when a change is detected (after a debounce period)."""
@@ -322,7 +447,8 @@ class Viewer:
                  hot_reload: bool = False, max_sort_pairs: int | None = None,
                  gpu_lock=None, sh_degree: int = 0,
                  mip_enabled: bool = False, mip_kernel_size: float = 0.3,
-                 test_cameras: list[tuple[str, Camera]] | None = None):
+                 test_cameras: list[tuple[str, Camera]] | None = None,
+                 state: SessionState | None = None):
         self.device = device
         self.width = width
         self.height = height
@@ -330,9 +456,17 @@ class Viewer:
         self.fovy = fovy
         self.hot_reload = hot_reload
         self.sh_degree = sh_degree
-        # Held-out test cameras as (name, Camera) for the C/V snap feature;
-        # empty when the viewer runs without a scene (standalone / tests).
-        self._test_cameras: list[tuple[str, Camera]] = list(test_cameras or [])
+        # Session state shared with the orchestrator (phase, progress, log,
+        # training stats, dataset commands). Always present, so every panel
+        # binding has something to read even for a plain `train` run.
+        self.state = state if state is not None else SessionState()
+        # Hub mode adds the DATASET section (drag-drop + reconstruct/train).
+        self._hub = self.state.mode == MODE_HUB
+        # The camera rig owns the fly camera and the test-camera snapping; the
+        # panel binds to it directly, so the dropdown and the camera cannot
+        # disagree and attach_scene needs no dirty-flag dance in the loop.
+        self._rig = _CameraRig(fovy=fovy, render_size=(width, height),
+                               test_cameras=test_cameras)
 
         import contextlib
         self.gpu_lock = gpu_lock if gpu_lock is not None else contextlib.nullcontext()
@@ -344,15 +478,41 @@ class Viewer:
         # Set == training paused; the trainer blocks on wait_while_paused() each
         # iteration. Toggled by the viewer's Pause/Resume button.
         self._pause_event = threading.Event()
+        # Set == skip ALL GPU work in the render loop. The hub sets this while it
+        # does heavy pipeline/target setup on the main thread, so those uploads
+        # don't race the render thread on the shared queue.
+        self._suspend = threading.Event()
         # Reflects the trainer's state so the panel can show "training" vs
         # "inspecting init". The trainer sets this True once it starts looping.
         self._training_active = False
+        # Set == save the next rendered frame to a PNG (P key / programmatic).
+        self._grab = threading.Event()
 
+        # Serializes the main loop's paint against the one on_resize does from
+        # inside the OS modal-resize loop — and against reconfigure_model, which
+        # must not swap the pipeline out from under a frame.
+        self._render_lock = threading.RLock()
+        self._explicit_sort_pairs = max_sort_pairs
+        self._mip_enabled = mip_enabled
+        self._mip_kernel_size = mip_kernel_size
+        self._pipeline = self._build_view_pipeline(
+            max_splats, sh_degree, mip_enabled, mip_kernel_size, max_sort_pairs)
+
+        self._has_data = False
+        self._update_pending = False
+
+    def _build_view_pipeline(self, max_splats: int, sh_degree: int,
+                             mip_enabled: bool, mip_kernel_size: float,
+                             max_sort_pairs: int | None) -> TrainingPipeline:
+        """The viewer's OWN (render-only) pipeline, sized for the snapshots it will
+        receive. Kept separate from ``__init__`` so :meth:`reconfigure_model` can
+        rebuild it when the hub's TRAINING SETUP changes the model."""
         # NOTE can cut out splats
         if max_sort_pairs is None:
             max_sort_pairs = min(12_000_000, max(2_000_000, max_splats * 6))
-        self._pipeline = TrainingPipeline(
-            device=device, width=width, height=height, max_splats=max_splats,
+        pipeline = TrainingPipeline(
+            device=self.device, width=self.width, height=self.height,
+            max_splats=max_splats,
             max_sort_pairs=max_sort_pairs,
             gpu_lock=self.gpu_lock,
             viewer_only=True,
@@ -364,12 +524,42 @@ class Viewer:
             raster_config=RasterConfig(mip_enabled=mip_enabled,
                                        kernel_size=mip_kernel_size),
         )
-
         if sh_degree > 0:
-            self._pipeline.set_active_sh_degree(sh_degree)
+            pipeline.set_active_sh_degree(sh_degree)
+        return pipeline
 
-        self._has_data = False
-        self._update_pending = False
+    def reconfigure_model(self, *, max_splats: int, sh_degree: int,
+                          mip_enabled: bool, mip_kernel_size: float) -> bool:
+        """Rebuild the viewer's pipeline for a model the hub just reconfigured.
+
+        ``max_splats`` sizes the snapshot buffers, ``sh_degree`` decides whether a
+        ``features_rest`` buffer exists at all, and the Mip settings pick the raster
+        path plus the ``filter_3D`` buffer — all fixed at pipeline construction. So
+        when the panel's TRAINING SETUP changes any of them, the viewer's pipeline
+        has to be rebuilt or the snapshot copy would target the wrong buffers.
+
+        Call with rendering suspended (the hub already is, while it builds the run).
+        Returns True if a rebuild happened. Cheap no-op when nothing changed.
+        """
+        if (max_splats == self.max_splats and sh_degree == self.sh_degree
+                and mip_enabled == self._mip_enabled
+                and mip_kernel_size == self._mip_kernel_size):
+            return False
+        with self._render_lock:      # no frame in flight while we swap pipelines
+            with self.runtime.queue_scope():
+                self.runtime.wait_for_idle()   # old buffers may still be in use
+            self.max_splats = max_splats
+            self.sh_degree = sh_degree
+            self._mip_enabled = mip_enabled
+            self._mip_kernel_size = mip_kernel_size
+            self._pipeline = self._build_view_pipeline(
+                max_splats, sh_degree, mip_enabled, mip_kernel_size,
+                self._explicit_sort_pairs)
+            # The new buffers are empty: don't rasterize until a snapshot lands.
+            self._has_data = False
+        print(f"[Viewer] model reconfigured: max_splats={max_splats:,} "
+              f"sh_degree={sh_degree} mip={mip_enabled}")
+        return True
 
     def update_gaussians(self, train_pipeline: TrainingPipeline):
         src_g = train_pipeline.buffers.gaussians.storage
@@ -401,6 +591,49 @@ class Viewer:
         self._pipeline.set_active_sh_degree(train_pipeline._active_sh_degree)
         self._has_data = True
 
+    def preview_points(self, initial_points: dict) -> int:
+        """Show a COLMAP-derived initial point cloud in the viewer's own pipeline.
+
+        The hub calls this once a dataset is ready but before Train is pressed, so
+        there is no training pipeline to snapshot from yet — the points go straight
+        into the view pipeline's buffers instead. Returns how many were uploaded.
+
+        SH is pinned to band 0 for the preview: an SfM cloud only carries DC
+        color, and the higher bands in these buffers belong to whatever was shown
+        before (a previous preview, or nothing at all).
+        """
+        means = np.asarray(initial_points["means"], dtype=np.float32)
+        count = min(means.shape[0], self.max_splats)
+        if count < means.shape[0]:
+            print(f"[Viewer] preview clipped to {count:,} of {means.shape[0]:,} "
+                  f"SfM points (viewer capacity)")
+        with self._render_lock:      # no frame reading the buffers mid-upload
+            with self.runtime.queue_scope():
+                self._pipeline.set_gaussians(
+                    means=means[:count],
+                    log_scales=initial_points["log_scales"][:count],
+                    rot_quats=initial_points["rot_quats"][:count],
+                    opacities=initial_points["opacities"][:count],
+                    color_logits=initial_points["color_logits"][:count],
+                )
+            self._pipeline.set_active_sh_degree(0)
+            self._has_data = count > 0
+        return count
+
+    def clear_view(self) -> None:
+        """Blank the display: no gaussians, no camera list (the hub's Clear).
+
+        The buffers keep their allocation — ``_has_data`` is what gates
+        rasterization — so the next preview or snapshot fills them straight back
+        in. What this DOES drop is the last run's picture, which would otherwise
+        sit on screen next to a panel that says there is no dataset.
+        """
+        with self._render_lock:      # no frame mid-read of the buffers
+            self._has_data = False
+        self._rig.set_test_cameras([])
+        self._training_active = False
+        print("[Viewer] view cleared")
+
     def start_requested(self) -> bool:
         """True once the user pressed 'Start Training' in the viewer panel."""
         return self._start_event.is_set()
@@ -414,8 +647,33 @@ class Viewer:
             time.sleep(poll)
 
     def set_training_active(self, active: bool = True) -> None:
-        """Trainer tells the viewer it has begun (drives the panel label)."""
+        """Trainer tells the viewer it has begun (drives the panel + progress
+        bar): training is a session PHASE, so publish it once here rather than
+        re-deriving it in the loop."""
         self._training_active = active
+        if active:
+            self.state.set_phase(PHASE_TRAINING)
+        elif self.state.snapshot().phase == PHASE_TRAINING:
+            self.state.set_phase(PHASE_DONE)
+
+    def attach_scene(self, test_cameras, snap: bool = False) -> None:
+        """Populate the camera dropdown from a scene chosen at runtime (hub flow).
+        Thread-safe hand-off: the combo's items/value are bound to the rig, so the
+        next frame picks the new list up on its own. ``snap`` parks on the first
+        camera (see ``_CameraRig.set_test_cameras``).
+        """
+        self._rig.set_test_cameras(test_cameras, snap=snap)
+
+    def suspend_rendering(self) -> None:
+        """Pause all GPU work in the render loop (hub uses this during setup).
+
+        Also frees the GIL: a painting frame holds it through the submit wait and
+        every panel binding, which starves CPU-heavy work on other threads (see
+        ``ViewerSession.suspend_rendering``)."""
+        self._suspend.set()
+
+    def resume_rendering(self) -> None:
+        self._suspend.clear()
 
     def is_paused(self) -> bool:
         """True while the Pause button has training suspended."""
@@ -450,6 +708,93 @@ class Viewer:
         except Exception as e:
             print(f"[Viewer] crashed: {e}")
 
+    # ---- UI composition (nothing below this lives in the hot loop) --------
+
+    def _set_up_ref(self) -> None:
+        self._rig.cam.set_ref_up_to_current()
+        print("[Viewer] up reference set to current view")
+
+    def _save_frame(self) -> None:
+        """Write the last rendered frame to a PNG for offline diffing against
+        the eval output (outputs/<run>/cams/cam_XX/...)."""
+        try:
+            from PIL import Image
+            img = self._pipeline.read_output_image()[..., :3]
+            png = (np.clip(img, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8)
+            name = self._rig.current_name()
+            label = ("testcam_" + name.replace("/", "_").replace("\\", "_")
+                     if self._rig.index >= 0 else "freefly")
+            path = os.path.abspath(f"viewer_grab_{label}.png")
+            Image.fromarray(png, mode="RGB").save(path)
+            print(f"[Viewer] saved frame for {name} -> {path}")
+        except Exception as e:  # noqa: BLE001 - a failed grab must not stop the loop
+            print(f"[Viewer] frame grab failed: {e}")
+
+    def _build_input(self, mouse: dict) -> InputMap:
+        """Key bindings AND their help text. Adding a control is one line here;
+        ``describe()`` feeds the panel's CONTROLS section, so the on-screen help
+        can never drift from the real bindings."""
+        keys = InputMap().hold_many([
+            (spy.KeyCode.w, "w"), (spy.KeyCode.a, "a"), (spy.KeyCode.s, "s"),
+            (spy.KeyCode.d, "d"), (spy.KeyCode.q, "q"), (spy.KeyCode.e, "e"),
+            (spy.KeyCode.r, "r"), (spy.KeyCode.t, "t"),  # R/T roll
+        ])
+        keys.press(spy.KeyCode.c, lambda: self._rig.step(+1))
+        keys.press(spy.KeyCode.v, lambda: self._rig.step(-1))
+        keys.press(spy.KeyCode.p, self._grab.set)
+        keys.press(spy.KeyCode.y, self._set_up_ref)
+        keys.press(spy.KeyCode.escape, lambda: mouse.update(captured=False))
+        return (keys
+                .document("WASD / QE", "move")
+                .document("drag", "look around")
+                .document("wheel", "move speed")
+                .document("R / T", "roll view")
+                .document("Y", "level horizon to view")
+                .document("C / V", "next / prev test camera")
+                .document("P", "save frame to PNG")
+                .document("F1", "show / hide panel"))
+
+    def _build_panel(self, view, keys: InputMap) -> Panel:
+        """Compose the panel from independent section builders bound to state.
+
+        Every widget PULLS its value from a getter each frame, so extending the
+        UI means adding a line to a section in :mod:`.ui.sections` (or a new
+        section here) — the render loop below never mentions a widget.
+        """
+        panel = Panel(self.device, title="3DGS Viewer", anchor="left")
+        status_section(panel, view)
+        if self._hub:
+            dataset_section(panel, view, SessionActions(
+                setup=lambda: self.state.request("setup"),
+                reconstruct=lambda: self.state.request("reconstruct"),
+                train=lambda: self.state.request("train"),
+                select_matcher=self.state.set_matcher_index,
+                set_recon_cuda=self.state.set_recon_cuda,
+                export_ply=lambda: self.state.request("export"),
+                clear=lambda: self.state.request("clear"),
+            ))
+            # Hub only: outside the hub the run is already built by the time the
+            # window exists, so every one of these would be read-only.
+            training_setup_section(panel, view, self.state.setup)
+        training_section(panel, view, TrainingControls(
+            stats=lambda: view.stats,
+            active=lambda: self._training_active,
+            paused=self.is_paused,
+            toggle_pause=self.toggle_pause,
+            # In hub mode training starts from the DATASET section's Train button.
+            start=None if self._hub else self._start_event.set,
+        ))
+        camera_section(panel, CameraControls(
+            names=self._rig.names,
+            selection=self._rig.selection,
+            select=lambda index: self._rig.snap_to(int(index) - 1),
+            label=self._rig.label,
+            speed=lambda: self._rig.cam.speed,
+            fovy=lambda: self._rig.fovy,
+        ))
+        help_section(panel, keys.describe())
+        return panel
+
     def _run_inner(self):
         window = spy.Window(width=self.width, height=self.height, title="3DGS Viewer")
 
@@ -462,127 +807,23 @@ class Viewer:
         print(f"[Viewer] surface preferred={surface.info.preferred_format} "
               f"-> presenting as {present_format}")
         surface.configure(width=self.width, height=self.height, format=present_format)
-        needs_reconfigure = False
+        # The configured surface size is the SINGLE source of truth for a frame
+        # (drives surface config, camera aspect, ui.layout, ui.begin, and the blit
+        # target) — mixing this with the live window size mis-projected the panel.
+        surf_w, surf_h = self.width, self.height
+        render_lock = self._render_lock   # main-loop vs on_resize vs reconfigure
 
-        cam = FlyCamera()
-
-        # Interaction state shared by the input callbacks and the render loop.
-        #   snap_idx : current test-camera index, -1 == free-fly
-        #   snapped  : exact-proj Camera to render while parked (None => fly-cam)
-        #   grab     : request to save the next frame to a PNG (P key)
-        #   syncing  : guard so programmatic combo updates don't re-fire select
-        st = {"snap_idx": -1, "snapped": None, "grab": False, "syncing": False}
-        test_cams = self._test_cameras
-        cam_combo = None  # assigned in the panel build below when cameras exist
-
-        # --- Actions driven FROM the UI / keyboard. ---
-        def apply_snap(idx: int) -> None:
-            """Snap to test-camera ``idx`` (-1 => free-fly). Single source of
-            truth for C/V, the camera dropdown, and 'left on manual nav'; keeps
-            the dropdown selection in sync."""
-            if idx < 0 or not test_cams:
-                st["snap_idx"], st["snapped"] = -1, None
-                ui.set("camera", "Free-fly")
-            else:
-                idx %= len(test_cams)
-                name, tcam = test_cams[idx]
-                cam.set_from_view_matrix(tcam.view_matrix)  # so WASD continues here
-                fovy = _fovy_from_proj(tcam.proj_matrix)
-                if fovy is not None:
-                    self.fovy = fovy
-                # Render the test camera EXACTLY (view+proj) when its resolution
-                # matches the render target; else fall back to the fly-cam
-                # perspective. Exact proj removes the last raster-side difference
-                # vs eval (principal point, exact fx/fy).
-                st["snap_idx"] = idx
-                st["snapped"] = (tcam if tuple(tcam.image_size) == (self.width, self.height)
-                                 else None)
-                ui.set("camera", f"Cam {idx + 1}/{len(test_cams)}: {name}")
-                print(f"[Viewer] snapped to test cam {idx + 1}/{len(test_cams)} "
-                      f"({name}), exact_proj={st['snapped'] is not None}, fovy={self.fovy:.1f} deg")
-            if cam_combo is not None:  # reflect state in the dropdown (no re-fire)
-                st["syncing"] = True
-                cam_combo.value = st["snap_idx"] + 1
-                st["syncing"] = False
-
-        def snap_delta(step: int) -> None:
-            if not test_cams:
-                print("[Viewer] no test cameras available to snap to")
-                return
-            apply_snap((st["snap_idx"] + step) % len(test_cams))
-
-        def leave_snap() -> None:
-            """Manual navigation drops the 'parked on a test cam' state."""
-            if st["snap_idx"] != -1:
-                apply_snap(-1)
-
-        def on_cam_select(value: int) -> None:
-            if not st["syncing"]:            # ignore our own programmatic updates
-                apply_snap(int(value) - 1)   # 0 => free-fly, k => camera k-1
-
-        def on_pause_toggle() -> None:
-            self.toggle_pause()
-            pause_btn.label = "Resume training" if self.is_paused() else "Pause training"
-
-        def set_up_ref() -> None:
-            cam.set_ref_up_to_current()
-            print("[Viewer] up reference set to current view")
-
-        def save_frame() -> None:
-            """Write the last rendered frame to a PNG for offline diffing against
-            the eval output (outputs/<run>/cams/cam_XX/...)."""
-            try:
-                from PIL import Image
-                img = self._pipeline.read_output_image()[..., :3]
-                png = (np.clip(img, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8)
-                if st["snap_idx"] != -1:
-                    name = test_cams[st["snap_idx"]][0]
-                    label = "testcam_" + name.replace("/", "_").replace("\\", "_")
-                else:
-                    name, label = "(free-fly)", "freefly"
-                path = os.path.abspath(f"viewer_grab_{label}.png")
-                Image.fromarray(png, mode="RGB").save(path)
-                print(f"[Viewer] saved frame for {name} -> {path}")
-            except Exception as e:
-                print(f"[Viewer] frame grab failed: {e}")
-
-        # --- Panel. Real widgets (dropdown / buttons) + live fields; EXTEND by
-        #     adding a control here and, if it shows state, a ui.set(...) call. ---
-        ui = ViewerUI(self.device, title="3DGS Viewer", anchor="left", thickness=300.0)
-        ui.text("CAMERA")
-        if test_cams:
-            items = ["Free-fly"] + [f"{i + 1:02d}  {n}" for i, (n, _) in enumerate(test_cams)]
-            cam_combo = ui.combo("snap", items, 0, on_cam_select)
-        else:
-            ui.text("  (no test cameras)")
-        ui.field("camera", "Free-fly")
-        ui.field("speed", f"Move speed: {cam.speed:.2f}")
-        ui.text("")
-        ui.text("TRAINING")
-        ui.field("status", "inspecting init")
-        start_btn = ui.button("Start Training", self._start_event.set)
-        pause_btn = ui.button("Pause training", on_pause_toggle)
-        ui.text("")
-        ui.text("CONTROLS")
-        ui.text("  WASD / QE  move      drag  look")
-        ui.text("  R / T      roll      Y     set up")
-        ui.text("  C / V      snap cam  P     save PNG")
-        ui.text("  wheel      move speed")
-
-        # --- Keyboard bindings. EXTEND controls by adding a hold/press line. ---
-        MOVE_TAGS = {"w", "a", "s", "d", "q", "e", "r", "t"}
-        roll_speed = 60.0  # deg/sec while R/T held
+        # One consistent state snapshot per frame feeds EVERY binding (see
+        # StateView): no two widgets can show state from different instants.
+        view = self.state.view()
         mouse = {"captured": False, "x": 0.0, "y": 0.0}
-        keys = InputMap().hold_many([
-            (spy.KeyCode.w, "w"), (spy.KeyCode.a, "a"), (spy.KeyCode.s, "s"),
-            (spy.KeyCode.d, "d"), (spy.KeyCode.q, "q"), (spy.KeyCode.e, "e"),
-            (spy.KeyCode.r, "r"), (spy.KeyCode.t, "t"),  # R/T roll
-        ])
-        keys.press(spy.KeyCode.c, lambda: snap_delta(+1))
-        keys.press(spy.KeyCode.v, lambda: snap_delta(-1))
-        keys.press(spy.KeyCode.p, lambda: st.__setitem__("grab", True))
-        keys.press(spy.KeyCode.y, set_up_ref)
-        keys.press(spy.KeyCode.escape, lambda: mouse.__setitem__("captured", False))
+        keys = self._build_input(mouse)
+        ui = self._build_panel(view, keys)
+        # ImGui puts a close box on the panel's title bar; F1 brings it back (and
+        # gives an unobstructed look at the scene on demand).
+        keys.press(spy.KeyCode.f1, ui.toggle)
+        print(f"[Viewer] panel: {ui.dock.thickness_px:.0f}px wide "
+              f"(display scale {ui.dock.scale:.2f}x)")
 
         # --- Mouse: look (drag) + scroll-to-speed. Camera control, not a widget,
         #     so it stays here; the UI only reports whether it ate the event. ---
@@ -596,8 +837,7 @@ class Viewer:
                 mouse["captured"] = False  # don't drive the camera from panel clicks
                 return
             if event.is_scroll():
-                cam.adjust_speed(float(event.scroll.y))
-                ui.set("speed", f"Move speed: {cam.speed:.2f}")
+                self._rig.cam.adjust_speed(float(event.scroll.y))
                 return
             if event.is_button_down():
                 mouse.update(captured=True, x=event.pos[0], y=event.pos[1])
@@ -607,124 +847,117 @@ class Viewer:
                 dx = event.pos[0] - mouse["x"]
                 dy = event.pos[1] - mouse["y"]
                 mouse["x"], mouse["y"] = event.pos[0], event.pos[1]
-                cam.rotate(dx, dy)
-                leave_snap()
+                self._rig.cam.rotate(dx, dy)
+                self._rig.leave()
+
+        def on_drop(paths) -> None:
+            if paths:
+                self.state.drop(str(paths[0]))
+
+        def _reconfigure(w, h):
+            """Match the swapchain to the window. No window.resize / aspect-snap
+            (that fought the drag). configure() rebuilds the swapchain; GPU must
+            be idle first. Early-outs when the size is unchanged."""
+            nonlocal surf_w, surf_h
+            if w <= 0 or h <= 0 or (w, h) == (surf_w, surf_h):
+                return
+            with self.runtime.queue_scope():
+                self.runtime.wait_for_idle()
+                surface.configure(width=w, height=h, format=present_format)
+            surf_w, surf_h = w, h
+
+        def render_frame():
+            """Paint one frame. Uses surf_w/surf_h for EVERYTHING (ui.layout,
+            ui.begin's ImGui DisplaySize, the camera aspect, the blit target) so
+            the docked panel can never be mis-projected for a frame. The UI always
+            draws; the scene is rasterized+blitted only once gaussians exist."""
+            with render_lock:
+                if self._suspend.is_set():   # hub setup owns the GPU queue
+                    return
+                w, h = surf_w, surf_h
+                # layout THEN refresh: bindings wrap their text to the panel's
+                # current content width, so a panel resize re-flows text live.
+                ui.layout(w, h)
+                ui.refresh()
+                surface_tex = surface.acquire_next_image()
+                if surface_tex is None:      # can happen transiently on resize
+                    return
+                batch = self.runtime.command_batch("viewer_frame")
+                enc = batch.encoder
+                if self._has_data:
+                    camera = self._rig.camera(self.width, self.height, w / h)
+                    self._pipeline._encoder = enc
+                    try:
+                        self._pipeline.rasterize(camera)
+                    finally:
+                        self._pipeline._encoder = None
+                    enc.blit(surface_tex, self._pipeline.buffers.output_image)
+                else:
+                    # Nothing else writes the target before the UI pass, and that
+                    # pass must LOAD (else it would erase the scene blit above),
+                    # so an un-cleared swapchain image shows whatever was in it
+                    # LAST time it came round — which smeared several stale copies
+                    # of the panel's edge across the hub window during a resize.
+                    enc.clear_texture_float(surface_tex, clear_value=BACKDROP)
+                ui.begin(w, h, window)
+                ui.end(surface_tex, enc)
+                submit = self.runtime.submit(batch, after_submit=surface.present)
+                self.runtime.wait_for_submit(submit)
+                if self._grab.is_set():
+                    self._grab.clear()
+                    self._save_frame()
 
         def on_resize(w, h):
-            nonlocal needs_reconfigure
-            needs_reconfigure = True
+            """Render LIVE during a resize. sgl fires on_resize on THIS render
+            thread from inside window.process_events()'s Win32 modal-resize loop,
+            so painting here is the only way to track the drag — the old debounce
+            skipped rendering and let the OS stretch a stale frame (the glitch)."""
+            if self._suspend.is_set():
+                return
+            try:
+                _reconfigure(w, h)
+                render_frame()
+            except Exception as e:
+                if not getattr(self, "_err_printed", False):
+                    print(f"[Viewer] on_resize render failed: {e}")
+                    self._err_printed = True
 
         window.on_keyboard_event = on_key
         window.on_mouse_event = on_mouse
         window.on_resize = on_resize
+        if self._hub:
+            window.on_drop_files = on_drop  # drag a dataset folder onto the window
 
-        configured = True
         watcher = _ShaderWatcher(
             self.device, self._pipeline, self.runtime) if self.hot_reload else None
         last_time = time.perf_counter()
 
         while not window.should_close() and not self._stop_event.is_set():
             window.process_events()
+            if self._suspend.is_set():  # hub setup owns the GPU queue right now
+                time.sleep(0.02)
+                continue
             if watcher:
                 watcher.poll()
 
-            # Preserve the render's aspect ratio on resize. output_image is a
-            # FIXED (self.width x self.height) render, and a full-extent blit
-            # onto a surface with a different aspect is exactly what stretched
-            # the image. Fit the render aspect inside the requested window and
-            # SNAP the window to it, so the swapchain we blit into always shares
-            # the render aspect (uniform scale, no distortion). The >1px guard
-            # stops a resize/rounding feedback loop.
-            if needs_reconfigure:
-                needs_reconfigure = False
-                configured = False
-                req_w, req_h = window.width, window.height
-                if req_w > 0 and req_h > 0:
-                    ar = self.width / self.height
-                    if req_w / req_h > ar:       # too wide -> clamp width to height
-                        cw, ch = max(1, round(req_h * ar)), req_h
-                    else:                         # too tall -> clamp height to width
-                        cw, ch = req_w, max(1, round(req_w / ar))
-                    try:
-                        if abs(cw - req_w) > 1 or abs(ch - req_h) > 1:
-                            window.resize(cw, ch)  # snap; re-triggers on_resize once
-                        with self.runtime.queue_scope():
-                            self.runtime.wait_for_idle()
-                            surface.unconfigure()
-                            self.runtime.wait_for_idle()
-                            surface.configure(width=cw, height=ch,
-                                              format=present_format)
-                        configured = True
-                    except Exception as e:
-                        print(f"[Viewer] reconfigure failed: {e}")
-                continue
+            # Keep the surface matched to the window (catches a resize that
+            # arrived while suspended or that on_resize didn't service). Cheap —
+            # early-outs when unchanged.
+            _reconfigure(window.width, window.height)
 
-            if not configured:
-                time.sleep(0.016)
-                continue
-
+            # --- per-frame STATE, once per loop iteration (NOT inside
+            #     render_frame, so a paint triggered from on_resize can't advance
+            #     the camera or re-sample state mid-drag). ---
             now = time.perf_counter()
             dt = min(now - last_time, 0.1)
             last_time = now
-            cam.move(keys.held, dt)
-            if "r" in keys.held:
-                cam.roll_by(+roll_speed * dt)
-            if "t" in keys.held:
-                cam.roll_by(-roll_speed * dt)
-            if keys.held & MOVE_TAGS:
-                leave_snap()
+            self._rig.advance(keys.held, dt)
+            view.sample()   # the frame's single, consistent state snapshot
 
-            paused = self.is_paused()
-            ui.set("status", ("paused" if paused else "training") if self._training_active
-                   else "inspecting init — press Start Training")
-            start_btn.enabled = not self._training_active   # only before training
-            pause_btn.enabled = self._training_active        # only during training
-            ui.layout(window.width, window.height)  # keep the panel docked
-
-            if not self._has_data:
-                # Pump the UI so the Start button works before the first snapshot.
-                try:
-                    with self.runtime.queue_scope():
-                        surface_tex = surface.acquire_next_image()
-                        if surface_tex is not None:
-                            batch = self.runtime.command_batch("viewer_ui")
-                            encoder = batch.encoder
-                            ui.begin(window.width, window.height)
-                            ui.end(surface_tex, encoder)
-                            self.runtime.submit(batch, after_submit=surface.present)
-                except Exception:
-                    pass
-                time.sleep(0.016)
-                continue
-
-            # Parked on a test camera -> render it EXACTLY (pixel-faithful to
-            # eval); otherwise the free-fly perspective.
-            camera = (st["snapped"] if st["snapped"] is not None
-                      else cam.get_camera(self.width, self.height, self.fovy))
             try:
-                surface_tex = surface.acquire_next_image()
-                batch = self.runtime.command_batch("viewer_frame")
-                encoder = batch.encoder
-                self._pipeline._encoder = encoder
-                try:
-                    self._pipeline.rasterize(camera)
-                finally:
-                    self._pipeline._encoder = None
-                if surface_tex is not None:
-                    encoder.blit(surface_tex, self._pipeline.buffers.output_image)
-                    # Draw the panel on top, same swapchain image + encoder.
-                    ui.begin(window.width, window.height)
-                    ui.end(surface_tex, encoder)
-
-                present = surface.present if surface_tex is not None else None
-                submit = self.runtime.submit(batch, after_submit=present)
-
-                self.runtime.wait_for_submit(submit)
-                if st["grab"]:
-                    st["grab"] = False
-                    save_frame()
+                render_frame()
             except Exception as e:
-                if not getattr(self, '_err_printed', False):
+                if not getattr(self, "_err_printed", False):
                     print(f"[Viewer] frame error: {e}")
                     self._err_printed = True
                 time.sleep(0.016)

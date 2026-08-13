@@ -449,6 +449,22 @@ class TrainingPipeline:
             thread_count=[adam_count, 1, 1],
             buffer=sh.adam_rest.storage, count=adam_count)
 
+    def set_gaussians(self, means: np.ndarray, log_scales: np.ndarray,
+                      rot_quats: np.ndarray, opacities: np.ndarray,
+                      color_logits: np.ndarray) -> None:
+        """Upload per-field gaussian parameters without touching optimizer state.
+
+        The render-only sibling of ``_load_snapshot``: same fields, but no Adam
+        clear and no SH reset, so it is valid on a ``viewer_only`` pipeline (which
+        has no Adam state at all). Used to show a COLMAP point cloud in the viewer
+        before any training pipeline exists.
+        """
+        buffer_io.write_gaussians(
+            self.buffers,
+            means=means, log_scales=log_scales, rot_quats=rot_quats,
+            opacities=opacities, color_logits=color_logits,
+        )
+
     def set_gaussians_raw(self, floats: np.ndarray, count: int) -> None:
         """Upload a snapshot already in the packed 14-float layout (from the
         splat stream). Render-only path — does not touch Adam state."""
@@ -495,15 +511,14 @@ class TrainingPipeline:
         self.buffers.target_image.copy_from_numpy(_srgb01_to_u8(rgba))
         self._active_target = self.buffers.target_image
 
-    def create_target_texture(self, img: np.ndarray) -> spy.Texture:
-        """Create a new rgba8_unorm target texture and upload into it.
+    def pack_target_texture(self, img: np.ndarray) -> np.ndarray:
+        """CPU half of :meth:`create_target_texture`: validate, pad alpha, and
+        quantize to the contiguous uint8 the upload wants.
 
-        Accepts (H, W, 3) RGB or (H, W, 4) RGBA. RGB is padded with
-        alpha=1. Stored rgba8_unorm: the GT originates as an 8-bit PNG
-        (uint8/255), so 8-bit storage is lossless vs. the former rgba32_float
-        (4x smaller) — the only change is resized/interpolated pixels quantize
-        back to 1/255, which is the source's own precision.
-
+        Split out from the upload because it is pure numpy — and therefore drops
+        the GIL — so a caller with a few hundred targets can pack them on a
+        thread pool (see :func:`trainer.data.parallel.map_ordered`) while the
+        device, which is NOT thread-safe, keeps uploading one at a time.
         """
         if img.ndim == 3 and img.shape[2] == 4:
             assert img.shape[:2] == (self.height, self.width)
@@ -517,6 +532,12 @@ class TrainingPipeline:
                 [img, np.ones((self.height, self.width, 1), img.dtype)],
                 axis=-1,
             )
+        return _srgb01_to_u8(rgba)
+
+    def upload_target_texture(self, packed: np.ndarray) -> spy.Texture:
+        """GPU half of :meth:`create_target_texture`: allocate the texture and
+        upload an already-packed (H, W, 4) uint8 image into it. Must run on the
+        thread that owns the device."""
         tex = self.device.create_texture(
             type=spy.TextureType.texture_2d,
             format=spy.Format.rgba8_unorm,
@@ -524,8 +545,20 @@ class TrainingPipeline:
             usage=spy.TextureUsage.shader_resource | spy.TextureUsage.unordered_access,
             label="target_image_cached",
         )
-        tex.copy_from_numpy(_srgb01_to_u8(rgba))
+        tex.copy_from_numpy(packed)
         return tex
+
+    def create_target_texture(self, img: np.ndarray) -> spy.Texture:
+        """Create a new rgba8_unorm target texture and upload into it.
+
+        Accepts (H, W, 3) RGB or (H, W, 4) RGBA. RGB is padded with
+        alpha=1. Stored rgba8_unorm: the GT originates as an 8-bit PNG
+        (uint8/255), so 8-bit storage is lossless vs. the former rgba32_float
+        (4x smaller) — the only change is resized/interpolated pixels quantize
+        back to 1/255, which is the source's own precision.
+
+        """
+        return self.upload_target_texture(self.pack_target_texture(img))
 
     def set_target_texture(self, tex: spy.Texture) -> None:
         """Use a pre-uploaded target texture for subsequent forward+loss

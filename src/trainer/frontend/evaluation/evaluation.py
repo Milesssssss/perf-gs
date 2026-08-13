@@ -64,11 +64,16 @@ def render_all_cameras(pipeline: "TrainingPipeline", scene, iter_idx: int,
     """Render every scene camera at ``iter_idx`` and write one PNG per camera.
 
     The renderer composites in sRGB, so the output image is written directly.
+    Creates each ``cam_XX/`` directory itself: this used to rely on the
+    ground-truth dump having already made them, which silently turned "GT writing
+    is off" into a mid-training FileNotFoundError.
     """
     for cam_i, entry in enumerate(scene.images):
         pipeline.render(entry.camera)
         img = np.clip(pipeline.read_output_image()[..., :3], 0.0, 1.0)
-        out_path = cams_dir / f"cam_{cam_i:02d}" / f"iter_{iter_idx:06d}.png"
+        out_dir = cams_dir / f"cam_{cam_i:02d}"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_path = out_dir / f"iter_{iter_idx:06d}.png"
         rgba = np.concatenate([img, np.ones_like(img[..., :1])], axis=-1)
         png = (rgba * 255.0 + 0.5).astype(np.uint8)
         Image.fromarray(png, mode="RGBA").save(out_path)

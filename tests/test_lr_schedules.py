@@ -18,11 +18,10 @@ import math
 import numpy as np
 import pytest
 
-from trainer.frontend.lr_schedule import (
+from trainer.frontend.schedule import (
     ExtinctionHardnessSchedule,
     MeanLearningRateSchedule,
 )
-
 
 def _reference_mean_lr(step, lr_init, lr_final, max_steps):
     t = min(max(step / max(max_steps, 1), 0.0), 1.0)

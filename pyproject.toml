@@ -10,6 +10,11 @@ requires-python = ">=3.10"
 dependencies = [
     "slangpy",
     "numpy",
+    # Dataset decode path (trainer.data.colmap.load_colmap_image). The HEADLESS
+    # build on purpose: we only use imread/cvtColor/resize, so the GUI variant
+    # would add Qt/libGL for nothing (and break on headless Linux).
+    "opencv-python-headless",
+    # Still used for writing PNGs (ground truths, previews).
     "pillow",
     "plyfile",
     "scipy",

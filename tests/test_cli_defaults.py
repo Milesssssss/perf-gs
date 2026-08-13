@@ -5,14 +5,16 @@ defaults" as NON-NEGOTIABLE. This asserts the FULL parsed-default namespace of
 ``build_parser()``, so any added / removed / renamed flag or changed default
 fails loudly and forces a conscious update.
 
-When the parser moves into ``trainer.frontend.cli`` (from the scripts shim),
-repoint the import below; ``EXPECTED_DEFAULTS`` stays the contract the extracted
-parser must reproduce byte-for-byte.
+The parser now lives in ``trainer.frontend.cli`` (it was a scripts shim), so the
+import below points there rather than at ``v2_train`` — which keeps this contract
+test independent of the whole application's import graph. ``EXPECTED_DEFAULTS``
+stays the contract the extracted parser must reproduce byte-for-byte, including for
+the flags ``cli.py`` mounts from the shared ``trainer.frontend.settings`` table.
 """
 
 from __future__ import annotations
 
-from v2_train import build_parser
+from trainer.frontend.cli import build_parser
 
 # dest -> default, exactly as build_parser() defines today. This is the frozen
 # CLI contract. The former quirky `store_true, default=True` flags were fixed by
@@ -23,7 +25,9 @@ from v2_train import build_parser
 EXPECTED_DEFAULTS = {
     "scene": "datasets/360_v2/bicycle",
     "iters": 3000,
-    "position_lr_max_steps": 3000,
+    # 0 == follow --iters (app._resolve_position_lr_max_steps). It used to be a
+    # hard 3000 that silently disagreed with any other --iters.
+    "position_lr_max_steps": 0,
     "downsample": 4,
     "width": None,
     "height": None,
@@ -75,6 +79,11 @@ EXPECTED_DEFAULTS = {
     "no_viewer": False,
     "launch_viewer": False,
     "wait_for_viewer": False,
+    "hub": False,
+    "glomap_bin": None,
+    "colmap_bin": None,
+    # install-time colmap/glomap build choice; CUDA by default (the only GPU path)
+    "recon_cuda": True,
     "stream_max_splats": 7_000_000,
     "stream_every": 10,
     "backend": "vulkan",

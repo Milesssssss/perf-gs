@@ -5,22 +5,36 @@ Namespace. Extracted from ``scripts/v2_train.py`` to thin the entry script; flag
 names, defaults, and help text are preserved EXACTLY (frozen by
 tests/test_cli_defaults.py). Callers should resolve the Namespace into the typed
 config (``trainer.config_types``) rather than threading it around.
+
+The flags the hub panel ALSO offers are not declared here: they are the shared
+:data:`trainer.frontend.settings.SETTINGS` rows, mounted by :func:`_shared` at the
+position they belong in ``--help``. That is what keeps the command line and the
+panel from disagreeing about a type, a default or a set of choices — a knob is
+declared once, in the settings table, and consumed by both.
 """
 
 from __future__ import annotations
 
 import argparse
 
-from trainer.config.config_types import DensificationMode
+from trainer.frontend.settings import SETTINGS_MAP
 
+
+def _shared(parser: argparse.ArgumentParser, dest: str) -> None:
+    SETTINGS_MAP[dest].add_to(parser)
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("--scene", type=str, default="datasets/360_v2/bicycle")
-    parser.add_argument("--iters", type=int, default=3000)
-    parser.add_argument("--position-lr-max-steps", type=int, default=3000,
+    _shared(parser, "iters")
+    parser.add_argument("--position-lr-max-steps", type=int, default=0,
                     help="horizon for the exponential mean-LR decay (3DGS "
-                         "position_lr_max_steps). independent of --iters. Ideally should match --iters though")
+                         "position_lr_max_steps). 0 (the default) = FOLLOW --iters, "
+                         "which is what you almost always want: a horizon shorter "
+                         "than the run freezes the means early, a longer one never "
+                         "reaches the final LR. Pass a positive value to pin it "
+                         "independently of --iters (e.g. to reproduce a 30k-step "
+                         "decay in a short run).")
     parser.add_argument("--downsample", type=int, default=4,
                     help="downsample factor (1=full res, 2=half, 4=quarter). "
                          "Uses images_N dir if it exists, otherwise resizes on load.")
@@ -70,9 +84,9 @@ def build_parser() -> argparse.ArgumentParser:
                          "Reads buffers the forward already fills (no extra kernel) "
                          "but adds readback + PNG encode per view, so it's off by "
                          "default. Requires --eval-every > 0.", default=False)
-    parser.add_argument("--densify-every", type=int, default=100)
-    parser.add_argument("--densify-from", type=int, default=100)
-    parser.add_argument("--densify-to", type=int, default=1900)
+    _shared(parser, "densify_every")
+    _shared(parser, "densify_from")
+    _shared(parser, "densify_to")
     #ap.add_argument("--opacity-reset-iters", type=int, nargs="*", default=[3000])
     parser.add_argument("--n-scoring-views", type=int, default=10)
     parser.add_argument("--t-opacity", type=float, default=0.005,
@@ -84,15 +98,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--prune-scale3d", type=float, default=0.1,
                     help="prune splats whose max 3D scale exceeds this * scene_extent "
                          "(gsplat prune_scale3d). Only active after the first opacity reset.")
-    parser.add_argument("--reset-every", type=int, default=1200,
-                    help="opacity-reset interval. Big-scale prune is disabled until after the first reset.")
+    _shared(parser, "reset_every")
     parser.add_argument("--opacity-reg", type=float, default=0.00)
     parser.add_argument("--scale-reg", type=float, default=0.00)
     parser.add_argument("--w-alpha", type=float, default=0.0,
                     help="alpha loss weight; set > 0 for RGBA targets (e.g. 1.0)")
-    parser.add_argument("--lambda-ssim", type=float, default=0.2,
-                    help="SSIM loss weight (3DGS default 0.2); 0 = pure L2")
-    parser.add_argument("--max-splats", type=int, default=10_000_000)
+    _shared(parser, "lambda_ssim")
+    _shared(parser, "max_splats")
     parser.add_argument("--z-near-cull", type=float, default=0.01,
                     help="view-space depth floor for bin cull; raise for scenes "
                          "where points can land near a camera pose (e.g. 0.2)")
@@ -117,16 +129,7 @@ def build_parser() -> argparse.ArgumentParser:
                          "spatially coherent (without it, each cluster spans the "
                          "whole scene). Mask-in-bin_count design (no compaction, "
                          "no slot remap) — every downstream pass is unaware.")
-    parser.add_argument("--densify-mode",
-                    choices=[m.value for m in DensificationMode],
-                    default=DensificationMode.STRUCTURE_AWARE.value,
-                    help="densification strategy the loop runs on a densify tick "
-                         "(default: structure_aware). Modes: 'none' = no "
-                         "densification; 'simple' "
-                         "= reference 3DGS threshold-based clone/split; "
-                         "'structure_aware' = SAD-GS anisotropic grid-split "
-                         "(arXiv 2604.28016) with an interleaved AbsGS gradient "
-                         "filler on the non-structure densify ticks.")
+    _shared(parser, "densify_mode")
     parser.add_argument("--sad-tau-split", type=float, default=0.8,
                     help="SAD split_ratio_threshold: split if high_ratio (fraction of views "
                          "with scalar eta>1) exceeds this AND the gradient is high (SADGS 0.8)")
@@ -209,39 +212,38 @@ def build_parser() -> argparse.ArgumentParser:
                          "state and BLOCK until the viewer's 'Start Training' "
                          "button is pressed (or Enter here). Lets you inspect "
                          "the init before training begins. No-op with --no-viewer.")
-    parser.add_argument("--stream-max-splats", type=int, default=7_000_000,
-                    help="capacity of the live-viewer shared-memory stream (splats). "
-                         "Snapshots beyond this are truncated for viewing only.")
-    parser.add_argument("--stream-every", type=int, default=10,
-                    help="push a gaussian snapshot to the in-process viewer every "
-                         "N iters. Now a zero-copy GPU->GPU blit, so a fine cadence "
-                         "is cheap (was coarse when it required a GPU->CPU readback).")
+    parser.add_argument("--hub", action="store_true",
+                    help="Launch the interactive viewer HUB instead of training "
+                         "immediately: bring up the viewer with no dataset, then "
+                         "drag-drop a dataset folder and choose Reconstruct "
+                         "(images-only, via GLOMAP/COLMAP) or Train (a COLMAP "
+                         "dataset) from the UI. CLI training (--scene ...) is "
+                         "unchanged; without --hub the trainer behaves as before.")
+    parser.add_argument("--glomap-bin", type=str, default=None,
+                    help="Path to a glomap executable (global SfM mapper). Falls "
+                         "back to $GLOMAP_PATH, the copy under .recon-tools/, then "
+                         "PATH; unresolved, mapping uses colmap's own mapper.")
+    parser.add_argument("--colmap-bin", type=str, default=None,
+                    help="Path to a colmap executable — the reconstruction "
+                         "front-end. Falls back to $COLMAP_PATH, the copy under "
+                         ".recon-tools/, then PATH.")
+    parser.add_argument("--recon-cuda", "--glomap-cuda",
+                    action=argparse.BooleanOptionalAction, default=True,
+                    help="Use the CUDA builds of colmap/glomap (also a checkbox in "
+                         "the hub's DATASET panel). On by default: it is what puts "
+                         "SIFT extraction/matching and bundle adjustment on the GPU. "
+                         "Pass --no-recon-cuda for the CPU-only zips. The two "
+                         "variants install side by side, so switching re-downloads.")
+    _shared(parser, "stream_max_splats")
+    _shared(parser, "stream_every")
     parser.add_argument("--backend", type=str, default="vulkan", choices=["vulkan", "d3d12"])
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--mip-splatting", action=argparse.BooleanOptionalAction,
-                    default=True,
-                    help="Enable Mip-Splatting (Yu et al., CVPR 2024): a per-gaussian 3D "
-                         "smoothing filter (from the TRAIN cameras) folded into the "
-                         "projected covariance, plus the 2D Mip antialiasing filter with "
-                         "differentiable opacity compensation. Targets the high-frequency "
-                         "detail gap vs SADGS (which uses the same 3D filter). Default on; "
-                         "pass --no-mip-splatting for the bit-identical vanilla renderer.")
+    _shared(parser, "mip_splatting")
     parser.add_argument("--mip-kernel-size", type=float, default=0.1,
                     help="Mip-Splatting 2D low-pass dilation (mip canonical 0.1). Only used "
                          "with --mip-splatting; vanilla uses 0.3 with no compensation.")
-    parser.add_argument("--sh-degree", type=int, default=0, choices=[0, 1, 2, 3],
-                    help="Spherical-harmonics degree for view-dependent color (classic "
-                         "3DGS). 0 (default) = view-independent SH band-0 (DC) only, the "
-                         "original bit-identical path. 1-3 enables higher bands, stored in "
-                         "a separate features_rest buffer allocated only when >0, activated "
-                         "one band every --sh-band-interval iters (oneupSHdegree).")
-    parser.add_argument("--sh-band-interval", type=int, default=250,
-                    help="Iterations between activating successive SH bands (classic 3DGS "
-                         "oneupSHdegree). Only used with --sh-degree > 0. "
-                         "0 (default) = AUTO: scale to --iters so the last band turns on "
-                         "by iters//2 (interval = iters // (2*sh_degree)); the classic "
-                         "constant 1000 assumes a 30k-iter run and starves the top bands "
-                         "on short runs. Pass a positive value to override.")
+    _shared(parser, "sh_degree")
+    _shared(parser, "sh_band_interval")
     parser.add_argument("--sample-mode", type=str, default="sadgs", choices=["ours", "sadgs"],
                     help="per-iteration train-camera draw. 'ours' (default): "
                          "np.random.default_rng(seed).integers over the name-sorted "
@@ -309,33 +311,9 @@ def build_parser() -> argparse.ArgumentParser:
                          "instead of the per-tile per-splat backward. "
                          "Gradient-equivalent. Pass --no-flat-bucket-backward "
                          "for the per-tile path (e.g. A/B timing).")
-    parser.add_argument("--backward-pixel-stride", type=int, default=1,
-                    choices=[1, 2, 4, 8, 16],
-                    help="Stochastic pixel-subsampling stride for the backward "
-                         "rasterizer (BACKWARD_PIXEL_STRIDE shader define). "
-                         "1 = exact full-pixel backward; N>1 visits 1/N of tile "
-                         "pixels per iter (unbiased SGD estimator, rotating "
-                         "phase) for a faster backward at some gradient-noise "
-                         "cost. Injected as a compile-time define.")
-    parser.add_argument("--extinction-hardness", type=float, default=1.0,
-                    help="Compositor extinction hardness k (a shader UNIFORM, so "
-                         "no recompile). 1.0 (default) = standard alpha-over "
-                         "(bit-identical). k>1 hardens the per-splat transmittance "
-                         "to (1-alpha)^k so T decays faster => stronger occlusion "
-                         "culling (earlier early-out in forward AND backward) at a "
-                         "quality tradeoff. Beer-Lambert-style; requires the "
-                         "per-splat backward (the default).")
-    parser.add_argument("--extinction-hardness-warmup", type=int, default=500,
-                    help="Steps to ramp the extinction hardness from 1.0 up to "
-                         "--extinction-hardness AFTER the first densification. "
-                         "k is held at 1.0 (standard alpha-over) until the first "
-                         "densify fires, then log-linearly ramps 1 -> target over "
-                         "this many steps (like the mean-LR schedule), so "
-                         "extinction only sharpens once geometry starts forming. "
-                         "0 = jump straight to the target after the first densify; "
-                         "<0 = disable the schedule (constant target from step 0, "
-                         "the pre-schedule behavior). No-op when "
-                         "--extinction-hardness <= 1.")
+    _shared(parser, "backward_pixel_stride")
+    _shared(parser, "extinction_hardness")
+    _shared(parser, "extinction_hardness_warmup")
     parser.add_argument("--final-test-psnr", action="store_true", default=False,
                     help="After the timed loop, compute ONLY the held-out "
                          "TEST-set PSNR (mean per-image sRGB, the paper metric "

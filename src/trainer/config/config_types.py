@@ -1,17 +1,3 @@
-"""Typed training configuration: enums + config dataclasses for the frontend.
-
-Introduced by the frontend refactor to stop threading an ``argparse.Namespace``
-through the trainer. This module is ADDITIVE — the legacy ``build_parser()``
-surface is unchanged. These types resolve parsed args into explicit, typed
-values that the extracted training components (schedule, resources, loop) will
-consume. The ``from_args`` classmethods are the single boundary that reads the
-Namespace, so no Namespace escapes into code that depends on these types.
-
-Enums use ``(str, Enum)`` (not 3.11's ``StrEnum``) to keep the declared
-``requires-python >= 3.10`` support; ``==`` comparison against the raw CLI
-string and ``EnumClass(value)`` construction behave identically.
-"""
-
 from __future__ import annotations
 
 from dataclasses import dataclass
