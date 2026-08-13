@@ -223,7 +223,7 @@ SETTINGS: tuple[Setting, ...] = (
             launch_only=True,
             note="compile-time: set it with --backward-pixel-stride"),
     # ---- EVALUATION: the passes that render the WHOLE camera set.
-    Setting("evaluation", "eval + final metrics", "eval", bool, default=True,
+    Setting("evaluation", "eval + final metrics", "eval", bool, default=False,
             help="Run the passes that render every camera: the periodic eval "
                  "sweep (--eval-every, which lands on the LAST iteration whenever "
                  "it divides --iters and is most of the wait after training "
