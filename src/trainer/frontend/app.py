@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import threading
 import time
 from dataclasses import dataclass
@@ -63,16 +64,19 @@ from trainer.frontend.training_preflight import (
     resolve_loss_and_lrs,
 )
 
-from trainer.frontend.viewer.state import (
+from trainer.frontend.viewer.session import (
+    ERROR,
     KIND_COLMAP,
-    PHASE_DONE,
-    PHASE_ERROR,
-    PHASE_FINALIZE,
-    PHASE_IDLE,
-    PHASE_RECONSTRUCT,
-    PHASE_SETUP,
-    PHASE_TRAINING,
-    SessionState,
+    KIND_IMAGES,
+    OK,
+    WARN,
+    Confirm,
+    DatasetInfo,
+    ResultInfo,
+    Session,
+    ToolsState,
+    TrainingState,
+    format_duration,
 )
 from trainer.frontend.viewer.viewer_control import ViewerSession
 
@@ -87,7 +91,7 @@ from trainer.frontend.profiling.profiler import (
 from trainer.frontend.evaluation.evaluation import CameraSampler 
 from trainer.config.config import IterationContext, IterationContextualVariables
 
-def _progress_relay(state: SessionState, parser):
+def _progress_relay(state: Session, parser):
     """Adapt a subprocess line stream to the session state.
 
     Every line lands in the log (wrapped, never clipped, by the panel) and is
@@ -316,8 +320,8 @@ class TrainingApplication:
         tools = ReconTools(colmap_bin=self.args.colmap_bin,
                            glomap_bin=self.args.glomap_bin,
                            recon_cuda=self.args.recon_cuda)
-        state.set_tools_ready(tools.is_ready())
-        state.log("viewer ready — drag a dataset folder onto the window")
+        state.tools(ToolsState.READY if tools.is_ready() else ToolsState.MISSING)
+        state.notify("Viewer ready - drop a dataset folder", OK)
         print("[hub] viewer up — drag a dataset folder onto the window.")
 
         # ONE session, MANY runs: a finished run no longer ends the hub. Control
@@ -332,47 +336,146 @@ class TrainingApplication:
             self._hub_train_scene(scene_dir, setup)
 
     def _hub_choose_scene(self, tools) -> "str | None":
-        """Service panel commands until a COLMAP scene is ready to train.
+        """Service panel requests until a scene is ready to train.
 
-        Returns the scene dir, or ``None`` if the user closed the window first.
-        Each command is one small step: the panel owns *when* (and what is
-        enabled — see ``SessionSnapshot.can_*``), this owns *how*.
+        Returns the scene dir to train, or ``None`` if the window closed. The panel
+        owns *when* (every button's ``enabled`` is a ``can_*`` property); this owns
+        *how*, and every branch here publishes a state transition so the UI reacts
+        on the same frame the request lands.
         """
-        from trainer.frontend.reconstruction import classify_dataset
-
         state = self._viewer.state
         while self._viewer.is_alive():
             dropped = state.take_dropped()
             if dropped:
-                kind = classify_dataset(dropped)
-                # A new dataset supersedes the last run's outcome: without this the
-                # status line would still say "training finished" (or "something
-                # failed") over a folder that has not been trained at all.
-                if state.snapshot().phase in (PHASE_DONE, PHASE_ERROR):
-                    state.set_phase(PHASE_IDLE)
-                state.set_dataset(dropped, kind)
-                state.set_scene_dir(dropped if kind == KIND_COLMAP else "")
-                state.log(f"dropped {dropped}")
-                state.log(f"detected: {kind}")
-                if kind == KIND_COLMAP:
-                    self._hub_preview_scene(dropped)
+                self._hub_dropped(dropped)
 
             command = state.take_command()
-            if command == "setup":
+            if command in ("confirm", "confirm_alt"):
+                command = state.take_confirm(accept=True,
+                                             alt=command == "confirm_alt")
+                if command == "export" and getattr(self, "_pending_drop", None):
+                    # "Export first" rescues the result; it does NOT then destroy it
+                    # by continuing with the load. The drop is forgotten and the
+                    # user is told, rather than being applied behind an export that
+                    # might itself fail.
+                    self._pending_drop = None
+                    state.notify("Exporting first - drop the dataset again after",
+                                 WARN)
+            elif command == "cancel":
+                state.take_confirm(accept=False)
+                state.notify("Cancelled", OK)
+                command = None
+
+            if command == "install_tools":
                 self._hub_setup_tools(tools)
             elif command == "reconstruct":
                 self._hub_reconstruct(tools)
             elif command == "export":
                 self._hub_export_ply()
+            elif command == "reveal":
+                self._hub_reveal_export()
             elif command == "clear":
+                self._hub_request_clear()
+            elif command == "clear!":
                 self._hub_clear_session()
-            elif command == "train":
-                scene_dir = state.scene_dir
-                if scene_dir:
-                    return scene_dir
-                state.log("no COLMAP dataset ready — reconstruct or drop one first")
+            elif command == "new_dataset":
+                state.notify("Drop the next dataset onto the window", OK)
+            elif command == "load_dropped":
+                self._hub_load_pending_drop()
+            elif command in ("train", "restart"):
+                scene = self._hub_request_training(command)
+                if scene is not None:
+                    return scene
+            elif command == "train!":
+                return state.scene_dir
             time.sleep(0.05)
         return None
+
+    # ---- one request, one handler -------------------------------------
+
+    def _hub_dropped(self, path: str) -> None:
+        """A folder was dropped. Acknowledge it BEFORE reading anything.
+
+        Replacing a live reconstruction is consequential, so an unexported result
+        asks first — and offers to export instead of losing it. Anything else loads
+        straight away: a confirmation for a harmless action is just a click.
+        """
+        state = self._viewer.state
+        if state.snapshot().has_result:
+            self._pending_drop = path
+            unexported = state.snapshot().unexported
+            state.ask(Confirm(
+                key="dataset", title="Load a new dataset?",
+                body=("The current reconstruction has not been exported and will "
+                      "be discarded." if unexported else
+                      "The current reconstruction will be cleared."),
+                command="load_dropped", confirm_label="Discard and load",
+                alt_label="Export first" if unexported else "",
+                alt_command="export" if unexported else ""))
+            state.notify("Current reconstruction would be replaced", WARN)
+            return
+        self._hub_load_dataset(path)
+
+    def _hub_load_pending_drop(self) -> None:
+        """The confirmed half of :meth:`_hub_dropped`."""
+        path, self._pending_drop = getattr(self, "_pending_drop", None), None
+        if path is None:
+            return
+        self._hub_clear_session(notify=False)
+        self._hub_load_dataset(path)
+
+    def _hub_load_dataset(self, path: str) -> None:
+        """INSPECTING -> detected -> (LOADING) -> READY / ERROR."""
+        from trainer.frontend.reconstruction import classify_dataset
+
+        state = self._viewer.state
+        state.dataset_inspecting(path)
+        state.log(f"dropped {path}")
+        kind = classify_dataset(path)
+        state.dataset_detected(kind, scene_dir=path if kind == KIND_COLMAP else "")
+        state.log(f"detected: {kind}")
+        if kind == KIND_COLMAP:
+            self._hub_preview_scene(path)
+            return
+        if kind == KIND_IMAGES:
+            state.dataset_ready(DatasetInfo(path=path, kind=kind))
+            state.notify("Image folder loaded - reconstruct it to train", OK)
+            return
+        state.dataset_failed("No images and no sparse model here. A dataset is a "
+                             "folder of images, or one with sparse/ + images/.")
+        state.notify("Could not load dataset", ERROR)
+
+    def _hub_request_training(self, command: str) -> "str | None":
+        """Start or restart. A restart discards a finished result, so it asks."""
+        state = self._viewer.state
+        snap = state.snapshot()
+        if not snap.trainable:
+            state.notify("No trainable scene yet", WARN)
+            return None
+        if command == "restart" and snap.has_result:
+            state.ask(Confirm(
+                key="result", title="Restart training?",
+                body=("This reconstruction has not been exported. Training again "
+                      "discards it and optimizes the same dataset from scratch."
+                      if snap.unexported else
+                      "The current reconstruction is discarded and training "
+                      "restarts from scratch on the same dataset."),
+                command="train!", confirm_label="Discard and restart",
+                alt_label="Export first" if snap.unexported else "",
+                alt_command="export" if snap.unexported else ""))
+            return None
+        return state.scene_dir
+
+    def _hub_request_clear(self) -> None:
+        state = self._viewer.state
+        if state.snapshot().unexported:
+            state.ask(Confirm(
+                key="result", title="Clear the session?",
+                body="This reconstruction has not been exported and will be lost.",
+                command="clear!", confirm_label="Discard and clear",
+                alt_label="Export first", alt_command="export"))
+            return
+        self._hub_clear_session()
 
     def _hub_train_scene(self, scene_dir: str, setup) -> None:
         """Build and train ONE run on ``scene_dir``, feeding the running viewer.
@@ -384,9 +487,12 @@ class TrainingApplication:
         """
         state = self._viewer.state
         print(f"[hub] training on {scene_dir}")
-        state.set_trained_model(False)   # the previous result is about to be dropped
-        state.set_phase(PHASE_TRAINING)
-        state.set_progress("loading scene and building the pipeline", 0.0)
+        # Acknowledge the click before the slowest part of a short run: the scene
+        # load, pipeline build and texture upload all happen before iteration 1.
+        state.reset_for_new_run()
+        state.training_initializing(self.args.iters)
+        state.begin_activity("Loading scene and building the pipeline")
+        self.viewer.clear_stop_request()
         state.log(f"preparing training on {scene_dir}")
         self.viewer.suspend_rendering()
         try:
@@ -414,7 +520,16 @@ class TrainingApplication:
             return
         # The pipeline stays alive and on screen: that is what Export writes out,
         # and what the viewer keeps showing while the user decides what is next.
-        state.set_trained_model(True)
+        stats = state.snapshot().stats
+        stopped = self.viewer.stop_requested()
+        state.training_completed(ResultInfo(
+            iterations=stats.step, target_iterations=stats.total,
+            wall_s=stats.elapsed_s, splats=stats.gaussians, psnr=stats.psnr,
+            run_dir=str(self.paths.root)))
+        state.set_export_name(f"{self.paths.root.name}.ply")
+        state.notify(f"Training stopped at iteration {stats.step:,}" if stopped
+                     else f"Training complete in "
+                          f"{format_duration(stats.elapsed_s)}", OK)
         state.log(f"training finished — .ply export goes to {self.paths.root}")
 
     def _hub_run_failed(self, what: str, error: Exception) -> None:
@@ -423,10 +538,9 @@ class TrainingApplication:
 
         traceback.print_exc()
         state = self._viewer.state
-        state.set_phase(PHASE_ERROR)
+        state.training_failed(f"{what}: {error}")
+        state.notify(f"Training failed while {what}", ERROR)
         state.log(f"{what} failed: {error}")
-        state.log("the hub is still live — drop another dataset, or press Train "
-                  "again after changing the setup")
         print(f"[hub] {what} failed: {error}")
 
     def _begin_repeat_run(self) -> None:
@@ -501,9 +615,11 @@ class TrainingApplication:
 
         state = self._viewer.state
         if self.pipeline is None:
-            state.log("nothing to export yet — train a scene first")
+            state.result_failed("Nothing to export yet - train a scene first.")
+            state.notify("Nothing to export", WARN)
             return
-        path = self.paths.root / "output.ply"
+        path = self.paths.root / (state.export_name or "output.ply")
+        state.begin_activity(f"Exporting {path.name}")
         state.log(f"exporting {path.name} …")
         # save_ply READS BACK the gaussian buffers, so the render thread has to be
         # off the queue (and off the GIL) for it — see suspend_rendering.
@@ -511,16 +627,37 @@ class TrainingApplication:
         try:
             save_ply(self._pipeline, path)
         except Exception as error:                     # noqa: BLE001
-            state.log(f"export failed: {error}")
+            state.result_failed(f"Could not write {path}: {error}")
+            state.notify("Export failed", ERROR)
             print(f"[hub] export failed: {error}")
             return
         finally:
             self.viewer.resume_rendering()
         size_mb = path.stat().st_size / (1024 * 1024)
+        state.result_exported(str(path.resolve()), size_mb)
+        state.notify(f"Exported {path.name}", OK)
         state.log(f"exported {size_mb:,.1f} MB -> {path.resolve()}")
         print(f"[hub] exported {path.resolve()} ({size_mb:,.1f} MB)")
 
-    def _hub_clear_session(self) -> None:
+    def _hub_reveal_export(self) -> None:
+        """Open the exported file's folder in the OS file manager.
+
+        Windows-only on purpose: ``os.startfile`` is the one platform-appropriate
+        call available without adding a dependency, and a button that silently does
+        nothing elsewhere would be worse than not offering it.
+        """
+        state = self._viewer.state
+        exported = state.snapshot().result.exported_path
+        if not exported:
+            return
+        folder = Path(exported).parent
+        try:
+            os.startfile(str(folder))   # user-initiated, this machine only
+        except (AttributeError, OSError) as error:
+            state.result_failed(f"Could not open {folder}: {error}")
+            state.notify("Could not open the folder", ERROR)
+
+    def _hub_clear_session(self, *, notify: bool = True) -> None:
         """Forget the dataset and the finished run so the hub can start over.
 
         The 'work on something else' path: the window, the device and the installed
@@ -536,6 +673,8 @@ class TrainingApplication:
             self.viewer.resume_rendering()
         self.viewer.clear_view()
         state.clear_session()
+        if notify:
+            state.notify("Session cleared", OK)
         state.log("session cleared — drag another dataset onto the window")
         print("[hub] session cleared")
 
@@ -567,13 +706,14 @@ class TrainingApplication:
         from trainer.frontend.reconstruction.progress import setup_parser
 
         state = self._viewer.state
-        state.set_phase(PHASE_SETUP)
-        state.set_progress("starting", 0.0)
+        state.tools(ToolsState.INSTALLING)
         # The panel's checkbox is the install-time build choice (see ReconTools).
         tools.recon_cuda = state.recon_cuda
         ready = tools.setup(progress=_progress_relay(state, setup_parser()))
-        state.set_tools_ready(ready)
-        state.set_phase(PHASE_IDLE if ready else PHASE_ERROR)
+        state.tools(ToolsState.READY if ready else ToolsState.MISSING)
+        state.notify("Reconstruction tools ready" if ready
+                     else "Tool install failed - see diagnostics",
+                     OK if ready else ERROR)
         state.log("reconstruction tools ready" if ready
                   else "tool setup failed — see the log above")
 
@@ -583,21 +723,21 @@ class TrainingApplication:
         from trainer.frontend.reconstruction.progress import reconstruction_parser
 
         state = self._viewer.state
-        source = state.snapshot().dataset_path
+        source = state.dataset_path
         if not source:
-            state.log("no dataset to reconstruct — drop a folder of images first")
+            state.notify("No dataset to reconstruct", WARN)
             return
-        state.set_phase(PHASE_RECONSTRUCT)
-        state.set_progress("starting", 0.0)
+        state.dataset_reconstructing()
         out = Path(source) / "reconstruction"
         result = reconstruct(tools, source, out, matcher=state.matcher,
                              progress=_progress_relay(state, reconstruction_parser()))
         if result is None:
-            state.set_phase(PHASE_ERROR)
+            state.dataset_failed("Reconstruction failed - see diagnostics for the "
+                                 "COLMAP output.")
+            state.notify("Reconstruction failed", ERROR)
             return
-        state.set_dataset(str(result), KIND_COLMAP)
-        state.set_scene_dir(str(result))
-        state.set_phase(PHASE_IDLE)
+        state.dataset_detected(KIND_IMAGES, scene_dir=str(result))
+        state.notify("Reconstruction complete", OK)
         state.log("reconstruction complete")
         self._hub_preview_scene(str(result))
 
@@ -614,6 +754,7 @@ class TrainingApplication:
         surface the same failure with a real traceback if the user insists.
         """
         state = self._viewer.state
+        state.dataset_loading("Reading the COLMAP model")
         state.log("loading the SfM point cloud …")
         started = time.time()
         # Rendering is suspended for the WHOLE thing, load included — not just the
@@ -633,6 +774,8 @@ class TrainingApplication:
             )
             shown = self.viewer.preview_points(dataset.initial_points)
         except Exception as error:                    # noqa: BLE001
+            state.dataset_failed(str(error))
+            state.notify("Could not load dataset", ERROR)
             state.log(f"cannot preview this dataset: {error}")
             print(f"[hub] preview failed for {scene_dir}: {error}")
             return
@@ -645,6 +788,18 @@ class TrainingApplication:
         self.viewer.attach_scene(
             [(entry.image_name, entry.camera) for entry in dataset.images],
             snap=True)
+        # What was detected, in numbers: the panel says "148 images · 1920x1080 ·
+        # 1.7M points" instead of leaving the user to trust the word "colmap".
+        first = dataset.images[0].camera if dataset.images else None
+        info = state.snapshot().dataset
+        state.dataset_ready(DatasetInfo(
+            path=info.path or scene_dir, kind=info.kind or KIND_COLMAP,
+            images=len(dataset.images),
+            width=int(getattr(first, "width", 0) or 0),
+            height=int(getattr(first, "height", 0) or 0),
+            points=int(shown), scene_dir=info.scene_dir or scene_dir))
+        state.result_initialized(int(shown))
+        state.notify(f"{info.kind_label} loaded - {len(dataset.images)} images", OK)
         state.log(f"previewing {shown:,} SfM points from {len(dataset.images)} "
                   f"cameras — press Train to start")
         print(f"[hub] previewing {shown:,} initial points from {scene_dir} "
@@ -688,7 +843,7 @@ class TrainingApplication:
         # -----Post-training----------------------------------------
         # Its own phase, with its own progress: everything below renders cameras
         # and writes files, so it is minutes of work that used to show up as a
-        # finished run stuck at "iter N/N" (see PHASE_FINALIZE).
+        # finished run stuck at "iter N/N" (see TrainingState.FINALIZING).
         self._publish_finalize("held-out test PSNR", 0.05)
         self._write_final_test_psnr(result)
 
@@ -721,8 +876,8 @@ class TrainingApplication:
             t_start=result.started_at,
             psnr_curve=result.psnr_curve
         )
-        if self.viewer is not None:
-            self._viewer.state.set_phase(PHASE_DONE)   # NOW the run is over
+        # The COMPLETED transition (and the result record) is published by the hub
+        # once this returns — see ``_hub_train_scene``.
 
     def _publish_finalize(self, label: str, fraction: float) -> None:
         """Publish post-training progress (no-op without a viewer).
@@ -733,7 +888,8 @@ class TrainingApplication:
         if self.viewer is None:
             return
         state = self._viewer.state
-        state.set_phase(PHASE_FINALIZE)
+        if state.snapshot().training_state != TrainingState.FINALIZING:
+            state.training_finalizing(label)
         state.set_progress(label, fraction)
 
     def _prepare_target_dataset(self) -> None:
@@ -1121,6 +1277,9 @@ class TrainingLoop:
         return (
             self.training_step < self.args.iters
             and (profiler is None or not profiler.should_stop())
+            # The viewer's Stop button: end the run early but finalize normally, so
+            # what has been optimized so far stays a usable result.
+            and not self.runtime.viewer.stop_requested()
         )
 
     def _next_iteration(self) -> IterationContext:
@@ -1233,7 +1392,7 @@ class TrainingLoop:
 
         if context.step_number > 1 and context.events.render_all:
             state = self.runtime.viewer.state
-            state.set_activity("rendering every camera")
+            state.set_detail("rendering every camera")
             try:
                 render_all_cameras(
                     self.runtime.pipeline,
@@ -1242,7 +1401,7 @@ class TrainingLoop:
                     self.paths.cameras,
                 )
             finally:
-                state.set_activity("")
+                state.set_detail("")
 
         self._record_psnr_curve_if_due(context)
         self._run_evaluation_if_due(context)
@@ -1308,10 +1467,10 @@ class TrainingLoop:
                 eval_time_total=self.eval_time_total,
                 eval_holdout=bool(self.args.eval_holdout),
                 progress=lambda done, total:
-                    state.set_activity(f"evaluating camera {done}/{total}"),
+                    state.set_detail(f"evaluating camera {done}/{total}"),
             )
         finally:
-            state.set_activity("")
+            state.set_detail("")
 
     def _complete_training_loop(self) -> TrainingResult:
         self.runtime.pipeline.runtime.wait_for_idle()
@@ -1583,13 +1742,13 @@ class TrainingReporter:
     """Owns training log formatting, artifact schemas, and the live UI numbers."""
 
     def __init__(self, artifacts: RunArtifacts, args: argparse.Namespace,
-                 scene: SceneContext, state: SessionState | None = None) -> None:
+                 scene: SceneContext, state: Session | None = None) -> None:
         self._artifacts = artifacts
         self._args = args
         self._scene = scene
         # Where the viewer reads its progress bar / metrics from. Always present
         # (ViewerSession owns one even under --no-viewer), so no null checks.
-        self._state = state if state is not None else SessionState()
+        self._state = state if state is not None else Session()
         self._started_at = 0.0
         self._last_time = 0.0
         self._last_iteration = 0
@@ -1652,7 +1811,8 @@ class TrainingReporter:
                 f"non-finite pixels (out of {rendered.size}). Training aborted.")
             print(message)
             self._artifacts.log_txt.write(f"# ABORT: {message}\n")
-            self._state.set_phase(PHASE_ERROR)  # the panel says so, not just stdout
+            self._state.training_failed(message)  # the panel says so, not stdout
+            self._state.notify("Training diverged", ERROR)
             self._state.log(message)
             return False, current_count
 

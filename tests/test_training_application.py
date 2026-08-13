@@ -19,6 +19,12 @@ from _colmap_testkit import write_colmap_scene
 
 from trainer.frontend.evaluation.evaluation import render_all_cameras
 from trainer.frontend import app as app_module
+from trainer.frontend.viewer.session import (
+    MODE_HUB,
+    DatasetState,
+    ResultState,
+    Session,
+)
 from trainer.frontend.app import (
     ShaderSpecialization,
     TargetDataset,
@@ -221,18 +227,27 @@ def test_ground_truths_land_one_per_camera_and_are_not_rewritten(tmp_path) -> No
 
 
 class _FakeHubViewer:
-    """Records what the hub asks the viewer to show."""
+    """Records what the hub asks the viewer to show.
+
+    Wraps a REAL :class:`Session` rather than a stub, so what the hub publishes
+    (dataset lifecycle, notices) is asserted as the panel would read it.
+    """
 
     def __init__(self) -> None:
-        self.state = SimpleNamespace(messages=[], log=self.state_log)
+        self.state = Session(MODE_HUB)
         self.previewed: dict | None = None
         self.attached: list | None = None
         self.snapped = False
         self.suspend_depth = 0
         self.suspended_during_upload = False
 
-    def state_log(self, message: str) -> None:
-        self.state.messages.append(message)
+    @property
+    def messages(self) -> list[str]:
+        return list(self.state.snapshot().log)
+
+    @property
+    def notices(self) -> list[str]:
+        return [n.text for n in self.state.snapshot().notices]
 
     def suspend_rendering(self) -> None:
         self.suspend_depth += 1
@@ -274,7 +289,13 @@ def test_dropping_a_colmap_dataset_previews_its_point_cloud(tmp_path) -> None:
     assert [name for name, _cam in viewer.attached] == ["a.png", "b.png", "c.png",
                                                         "d.png"]
     assert viewer.snapped
-    assert any("press Train" in m for m in viewer.state.messages)
+    assert any("press Train" in m for m in viewer.messages)
+    # ... and the panel can now say WHAT was loaded, not just that something was.
+    snap = viewer.state.snapshot()
+    assert snap.dataset_state is DatasetState.READY
+    assert snap.dataset.images == 4
+    assert snap.result_state is ResultState.INITIALIZED   # points, not a result
+    assert any("loaded" in n for n in viewer.notices)
 
 
 def test_the_sparse_model_is_parsed_with_rendering_suspended(
@@ -311,4 +332,9 @@ def test_a_dataset_the_loader_rejects_leaves_the_hub_alive(tmp_path) -> None:
 
     assert viewer.previewed is None
     assert viewer.suspend_depth == 0
-    assert any("cannot preview" in m for m in viewer.state.messages)
+    assert any("cannot preview" in m for m in viewer.messages)
+    # The failure belongs to the DATASET, with a reason the panel can show.
+    snap = viewer.state.snapshot()
+    assert snap.dataset_state is DatasetState.ERROR
+    assert snap.dataset_error
+    assert snap.can_drop, "the hub must still accept another folder"

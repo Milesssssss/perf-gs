@@ -22,7 +22,7 @@ When live viewing is disabled (``--no-viewer``) the session wraps ``None`` and
 every method is a no-op. :meth:`is_alive` replaces direct ``viewer._thread``
 access.
 
-The session ALWAYS owns a :class:`~trainer.frontend.viewer.state.SessionState`,
+The session ALWAYS owns a :class:`~trainer.frontend.viewer.session.Session`,
 even under ``--no-viewer``: producers (the reporter, the hub orchestrator) publish
 progress/log/stats into ``session.state`` unconditionally and never null-check a
 viewer. With no viewer attached nothing reads it, which costs a lock and a dataclass
@@ -34,13 +34,7 @@ import threading
 import time
 from typing import TYPE_CHECKING
 
-from trainer.frontend.viewer.state import (
-    MODE_HUB,
-    MODE_TRAIN,
-    PHASE_DONE,
-    PHASE_TRAINING,
-    SessionState,
-)
+from trainer.frontend.viewer.session import OK, MODE_HUB, MODE_TRAIN, Session
 
 if TYPE_CHECKING:
     import slangpy as spy
@@ -55,11 +49,11 @@ class ViewerSession:
     """Owns the optional live viewer, its full lifecycle, and the session state."""
 
     def __init__(self, viewer: "Viewer | None",
-                 state: SessionState | None = None) -> None:
+                 state: Session | None = None) -> None:
         self._viewer = viewer
         # One state object shared with the viewer's panel (see module docstring).
         if state is None:
-            state = viewer.state if viewer is not None else SessionState(MODE_TRAIN)
+            state = viewer.state if viewer is not None else Session(MODE_TRAIN)
         self.state = state
 
     @property
@@ -89,7 +83,7 @@ class ViewerSession:
         """
         from trainer.frontend.viewer.viewer import Viewer
 
-        state = SessionState(MODE_TRAIN)
+        state = Session(MODE_TRAIN)
         viewer = Viewer(
             device=device, width=width, height=height,
             max_splats=max_splats, fovy=fovy, gpu_lock=gpu_lock,
@@ -132,7 +126,7 @@ class ViewerSession:
         """
         from trainer.frontend.viewer.viewer import Viewer
 
-        state = SessionState(MODE_HUB, setup=setup)
+        state = Session(MODE_HUB, setup=setup)
         viewer = Viewer(
             device=device, width=width, height=height,
             max_splats=max_splats, fovy=fovy, gpu_lock=gpu_lock,
@@ -225,17 +219,28 @@ class ViewerSession:
         print("[wait-for-viewer] starting training.")
 
     def set_training_active(self, active: bool = True) -> None:
-        """Flag that training is now running. The viewer publishes the session
-        PHASE itself (so its panel switches to the iteration progress bar); with
-        no viewer attached, publish it here so the state stays truthful."""
+        """Flag that the trainer is inside its loop.
+
+        The viewer needs it for the Pause button; the session needs the RUNNING
+        transition either way, so with no viewer attached it is published here and
+        the state stays truthful under ``--no-viewer``."""
         if self._viewer is not None:
             self._viewer.set_training_active(active)
         elif active:
-            self.state.set_phase(PHASE_TRAINING)
+            self.state.training_running()
 
     def is_paused(self) -> bool:
         """Whether the viewer's Pause button currently has training suspended."""
         return self._viewer is not None and self._viewer.is_paused()
+
+    def stop_requested(self) -> bool:
+        """Whether the user asked to end the run early (the Stop button)."""
+        return self._viewer is not None and self._viewer.stop_requested()
+
+    def clear_stop_request(self) -> None:
+        """Before a new run: a stop belongs to the run that was stopped."""
+        if self._viewer is not None:
+            self._viewer.clear_stop_request()
 
     def wait_while_paused(self) -> None:
         """Block the trainer while the viewer's Pause button is engaged (no-op
@@ -280,7 +285,7 @@ class ViewerSession:
         """Push the final state and leave the window live until the user closes
         it (or Ctrl-C, which stops the viewer)."""
         self.finish_training(pipeline)
-        self.state.set_phase(PHASE_DONE)
+        self.state.notify("Training complete", OK)
         self.state.log("training complete — close the viewer window to exit")
         if self._viewer is None:
             return

@@ -6,13 +6,15 @@ functions and small state objects:
 
   * :mod:`trainer.frontend.viewer.ui.dock`  — the anchored-panel resize fix
   * :mod:`trainer.frontend.viewer.ui.text`  — wrap/elide (nothing gets clipped)
-  * :mod:`trainer.frontend.viewer.state`    — log tail + enable/hint policy
-  * :mod:`trainer.frontend.settings` — the hub's editable TRAINING SETUP
+  * :mod:`trainer.frontend.viewer.session`  — the log tail
+  * :mod:`trainer.frontend.settings`        — the shared CLI/panel settings table
   * :mod:`trainer.frontend.reconstruction.progress` — determinate progress
+
+The application's own state machine is covered by ``test_session_state.py`` and what
+the panel shows in each state by ``test_panel_sections.py``; this file stays on the
+toolkit underneath them.
 """
 from __future__ import annotations
-
-import contextlib
 
 import pytest
 
@@ -25,32 +27,22 @@ from trainer.frontend.reconstruction.progress import (
 )
 from trainer.frontend.settings import (
     BOOL,
-    SETTINGS_MAP,
     CHOICE,
     FLOAT,
-    GROUPS,
     INT,
     SETTINGS,
+    SETTINGS_MAP,
     Setting,
     TrainingSetup,
     validate,
     viewer_stream_capacity,
 )
-from trainer.frontend.viewer import state as st
+from trainer.frontend.viewer.session import LogBuffer
 from trainer.frontend.viewer.ui import scale as sc
 from trainer.frontend.viewer.ui import text as tx
 from trainer.frontend.viewer.ui.dock import PADDING, SCROLLBAR, Dock, Rect
 from trainer.frontend.viewer.ui.input import InputMap
 from trainer.frontend.viewer.ui.panel import bullets
-from trainer.frontend.viewer.ui.sections import (
-    SessionActions,
-    _progress_caption,
-    _training_metrics,
-    _training_timing,
-    dataset_section,
-    status_section,
-    training_setup_section,
-)
 
 WINDOW = (1600.0, 900.0)
 
@@ -272,13 +264,13 @@ def test_short_text_is_returned_untouched():
 # --------------------------------------------------------------------------
 
 def test_log_buffer_keeps_only_the_last_carriage_return_redraw():
-    log = st.LogBuffer()
+    log = LogBuffer()
     log.append("downloading [10/360 MB]\rdownloading [90/360 MB]")
     assert log.last() == "downloading [90/360 MB]"
 
 
 def test_log_buffer_drops_blank_lines_and_collapses_repeats():
-    log = st.LogBuffer()
+    log = LogBuffer()
     assert log.append("   ") is None
     log.append("same")
     log.append("same")
@@ -290,242 +282,12 @@ def test_log_buffer_drops_blank_lines_and_collapses_repeats():
 
 
 def test_log_buffer_is_bounded_and_tails_newest_last():
-    log = st.LogBuffer(capacity=5)
+    log = LogBuffer(capacity=5)
     for i in range(20):
         log.append(f"line {i}")
     assert len(log) == 5
     assert log.tail(3) == ("line 17", "line 18", "line 19")
     assert log.tail(0) == ()
-
-
-# --------------------------------------------------------------------------
-# SessionState / SessionSnapshot: the UI policy, in one place
-# --------------------------------------------------------------------------
-
-def test_commands_are_one_shot():
-    session = st.SessionState(st.MODE_HUB)
-    session.drop("D:/data/garden")
-    session.request("reconstruct")
-    assert session.take_dropped() == "D:/data/garden"
-    assert session.take_dropped() is None
-    assert session.take_command() == "reconstruct"
-    assert session.take_command() is None
-
-
-def test_matcher_selection_round_trips_through_the_combo_index():
-    session = st.SessionState(st.MODE_HUB)
-    assert session.snapshot().matcher_index == 0
-    session.set_matcher_index(2)
-    assert session.matcher == st.MATCHERS[2]
-    assert session.snapshot().matcher_index == 2
-    session.set_matcher("not-a-matcher")            # ignored, not crashed
-    assert session.matcher == st.MATCHERS[2]
-
-
-def test_button_enablement_follows_the_pipeline_state():
-    session = st.SessionState(st.MODE_HUB)
-    snap = session.snapshot()
-    assert (snap.can_setup, snap.can_reconstruct, snap.can_train) == (True, False, False)
-
-    session.set_dataset("D:/data/raw", st.KIND_IMAGES)
-    assert session.snapshot().can_reconstruct is False   # tools not installed yet
-    session.set_tools_ready(True)
-    assert session.snapshot().can_reconstruct is True
-    assert session.snapshot().can_setup is False        # the venv is already there
-
-    session.set_phase(st.PHASE_RECONSTRUCT)             # busy: nothing is clickable
-    snap = session.snapshot()
-    assert (snap.busy, snap.can_setup, snap.can_reconstruct) == (True, False, False)
-
-    session.set_phase(st.PHASE_IDLE)
-    session.set_scene_dir("D:/data/raw/reconstruction")
-    assert session.snapshot().can_train is True
-
-
-def test_a_finished_run_can_be_exported_relaunched_or_cleared():
-    """The session outlives the run: its result is still in memory, so the panel
-    offers the .ply, another Train on the same scene, and a reset."""
-    session = st.SessionState(st.MODE_HUB)
-    session.set_dataset("D:/data/scene", st.KIND_COLMAP)
-    session.set_scene_dir("D:/data/scene")
-    assert session.snapshot().can_export is False      # nothing trained yet
-
-    session.set_phase(st.PHASE_TRAINING)
-    assert session.snapshot().can_clear is False       # not while it runs
-    session.set_trained_model(True)
-    session.set_phase(st.PHASE_DONE)
-    snap = session.snapshot()
-    assert (snap.can_export, snap.can_train, snap.can_clear) == (True, True, True)
-    assert snap.can_configure is True                  # editable for the next run
-
-
-def test_clearing_the_session_forgets_the_dataset_but_not_the_tools():
-    session = st.SessionState(st.MODE_HUB)
-    session.set_tools_ready(True)
-    session.set_matcher_index(2)
-    session.set_dataset("D:/data/scene", st.KIND_COLMAP)
-    session.set_scene_dir("D:/data/scene")
-    session.set_trained_model(True)
-    session.publish_training(step=3000, total=3000, psnr=27.5)
-    session.set_phase(st.PHASE_DONE)
-    session.log("a line worth keeping")
-    session.request("export")
-
-    session.clear_session()
-    snap = session.snapshot()
-    assert (snap.dataset_path, snap.dataset_kind) == ("", st.KIND_NONE)
-    assert (snap.scene_dir, snap.has_trained_model) == ("", False)
-    assert (snap.phase, snap.stats.psnr, snap.stats.step) == (st.PHASE_IDLE, None, 0)
-    assert (snap.can_export, snap.can_train, snap.can_clear) == (False, False, False)
-    # A queued click must not act on the session that was just cleared.
-    assert session.take_command() is None
-    # Install state, choices and the record of what happened all survive.
-    assert (snap.tools_ready, snap.matcher) == (True, st.MATCHERS[2])
-    assert snap.log[-1] == "a line worth keeping"
-    assert "drag" in snap.hint()
-
-
-def test_hints_tell_the_user_what_to_do_next():
-    hub = st.SessionState(st.MODE_HUB)
-    assert "drag" in hub.snapshot().hint()
-    hub.set_dataset("D:/data/raw", st.KIND_IMAGES)
-    assert "Set up" in hub.snapshot().hint()
-    hub.set_tools_ready(True)
-    assert "Reconstruct" in hub.snapshot().hint()
-    hub.set_dataset("D:/data/scene", st.KIND_COLMAP)
-    assert "Train" in hub.snapshot().hint()
-    hub.set_phase(st.PHASE_DONE)
-    assert "export" in hub.snapshot().hint()        # the run is over, not the session
-    hub.set_phase(st.PHASE_ERROR)
-    assert "log" in hub.snapshot().hint()
-    assert "gaussians" in st.SessionState(st.MODE_TRAIN).snapshot().hint()
-
-    # A CLI run has no panel to offer any of that, so it says what IS true there.
-    cli = st.SessionState(st.MODE_TRAIN)
-    cli.set_phase(st.PHASE_DONE)
-    assert "viewer stays live" in cli.snapshot().hint()
-
-
-def test_training_stats_drive_a_determinate_progress_bar():
-    session = st.SessionState()
-    session.set_phase(st.PHASE_TRAINING)
-    session.publish_training(step=750, total=3000, it_per_s=50.0)
-    snap = session.snapshot()
-    assert snap.progress.active is True
-    assert snap.progress.percent() == 25
-    assert snap.progress.label == "iter 750/3000"
-    assert snap.stats.eta_s == pytest.approx((3000 - 750) / 50.0)
-
-
-def test_publish_training_merges_independent_ticks():
-    """A throughput tick and a loss/psnr tick publish separately; neither may
-    erase the other's numbers."""
-    session = st.SessionState()
-    session.publish_training(step=10, total=100, it_per_s=12.0)
-    session.publish_training(loss=0.01, psnr=24.5)
-    stats = session.snapshot().stats
-    assert (stats.step, stats.total, stats.it_per_s) == (10, 100, 12.0)
-    assert (stats.loss, stats.psnr) == (0.01, 24.5)
-
-
-def test_leaving_a_busy_phase_retires_the_progress_bar():
-    session = st.SessionState(st.MODE_HUB)
-    session.set_phase(st.PHASE_SETUP)
-    session.set_progress("installing glomap", 0.7)
-    assert session.snapshot().progress.active is True
-    session.set_phase(st.PHASE_IDLE)
-    assert session.snapshot().progress.active is False
-
-
-def test_only_training_locks_the_training_setup():
-    """Installing the tools and reconstructing both happen BEFORE a run exists,
-    so locking the setup then protects nothing — and those are the long waits
-    during which you actually want to set the next run up."""
-    session = st.SessionState(st.MODE_HUB)
-    for phase in (st.PHASE_IDLE, st.PHASE_SETUP, st.PHASE_RECONSTRUCT,
-                  st.PHASE_FINALIZE, st.PHASE_DONE, st.PHASE_ERROR):
-        session.set_phase(phase)
-        assert session.snapshot().can_configure is True, phase
-    session.set_phase(st.PHASE_TRAINING)
-    assert session.snapshot().can_configure is False
-
-
-def test_finalizing_is_busy_so_it_cannot_be_mistaken_for_a_finished_run():
-    """The metrics pass and the .ply export run with the orchestrator parked, so
-    the buttons must stay disabled — pressing them would do nothing until it
-    returned."""
-    session = st.SessionState(st.MODE_HUB)
-    session.set_scene_dir("D:/data/scene")
-    session.set_trained_model(True)
-    session.set_phase(st.PHASE_FINALIZE)
-    snap = session.snapshot()
-    assert snap.busy is True
-    assert (snap.can_train, snap.can_export, snap.can_clear) == (False, False, False)
-    assert snap.phase_label == "finalizing the run"
-    assert "metrics" in snap.hint()
-
-
-def test_the_finalize_bar_reports_the_post_training_steps():
-    session = st.SessionState(st.MODE_HUB)
-    session.publish_training(step=3000, total=3000)
-    session.set_phase(st.PHASE_FINALIZE)
-    session.set_progress("final metrics, camera 40/194", 0.46)
-    progress = session.snapshot().progress
-    assert progress.active is True
-    assert (progress.label, progress.percent()) == ("final metrics, camera 40/194", 46)
-
-
-def test_work_at_the_last_iteration_is_named_instead_of_sitting_at_n_of_n():
-    """THE COMPLAINT: --eval-every divides --iters, so the final iteration runs a
-    full eval sweep over every held-out camera. The bar is pinned at iter N/N by
-    definition, so the sweep has to say what it is doing."""
-    session = st.SessionState(st.MODE_HUB)
-    session.set_phase(st.PHASE_TRAINING)
-    session.publish_training(step=3000, total=3000)
-    assert session.snapshot().progress.label == "iter 3000/3000"
-
-    session.set_activity("evaluating camera 12/194")
-    assert session.snapshot().progress.label == "iter 3000/3000 — evaluating camera 12/194"
-    assert session.snapshot().progress.fraction == 1.0     # the iterations ARE done
-
-    session.set_activity("")
-    assert session.snapshot().progress.label == "iter 3000/3000"
-
-
-def test_changing_phase_drops_a_stale_activity():
-    session = st.SessionState(st.MODE_HUB)
-    session.set_phase(st.PHASE_TRAINING)
-    session.publish_training(step=3000, total=3000)
-    session.set_activity("evaluating camera 12/194")
-    session.set_phase(st.PHASE_FINALIZE)
-    assert session.snapshot().activity == ""
-
-
-def test_log_tail_is_published_into_the_snapshot():
-    session = st.SessionState(log_lines=3)
-    for i in range(6):
-        session.log(f"line {i}")
-    snap = session.snapshot()
-    assert snap.log == ("line 3", "line 4", "line 5")
-    assert snap.message == "line 5"
-    session.clear_log()
-    assert session.snapshot().log == ()
-
-
-def test_state_view_caches_one_snapshot_per_frame():
-    session = st.SessionState()
-    view = session.view()
-    session.log("published after sample")
-    assert view.log == ()          # the frame's snapshot is frozen...
-    view.sample()
-    assert view.log == ("published after sample",)   # ... until the next frame
-
-
-def test_format_duration():
-    assert st.format_duration(None) == "--"
-    assert st.format_duration(0) == "0:00"
-    assert st.format_duration(75) == "1:15"
-    assert st.format_duration(3725) == "1:02:05"
 
 
 # --------------------------------------------------------------------------
@@ -588,27 +350,6 @@ def test_the_big_colmap_download_moves_the_bar_while_it_runs():
 # panel-facing formatting + self-documenting input map
 # --------------------------------------------------------------------------
 
-def test_progress_caption_shows_the_phase_when_idle_and_the_percent_when_busy():
-    session = st.SessionState(st.MODE_HUB)
-    view = session.view()
-    assert _progress_caption(view) == "idle"
-    session.set_phase(st.PHASE_RECONSTRUCT)
-    session.set_progress("matching images", 0.42)
-    view.sample()
-    assert _progress_caption(view) == "matching images  —  42%"
-
-
-def test_training_readouts_degrade_gracefully_before_any_numbers():
-    assert _training_metrics(st.TrainingStats()) == "no metrics yet"
-    assert "-- it/s" in _training_timing(st.TrainingStats())
-    assert "eta --" in _training_timing(st.TrainingStats())
-    stats = st.TrainingStats(step=100, total=1000, gaussians=123456,
-                             it_per_s=20.0, loss=0.0123, psnr=25.5, elapsed_s=5.0)
-    metrics = _training_metrics(stats)
-    assert "loss 0.0123" in metrics and "25.50 dB" in metrics
-    assert "123,456 splats" in metrics
-    assert "eta 0:45" in _training_timing(stats)
-
 
 def test_input_map_documents_itself_for_the_help_section():
     keys = InputMap().hold("KEY_W", "w").document("WASD", "move")
@@ -641,164 +382,12 @@ def test_input_map_tracks_held_keys_and_fires_presses():
 # section builders: the declared widgets and what drives them
 # --------------------------------------------------------------------------
 
-def test_status_section_shows_the_bar_only_while_something_runs():
-    """An idle 0% bar reads as 'stuck at zero', so it is hidden when idle."""
-    session = st.SessionState(st.MODE_HUB)
-    view = session.view()
-    panel = _RecordingPanel()
-    status_section(panel, view)
-
-    bar = panel.only("progress")
-    assert bar.binds["visible"]() is False
-    session.set_phase(st.PHASE_SETUP)
-    session.set_progress("installing colmap", 0.5)
-    view.sample()
-    assert bar.binds["visible"]() is True
-    assert bar.binds["fraction"]() == pytest.approx(0.5)
-
-
-def test_dataset_section_buttons_gate_and_drive_the_session():
-    """A control is declared with an ``enabled`` getter and its action — the
-    render loop never touches either (the extensibility this refactor is for)."""
-    session = st.SessionState(st.MODE_HUB)
-    view = session.view()
-    panel = _RecordingPanel()
-    dataset_section(panel, view, SessionActions(
-        setup=lambda: session.request("setup"),
-        reconstruct=lambda: session.request("reconstruct"),
-        train=lambda: session.request("train"),
-        select_matcher=session.set_matcher_index))
-
-    train = panel.only("button", label="Train")
-    assert train.binds["enabled"]() is False
-    session.set_dataset("D:/data/scene", st.KIND_COLMAP)
-    session.set_scene_dir("D:/data/scene")
-    view.sample()
-    assert train.binds["enabled"]() is True
-    train.click()
-    assert session.take_command() == "train"
-
-    panel.only("combo").change(2)          # the matcher dropdown drives state
-    assert session.matcher == st.MATCHERS[2]
-
-
-def test_dataset_section_exposes_the_install_time_cuda_build_choice():
-    """Which COLMAP/GLOMAP builds get installed is an INSTALL-TIME choice (the CUDA
-    and CPU zips are separate downloads), so it belongs next to the Set up button."""
-    session = st.SessionState(st.MODE_HUB)
-    view = session.view()
-    panel = _RecordingPanel()
-    dataset_section(panel, view, SessionActions(
-        setup=lambda: None, reconstruct=lambda: None, train=lambda: None,
-        select_matcher=session.set_matcher_index,
-        set_recon_cuda=session.set_recon_cuda))
-
-    box = panel.only("checkbox", caption="CUDA recon builds")
-    assert box.info["value"]() is True      # CUDA by default: it is the only GPU path
-    box.change(False)
-    assert session.recon_cuda is False
-    session.set_phase(st.PHASE_SETUP)
-    view.sample()
-    assert box.binds["enabled"]() is False     # can't switch build mid-install
-
-
-def test_setup_is_offered_only_while_the_recon_tools_are_missing():
-    """The button downloads the COLMAP / GLOMAP builds; with those already on disk,
-    pressing it again would just re-fetch hundreds of MB. ``tools_ready`` is probed
-    from disk when the hub starts, so the button stays greyed out across restarts
-    too — and so does the build checkbox, which has no next install left to steer."""
-    session = st.SessionState(st.MODE_HUB)
-    view = session.view()
-    panel = _RecordingPanel()
-    dataset_section(panel, view, SessionActions(
-        setup=lambda: session.request("setup"),
-        reconstruct=lambda: None, train=lambda: None,
-        select_matcher=session.set_matcher_index,
-        set_recon_cuda=session.set_recon_cuda))
-
-    button = panel.only("button", label="Set up recon tools")
-    assert button.binds["enabled"]() is True
-    button.click()
-    assert session.take_command() == "setup"
-
-    session.set_tools_ready(True)
-    view.sample()
-    assert button.binds["enabled"]() is False
-    assert panel.only("checkbox",
-                      caption="CUDA recon builds").binds["enabled"]() is False
-
-
-def test_the_dataset_section_offers_the_post_training_actions():
-    """What happens when a run finishes: the .ply can be written, the same scene
-    re-trained (the button says so), or the whole session thrown away."""
-    session = st.SessionState(st.MODE_HUB)
-    view = session.view()
-    panel = _RecordingPanel()
-    dataset_section(panel, view, SessionActions(
-        setup=lambda: None, reconstruct=lambda: None,
-        train=lambda: session.request("train"),
-        select_matcher=session.set_matcher_index,
-        export_ply=lambda: session.request("export"),
-        clear=lambda: session.request("clear")))
-
-    export = panel.only("button", label="Export .ply")
-    clear = panel.only("button", label="Clear session")
-    train = panel.only("button", label="Train")
-    assert export.binds["enabled"]() is False       # nothing trained yet
-    assert clear.binds["enabled"]() is False        # and nothing to forget
-
-    session.set_dataset("D:/data/scene", st.KIND_COLMAP)
-    session.set_scene_dir("D:/data/scene")
-    session.set_trained_model(True)
-    session.set_phase(st.PHASE_DONE)
-    view.sample()
-    assert export.binds["enabled"]() is True
-    assert clear.binds["enabled"]() is True
-    assert train.binds["enabled"]() is True
-    assert train.binds["label"]() == "Train again"  # a re-run, and it says so
-
-    export.click()
-    assert session.take_command() == "export"
-    clear.click()
-    assert session.take_command() == "clear"
-
-
-def test_a_panel_without_the_post_training_actions_declares_no_such_buttons():
-    """They are optional wiring, so a caller that offers neither gets neither —
-    the buttons cannot be there without something behind them."""
-    session = st.SessionState(st.MODE_HUB)
-    panel = _RecordingPanel()
-    dataset_section(panel, session.view(), SessionActions(
-        setup=lambda: None, reconstruct=lambda: None, train=lambda: None,
-        select_matcher=session.set_matcher_index))
-    labels = [w.info["label"] for w in panel.widgets if w.kind == "button"]
-    assert labels == ["Set up recon tools", "Reconstruct", "Train"]
-
 
 # --------------------------------------------------------------------------
 # TRAINING SETUP: the hub's editable hyperparameters (spec table + section)
 # --------------------------------------------------------------------------
 
 CONTROLS = ("checkbox", "combo", "drag_int", "drag_float")
-EDITABLE = tuple(s for s in SETTINGS if not s.launch_only)
-
-
-def _build_setup_section(mode: str = st.MODE_HUB):
-    session = st.SessionState(mode)
-    view = session.view()
-    setup = TrainingSetup()
-    panel = _RecordingPanel()
-    training_setup_section(panel, view, setup)
-    return session, view, setup, panel
-
-
-def _controls(panel) -> list[_Declared]:
-    return [w for w in panel.widgets if w.kind in CONTROLS]
-
-
-def _texts(panel) -> list[str]:
-    return [w.info["value"]() if callable(w.info["value"]) else w.info["value"]
-            for w in panel.widgets if w.kind == "text"]
 
 
 def _probe(setting):
@@ -817,78 +406,6 @@ def _expected(setting):
     if setting.kind == CHOICE:
         return setting.choices[-1]
     return setting.coerce(setting.maximum)
-
-
-def test_setup_section_groups_related_options_in_the_declared_order():
-    """The grouping IS the feature: related knobs sit together, in a deliberate
-    order (GROUPS) rather than whatever order the table happens to list dests."""
-    *_, panel = _build_setup_section()
-    titles = [w.info["title"] for w in panel.widgets if w.kind == "section"]
-    assert titles == ["TRAINING SETUP"] + [title for _, title in GROUPS]
-
-
-def test_setup_section_offers_every_editable_setting_exactly_once():
-    *_, panel = _build_setup_section()
-    assert len(_controls(panel)) == len(EDITABLE)
-
-
-def test_every_setup_control_reads_and_writes_the_shared_store():
-    """Each widget is bound to the store, not to a copy: it writes through its
-    callback and pulls its displayed value back out every frame."""
-    _, _, setup, panel = _build_setup_section()
-    for setting, widget in zip(EDITABLE, _controls(panel), strict=True):
-        assert widget.binds["enabled"]() is True
-        widget.change(_probe(setting))
-        assert setup.get(setting.setting_name) == _expected(setting)
-        pulled = widget.info["value"]()
-        assert pulled == (setup.index_of(setting.setting_name) if setting.kind == CHOICE
-                          else setup.get(setting.setting_name))
-
-
-def test_setup_controls_lock_while_a_run_trains_and_only_then():
-    """A run reads these values when it is BUILT, so training is the one phase
-    where an edit would be silently ignored. Setting up the tools and
-    reconstructing happen before any run exists — locking them out of those (the
-    two longest waits in the hub) protected nothing."""
-    session, view, _, panel = _build_setup_section()
-    session.set_phase(st.PHASE_TRAINING)
-    view.sample()
-    assert all(w.binds["enabled"]() is False for w in _controls(panel))
-    for phase in (st.PHASE_SETUP, st.PHASE_RECONSTRUCT, st.PHASE_FINALIZE,
-                  st.PHASE_IDLE):
-        session.set_phase(phase)
-        view.sample()
-        assert all(w.binds["enabled"]() is True for w in _controls(panel)), phase
-
-
-def test_setup_controls_reopen_after_a_run_so_it_can_be_relaunched():
-    """The values are read again by the NEXT run, which is how the same scene is
-    re-trained with different parameters — locking them at DONE would have made
-    'Train again' a repeat of the previous settings and nothing else."""
-    session, view, _, panel = _build_setup_section()
-    session.set_phase(st.PHASE_DONE)
-    view.sample()
-    assert all(w.binds["enabled"]() is True for w in _controls(panel))
-    assert "applied when you press Train" in _texts(panel)[0]
-
-
-def test_setup_is_never_editable_outside_the_hub():
-    """A plain training run already had its args consumed before the window."""
-    assert st.SessionState(st.MODE_TRAIN).snapshot().can_configure is False
-    _, _, _, panel = _build_setup_section(st.MODE_TRAIN)
-    assert all(w.binds["enabled"]() is False for w in _controls(panel))
-
-
-def test_a_compile_time_setting_is_shown_read_only_not_silently_ignored():
-    """--backward-pixel-stride is a shader define injected when the DEVICE is
-    created, i.e. before the hub panel exists. It must not look editable."""
-    stride = SETTINGS_MAP["backward_pixel_stride"]
-    assert stride.launch_only is True
-    _, _, setup, panel = _build_setup_section()
-    row = [t for t in _texts(panel) if t.startswith(stride.caption)]
-    assert len(row) == 1
-    assert stride.display(setup.get(stride.setting_name)) in row[0]
-    assert stride.note in row[0]               # ... and says why it is read-only
 
 
 def test_the_shared_settings_are_internally_consistent():
@@ -1001,96 +518,6 @@ def test_viewer_capacity_can_only_be_raised_above_the_trainers():
     storage: --stream-max-splats can only ever raise the capacity."""
     assert viewer_stream_capacity(10_000_000, 7_000_000) == 10_000_000
     assert viewer_stream_capacity(1_000_000, 7_000_000) == 7_000_000
-
-
-class _Declared:
-    """One widget a section asked for, plus the getters bound to it."""
-
-    def __init__(self, kind: str, **info) -> None:
-        self.kind = kind
-        self.binds = info.pop("binds", {})
-        self.info = info
-
-    def click(self) -> None:
-        self.info["on_click"]()
-
-    def change(self, value) -> None:
-        self.info["on_change"](value)
-
-
-class _RecordingPanel:
-    """Stand-in for :class:`Panel` that records a section's declarations, so the
-    wiring is testable without a GPU device."""
-
-    def __init__(self) -> None:
-        self.widgets: list[_Declared] = []
-
-    def only(self, kind: str, **match) -> _Declared:
-        found = [w for w in self.widgets if w.kind == kind
-                 and all(w.info.get(k) == v for k, v in match.items())]
-        assert len(found) == 1, f"expected one {kind} {match}, got {len(found)}"
-        return found[0]
-
-    @contextlib.contextmanager
-    def section(self, title: str, **binds):
-        self.widgets.append(_Declared("section", title=title, binds=binds))
-        yield
-
-    def text(self, value="", *, lines=1, mode="wrap", visible=None) -> None:
-        self.widgets.append(_Declared("text", value=value, lines=lines, mode=mode,
-                                      binds={} if visible is None
-                                      else {"visible": visible}))
-
-    def spacer(self) -> None:
-        self.widgets.append(_Declared("spacer"))
-
-    def log(self, lines_getter, *, lines=8) -> None:
-        self.widgets.append(_Declared("log", getter=lines_getter, lines=lines))
-
-    def progress(self, fraction, *, caption=None, **binds) -> None:
-        if caption is not None:
-            self.text(caption)
-        self.widgets.append(_Declared("progress", binds={"fraction": fraction, **binds}))
-
-    def button(self, label, on_click, **binds) -> None:
-        # A dynamic label is bound like any other getter (see Panel.button), so it
-        # stays live; ``label`` keeps the build-time text for matching in only().
-        if not isinstance(label, str):
-            binds.setdefault("label", label)
-        self.widgets.append(_Declared(
-            "button", label=label if isinstance(label, str) else label(),
-            on_click=on_click, binds=binds))
-
-    def combo(self, caption, items, value, on_change, **binds) -> None:
-        if caption:
-            self.text(caption)
-        self.widgets.append(_Declared("combo", items=items, value=value,
-                                      on_change=on_change, binds=binds))
-
-    def checkbox(self, caption, value, on_change, **binds) -> None:
-        self.widgets.append(_Declared("checkbox", caption=caption, value=value,
-                                      on_change=on_change, binds=binds))
-
-    def slider_float(self, caption, value, minimum, maximum, on_change,
-                     fmt="%.3f", **binds) -> None:
-        self.widgets.append(_Declared("slider", value=value, on_change=on_change,
-                                      binds=binds))
-
-    slider_int = slider_float
-
-    def drag_int(self, caption, value, on_change, *, minimum=0, maximum=0,
-                 speed=1.0, fmt="%d", **binds) -> None:
-        if caption:
-            self.text(caption)
-        self.widgets.append(_Declared("drag_int", value=value, on_change=on_change,
-                                      minimum=minimum, maximum=maximum, binds=binds))
-
-    def drag_float(self, caption, value, on_change, *, minimum=0.0, maximum=0.0,
-                   speed=0.01, fmt="%.3f", **binds) -> None:
-        if caption:
-            self.text(caption)
-        self.widgets.append(_Declared("drag_float", value=value, on_change=on_change,
-                                      minimum=minimum, maximum=maximum, binds=binds))
 
 
 class _KeyEvent:

@@ -1,14 +1,23 @@
-"""The viewer panel's sections, as independent builders.
+"""The panel's sections: one per concept, in lifecycle order.
 
-Each function adds one collapsible section to a :class:`~.panel.Panel` and takes
-exactly the state it needs — a :class:`~trainer.frontend.viewer.state.StateView`
-for shared session state, and a small controls dataclass for whatever it drives.
-The render loop therefore contains NO panel code: it samples the state view once
-per frame and calls ``panel.refresh()``.
+    header            what state am I in, what just happened, what next
+    DATASET           what am I working on          (drop target when empty)
+    TRAINING          what is happening right now   (run status + controls)
+    RESULT            what exists now               (export / train again)
+    CONFIGURATION     what the NEXT run will use
+    VIEWER            camera
+    CONTROLS          keys
+    DIAGNOSTICS       the log, off by default
 
-Adding a readout is one ``panel.text(lambda: ...)`` line inside the relevant
-section; adding a control is one ``panel.button``/``combo``/``slider`` line with
-an ``enabled=`` getter. Nothing else changes.
+Status, configuration and result are deliberately three sections rather than one
+mixed list: "327 it/s" and "iterations: 30,000" answer different questions, and the
+old panel put them a line apart. Every readout comes from
+:class:`~trainer.frontend.viewer.session.Snapshot`, so no section derives policy of
+its own — a button's ``enabled`` is a ``can_*`` property, never a local conjunction
+of booleans.
+
+Sections are built once and PULL from getters each frame (see the panel module), so
+the render loop contains no UI code and a state transition needs no rebuild.
 """
 from __future__ import annotations
 
@@ -21,34 +30,84 @@ from trainer.frontend.settings import (
     FLOAT,
     GROUPS,
     INT,
+    SETTINGS_MAP,
     Setting,
     TrainingSetup,
     group_settings,
 )
-from trainer.frontend.viewer.state import (
+from trainer.frontend.viewer.session import (
+    KIND_IMAGES,
+    KIND_NONE,
     MATCHERS,
-    PHASE_ERROR,
-    StateView,
-    TrainingStats,
+    DatasetState,
+    ResultState,
+    ToolsState,
+    TrainingState,
+    View,
+    format_count,
     format_duration,
+    format_rate,
+)
+from trainer.frontend.viewer.ui.components import (
+    GLYPHS,
+    activity_block,
+    badge,
+    confirm_block,
+    inline_error,
+    metric,
+    name_field,
+    note,
+    path_row,
+    row,
+    section_summary,
+    status_line,
+    titled,
+    toasts,
+)
+from trainer.frontend.viewer.ui.components import (
+    actions as action_rows,
 )
 from trainer.frontend.viewer.ui.panel import ELIDE_START, Panel, bullets
 
 
 @dataclass(frozen=True)
-class SessionActions:
-    """What the DATASET section can ask the orchestrator to do."""
+class Actions:
+    """Everything the panel can ask the orchestrator to do.
 
-    setup: Callable[[], None]
-    reconstruct: Callable[[], None]
-    train: Callable[[], None]
-    select_matcher: Callable[[int], None]
-    set_recon_cuda: Callable[[bool], None] | None = None
-    # Post-training: write the trained gaussians out, or forget the whole session
-    # and start on something else. Optional so a caller that offers neither (a
-    # test, or a future read-only panel) simply gets no buttons.
-    export_ply: Callable[[], None] | None = None
-    clear: Callable[[], None] | None = None
+    One dataclass rather than one per section: this IS the application's command
+    surface, and keeping it in a single place makes it obvious when a state has no
+    action attached to it. Every callback is one-shot — it posts intent and returns
+    immediately, so the render thread never waits on the orchestrator.
+    """
+
+    # dataset
+    browse: Callable[[], None] | None = None
+    install_tools: Callable[[], None] = lambda: None
+    reconstruct: Callable[[], None] = lambda: None
+    select_matcher: Callable[[int], None] = lambda _i: None
+    set_recon_cuda: Callable[[bool], None] = lambda _v: None
+    new_dataset: Callable[[], None] = lambda: None
+    clear_session: Callable[[], None] = lambda: None
+    # training
+    start_training: Callable[[], None] = lambda: None
+    restart_training: Callable[[], None] = lambda: None
+    pause: Callable[[], None] = lambda: None
+    resume: Callable[[], None] = lambda: None
+    stop: Callable[[], None] = lambda: None
+    # result
+    export: Callable[[], None] = lambda: None
+    set_export_name: Callable[[str], None] = lambda _n: None
+    reveal_export: Callable[[], None] | None = None
+    # pending confirmations (one at a time, resolved by the section that owns it)
+    confirm: Callable[[], None] = lambda: None
+    confirm_alt: Callable[[], None] = lambda: None
+    cancel: Callable[[], None] = lambda: None
+    # configuration: an edit invalidates the match between the on-screen result
+    # and what the next run would produce (drives the "parameters changed" hint).
+    on_config_change: Callable[[], None] = lambda: None
+    # diagnostics
+    toggle_log: Callable[[bool], None] = lambda _v: None
+    clear_log: Callable[[], None] = lambda: None
 
 
 @dataclass(frozen=True)
@@ -63,214 +122,441 @@ class CameraControls:
     fovy: Callable[[], float]
 
 
-@dataclass(frozen=True)
-class TrainingControls:
-    """Training readouts + the pause/start buttons."""
+# --------------------------------------------------------------------------
+# header: the answer to "what state am I in" and "what did my last action do"
+# --------------------------------------------------------------------------
 
-    stats: Callable[[], TrainingStats]
-    active: Callable[[], bool]
-    paused: Callable[[], bool]
-    toggle_pause: Callable[[], None]
-    start: Callable[[], None] | None = None
+def header(panel: Panel, view: View) -> None:
+    """Always-visible state header (deliberately NOT collapsible).
 
-
-def status_section(panel: Panel, view: StateView, *, log_lines: int = 7) -> None:
-    """Headline hint + determinate progress bar + wrapped log tail.
-
-    This replaces the old single ``progress`` string that any long line (a runner
-    command, a pip URL) overwrote and then got clipped: the hint says what to do
-    next, the bar says how far along we are, and the log keeps the last lines
-    intact across as many rows as they need.
+    Three things, in priority order: the state badge, the one-line state, and what
+    to do next. Then the current long operation and any transient acknowledgements
+    — which is where "did my click do anything" gets answered for every action that
+    does not have a section of its own.
     """
-    with panel.section("STATUS"):
-        # Note the lambdas: a StateView attribute must be re-read every frame
-        # (it resolves against the CURRENT snapshot), never captured at build.
-        panel.text(lambda: view.hint(), lines=2)
-        # The bar appears only while something is running — an idle 0% bar reads
-        # as "stuck at zero". The caption stays: it doubles as the phase readout.
-        panel.progress(lambda: view.progress.fraction,
-                       caption=lambda: _progress_caption(view),
-                       visible=lambda: view.progress.active)
-        panel.text(lambda: f"log ({len(view.log)} lines, newest last)",
-                   visible=lambda: bool(view.log))
-        panel.log(lambda: view.log[-log_lines:], lines=log_lines)
+    panel.text(lambda: f"{badge(view.status_badge)}  {view.state_label}", lines=2)
+    note(panel, lambda: view.next_step(), lines=3)
+    activity_block(panel, lambda: view.activity)
+    toasts(panel, view)
+    panel.spacer()
 
 
-def _progress_caption(view: StateView) -> str:
-    progress = view.progress
-    if not progress.active:
-        return view.phase_label
-    label = progress.label or view.phase_label
-    return f"{label}  —  {progress.percent()}%"
+# --------------------------------------------------------------------------
+# DATASET
+# --------------------------------------------------------------------------
+
+def dataset_section(panel: Panel, view: View, actions: Actions) -> None:
+    """What am I working on — and, when nothing is loaded, the way to begin."""
+    def summary() -> str:
+        if not view.has_dataset:
+            return "empty"
+        info = view.dataset
+        if view.dataset_state == DatasetState.ERROR:
+            return "failed"
+        if view.dataset_state != DatasetState.READY:
+            return str(view.dataset_state)
+        return section_summary(info.name, info.summary())
+
+    with panel.section("DATASET", label=titled("DATASET", summary)):
+        _dataset_empty(panel, view, actions)
+        _dataset_working(panel, view)
+        _dataset_ready(panel, view, actions)
+        _dataset_error(panel, view, actions)
+        confirm_block(panel, view, "dataset", on_confirm=actions.confirm,
+                      on_alt=actions.confirm_alt, on_cancel=actions.cancel)
 
 
-def dataset_section(panel: Panel, view: StateView, actions: SessionActions) -> None:
-    """Dataset selection and the reconstruct/train pipeline (hub mode)."""
-    with panel.section("DATASET"):
-        panel.text(lambda: view.dataset_path or "(none — drag a folder here)",
-                   mode=ELIDE_START)
-        panel.text(lambda: f"type: {view.dataset_kind}"
-                           + ("   tools: ready" if view.tools_ready
-                              else "   tools: not installed"))
-        panel.combo("feature matcher", list(MATCHERS),
-                    lambda: view.matcher_index, actions.select_matcher,
-                    enabled=lambda: not view.busy)
-        if actions.set_recon_cuda is not None:
-            # INSTALL-TIME choice, hence its place next to the Set up button: the
-            # CUDA and CPU builds of colmap/glomap are separate downloads, so this
-            # decides which ones the next setup fetches — and therefore whether
-            # feature matching and bundle adjustment run on the GPU at all. It
-            # follows that button's own gate: with the tools installed there is no
-            # next setup for it to steer.
-            panel.checkbox("CUDA recon builds", lambda: view.recon_cuda,
-                           actions.set_recon_cuda,
-                           enabled=lambda: view.can_setup)
-        panel.button("Set up recon tools", actions.setup,
-                     enabled=lambda: view.can_setup)
-        panel.button("Reconstruct", actions.reconstruct,
-                     enabled=lambda: view.can_reconstruct)
-        # "Train again" once a run has finished: the same button re-launches on the
-        # same scene with whatever TRAINING SETUP now holds (which is why that
-        # section unlocks again — see ``can_configure``).
-        panel.button(lambda: "Train again" if view.has_trained_model else "Train",
-                     actions.train, enabled=lambda: view.can_train)
-        if actions.export_ply is not None:
-            panel.button("Export .ply", actions.export_ply,
-                         enabled=lambda: view.can_export)
-        if actions.clear is not None:
-            panel.button("Clear session", actions.clear,
-                         enabled=lambda: view.can_clear)
-        panel.text("reconstruction needs a folder of images (or images/)",
-                   lines=2, visible=lambda: not view.tools_ready)
+def _dataset_empty(panel: Panel, view: View, actions: Actions) -> None:
+    def empty() -> bool:
+        return view.dataset_state == DatasetState.EMPTY
+
+    panel.text("      DROP A DATASET HERE", visible=empty)
+    panel.text("   image folder or COLMAP data", visible=empty)
+    if actions.browse is not None:
+        panel.button("Browse...", actions.browse,
+                     enabled=lambda: view.can_drop, visible=empty)
+    note(panel, "A folder of images, or one with sparse/ + images/.",
+         lines=2, visible=empty)
 
 
-def training_setup_section(panel: Panel, view: StateView,
-                           setup: TrainingSetup) -> None:
-    """Editable training hyperparameters, grouped by concept (hub mode).
+def _dataset_working(panel: Panel, view: View) -> None:
+    """INSPECTING / LOADING / RECONSTRUCTING — the drop is acknowledged here, on the
+    frame it lands, before anything has been read from disk."""
+    def working() -> bool:
+        return view.dataset_state in (DatasetState.INSPECTING, DatasetState.LOADING,
+                                      DatasetState.RECONSTRUCTING)
 
-    Rendered GENERICALLY from :data:`trainer.frontend.settings.SETTINGS` —
-    the spec table owns which options exist, their ranges and their grouping, so a
-    new knob never needs a line here. Each widget writes straight into the shared
-    :class:`TrainingSetup`; the orchestrator applies the whole store to the run's
-    args once, when Train is pressed.
+    status_line(panel, lambda: str(view.dataset_state).upper(),
+                lambda: view.dataset.name or "...", visible=working)
+    panel.text(lambda: f"  detected: {view.dataset.kind_label}",
+               visible=lambda: working() and view.dataset.kind != KIND_NONE)
 
-    Everything greys out via ``can_configure`` while a run is being built or
-    trained, because that is when the values are consumed, and comes back once it
-    finishes — the store is what the next run is built from (see the settings
-    module docstring).
+
+def _dataset_ready(panel: Panel, view: View, actions: Actions) -> None:
+    def ready() -> bool:
+        return view.dataset_state == DatasetState.READY
+
+    def needs_recon() -> bool:
+        # Images not yet reconstructed: the only case where the COLMAP controls
+        # mean anything, so the only case that shows them.
+        return (ready() and view.dataset.kind == KIND_IMAGES
+                and not view.dataset.scene_dir)
+
+    panel.text(lambda: f"{GLYPHS['ok']} {view.dataset.name}", visible=ready)
+    note(panel, lambda: view.dataset.kind_label, lines=1, visible=ready)
+    note(panel, lambda: view.dataset.summary(), lines=2,
+         visible=lambda: ready() and bool(view.dataset.summary()))
+    path_row(panel, "  folder", lambda: view.dataset.path, visible=ready)
+
+    # -- images that still need a reconstruction -------------------------
+    metric(panel, "  tools", lambda: str(view.tools_state), visible=needs_recon)
+    panel.combo("  feature matcher", list(MATCHERS),
+                lambda: MATCHERS.index(view.matcher) if view.matcher in MATCHERS else 0,
+                actions.select_matcher,
+                enabled=lambda: not view.busy, visible=needs_recon)
+    panel.checkbox("  CUDA reconstruction builds", lambda: view.recon_cuda,
+                   actions.set_recon_cuda,
+                   enabled=lambda: view.can_install_tools, visible=needs_recon)
+    panel.button("Install reconstruction tools", actions.install_tools,
+                 enabled=lambda: view.can_install_tools,
+                 visible=lambda: needs_recon()
+                 and view.tools_state != ToolsState.READY)
+    panel.button("Reconstruct to COLMAP", actions.reconstruct,
+                 enabled=lambda: view.can_reconstruct, visible=needs_recon)
+
+    # -- a derived scene: say so, so "148 images" and the trained scene agree --
+    path_row(panel, "  reconstructed scene", lambda: view.dataset.scene_dir,
+             visible=lambda: ready() and bool(view.dataset.scene_dir)
+             and view.dataset.kind == KIND_IMAGES)
+
+
+def _dataset_error(panel: Panel, view: View, actions: Actions) -> None:
+    def failed() -> bool:
+        return view.dataset_state == DatasetState.ERROR
+
+    inline_error(panel, lambda: view.dataset_error if failed() else "",
+                 title="Could not load dataset")
+    path_row(panel, "  folder", lambda: view.dataset.path, visible=failed)
+    if actions.browse is not None:
+        panel.button("Try another folder", actions.browse,
+                     enabled=lambda: view.can_drop, visible=failed)
+
+
+# --------------------------------------------------------------------------
+# TRAINING
+# --------------------------------------------------------------------------
+
+def training_section(panel: Panel, view: View, actions: Actions) -> None:
+    """What is happening right now: one coherent run status, then its controls."""
+    def summary() -> str:
+        state = view.training_state
+        if state == TrainingState.RUNNING:
+            return f"running {GLYPHS['bullet']} {view.stats.percent:.1f}%"
+        if state == TrainingState.PAUSED:
+            return f"paused at {view.stats.step:,}"
+        if state == TrainingState.COMPLETED:
+            return "complete"
+        if state == TrainingState.FAILED:
+            return "failed"
+        return str(state)
+
+    with panel.section("TRAINING", label=titled("TRAINING", summary)):
+        _training_idle(panel, view, actions)
+        _training_live(panel, view, actions)
+        inline_error(panel, lambda: view.training_error, title="Training failed")
+        confirm_block(panel, view, "training", on_confirm=actions.confirm,
+                      on_alt=actions.confirm_alt, on_cancel=actions.cancel)
+
+
+def _training_idle(panel: Panel, view: View, actions: Actions) -> None:
+    def idle() -> bool:
+        return view.training_state == TrainingState.IDLE
+
+    panel.text(lambda: "Ready to train." if view.trainable
+               else "Load a trainable dataset first.",
+               visible=lambda: idle() and not view.has_result)
+    metric(panel, "  iterations", lambda: f"{view.stats.total:,}",
+           visible=lambda: idle() and view.trainable and view.stats.total > 0)
+    panel.button("Start Training", actions.start_training,
+                 enabled=lambda: view.can_start_training,
+                 visible=lambda: idle() and not view.has_result)
+
+
+def _training_live(panel: Panel, view: View, actions: Actions) -> None:
+    """INITIALIZING through FINALIZING: the complete run status in one block.
+
+    Iteration, progress, rate, elapsed, ETA, splats and quality all live here —
+    the numbers a run is judged by should not be spread across the panel.
     """
-    with panel.section("TRAINING SETUP"):
-        panel.text(lambda: ("applied when you press Train"
-                            if view.can_configure
-                            else "locked — these are read when the run is built"),
-                   lines=2)
-        for key, title in GROUPS:
-            settings = group_settings(key)
+    def live() -> bool:
+        return view.training_live
+
+    status_line(panel, lambda: str(view.training_state).upper(),
+                lambda: _iteration_text(view), visible=live)
+    panel.progress(lambda: view.stats.fraction,
+                   visible=lambda: live() and view.stats.total > 0)
+    panel.text(lambda: row("  throughput", _timing_text(view)), visible=live)
+    panel.text(lambda: row("  model", _model_text(view)), visible=live)
+    panel.text(lambda: row("  appearance", _appearance_text(view)),
+               visible=lambda: live() and bool(_appearance_text(view)))
+    note(panel, lambda: view.activity.detail, lines=2,
+         visible=lambda: live() and bool(view.activity.detail))
+
+    panel.button("Pause", actions.pause, enabled=lambda: view.can_pause,
+                 visible=lambda: live() and not view.can_resume)
+    panel.button("Resume", actions.resume, enabled=lambda: view.can_resume,
+                 visible=lambda: view.can_resume)
+    panel.button("Stop", actions.stop, enabled=lambda: view.can_stop, visible=live)
+
+
+def _iteration_text(view: View) -> str:
+    stats = view.stats
+    if stats.total <= 0:
+        return "starting"
+    return f"{stats.step:,} / {stats.total:,}      {stats.percent:.1f}%"
+
+
+def _timing_text(view: View) -> str:
+    stats = view.stats
+    parts = [format_rate(stats.it_per_s), f"{format_duration(stats.elapsed_s)} elapsed"]
+    if stats.eta_s is not None:
+        parts.append(f"ETA {format_duration(stats.eta_s)}")
+    return f"   {GLYPHS['bullet']} ".join(parts)
+
+
+def _model_text(view: View) -> str:
+    stats = view.stats
+    parts = [f"{format_count(stats.gaussians)} splats"] if stats.gaussians else []
+    if stats.psnr is not None:
+        parts.append(f"{stats.psnr:.2f} dB")
+    if stats.loss is not None:
+        parts.append(f"loss {stats.loss:.4f}")
+    return f"   {GLYPHS['bullet']} ".join(parts) if parts else "--"
+
+
+def _appearance_text(view: View) -> str:
+    stats = view.stats
+    parts = []
+    if stats.sh_degree:
+        parts.append(f"SH {stats.sh_degree}")
+    if stats.densify_step:
+        label = f"densify @ {stats.densify_step:,}"
+        parts.append(f"{label} ({stats.densify_kind})" if stats.densify_kind else label)
+    return f"   {GLYPHS['bullet']} ".join(parts)
+
+
+# --------------------------------------------------------------------------
+# RESULT
+# --------------------------------------------------------------------------
+
+def result_section(panel: Panel, view: View, actions: Actions) -> None:
+    """What exists now. After a run this is the important object, so its actions
+    (export, train again, move on) live here rather than under DATASET."""
+    def summary() -> str:
+        if view.result_state == ResultState.NONE:
+            return "none"
+        if view.result_state == ResultState.INITIALIZED:
+            return "initial points"
+        return section_summary(view.result.quality(),
+                               "exported" if view.result_state == ResultState.EXPORTED
+                               else "not exported")
+
+    with panel.section("RESULT", label=titled("RESULT", summary)):
+        panel.text("No reconstruction yet.",
+                   visible=lambda: view.result_state == ResultState.NONE)
+        note(panel, "Initial points are on screen — nothing has been trained yet.",
+             lines=2, visible=lambda: view.result_state == ResultState.INITIALIZED)
+        _result_body(panel, view, actions)
+        inline_error(panel, lambda: view.result_error, title="Export failed")
+        confirm_block(panel, view, "result", on_confirm=actions.confirm,
+                      on_alt=actions.confirm_alt, on_cancel=actions.cancel)
+
+
+def _result_body(panel: Panel, view: View, actions: Actions) -> None:
+    def got() -> bool:
+        return view.has_result
+
+    panel.text(lambda: f"{GLYPHS['ok']} " + ("Exported"
+               if view.result_state == ResultState.EXPORTED else "Training complete"),
+               visible=got)
+    note(panel, lambda: view.result.summary(), lines=1, visible=got)
+    note(panel, lambda: view.result.quality(), lines=1, visible=got)
+    note(panel, lambda: f"{GLYPHS['warn']} Parameters changed since this run — "
+         f"Train Again will not reproduce it.", lines=3,
+         visible=lambda: got() and view.result.stale_config)
+
+    name_field(panel, "  export as", lambda: view.export_name,
+               actions.set_export_name, enabled=lambda: view.can_export,
+               visible=got)
+    panel.button("Export PLY", actions.export, enabled=lambda: view.can_export,
+                 visible=got)
+    path_row(panel, f"  {GLYPHS['ok']} written", lambda: view.result.exported_path,
+             visible=lambda: bool(view.result.exported_path))
+    metric(panel, "  size", lambda: f"{view.result.exported_mb:,.1f} MB",
+           visible=lambda: view.result.exported_mb > 0)
+    if actions.reveal_export is not None:
+        panel.button("Show in folder", actions.reveal_export,
+                     enabled=lambda: bool(view.result.exported_path) and not view.busy,
+                     visible=lambda: bool(view.result.exported_path))
+
+    panel.spacer()
+    action_rows(
+        panel,
+        primary=[("Train Again (fresh run)", actions.restart_training,
+                  lambda: view.can_restart_training, got),
+                 ("Load New Dataset", actions.new_dataset,
+                  lambda: view.can_drop, got)],
+        secondary=[("Clear Session", actions.clear_session,
+                    lambda: view.can_clear, got)],
+    )
+    note(panel, "Train Again discards this reconstruction and optimizes the same "
+                "dataset from scratch with the current parameters.", lines=3,
+         visible=got)
+
+
+# --------------------------------------------------------------------------
+# CONFIGURATION
+# --------------------------------------------------------------------------
+
+# The knobs shown as the section's own summary, in the order a user reads them.
+SUMMARY_KEYS = ("iters", "densify_mode", "sh_degree", "lambda_ssim")
+
+
+def configuration_section(panel: Panel, view: View, setup: TrainingSetup,
+                          actions: Actions, *,
+                          show_all: Callable[[], bool],
+                          toggle_all: Callable[[bool], None]) -> None:
+    """What the NEXT run will use — never mixed with what the current one is doing.
+
+    Progressive disclosure: the four knobs most runs change are always visible; the
+    full grouped table is behind one toggle. (This toolkit cannot open or close a
+    Group programmatically, so the toggle gates VISIBILITY rather than relying on a
+    default-collapsed header.)
+    """
+    def summary() -> str:
+        return section_summary(*(_setting_text(setup, key) for key in SUMMARY_KEYS[:3]))
+
+    with panel.section("CONFIGURATION", label=titled("CONFIGURATION", summary)):
+        note(panel, lambda: ("Applies to the next run." if view.can_configure
+                             else "Locked while a run is training."), lines=2)
+        for key in SUMMARY_KEYS:
+            _summary_row(panel, setup, key)
+        panel.checkbox("  show all parameters", show_all, toggle_all)
+        for group_key, title in GROUPS:
+            settings = group_settings(group_key)
             if not settings:
                 continue
-            with panel.section(title):
+            with panel.section(title, label=titled(
+                    title, lambda s=settings: _group_summary(setup, s)),
+                    visible=show_all):
                 for setting in settings:
-                    _setting_widget(panel, view, setup, setting)
+                    _setting_widget(panel, view, setup, setting, actions)
 
 
-def _setting_widget(panel: Panel, view: StateView, setup: TrainingSetup,
-                    setting: Setting) -> None:
-    """One row of the setup section, chosen by the setting's kind.
+def _summary_row(panel: Panel, setup: TrainingSetup, key: str) -> None:
+    setting = SETTINGS_MAP.get(key)
+    if setting is None:
+        return
+    panel.text(lambda s=setting: row(f"  {s.caption}",
+                                     s.display(setup.get(s.setting_name))))
 
-    Note the ``setting=setting`` default arguments: these lambdas outlive the loop
-    that builds them, so the loop variable must be captured by value.
+
+def _setting_text(setup: TrainingSetup, key: str) -> str:
+    setting = SETTINGS_MAP.get(key)
+    return "" if setting is None else setting.display(setup.get(setting.setting_name))
+
+
+def _group_summary(setup: TrainingSetup, settings: Sequence[Setting]) -> str:
+    """A collapsed group still says what it holds (its first two values)."""
+    return section_summary(*(s.display(setup.get(s.setting_name))
+                             for s in settings[:2]))
+
+
+def _setting_widget(panel: Panel, view: View, setup: TrainingSetup,
+                    setting: Setting, actions: Actions) -> None:
+    """One parameter row, chosen by the setting's kind.
+
+    Note the ``s=setting`` default arguments: these lambdas outlive the loop that
+    builds them, so the loop variable must be captured by value.
     """
-    editable = (lambda: False) if setting.launch_only else (lambda: view.can_configure)
+    def editable() -> bool:
+        return False if setting.launch_only else view.can_configure
+
+    def write(value, s=setting) -> None:
+        setup.set(s.setting_name, value)
+        actions.on_config_change()
+
+    def write_index(index, s=setting) -> None:
+        setup.set_index(s.setting_name, index)
+        actions.on_config_change()
+
     if setting.launch_only:
-        # Compile-time (device-creation-time) value: show it, don't pretend to
-        # offer it. See the settings module docstring.
-        panel.text(lambda s=setting: f"{s.caption}: {s.display(setup.get(s.setting_name))}"
-                                     f"  ({s.note})", lines=3)
+        # Fixed when the device was created: show the value, do not pretend to
+        # offer it. Saying WHY beats a mysteriously greyed-out control.
+        panel.text(lambda s=setting: row(f"  {s.caption}",
+                                         s.display(setup.get(s.setting_name))))
+        note(panel, f"launch-only: {setting.note}", lines=2)
         return
     if setting.kind == BOOL:
-        panel.checkbox(setting.caption, lambda s=setting: bool(setup.get(s.setting_name)),
-                       lambda value, s=setting: setup.set(s.setting_name, value),
-                       enabled=editable)
+        panel.checkbox(f"  {setting.caption}",
+                       lambda s=setting: bool(setup.get(s.setting_name)),
+                       write, enabled=editable)
+        note(panel, setting.note, lines=2, visible=lambda: bool(setting.note))
         return
     _caption(panel, setting)
     if setting.kind == CHOICE:
         panel.combo("", setting.choice_labels(),
                     lambda s=setting: setup.index_of(s.setting_name),
-                    lambda index, s=setting: setup.set_index(s.setting_name, index),
-                    enabled=editable)
+                    write_index, enabled=editable)
     elif setting.kind == INT:
         panel.drag_int("", lambda s=setting: int(setup.get(s.setting_name)),
-                       lambda value, s=setting: setup.set(s.setting_name, value),
-                       minimum=int(setting.minimum), maximum=int(setting.maximum),
+                       write, minimum=int(setting.minimum), maximum=int(setting.maximum),
                        speed=setting.speed, enabled=editable)
     elif setting.kind == FLOAT:
         panel.drag_float("", lambda s=setting: float(setup.get(s.setting_name)),
-                         lambda value, s=setting: setup.set(s.setting_name, value),
-                         minimum=float(setting.minimum),
+                         write, minimum=float(setting.minimum),
                          maximum=float(setting.maximum), speed=setting.speed,
                          fmt=setting.fmt or "%.3f", enabled=editable)
 
 
 def _caption(panel: Panel, setting: Setting) -> None:
     """The caption row above a control (sgl's hard-coded item width pushes a real
-    widget label off the panel — see the panel module docstring). Two rows of room
-    so a caption plus its note can wrap instead of being clipped."""
-    label = (f"{setting.caption}   ({setting.note})" if setting.note
-             else setting.caption)
+    widget label off the panel — see the panel module docstring)."""
+    label = (f"  {setting.caption}   ({setting.note})" if setting.note
+             else f"  {setting.caption}")
     panel.text(label, lines=2)
 
 
-def training_section(panel: Panel, view: StateView,
-                     controls: TrainingControls) -> None:
-    """Live training numbers + pause/start."""
-    with panel.section("TRAINING"):
-        panel.text(lambda: _training_state(view, controls))
-        panel.text(lambda: _training_metrics(controls.stats()))
-        panel.text(lambda: _training_timing(controls.stats()))
-        if controls.start is not None:
-            panel.button("Start training", controls.start,
-                         enabled=lambda: not controls.active())
-        panel.button(lambda: "Resume training" if controls.paused()
-                     else "Pause training", controls.toggle_pause,
-                     enabled=controls.active)
+# --------------------------------------------------------------------------
+# VIEWER / CONTROLS / DIAGNOSTICS
+# --------------------------------------------------------------------------
+
+def viewer_section(panel: Panel, controls: CameraControls) -> None:
+    """Camera: what the viewport is looking through."""
+    with panel.section("VIEWER", label=titled(
+            "VIEWER", lambda: controls.label().split("/")[-1].strip())):
+        panel.combo("  view", controls.names, controls.selection, controls.select)
+        panel.text(lambda: f"  {controls.label()}", mode=ELIDE_START)
+        panel.text(lambda: row("  move speed", f"{controls.speed():.2f}"))
+        panel.text(lambda: row("  field of view", f"{controls.fovy():.0f} deg"))
 
 
-def _training_state(view: StateView, controls: TrainingControls) -> str:
-    if view.phase == PHASE_ERROR:
-        return "stopped"
-    if not controls.active():
-        return "not started"
-    return "PAUSED" if controls.paused() else "running"
-
-
-def _training_metrics(stats: TrainingStats) -> str:
-    parts = []
-    if stats.loss is not None:
-        parts.append(f"loss {stats.loss:.4f}")
-    if stats.psnr is not None:
-        parts.append(f"psnr {stats.psnr:.2f} dB")
-    if stats.gaussians:
-        parts.append(f"{stats.gaussians:,} splats")
-    return "   ".join(parts) if parts else "no metrics yet"
-
-
-def _training_timing(stats: TrainingStats) -> str:
-    rate = f"{stats.it_per_s:.1f} it/s" if stats.it_per_s else "-- it/s"
-    return (f"{rate}   elapsed {format_duration(stats.elapsed_s)}"
-            f"   eta {format_duration(stats.eta_s)}")
-
-
-def camera_section(panel: Panel, controls: CameraControls) -> None:
-    """Snap-camera selector + camera readouts."""
-    with panel.section("CAMERA"):
-        panel.combo("view", controls.names, controls.selection, controls.select)
-        panel.text(controls.label, mode=ELIDE_START)
-        panel.text(lambda: f"move speed {controls.speed():.2f}"
-                           f"   fov {controls.fovy():.0f}°")
-
-
-def help_section(panel: Panel, entries: Sequence[tuple[str, str]]) -> None:
+def controls_section(panel: Panel, entries: Sequence[tuple[str, str]]) -> None:
     """Key bindings, taken from the InputMap itself (see ``InputMap.describe``)."""
     with panel.section("CONTROLS"):
-        # +2 rows of slack: a help row that wraps must not push the last one out.
         panel.text(bullets(entries), lines=max(1, len(entries)) + 2)
+
+
+def diagnostics_section(panel: Panel, view: View, actions: Actions, *,
+                        show: Callable[[], bool], lines: int = 12) -> None:
+    """The log — secondary by default.
+
+    It stopped being the feedback channel: every state, acknowledgement and failure
+    now surfaces in the section it belongs to. What is left here is a developer
+    trail, so it is off until asked for.
+    """
+    with panel.section("DIAGNOSTICS", label=titled(
+            "DIAGNOSTICS", lambda: f"{len(view.log)} lines")):
+        panel.checkbox("  show log", show, actions.toggle_log)
+        panel.log(lambda: view.log[-lines:] if show() else (), lines=lines)
+        panel.button("Clear log", actions.clear_log, visible=show)

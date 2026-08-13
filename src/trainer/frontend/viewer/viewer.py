@@ -14,23 +14,19 @@ from trainer.backend.compute.device import SHADERS_DIR
 from trainer.backend.compute.gpu import GpuRuntime
 from trainer.backend.render.pipeline import TrainingPipeline
 from trainer.config.config import AppearanceConfig, RasterConfig
-from trainer.frontend.viewer.state import (
-    MODE_HUB,
-    PHASE_DONE,
-    PHASE_TRAINING,
-    SessionState,
-)
+from trainer.frontend.viewer.session import MODE_HUB, Session
 from trainer.frontend.viewer.ui import InputMap, Panel
 from trainer.frontend.viewer.ui.sections import (
+    Actions,
     CameraControls,
-    SessionActions,
-    TrainingControls,
-    camera_section,
+    configuration_section,
+    controls_section,
     dataset_section,
-    help_section,
-    status_section,
+    diagnostics_section,
+    header,
+    result_section,
     training_section,
-    training_setup_section,
+    viewer_section,
 )
 
 # Backdrop behind the panel while there is no scene to show. Written straight
@@ -464,7 +460,7 @@ class Viewer:
                  gpu_lock=None, sh_degree: int = 0,
                  mip_enabled: bool = False, mip_kernel_size: float = 0.3,
                  test_cameras: list[tuple[str, Camera]] | None = None,
-                 state: SessionState | None = None):
+                 state: Session | None = None):
         self.device = device
         self.width = width
         self.height = height
@@ -475,7 +471,7 @@ class Viewer:
         # Session state shared with the orchestrator (phase, progress, log,
         # training stats, dataset commands). Always present, so every panel
         # binding has something to read even for a plain `train` run.
-        self.state = state if state is not None else SessionState()
+        self.state = state if state is not None else Session()
         # Hub mode adds the DATASET section (drag-drop + reconstruct/train).
         self._hub = self.state.mode == MODE_HUB
         # The camera rig owns the fly camera and the test-camera snapping; the
@@ -494,6 +490,10 @@ class Viewer:
         # Set == training paused; the trainer blocks on wait_while_paused() each
         # iteration. Toggled by the viewer's Pause/Resume button.
         self._pause_event = threading.Event()
+        # Set == the user asked to end the run early (Stop). The training loop's
+        # continue condition polls it, so the run finalizes normally instead of
+        # being torn down mid-iteration.
+        self._stop_training = threading.Event()
         # Set == skip ALL GPU work in the render loop. The hub sets this while it
         # does heavy pipeline/target setup on the main thread, so those uploads
         # don't race the render thread on the shared queue.
@@ -680,14 +680,15 @@ class Viewer:
             time.sleep(poll)
 
     def set_training_active(self, active: bool = True) -> None:
-        """Trainer tells the viewer it has begun (drives the panel + progress
-        bar): training is a session PHASE, so publish it once here rather than
-        re-deriving it in the loop."""
+        """The trainer tells the viewer whether it is inside the loop.
+
+        Only the Pause button needs this (there is nothing to pause otherwise);
+        the run's STATE is published by the orchestrator, which is the only place
+        that knows the difference between initializing, running and finalizing.
+        """
         self._training_active = active
         if active:
-            self.state.set_phase(PHASE_TRAINING)
-        elif self.state.snapshot().phase == PHASE_TRAINING:
-            self.state.set_phase(PHASE_DONE)
+            self.state.training_running()
 
     def attach_scene(self, test_cameras, snap: bool = False) -> None:
         """Populate the camera dropdown from a scene chosen at runtime (hub flow).
@@ -712,18 +713,64 @@ class Viewer:
         """True while the Pause button has training suspended."""
         return self._pause_event.is_set()
 
+    def pause_training(self) -> None:
+        """Ask the trainer to pause, and say so NOW.
+
+        The trainer notices at its next iteration boundary, so the button
+        publishes the INTENT ("Pausing") and the trainer publishes the fact (see
+        :meth:`wait_while_paused`). Without the first half the panel would look
+        unchanged for up to an iteration.
+        """
+        if self._training_active and not self._pause_event.is_set():
+            self._pause_event.set()
+            self.state.begin_activity("Pausing")
+
+    def resume_training(self) -> None:
+        if self._pause_event.is_set():
+            self._pause_event.clear()
+            self.state.begin_activity("Resuming")
+
     def toggle_pause(self) -> None:
-        """Flip pause/resume (called from the panel button)."""
-        (self._pause_event.clear if self._pause_event.is_set()
-         else self._pause_event.set)()
+        """Flip pause/resume (keyboard shortcut; the panel has both buttons)."""
+        (self.resume_training if self._pause_event.is_set()
+         else self.pause_training)()
+
+    def request_stop_training(self) -> None:
+        """Stop the run EARLY, keeping what it has optimized so far.
+
+        Not a cancel: the loop breaks at the next iteration boundary and the run
+        finalizes normally, so the partially trained result is still a result the
+        user can inspect and export. Clears any pause, or a paused run would never
+        reach the check.
+        """
+        self._stop_training.set()
+        self._pause_event.clear()
+        self.state.training_stopping()
+
+    def stop_requested(self) -> bool:
+        """Polled by the training loop's continue condition."""
+        return self._stop_training.is_set()
+
+    def clear_stop_request(self) -> None:
+        """Before a new run: a stop belongs to the run that was stopped."""
+        self._stop_training.clear()
 
     def wait_while_paused(self, poll: float = 0.05) -> None:
         """Block the caller (the trainer) while paused, releasing if the viewer
-        window closes so a paused+closed viewer can't hang training forever."""
+        window closes so a paused+closed viewer can't hang training forever.
+
+        Publishes PAUSED/RUNNING from HERE — the trainer thread is the only place
+        that knows when the pause actually took effect.
+        """
+        if not self._pause_event.is_set():
+            return
+        self.state.training_paused()
         while self._pause_event.is_set():
             if self._stop_event.is_set() or (self._thread and not self._thread.is_alive()):
                 break
             time.sleep(poll)
+        if not self._stop_training.is_set():
+            self.state.training_running()
 
     def start(self):
         self._stop_event.clear()
@@ -787,37 +834,63 @@ class Viewer:
                 .document("P", "save frame to PNG")
                 .document("F1", "show / hide panel"))
 
-    def _build_panel(self, view, keys: InputMap) -> Panel:
-        """Compose the panel from independent section builders bound to state.
+    def _panel_actions(self) -> Actions:
+        """Bind every panel action to a one-shot request on the session.
 
-        Every widget PULLS its value from a getter each frame, so extending the
-        UI means adding a line to a section in :mod:`.ui.sections` (or a new
-        section here) — the render loop below never mentions a widget.
+        Nothing here does work: a click posts intent and returns, so a slow
+        operation can never block the render thread. The orchestrator picks the
+        request up and drives the state machine (see ``TrainingApplication``).
+        Pause/resume/stop are the exception — they are the viewer's own events, so
+        they publish immediately, which is what makes them feel instant.
         """
-        panel = Panel(self.device, title="3DGS Viewer", anchor="left")
-        status_section(panel, view)
+        return Actions(
+            browse=None,          # no file dialog in this windowing layer
+            install_tools=lambda: self.state.request("install_tools"),
+            reconstruct=lambda: self.state.request("reconstruct"),
+            select_matcher=self.state.set_matcher_index,
+            set_recon_cuda=self.state.set_recon_cuda,
+            new_dataset=lambda: self.state.request("new_dataset"),
+            clear_session=lambda: self.state.request("clear"),
+            start_training=lambda: self.state.request("train"),
+            restart_training=lambda: self.state.request("restart"),
+            pause=self.pause_training,
+            resume=self.resume_training,
+            stop=self.request_stop_training,
+            export=lambda: self.state.request("export"),
+            set_export_name=self.state.set_export_name,
+            reveal_export=lambda: self.state.request("reveal"),
+            confirm=lambda: self.state.request("confirm"),
+            confirm_alt=lambda: self.state.request("confirm_alt"),
+            cancel=lambda: self.state.request("cancel"),
+            on_config_change=self.state.mark_config_edited,
+            toggle_log=self.state.toggle_log,
+            clear_log=self.state.clear_log,
+        )
+
+    def _build_panel(self, view, keys: InputMap) -> Panel:
+        """Compose the panel in LIFECYCLE order: state, dataset, training, result,
+        configuration, viewer, controls, diagnostics.
+
+        Every widget PULLS its value from a getter each frame, so a state
+        transition changes the UI without rebuilding anything, and extending it
+        means adding a line to a section in :mod:`.ui.sections`.
+        """
+        panel = Panel(self.device, title="Scatto-GS trainer", anchor="left",
+                      thickness=430.0, min_thickness=380.0)
+        actions = self._panel_actions()
+        header(panel, view)
         if self._hub:
-            dataset_section(panel, view, SessionActions(
-                setup=lambda: self.state.request("setup"),
-                reconstruct=lambda: self.state.request("reconstruct"),
-                train=lambda: self.state.request("train"),
-                select_matcher=self.state.set_matcher_index,
-                set_recon_cuda=self.state.set_recon_cuda,
-                export_ply=lambda: self.state.request("export"),
-                clear=lambda: self.state.request("clear"),
-            ))
-            # Hub only: outside the hub the run is already built by the time the
-            # window exists, so every one of these would be read-only.
-            training_setup_section(panel, view, self.state.setup)
-        training_section(panel, view, TrainingControls(
-            stats=lambda: view.stats,
-            active=lambda: self._training_active,
-            paused=self.is_paused,
-            toggle_pause=self.toggle_pause,
-            # In hub mode training starts from the DATASET section's Train button.
-            start=None if self._hub else self._start_event.set,
-        ))
-        camera_section(panel, CameraControls(
+            # Outside the hub the dataset and the run are already chosen by the
+            # time the window exists, so these would all be read-only.
+            dataset_section(panel, view, actions)
+        training_section(panel, view, actions)
+        if self._hub:
+            result_section(panel, view, actions)
+            configuration_section(
+                panel, view, self.state.setup, actions,
+                show_all=lambda: view.show_all_config,
+                toggle_all=self.state.toggle_config_detail)
+        viewer_section(panel, CameraControls(
             names=self._rig.names,
             selection=self._rig.selection,
             select=lambda index: self._rig.snap_to(int(index) - 1),
@@ -825,11 +898,12 @@ class Viewer:
             speed=lambda: self._rig.cam.speed,
             fovy=lambda: self._rig.fovy,
         ))
-        help_section(panel, keys.describe())
+        controls_section(panel, keys.describe())
+        diagnostics_section(panel, view, actions, show=lambda: view.show_log)
         return panel
 
     def _run_inner(self):
-        window = spy.Window(width=self.width, height=self.height, title="3DGS Viewer")
+        window = spy.Window(width=self.width, height=self.height, title="Scatto-GS")
 
         surface = self.device.create_surface(window)
         # Present in a NON-sRGB format: output_image already holds sRGB-encoded

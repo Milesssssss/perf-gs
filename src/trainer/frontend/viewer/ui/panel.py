@@ -209,6 +209,31 @@ class Panel:
         self.bind(button, **binds)
         return button
 
+    def _caption_row(self, caption: str, binds: dict) -> None:
+        """A control's caption, on the line above it (sgl's hard-coded item width
+        pushes a real widget label off the panel — see the module docstring).
+
+        It inherits the control's ``visible`` gate: a caption that outlives its own
+        widget is an orphan label, which is exactly how a hidden section leaks a
+        stray "feature matcher" into an empty panel.
+        """
+        if caption:
+            self.text(caption, visible=binds.get("visible"))
+
+    def input_text(self, value: Dynamic, on_change: Callable[[str], None],
+                   **binds: Dynamic) -> spy.ui.InputText:
+        """A single-line text field — the only text entry this toolkit has.
+
+        Used for the export filename, so a result can be named without a file
+        dialog (there is none in this windowing layer). The value is NOT re-bound
+        from state while the user types: pushing a getter into the widget every
+        frame would fight the caret.
+        """
+        widget = spy.ui.InputText(self._parent, "", value=str(_as_getter(value)()),
+                                  callback=on_change)
+        self.bind(widget, **binds)
+        return widget
+
     def checkbox(self, caption: str, value: Dynamic,
                  on_change: Callable[[bool], None], **binds: Dynamic) -> spy.ui.CheckBox:
         box = spy.ui.CheckBox(self._parent, caption, value=bool(_as_getter(value)()),
@@ -223,8 +248,7 @@ class Panel:
         """A dropdown with its caption on the line ABOVE (see module docstring).
         ``items`` may be a getter, so a list that changes at runtime (the camera
         list) needs no manual rebuild in the render loop."""
-        if caption:
-            self.text(caption)
+        self._caption_row(caption, binds)
         get_items = _as_getter(items)
         box = spy.ui.ComboBox(self._parent, "", value=int(_as_getter(value)()),
                               items=list(get_items()), callback=on_change)
@@ -238,8 +262,7 @@ class Panel:
     def slider_float(self, caption: str, value: Dynamic, minimum: float,
                      maximum: float, on_change: Callable[[float], None],
                      fmt: str = "%.3f", **binds: Dynamic) -> spy.ui.SliderFloat:
-        if caption:
-            self.text(caption)
+        self._caption_row(caption, binds)
         slider = spy.ui.SliderFloat(self._parent, "", value=float(_as_getter(value)()),
                                     min=float(minimum), max=float(maximum),
                                     callback=on_change, format=fmt)
@@ -250,8 +273,7 @@ class Panel:
 
     def slider_int(self, caption: str, value: Dynamic, minimum: int, maximum: int,
                    on_change: Callable[[int], None], **binds: Dynamic) -> spy.ui.SliderInt:
-        if caption:
-            self.text(caption)
+        self._caption_row(caption, binds)
         slider = spy.ui.SliderInt(self._parent, "", value=int(_as_getter(value)()),
                                   min=int(minimum), max=int(maximum),
                                   callback=on_change)
@@ -271,8 +293,7 @@ class Panel:
         drag to scrub coarsely, ctrl+click to type the exact number — and
         ``always_clamp`` keeps a typed value inside [minimum, maximum].
         """
-        if caption:
-            self.text(caption)
+        self._caption_row(caption, binds)
         widget = spy.ui.DragInt(
             self._parent, "", value=int(_as_getter(value)()), callback=on_change,
             speed=float(speed), min=int(minimum), max=int(maximum), format=fmt,
@@ -287,8 +308,7 @@ class Panel:
                    maximum: float = 0.0, speed: float = 0.01, fmt: str = "%.3f",
                    **binds: Dynamic) -> spy.ui.DragFloat:
         """A drag field for a FLOAT (see :meth:`drag_int` for why not a slider)."""
-        if caption:
-            self.text(caption)
+        self._caption_row(caption, binds)
         widget = spy.ui.DragFloat(
             self._parent, "", value=float(_as_getter(value)()), callback=on_change,
             speed=float(speed), min=float(minimum), max=float(maximum), format=fmt,
