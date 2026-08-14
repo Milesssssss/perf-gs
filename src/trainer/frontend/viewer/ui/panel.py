@@ -134,6 +134,7 @@ class Panel:
         self._parent: spy.ui.Widget = self._root
         self._bindings: list[Callable[[float], None]] = []
         self._failed: set[int] = set()
+        self._widget_seq = 0
 
     @property
     def dock(self) -> Dock:
@@ -153,6 +154,36 @@ class Panel:
         self._root.visible = not self._root.visible
 
     # ---- composition -----------------------------------------------------
+
+    def _widget_id(self, visible_label: str = "") -> str:
+        """``visible_label`` plus a unique, INVISIBLE ImGui id suffix.
+
+        ImGui identifies a widget BY ITS LABEL (``window->GetID(label)``) and
+        hides everything after a ``##``. Every control here puts its caption on
+        the line above (sgl's hard-coded item width pushes a real label off the
+        panel — see the module docstring), so they were all constructed with the
+        same empty label and therefore shared ONE id across the whole window.
+        ImGui tracks a single active id, so the first such widget drawn each
+        frame reclaimed it: a text edit lost focus after one keystroke, and a
+        drag could scrub a different field than the one under the cursor.
+
+        Every id-bearing widget must therefore route its label through here. The
+        suffix is positional, which is stable because the panel is BUILT once and
+        then only re-bound (see :meth:`bind`) — ids do not shuffle between frames.
+        """
+        self._widget_seq += 1
+        return f"{visible_label}##w{self._widget_seq}"
+
+    @staticmethod
+    def _relabel(getter: Getter, suffix: str) -> Getter:
+        """Keep a dynamically-labelled widget's id STABLE.
+
+        A ``label`` binding overwrites the label every frame, which would strip
+        the ``##`` suffix that :meth:`_widget_id` added and change the widget's
+        id mid-run — worse than sharing an id, because ImGui would drop any
+        interaction in progress.
+        """
+        return lambda: f"{getter()}{suffix}"
 
     def bind(self, widget: spy.ui.Widget, **getters: Dynamic) -> spy.ui.Widget:
         """Drive widget PROPERTIES from state, re-evaluated every frame::
@@ -202,10 +233,14 @@ class Panel:
 
     def button(self, label: Dynamic, on_click: Callable[[], None],
                **binds: Dynamic) -> spy.ui.Button:
+        # A button's label IS its id, so two buttons showing the same text (or
+        # both momentarily "" while their getters have not run) would collide.
+        suffix = self._widget_id()
         button = spy.ui.Button(
-            self._parent, label if isinstance(label, str) else "", callback=on_click)
+            self._parent, (label if isinstance(label, str) else "") + suffix,
+            callback=on_click)
         if not isinstance(label, str):
-            binds.setdefault("label", label)
+            binds.setdefault("label", self._relabel(_as_getter(label), suffix))
         self.bind(button, **binds)
         return button
 
@@ -229,14 +264,16 @@ class Panel:
         from state while the user types: pushing a getter into the widget every
         frame would fight the caret.
         """
-        widget = spy.ui.InputText(self._parent, "", value=str(_as_getter(value)()),
+        widget = spy.ui.InputText(self._parent, self._widget_id(),
+                                  value=str(_as_getter(value)()),
                                   callback=on_change)
         self.bind(widget, **binds)
         return widget
 
     def checkbox(self, caption: str, value: Dynamic,
                  on_change: Callable[[bool], None], **binds: Dynamic) -> spy.ui.CheckBox:
-        box = spy.ui.CheckBox(self._parent, caption, value=bool(_as_getter(value)()),
+        box = spy.ui.CheckBox(self._parent, self._widget_id(caption),
+                              value=bool(_as_getter(value)()),
                               callback=on_change)
         if callable(value):
             binds.setdefault("value", value)
@@ -250,7 +287,8 @@ class Panel:
         list) needs no manual rebuild in the render loop."""
         self._caption_row(caption, binds)
         get_items = _as_getter(items)
-        box = spy.ui.ComboBox(self._parent, "", value=int(_as_getter(value)()),
+        box = spy.ui.ComboBox(self._parent, self._widget_id(),
+                              value=int(_as_getter(value)()),
                               items=list(get_items()), callback=on_change)
         if callable(items):
             binds.setdefault("items", lambda: list(get_items()))
@@ -263,7 +301,8 @@ class Panel:
                      maximum: float, on_change: Callable[[float], None],
                      fmt: str = "%.3f", **binds: Dynamic) -> spy.ui.SliderFloat:
         self._caption_row(caption, binds)
-        slider = spy.ui.SliderFloat(self._parent, "", value=float(_as_getter(value)()),
+        slider = spy.ui.SliderFloat(self._parent, self._widget_id(),
+                                    value=float(_as_getter(value)()),
                                     min=float(minimum), max=float(maximum),
                                     callback=on_change, format=fmt)
         if callable(value):
@@ -274,7 +313,8 @@ class Panel:
     def slider_int(self, caption: str, value: Dynamic, minimum: int, maximum: int,
                    on_change: Callable[[int], None], **binds: Dynamic) -> spy.ui.SliderInt:
         self._caption_row(caption, binds)
-        slider = spy.ui.SliderInt(self._parent, "", value=int(_as_getter(value)()),
+        slider = spy.ui.SliderInt(self._parent, self._widget_id(),
+                                  value=int(_as_getter(value)()),
                                   min=int(minimum), max=int(maximum),
                                   callback=on_change)
         if callable(value):
@@ -295,7 +335,8 @@ class Panel:
         """
         self._caption_row(caption, binds)
         widget = spy.ui.DragInt(
-            self._parent, "", value=int(_as_getter(value)()), callback=on_change,
+            self._parent, self._widget_id(), value=int(_as_getter(value)()),
+            callback=on_change,
             speed=float(speed), min=int(minimum), max=int(maximum), format=fmt,
             flags=spy.ui.SliderFlags.always_clamp)
         if callable(value):
@@ -310,7 +351,8 @@ class Panel:
         """A drag field for a FLOAT (see :meth:`drag_int` for why not a slider)."""
         self._caption_row(caption, binds)
         widget = spy.ui.DragFloat(
-            self._parent, "", value=float(_as_getter(value)()), callback=on_change,
+            self._parent, self._widget_id(), value=float(_as_getter(value)()),
+            callback=on_change,
             speed=float(speed), min=float(minimum), max=float(maximum), format=fmt,
             flags=spy.ui.SliderFlags.always_clamp)
         if callable(value):
@@ -333,7 +375,7 @@ class Panel:
         finally:
             self._parent = previous
 
-    def add(self, build: Callable[["Panel"], None]) -> "Panel":
+    def add(self, build: Callable[[Panel], None]) -> Panel:
         """Append a section built by a callable — how the viewer composes the
         panel out of independent, testable section builders."""
         build(self)

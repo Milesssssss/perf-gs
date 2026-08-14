@@ -29,6 +29,7 @@
 #include "../../primitives/gaussian/eval.slang"
 #include "../../primitives/gaussian/blend.slang"
 #include "../../core/compositor.slang"
+#include "../../common/stbn.slang"
 #include "checkpoint.slang"
 
 #include "generated/execution_contract.slang"
@@ -134,6 +135,34 @@ void blendPrefixExclusive(float T_step, float dLdC_weight, uint lane,
 #define BACKWARD_PIXEL_STRIDE 1u
 #endif
 
+// STBN pixel subsampling (STBN_ENABLED, see common/stbn.slang) is the OTHER way
+// to cut this kernel's per-pixel work, and the two are mutually exclusive: both
+// decide which pixels a backward visits, and combining them would compose two
+// subsamplings into a density neither knob states. The host rejects the
+// combination (config_types.validate_training_config); this pins it in the
+// shader too, since a stale define pair would otherwise silently halve the
+// intended density.
+#if STBN_ENABLED && (BACKWARD_PIXEL_STRIDE > 1u)
+#error "STBN_ENABLED and BACKWARD_PIXEL_STRIDE > 1 both subsample the backward's pixels; enable only one."
+#endif
+
+// How the visited-pixel set is enumerated:
+//   STBN off — walk all TILE_AREA pixels and `continue` on the ones the stride
+//     phase excludes (the trip count stays TILE_AREA regardless of stride).
+//   STBN on  — walk the COMPACTED list of the k selected pixels, so the trip
+//     count itself drops to k. At k=6 of 64 that is the difference between
+//     paying 64 loop iterations and paying 6.
+// STAGED_PIXELS sizes the per-warp checkpoint stage below; STBN sizes it by the
+// compile-time budget ceiling rather than the stride.
+#if STBN_ENABLED
+static const uint STBN_VISIT_CAPACITY = STBN_MAX_TILE_PIXELS;
+// Compacted visit list: slot -> pixel-in-tile. Per warp, because the flat
+// backward's warps each own a bucket of a DIFFERENT tile (the per-tile kernel
+// only uses row 0). Read once per bucket by the staging loop and once per
+// iteration by the pixel loop, so LDS beats re-fetching from the table.
+groupshared uint gs_stbn_visit[NUM_WARPS][STBN_VISIT_CAPACITY];
+#endif
+
 // Per-pixel constants staged in LDS once (avoids re-reading global textures
 // on every bucket). dL_dC (rgb) + dL_dA (a) + T_final + C_total (rgb) = 8
 // floats/pixel * 256 = 2048 floats = 8 KB.
@@ -154,8 +183,12 @@ groupshared uint   gs_max_processed;     // deepest splat any pixel processed
 // STRIDE entries per warp, compacted by k = (p - phase) / STRIDE. At STRIDE=4
 // this is 64 not 256 -> 4 KB not 16 KB, which is what lifts the shared-memory
 // occupancy cap. Folds to the full 256 at STRIDE=1 (phase=0, k=p).
+#if STBN_ENABLED
+static const uint STAGED_PIXELS = STBN_VISIT_CAPACITY;
+#else
 static const uint STAGED_PIXELS = TILE_AREA / BACKWARD_PIXEL_STRIDE;
 //static const uint STAGED_PIXELS = TILE_AREA / 1u;
+#endif
 
 groupshared uint2  gs_checkpoints[NUM_WARPS][STAGED_PIXELS]; //Transmitt, R,G and B are already compressed to fp16. The limiting factor in this kernl is the groupshared memory.
 //on a 4080 we have ~100kb of gs mem. Each thread group is using ~25kb, meaning we can have 4 threagroups per SM, each TG is 256 threads == 8 warps. 8*4=32. The max warps in flight is 48 for a 4080, so
@@ -202,6 +235,16 @@ void backwardRasterizePerSplat(
     // subset this backward visits. Host toggles it each iter so the SGD is
     // unbiased. Ignored when BACKWARD_PIXEL_STRIDE == 1.
     uniform uint pixel_phase,
+#if STBN_ENABLED
+    // STBN mask (see common/stbn.slang). `stbn_slice` is the drawn image's VISIT
+    // count + phase, not the iteration, so repeat visits of one camera walk the
+    // mask's temporal axis. Declared only on this path so the default build's
+    // signature is untouched.
+    StructuredBuffer<uint> stbn_table,
+    uniform uint2 stbn_dims,
+    uniform uint stbn_slice,
+    uniform uint stbn_tile_pixels,
+#endif
     // Compositor extinction hardness k (1 = alpha-over). See core/compositor.slang.
     uniform float extinction_hardness)
 {
@@ -235,6 +278,17 @@ void backwardRasterizePerSplat(
     uint2 my_pixel = uint2(tile_origin_x + (tid % TILE_WIDTH),
                            tile_origin_y + (tid / TILE_WIDTH));
     bool my_pixel_valid = (my_pixel.x < frame_dim_px.x && my_pixel.y < frame_dim_px.y);
+#if STBN_ENABLED
+    // Tile-uniform: one workgroup owns one tile here, so the whole group shares
+    // one block of the mask. Slot j of that block is the j-th sampled pixel.
+    uint stbn_base = stbnBlockBase(uint2(tile_origin_x, tile_origin_y),
+                                   stbn_dims, stbn_slice);
+    uint visit_count = min(stbn_tile_pixels, STBN_VISIT_CAPACITY);
+    if (tid < visit_count)
+        gs_stbn_visit[0][tid] = stbnPixelAtSlot(stbn_table, stbn_base, tid);
+#else
+    uint visit_count = TILE_AREA;
+#endif
     if (my_pixel_valid)
     {
         gs_dLdC[tid]      = dL_dC_texture[my_pixel];
@@ -259,7 +313,14 @@ void backwardRasterizePerSplat(
     // zero contributing pixels -> skip them entirely (saturation early-out).
     if (tid == 0u) gs_max_processed = 0u;
     GroupMemoryBarrierWithGroupSync();
+#if STBN_ENABLED
+    // Reduce over the SAMPLED pixels only: an unsampled pixel's deeper ray adds
+    // nothing, and counting it would keep buckets alive that contribute zero.
+    if (stbnSelected(stbn_table, my_pixel, stbn_dims, stbn_slice, stbn_tile_pixels))
+        InterlockedMax(gs_max_processed, gs_processed[tid]);
+#else
     InterlockedMax(gs_max_processed, gs_processed[tid]);
+#endif
     GroupMemoryBarrierWithGroupSync();
     uint max_processed = gs_max_processed;
 
@@ -343,6 +404,14 @@ void backwardRasterizePerSplat(
         if (bucket_valid)
         {
             uint cp_base = checkpointIndex(cp_bucket, 0u);
+#if STBN_ENABLED
+            // LDS slot k holds the checkpoint of the k-th SAMPLED pixel, so the
+            // pixel loop below indexes it by visit slot. A gather rather than a
+            // strided read, but it happens once per bucket and only k times.
+            for (uint k = lane; k < visit_count; k += RASTER_BUCKET_SIZE)
+                gs_checkpoints[warp_idx][k] =
+                    raster_checkpoints[cp_base + gs_stbn_visit[0][k]];
+#else
             uint phase = pixel_phase % BACKWARD_PIXEL_STRIDE;  // 0 at STRIDE=1
             // Compact: LDS slot k holds pixel p = phase + k*STRIDE, i.e. exactly
             // the pixels the loop below visits. Global reads are STRIDE-strided
@@ -350,13 +419,25 @@ void backwardRasterizePerSplat(
             // STAGED_PIXELS, which is the point.
             for (uint k = lane; k < STAGED_PIXELS; k += RASTER_BUCKET_SIZE)
                 gs_checkpoints[warp_idx][k] = raster_checkpoints[cp_base + phase + k * BACKWARD_PIXEL_STRIDE];
+#endif
         }
         GroupMemoryBarrierWithGroupSync();
 
         // --- Pixel loop: all 32 lanes lockstep so wave scans are valid ---
+        // `v` indexes the VISIT, not the pixel: TILE_AREA visits of pixel v with
+        // STBN off, or `visit_count` visits of the v-th sampled pixel with it on.
         [loop]
-        for (uint p = 0u; p < TILE_AREA; ++p)
+        for (uint v = 0u; v < visit_count; ++v)
         {
+#if STBN_ENABLED
+            // Compacted: the visit list holds only sampled pixels, so there is
+            // no per-pixel mask test in the loop at all, and slot v is also this
+            // pixel's checkpoint slot. Warp-uniform (the list is tile-uniform).
+            uint p = gs_stbn_visit[0][v];
+            uint checkpoint_slot = v;
+#else
+            uint p = v;
+#endif
             // Per-bucket saturation skip: if pixel p's ray terminated before
             // this bucket, no lane contributes -> skip the eval + wave ops
             // entirely. Warp-uniform (bucket + gs_processed[p] are uniform
@@ -365,6 +446,7 @@ void backwardRasterizePerSplat(
             if (processed <= bucket_first_splat)
                 continue;
 
+#if !STBN_ENABLED
             // Stochastic pixel subsampling: visit only pixels whose index is
             // congruent to the current phase mod STRIDE. Depends solely on p
             // and pixel_phase (both warp-uniform), so all 32 lanes skip
@@ -372,12 +454,14 @@ void backwardRasterizePerSplat(
             if (BACKWARD_PIXEL_STRIDE > 1u &&
                 (p % BACKWARD_PIXEL_STRIDE) != (pixel_phase % BACKWARD_PIXEL_STRIDE))
                 continue;
+#endif
 
             // Early-break mask: pixel p only contributes gradient to splats
             // it actually processed (local_splat < processed[p]). Masked
             // lanes contribute alpha=0 -> scan identity (T_step=1, cαT=0).
             bool contributes = splat_valid && (local_splat < processed);
 
+#if !STBN_ENABLED
             // Read the bucket checkpoint for pixel p (in-front-of-bucket
             // (T, C)) from LDS (batch-staged above). Only reached for visited
             // pixels (p % STRIDE == phase), which are compacted to slot
@@ -385,6 +469,7 @@ void backwardRasterizePerSplat(
             // if the pixel reached this bucket; masked lanes ignore.
             uint checkpoint_slot = (p - (pixel_phase % BACKWARD_PIXEL_STRIDE))
                                    / BACKWARD_PIXEL_STRIDE;
+#endif
             float T_checkpoint; float3 C_checkpoint;
             unpackCheckpoint(gs_checkpoints[warp_idx][checkpoint_slot], T_checkpoint, C_checkpoint);
 
@@ -552,6 +637,10 @@ void backwardRasterizePerSplat(
             // six accumulators — including the densification-tracking abs
             // sums — are scaled together so downstream thresholds see the
             // same magnitude as the full backward. Folds to *1.0 at STRIDE=1.
+            // STBN needs no scale here: its TILE_AREA/k compensation already
+            // rides in dL_dC (see losses/*.slang), so every accumulator —
+            // including the abs sums the densifier thresholds against — comes
+            // out on the full-backward scale automatically.
             if (BACKWARD_PIXEL_STRIDE > 1u)
             {
                 float s = float(BACKWARD_PIXEL_STRIDE);
@@ -623,6 +712,12 @@ void backwardRasterizePerBucket(
     RWStructuredBuffer<int64_t> grad_2d_x_iter,
     RWStructuredBuffer<int64_t> grad_2d_y_iter,
     uniform uint pixel_phase,
+#if STBN_ENABLED
+    StructuredBuffer<uint> stbn_table,
+    uniform uint2 stbn_dims,
+    uniform uint stbn_slice,
+    uniform uint stbn_tile_pixels,
+#endif
     uniform float extinction_hardness)
 {
     uint tid = gtid.x;
@@ -662,12 +757,32 @@ void backwardRasterizePerBucket(
 
     // --- Stage this warp's checkpoints into per-warp LDS (coalesced) ---
     uint phase = pixel_phase % BACKWARD_PIXEL_STRIDE;   // 0 at STRIDE=1
+#if STBN_ENABLED
+    // Each warp owns a bucket of a DIFFERENT tile, so the mask block — and
+    // therefore the visit list — is per warp, not per workgroup. Its 32 lanes
+    // cooperatively fill it, then the pixel loop reads it warp-uniformly.
+    uint visit_count = min(stbn_tile_pixels, STBN_VISIT_CAPACITY);
+    if (bucket_valid)
+    {
+        uint stbn_base = stbnBlockBase(uint2(tile_origin_x, tile_origin_y),
+                                       stbn_dims, stbn_slice);
+        uint cp_base = checkpointIndex(cp_bucket, 0u);
+        for (uint k = lane; k < visit_count; k += RASTER_BUCKET_SIZE)
+        {
+            uint p = stbnPixelAtSlot(stbn_table, stbn_base, k);
+            gs_stbn_visit[warp_idx][k] = p;
+            gs_checkpoints[warp_idx][k] = raster_checkpoints[cp_base + p];
+        }
+    }
+#else
+    uint visit_count = TILE_AREA;
     if (bucket_valid)
     {
         uint cp_base = checkpointIndex(cp_bucket, 0u);
         for (uint k = lane; k < STAGED_PIXELS; k += RASTER_BUCKET_SIZE)
             gs_checkpoints[warp_idx][k] = raster_checkpoints[cp_base + phase + k * BACKWARD_PIXEL_STRIDE];
     }
+#endif
     // RAW barrier: the pixel loop's cross-lane checkpoint reads must see the
     // staged writes. ALL 8 warps must reach it (incl. invalid ones), so the
     // slot >= live_total return happens AFTER, never before.
@@ -703,9 +818,17 @@ void backwardRasterizePerBucket(
     float3 c_i = prim.color();
 
     // --- Pixel loop: all 32 lanes lockstep so the wave scans stay valid ---
+    // `v` indexes the VISIT: all TILE_AREA pixels with STBN off, or just the
+    // `visit_count` sampled ones with it on (see the visit-list comment above).
     [loop]
-    for (uint p = 0u; p < TILE_AREA; ++p)
+    for (uint v = 0u; v < visit_count; ++v)
     {
+#if STBN_ENABLED
+        uint p = gs_stbn_visit[warp_idx][v];
+        uint checkpoint_slot = v;
+#else
+        uint p = v;
+#endif
         uint2 pixel = uint2(tile_origin_x + (p % TILE_WIDTH),
                             tile_origin_y + (p / TILE_WIDTH));
         bool pix_valid = (pixel.x < frame_dim_px.x && pixel.y < frame_dim_px.y);
@@ -716,13 +839,17 @@ void backwardRasterizePerBucket(
         if (processed <= bucket_first_splat)
             continue;
 
+#if !STBN_ENABLED
         // Stochastic pixel subsampling (folds away at STRIDE=1). Warp-uniform.
         if (BACKWARD_PIXEL_STRIDE > 1u && (p % BACKWARD_PIXEL_STRIDE) != phase)
             continue;
+#endif
 
         bool contributes = splat_valid && (local_splat < processed);
 
+#if !STBN_ENABLED
         uint checkpoint_slot = (p - phase) / BACKWARD_PIXEL_STRIDE;
+#endif
         float T_checkpoint; float3 C_checkpoint;
         unpackCheckpoint(gs_checkpoints[warp_idx][checkpoint_slot], T_checkpoint, C_checkpoint);
 

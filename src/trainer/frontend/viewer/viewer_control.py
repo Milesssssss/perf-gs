@@ -34,7 +34,7 @@ import threading
 import time
 from typing import TYPE_CHECKING
 
-from trainer.frontend.viewer.session import OK, MODE_HUB, MODE_TRAIN, Session
+from trainer.frontend.viewer.session import MODE_HUB, MODE_TRAIN, OK, Session
 
 if TYPE_CHECKING:
     import slangpy as spy
@@ -48,7 +48,7 @@ if TYPE_CHECKING:
 class ViewerSession:
     """Owns the optional live viewer, its full lifecycle, and the session state."""
 
-    def __init__(self, viewer: "Viewer | None",
+    def __init__(self, viewer: Viewer | None,
                  state: Session | None = None) -> None:
         self._viewer = viewer
         # One state object shared with the viewer's panel (see module docstring).
@@ -65,15 +65,15 @@ class ViewerSession:
     def create(
         cls,
         *,
-        device: "spy.Device",
+        device: spy.Device,
         width: int,
         height: int,
         max_splats: int,
         fovy: float,
         gpu_lock,
-        pipeline: "TrainingPipeline",
-        test_cameras: "list[tuple[str, Camera]] | None" = None,
-    ) -> "ViewerSession":
+        pipeline: TrainingPipeline,
+        test_cameras: list[tuple[str, Camera]] | None = None,
+    ) -> ViewerSession:
         """Build the viewer and push the initialized gaussians, but DO NOT start
         the render thread yet.
 
@@ -101,7 +101,7 @@ class ViewerSession:
     def create_hub(
         cls,
         *,
-        device: "spy.Device",
+        device: spy.Device,
         width: int,
         height: int,
         max_splats: int,
@@ -110,8 +110,8 @@ class ViewerSession:
         sh_degree: int,
         mip_enabled: bool,
         mip_kernel_size: float,
-        setup: "TrainingSetup | None" = None,
-    ) -> "ViewerSession":
+        setup: TrainingSetup | None = None,
+    ) -> ViewerSession:
         """Build a SCENE-LESS hub viewer (no pipeline/scene yet).
 
         The user picks a dataset via drag-drop and drives reconstruct/train from
@@ -248,7 +248,7 @@ class ViewerSession:
         if self._viewer is not None:
             self._viewer.wait_while_paused()
 
-    def push_snapshot(self, pipeline: "TrainingPipeline") -> None:
+    def push_snapshot(self, pipeline: TrainingPipeline) -> None:
         """Push a gaussian snapshot to the viewer (GPU->GPU copy of the ACTIVE
         splat range, plus a 4-byte count readback — see ``update_gaussians``)."""
         if self._viewer is not None:
@@ -259,7 +259,7 @@ class ViewerSession:
         if self._viewer is not None:
             self._viewer.clear_view()
 
-    def finish_training(self, pipeline: "TrainingPipeline") -> None:
+    def finish_training(self, pipeline: TrainingPipeline) -> None:
         """Publish the end of the training LOOP and push its final gaussians —
         WITHOUT blocking.
 
@@ -281,7 +281,7 @@ class ViewerSession:
             except Exception:
                 pass
 
-    def hold_after_training(self, pipeline: "TrainingPipeline") -> None:
+    def hold_after_training(self, pipeline: TrainingPipeline) -> None:
         """Push the final state and leave the window live until the user closes
         it (or Ctrl-C, which stops the viewer)."""
         self.finish_training(pipeline)

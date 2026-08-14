@@ -20,20 +20,20 @@ class InputMap:
         self._help: list[tuple[str, str]] = []
         self.held: set[str] = set()
 
-    def hold(self, key, tag: str) -> "InputMap":
+    def hold(self, key, tag: str) -> InputMap:
         self._hold[key] = tag
         return self
 
-    def hold_many(self, pairs: Iterable[tuple[object, str]]) -> "InputMap":
+    def hold_many(self, pairs: Iterable[tuple[object, str]]) -> InputMap:
         for key, tag in pairs:
             self._hold[key] = tag
         return self
 
-    def press(self, key, on_press: Callable[[], None]) -> "InputMap":
+    def press(self, key, on_press: Callable[[], None]) -> InputMap:
         self._press[key] = on_press
         return self
 
-    def document(self, keys: str, action: str) -> "InputMap":
+    def document(self, keys: str, action: str) -> InputMap:
         """Record a help row (shown in the panel's CONTROLS section)."""
         self._help.append((keys, action))
         return self

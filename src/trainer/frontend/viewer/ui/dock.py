@@ -50,7 +50,7 @@ class Rect:
     w: float
     h: float
 
-    def approx_eq(self, other: "Rect", eps: float) -> bool:
+    def approx_eq(self, other: Rect, eps: float) -> bool:
         return (abs(self.x - other.x) <= eps and abs(self.y - other.y) <= eps
                 and abs(self.w - other.w) <= eps and abs(self.h - other.h) <= eps)
 

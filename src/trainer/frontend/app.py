@@ -32,6 +32,8 @@ from trainer.config.config import (
     LossConfig,
     RasterConfig,
     RegularizationConfig,
+    StbnConfig,
+    StbnVariables,
 )
 from trainer.config.config_types import (
     DensificationMode,
@@ -39,8 +41,10 @@ from trainer.config.config_types import (
     validate_training_config,
 )
 from trainer.backend.compute.device import create_device
+from trainer.backend.render import stbn as stbn_module
 from trainer.common.metrics import psnr
 from trainer.backend.render.pipeline import TrainingPipeline
+from trainer.contracts.codegen import TILE_AREA
 from trainer.frontend.cli import build_parser
 from trainer.frontend.densification import DensificationController, DensifyOutcome
 from trainer.frontend.evaluation.evaluation import (
@@ -52,6 +56,7 @@ from trainer.frontend.schedule import (
     AppearanceSchedule,
     ExtinctionHardnessSchedule,
     MeanLearningRateSchedule,
+    StbnDensitySchedule,
     TrainingSchedule
 )
 from trainer.frontend.reporting.outputs import RunArtifacts
@@ -150,6 +155,10 @@ class ShaderSpecialization:
     deals in the semantic value; only this adapter knows the Slang macro name
     and unsigned-literal spelling.
 
+    stbn_pixels_per_tile does the same job for STBN sparse supervision: it turns
+    on the backward's compacted-visit loop (STBN_ENABLED) and sizes its staged
+    arrays (STBN_MAX_TILE_PIXELS). None = the feature is off for this build.
+
     hardness_is_one specializes the Compositor to the pure alpha-over path when
     the run's extinction hardness is fixed at <= 1 (default): the dead pow-based
     hardened-extinction branches compile out, freeing registers in the hottest
@@ -161,19 +170,38 @@ class ShaderSpecialization:
     therefore always keep the full runtime path (a register-pressure cost paid for
     the panel being able to set hardness at all). ``--backward-pixel-stride`` has no
     such escape: it sizes staged arrays, so in the hub it stays a launch-time flag.
+    STBN's compacted backward is in the same position and takes the same out: a
+    hub run gets the mask (the loss applies it at runtime) but not the compacted
+    pixel loop, i.e. the correct sparse gradient without the speedup.
     """
 
     backward_pixel_stride: int
     # Default False = full runtime compositor (safe/back-compat). from_args sets
     # it True when the run's extinction hardness is fixed at <= 1.
     hardness_is_one: bool = False
+    # Per-tile pixel capacity for the STBN backward, or None when this build does
+    # not take the compacted-visit path at all.
+    stbn_pixels_per_tile: int | None = None
 
     @classmethod
     def from_args(cls, args: argparse.Namespace) -> "ShaderSpecialization":
         hub = bool(getattr(args, "hub", False))
+        fraction = float(getattr(args, "stbn_pixel_fraction", 1.0))
+        # The capacity has to cover the DENSEST point of the schedule. 0 = auto:
+        # the steady-state fraction, or a full tile when a warmup ramps down from
+        # one (sizing that run from its steady state would make the ramp's first
+        # steps ask for more slots than the kernel staged).
+        explicit = float(getattr(args, "stbn_max_fraction", 0.0))
+        ceiling = max(explicit, fraction) if explicit > 0.0 else fraction
+        if int(getattr(args, "stbn_warmup_iters", 0)) > 0:
+            ceiling = 1.0
+        stbn_pixels = None
+        if fraction < 1.0 and not hub:
+            stbn_pixels = stbn_module.pixels_per_tile(ceiling, TILE_AREA)
         return cls(
             backward_pixel_stride=args.backward_pixel_stride,
             hardness_is_one=(not hub and float(args.extinction_hardness) <= 1.0),
+            stbn_pixels_per_tile=stbn_pixels,
         )
 
     def compiler_defines(self) -> dict[str, str] | None:
@@ -182,7 +210,30 @@ class ShaderSpecialization:
             defines["BACKWARD_PIXEL_STRIDE"] = f"{self.backward_pixel_stride}u"
         if self.hardness_is_one:
             defines["COMPOSITOR_HARDNESS_ONE"] = "1"
+        if self.stbn_pixels_per_tile is not None:
+            defines["STBN_ENABLED"] = "1"
+            defines["STBN_MAX_TILE_PIXELS"] = f"{self.stbn_pixels_per_tile}u"
         return defines or None
+
+
+def resolve_stbn_config(args: argparse.Namespace) -> StbnConfig:
+    """The run's STBN policy, agreeing with :class:`ShaderSpecialization`.
+
+    Both are derived here from the same args so ``backward_compacted`` can never
+    disagree with whether ``STBN_ENABLED`` was actually injected — a mismatch
+    would bind shader parameters the compiled kernel never declared.
+    """
+    specialization = ShaderSpecialization.from_args(args)
+    capacity = specialization.stbn_pixels_per_tile
+    return StbnConfig(
+        pixel_fraction=float(getattr(args, "stbn_pixel_fraction", 1.0)),
+        warmup_iters=int(getattr(args, "stbn_warmup_iters", 0)),
+        max_fraction=(capacity / TILE_AREA if capacity is not None else 1.0),
+        backward_compacted=capacity is not None,
+        source=str(getattr(args, "stbn_source", "nvidia")),
+        file_path=str(getattr(args, "stbn_file", "")),
+        seed=int(getattr(args, "stbn_seed", 0)),
+    )
 
 
 @dataclass
@@ -524,7 +575,7 @@ class TrainingApplication:
         stopped = self.viewer.stop_requested()
         state.training_completed(ResultInfo(
             iterations=stats.step, target_iterations=stats.total,
-            wall_s=stats.elapsed_s, splats=stats.gaussians, psnr=stats.psnr,
+            wall_s=stats.elapsed_s, splats=stats.gaussians,
             run_dir=str(self.paths.root)))
         state.set_export_name(f"{self.paths.root.name}.ply")
         state.notify(f"Training stopped at iteration {stats.step:,}" if stopped
@@ -1017,7 +1068,7 @@ class TrainingApplication:
             )
         )
 
-        queue_limiter = QueueLimiter(self._pipeline.runtime, max_depth=1)
+        queue_limiter = QueueLimiter(self._pipeline.runtime)
 
         densifier = DensificationController(
             pipeline=self._pipeline,
@@ -1095,9 +1146,9 @@ class TrainingApplication:
 
     def _write_final_test_psnr(self, result: TrainingResult) -> None:
         # --no-evaluation vetoes this: it renders every held-out camera.
-        if (not self.args.final_test_psnr or self.args.profile_run
-                or not self.args.evaluation):
+        if (not self.args.final_test_psnr or self.args.profile_run or not self.args.evaluation):
             return
+
         sceneContext = self._sceneContext
         psnr, count = eval_test_psnr_srgb(self._pipeline, sceneContext.colmapScene, sceneContext.test_indices, self._targets.srgb)
 
@@ -1206,6 +1257,23 @@ class TrainingLoop:
             rng,
         )
         self.schedule = TrainingSchedule(ScheduleConfig.from_args(args))
+
+        # STBN sparse supervision. The mask's temporal axis is indexed by how
+        # many times a CAMERA has been drawn, not by the iteration, so repeat
+        # visits of one view walk the sequence the mask was built to distribute
+        # along. Each camera also gets a fixed phase, so cameras don't all march
+        # through the same slices in lockstep (with a shared start every view
+        # would be sampling slice 0's pixels on its first visit, slice 1's on its
+        # second, and so on — correlating the whole dataset to one sequence).
+        stbn_config = self.runtime.pipeline.stbn_config
+        self.stbn_density = StbnDensitySchedule(
+            target_fraction=stbn_config.pixel_fraction,
+            warmup=stbn_config.warmup_iters,
+        ) if stbn_config.enabled else None
+        self.stbn_slices = self.runtime.pipeline.stbn_slices
+        self.stbn_visits: dict[int, int] = {}
+        self.stbn_phase: dict[int, int] = {}
+
         self.training_step = 0
         self.gaussian_count = scene.initial_gaussian_count
         self.eval_time_total = 0.0
@@ -1282,6 +1350,32 @@ class TrainingLoop:
             and not self.runtime.viewer.stop_requested()
         )
 
+    def _stbn_variables(self, camera_index: int) -> "StbnVariables | None":
+        """This step's mask slice + per-tile budget, advancing the drawn camera's
+        own visit counter.
+
+        Called exactly once per iteration (from :meth:`_next_iteration`), because
+        it MUTATES the visit counter — a second call for the same step would skip
+        a slice. The phase is an integer mix of the camera index rather than a
+        draw from the run's RNG so it cannot perturb the camera sampling order,
+        which is frozen by tests/test_camera_sampling.py. (Not ``hash()``:
+        multiplicative mixing is reproducible by inspection and stays so if the
+        seed ever becomes a string.)
+        """
+        if self.stbn_density is None:
+            return None
+        slices = max(self.stbn_slices, 1)
+        if camera_index not in self.stbn_phase:
+            mixed = int(camera_index) * 2654435761 + int(self.args.stbn_seed) * 40503
+            self.stbn_phase[camera_index] = mixed % slices
+        visit = self.stbn_visits.get(camera_index, 0)
+        self.stbn_visits[camera_index] = visit + 1
+        fraction = self.stbn_density.at(self.training_step)
+        return StbnVariables(
+            slice_index=(visit + self.stbn_phase[camera_index]) % slices,
+            pixels_per_tile=stbn_module.pixels_per_tile(fraction, TILE_AREA),
+        )
+
     def _next_iteration(self) -> IterationContext:
         self.training_step += 1
         camera_index = self.sampler.next()
@@ -1311,6 +1405,7 @@ class TrainingLoop:
                     # ALSO -> the product is hacky way to hide that our magic hyperparms should all be normalized
                     structure_kwargs={"per_view_grad_thresh": (self.args.sad_freq_grad_threshold * self.scene.width * self.scene.height * 3.0) if self._should_accumulate_structure(self.training_step) else None}
                 ),
+                stbn=self._stbn_variables(camera_index),
             ),
         )
 
@@ -2052,6 +2147,7 @@ def create_pipeline(*, args: argparse.Namespace, device: Any, gpu_lock: Any,
             band_interval=_resolve_sh_band_interval(
                 args.sh_band_interval, args.iters, args.sh_degree),
         ),
+        stbn_config=resolve_stbn_config(args),
         initial_state=initial_state,
     )
 

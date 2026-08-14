@@ -133,6 +133,40 @@ class ExtinctionHardnessSchedule:
         # Log-linear 1 -> target (== target**t, since log(1) = 0).
         return float(np.exp(np.log(self._target) * t))
 
+class StbnDensitySchedule:
+    """Per-iteration STBN pixel density: full supervision, then a ramp down to
+    the steady-state fraction.
+
+    Sparse supervision is hardest on exactly the thin, high-frequency structures
+    (leaves, grass, fences, small specular highlights) that early densification
+    is trying to create Gaussians for: a splat covering a handful of pixels can
+    get ZERO samples on a given visit, and it is the densifier's gradient
+    statistics — not the Adam step — that suffer most from that. So the density
+    starts at 1.0 and ramps down, spending the dense pixels where they buy the
+    most and the sparse ones over the long refinement tail.
+
+    The ramp is log-linear (rho = target**t), matching
+    :class:`ExtinctionHardnessSchedule`: geometric in the quantity that matters
+    (the fraction), so it passes through the intermediate densities — 1.0 ->
+    0.5 -> 0.25 -> 0.1 — rather than spending most of the window near one end.
+    ``warmup <= 0`` pins the target from step 1.
+    """
+
+    def __init__(self, target_fraction: float, warmup: int) -> None:
+        self._target = float(target_fraction)
+        self._warmup = int(warmup)
+
+    @property
+    def target(self) -> float:
+        return self._target
+
+    def at(self, step: int) -> float:
+        if self._target >= 1.0 or self._warmup <= 0:
+            return self._target
+        t = min(max((step - 1) / self._warmup, 0.0), 1.0)
+        return float(np.exp(np.log(self._target) * t))
+
+
 class AppearanceSchedule:
 
     def __init__(self, appearanceConfig: AppearanceConfig) -> None:

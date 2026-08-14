@@ -55,7 +55,12 @@ class ImageLoss:
         return batch.marker_group(label)
 
     def record(self, batch: CommandBatch | None, *, rendered: spy.Texture,
-               target: spy.Texture) -> LossResult:
+               target: spy.Texture, stbn_kwargs: dict) -> LossResult:
+        """``stbn_kwargs`` are the four ``stbn_*`` mask parameters (see
+        :meth:`trainer.backend.render.stbn.StbnMask.shader_kwargs`). The loss is
+        where sparse supervision is DEFINED — it zeroes the gradient of every
+        pixel this slice does not sample and scales the rest by TILE_AREA/k — so
+        the backward can then skip those pixels without changing the result."""
         owned_batch = batch is None
         if batch is None:
             batch = self._runtime.command_batch("image_loss")
@@ -87,6 +92,7 @@ class ImageLoss:
                     lambda_ssim=config.ssim_weight,
                     w_alpha=config.alpha_weight,
                     lambda_l2=config.l2_weight,
+                    **stbn_kwargs,
                 )
         else:
             with self._group(batch, "l1_l2_loss"):
@@ -98,6 +104,7 @@ class ImageLoss:
                     frame_dim=dims,
                     w_alpha=config.alpha_weight,
                     lambda_l2=config.l2_weight,
+                    **stbn_kwargs,
                 )
         if owned_batch:
             self._runtime.submit(batch)

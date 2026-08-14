@@ -5,15 +5,16 @@ import math
 import os
 import threading
 import time
+from collections.abc import Callable
 
 import numpy as np
 import slangpy as spy
 
-from trainer.data.dataset import Camera
 from trainer.backend.compute.device import SHADERS_DIR
 from trainer.backend.compute.gpu import GpuRuntime
 from trainer.backend.render.pipeline import TrainingPipeline
 from trainer.config.config import AppearanceConfig, RasterConfig
+from trainer.data.dataset import Camera
 from trainer.frontend.viewer.session import MODE_HUB, Session
 from trainer.frontend.viewer.ui import InputMap, Panel
 from trainer.frontend.viewer.ui.sections import (
@@ -24,6 +25,7 @@ from trainer.frontend.viewer.ui.sections import (
     dataset_section,
     diagnostics_section,
     header,
+    loss_section,
     result_section,
     training_section,
     viewer_section,
@@ -301,6 +303,13 @@ class FlyCamera:
 MOVE_TAGS = frozenset({"w", "a", "s", "d", "q", "e", "r", "t"})
 ROLL_SPEED_DEG_S = 60.0
 
+# Scene re-renders per second while FREE-FLYING during training (see
+# Viewer._scene_due). A viewer frame costs about what a training step does, so an
+# unthrottled ~60 fps was taking most of the GPU from the trainer; 15 is still
+# fluid to fly with. Parked on a test camera the rate is zero — the scene is
+# re-rendered only when new gaussians arrive.
+TRAINING_SCENE_FPS = 15.0
+
 
 class _CameraRig:
     """Free-fly camera + held-out test-camera snapping.
@@ -314,13 +323,18 @@ class _CameraRig:
     """
 
     def __init__(self, *, fovy: float, render_size: tuple[int, int],
-                 test_cameras: list[tuple[str, Camera]] | None = None) -> None:
+                 test_cameras: list[tuple[str, Camera]] | None = None,
+                 on_change: Callable[[], None] | None = None) -> None:
         self.cam = FlyCamera()
         self.fovy = float(fovy)
         self._render_size = render_size
         self.test_cameras: list[tuple[str, Camera]] = list(test_cameras or [])
         self.index = -1                 # -1 == free-fly
         self.exact: Camera | None = None  # rendered verbatim while parked
+        # Called when the PARKED selection changes. While training and parked, the
+        # render loop only re-rasterizes on demand (see Viewer._scene_due), so a
+        # snap that nothing announced would leave the previous camera on screen.
+        self._on_change = on_change or (lambda: None)
 
     # ---- panel bindings ----
     def names(self) -> list[str]:
@@ -351,6 +365,7 @@ class _CameraRig:
         """Park on test camera ``index`` (-1 => free-fly)."""
         if index < 0 or not self.test_cameras:
             self.index, self.exact = -1, None
+            self._on_change()
             return
         index %= len(self.test_cameras)
         name, target = self.test_cameras[index]
@@ -365,6 +380,7 @@ class _CameraRig:
         self.index = index
         self.exact = (target if tuple(target.image_size) == self._render_size
                       else None)
+        self._on_change()
         print(f"[Viewer] snapped to test cam {index + 1}/{len(self.test_cameras)} "
               f"({name}), exact_proj={self.exact is not None}, "
               f"fovy={self.fovy:.1f} deg")
@@ -474,11 +490,24 @@ class Viewer:
         self.state = state if state is not None else Session()
         # Hub mode adds the DATASET section (drag-drop + reconstruct/train).
         self._hub = self.state.mode == MODE_HUB
+        # --- Scene-render budget WHILE TRAINING (see _scene_due) --------------
+        # The panel keeps painting every frame; only the SCENE rasterize is
+        # throttled, because that is the part that costs a training step's worth
+        # of GPU (bin_count + radix sort + blend over the whole model).
+        # Set == the model or the view changed, so the scene must be re-rendered
+        # even if the budget would otherwise skip it. Written from the TRAINER
+        # thread (update_gaussians), read/cleared on the render thread — an Event
+        # for the same reason _suspend / _grab are. Initialized BEFORE the rig,
+        # whose on_change callback writes it.
+        self._scene_dirty = threading.Event()
+        self._scene_dirty.set()
+        self._last_scene_s = 0.0
         # The camera rig owns the fly camera and the test-camera snapping; the
         # panel binds to it directly, so the dropdown and the camera cannot
         # disagree and attach_scene needs no dirty-flag dance in the loop.
         self._rig = _CameraRig(fovy=fovy, render_size=(width, height),
-                               test_cameras=test_cameras)
+                               test_cameras=test_cameras,
+                               on_change=self.invalidate_scene)
 
         import contextlib
         self.gpu_lock = gpu_lock if gpu_lock is not None else contextlib.nullcontext()
@@ -516,6 +545,7 @@ class Viewer:
 
         self._has_data = False
         self._update_pending = False
+
 
     def _build_view_pipeline(self, max_splats: int, sh_degree: int,
                              mip_enabled: bool, mip_kernel_size: float,
@@ -623,6 +653,10 @@ class Viewer:
         # scheduled degree) does not.
         self._pipeline.set_active_sh_degree(train_pipeline._active_sh_degree)
         self._has_data = count > 0
+        # New model: the last scene image is stale, so the next frame must
+        # re-rasterize even while the training budget is throttling (parked on a
+        # test camera this is the ONLY thing that triggers a render).
+        self.invalidate_scene()
 
     def preview_points(self, initial_points: dict) -> int:
         """Show a COLMAP-derived initial point cloud in the viewer's own pipeline.
@@ -651,6 +685,7 @@ class Viewer:
                 )
             self._pipeline.set_active_sh_degree(0)
             self._has_data = count > 0
+        self.invalidate_scene()
         return count
 
     def clear_view(self) -> None:
@@ -678,6 +713,44 @@ class Viewer:
             if self._stop_event.is_set() or (self._thread and not self._thread.is_alive()):
                 break
             time.sleep(poll)
+
+    def invalidate_scene(self) -> None:
+        """Mark the rendered scene stale, so the next frame re-rasterizes it.
+
+        Anything that changes WHAT should be on screen — new gaussians, a camera
+        snap, a resize, a pipeline swap — has to call this, because while training
+        the render loop otherwise assumes the last image is still good.
+        """
+        self._scene_dirty.set()
+
+    def _scene_due(self, now: float) -> bool:
+        """Whether to re-rasterize the scene this frame.
+
+        The viewer's frame does the same work as a training step, and unthrottled
+        it takes roughly 60 of them per second — which is why attaching the viewer
+        cost ~4x throughput early in a run, when a step is cheap and the model is
+        small. So while the trainer is competing for the queue, the scene is
+        rendered on a budget:
+
+          * PARKED ON A TEST CAMERA — the view cannot move (any navigation calls
+            ``_CameraRig.leave``), so there is nothing to animate: render only
+            when new gaussians actually arrive. This is the mode for watching a
+            held-out view converge, and it costs one render per snapshot.
+          * FREE-FLY — the camera can move at any moment, so it must animate;
+            capped at :data:`TRAINING_SCENE_FPS`, enough to fly by and far below
+            the ~60 that starves the trainer.
+          * NOT TRAINING — nothing to share the GPU with, so no budget at all.
+
+        The UI pass is NOT gated by this: the panel, log and progress bar keep
+        painting every frame, so the window stays responsive at 60Hz regardless.
+        """
+        if not self._training_active:
+            return True
+        if self._scene_dirty.is_set():
+            return True
+        if self._rig.index >= 0:            # parked: only new data moves the image
+            return False
+        return (now - self._last_scene_s) >= (1.0 / TRAINING_SCENE_FPS)
 
     def set_training_active(self, active: bool = True) -> None:
         """The trainer tells the viewer whether it is inside the loop.
@@ -884,6 +957,9 @@ class Viewer:
             # time the window exists, so these would all be read-only.
             dataset_section(panel, view, actions)
         training_section(panel, view, actions)
+        # Viewer-only by construction: the curve exists to be watched while a run
+        # goes, which is the one thing a headless run cannot do.
+        loss_section(panel, view)
         if self._hub:
             result_section(panel, view, actions)
             configuration_section(
@@ -972,6 +1048,11 @@ class Viewer:
                 self.runtime.wait_for_idle()
                 surface.configure(width=w, height=h, format=present_format)
             surf_w, surf_h = w, h
+            # The camera aspect changed, so the last scene image no longer matches
+            # the window — without this, resizing while parked on a test camera
+            # would blit a stale frame into the new shape for as long as the
+            # snapshot cadence takes.
+            self.invalidate_scene()
 
         def render_frame():
             """Paint one frame. Uses surf_w/surf_h for EVERYTHING (ui.layout,
@@ -992,12 +1073,19 @@ class Viewer:
                 batch = self.runtime.command_batch("viewer_frame")
                 enc = batch.encoder
                 if self._has_data:
-                    camera = self._rig.camera(self.width, self.height, w / h)
-                    self._pipeline._encoder = enc
-                    try:
-                        self._pipeline.rasterize(camera)
-                    finally:
-                        self._pipeline._encoder = None
+                    # Re-rasterize only when the budget allows (see _scene_due);
+                    # the blit happens either way, so a skipped frame re-presents
+                    # the last scene image while the UI pass below stays live.
+                    now = time.perf_counter()
+                    if self._scene_due(now):
+                        camera = self._rig.camera(self.width, self.height, w / h)
+                        self._pipeline._encoder = enc
+                        try:
+                            self._pipeline.rasterize(camera)
+                        finally:
+                            self._pipeline._encoder = None
+                        self._scene_dirty.clear()
+                        self._last_scene_s = now
                     enc.blit(surface_tex, self._pipeline.buffers.output_image)
                 else:
                     # Nothing else writes the target before the UI pass, and that

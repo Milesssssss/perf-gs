@@ -150,7 +150,7 @@ SETTINGS: tuple[Setting, ...] = (
                  "'structure_aware' = SAD-GS anisotropic grid-split "
                  "(arXiv 2604.28016) with an interleaved AbsGS gradient filler on "
                  "the non-structure densify ticks."),
-    Setting("densify_from", "first densify iter", "densify", int, default=100,
+    Setting("densify_from", "first densify iter", "densify", int, default=0,
             minimum=0, maximum=200_000, speed=25),
     Setting("densify_to", "last densify iter", "densify", int, default=1900,
             minimum=0, maximum=200_000, speed=25),
@@ -167,6 +167,14 @@ SETTINGS: tuple[Setting, ...] = (
             help="SSIM loss weight (3DGS default 0.2); 0 = pure L2",
             minimum=0.0, maximum=1.0, speed=0.005, fmt="%.3f",
             note="0 = pure L1/L2"),
+    Setting("log_every", "log every N iters", "loss", int, default=0,
+            help="sample the loss (and the single-camera PSNR) every N iters. Each "
+                 "sample re-renders the sampled camera and reads the frame back to "
+                 "the host, so this is the cadence of a GPU sync, not a free "
+                 "counter: it feeds the viewer's LOSS graph and the log lines. "
+                 "0 = off (no samples, empty graph).",
+            minimum=0, maximum=10_000, speed=10, note="0 = off"),
+
     # ---- APPEARANCE: view-dependent color + the Mip-Splatting filter.
     Setting("sh_degree", "SH degree", "appearance", int, default=0, choices=(0, 1, 2, 3),
             help="Spherical-harmonics degree for view-dependent color (classic "
@@ -222,8 +230,42 @@ SETTINGS: tuple[Setting, ...] = (
                  "cost. Injected as a compile-time define.",
             launch_only=True,
             note="compile-time: set it with --backward-pixel-stride"),
+    Setting("stbn_pixel_fraction", "STBN pixel fraction", "perf", float, default=0.25,
+            help="Fraction rho of pixels each backward supervises, chosen by a "
+                 "spatiotemporal blue-noise mask (NVIDIA STBN, re-ranked per "
+                 "tile so EXACTLY rho*64 of every 8x8 tile is sampled). 1.0 "
+                 "(default) = every pixel, feature off and bit-identical. Below "
+                 "1.0 the surviving per-pixel terms are scaled by 1/rho, so the "
+                 "gradient stays an unbiased estimate of the full-image one and "
+                 "the LR needs no retuning. The mask advances per CAMERA VISIT, "
+                 "so repeat visits of one view walk the mask's temporal axis "
+                 "instead of resampling the same pixels. Requires the asset: "
+                 "python scripts/data/download_stbn.py (non-commercial license). "
+                 "Mutually exclusive with --backward-pixel-stride > 1.",
+            minimum=0.02, maximum=1.0, speed=0.01, fmt="%.3f",
+            note="1 = every pixel (off)"),
+    Setting("stbn_warmup_iters", "STBN warmup steps", "perf", int, default=0,
+            help="Steps spent ramping the STBN pixel fraction from 1.0 down to "
+                 "--stbn-pixel-fraction (log-linear, so it passes through the "
+                 "intermediate densities). Sparse supervision is hardest on the "
+                 "thin structures early densification is trying to create, so "
+                 "starting dense is the cheap hedge. 0 (default) = the target "
+                 "fraction from step 1. No-op at --stbn-pixel-fraction 1.0.",
+            minimum=0, maximum=20_000, speed=10, note="0 = no ramp"),
+    Setting("stbn_max_fraction", "STBN staged fraction", "perf", float, default=0.0,
+            help="Compile-time CAPACITY for STBN sampling: the backward stages "
+                 "room for this fraction of a tile (STBN_MAX_TILE_PIXELS "
+                 "define) and the run may not exceed it. 0 (default) = AUTO: "
+                 "follow --stbn-pixel-fraction, so the staged LDS shrinks with "
+                 "the density and buys occupancy on top of the shorter pixel "
+                 "loop; a --stbn-warmup-iters ramp starts at full density, so "
+                 "auto then resolves to 1.0. Pass an explicit value to stage for "
+                 "a density higher than the run's steady state.",
+            minimum=0.0, maximum=1.0, speed=0.01, fmt="%.3f",
+            launch_only=True,
+            note="0 = auto (follow the pixel fraction)"),
     # ---- EVALUATION: the passes that render the WHOLE camera set.
-    Setting("evaluation", "eval + final metrics", "eval", bool, default=False,
+    Setting("evaluation", "eval + final metrics", "eval", bool, default=True,
             help="Run the passes that render every camera: the periodic eval "
                  "sweep (--eval-every, which lands on the LAST iteration whenever "
                  "it divides --iters and is most of the wait after training "

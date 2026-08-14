@@ -43,7 +43,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--height", type=int, default=None,
                     help="force render height (overrides --downsample)")
     parser.add_argument("--preview-every", type=int, default=3000)
-    parser.add_argument("--log-every", type=int, default=0)
+    _shared(parser, "log_every")
     parser.add_argument("--render-all-every", type=int, default=0,
                     help="dump PNGs for ALL cameras every N iters")
     _shared(parser, "evaluation")
@@ -54,13 +54,7 @@ def build_parser() -> argparse.ArgumentParser:
                          "iter, elapsed_s (pure training wall-clock, excluding eval "
                          "time), and avg_psnr_lin/srgb/srgb_masked.")
     parser.add_argument("--eval", dest="eval_holdout", type=int, default=1,
-                    help="paper eval protocol (3DGS/SAD-GS --eval, llffhold=8): hold "
-                         "out every 8th camera (name-sorted) from training and report "
-                         "PSNR on ONLY those held-out views, as the mean of per-image "
-                         "PSNR (the paper metric). 1 (default) = on; 0 = train on all "
-                         "cameras and report over all cameras (internal/legacy). When "
-                         "on, held-out frames are never sampled by the training loop "
-                         "and never feed the structure-densify eta accumulator.")
+                    help="1 (default) = on and holdout; 0 = train on all")
     parser.add_argument("--eval-holdout-stride", type=int, default=8,
                     help="holdout stride for --eval (3DGS llffhold=8). Test set is "
                          "cameras where index %% stride == 0.")
@@ -313,6 +307,29 @@ def build_parser() -> argparse.ArgumentParser:
                          "Gradient-equivalent. Pass --no-flat-bucket-backward "
                          "for the per-tile path (e.g. A/B timing).")
     _shared(parser, "backward_pixel_stride")
+    _shared(parser, "stbn_pixel_fraction")
+    _shared(parser, "stbn_warmup_iters")
+    _shared(parser, "stbn_max_fraction")
+    parser.add_argument("--stbn-source", type=str, default="nvidia",
+                    choices=["nvidia", "white", "file"],
+                    help="Where the spatiotemporal blue noise comes from. "
+                         "'nvidia' (default): the pregenerated scalar STBN from "
+                         "github.com/NVIDIA-RTX/STBN, fetched by "
+                         "scripts/data/download_stbn.py (NON-COMMERCIAL license). "
+                         "'white': independent random per-tile permutations — the "
+                         "CONTROL that isolates what the blue-noise arrangement "
+                         "buys, since it shares the exact per-tile count and every "
+                         "downstream code path. 'file': rank your own scalar "
+                         "volume from --stbn-file. Only used when "
+                         "--stbn-pixel-fraction < 1.")
+    parser.add_argument("--stbn-file", type=str, default="",
+                    help="Path to a (slices, height, width) .npy scalar STBN "
+                         "volume for --stbn-source file. Also overrides the "
+                         "cached asset path for --stbn-source nvidia.")
+    parser.add_argument("--stbn-seed", type=int, default=0,
+                    help="Seed for --stbn-source white (ignored otherwise). Kept "
+                         "separate from --seed so the mask can be re-rolled "
+                         "without changing the camera draw order.")
     _shared(parser, "extinction_hardness")
     _shared(parser, "extinction_hardness_warmup")
     parser.add_argument("--final-test-psnr", action="store_true", default=False,

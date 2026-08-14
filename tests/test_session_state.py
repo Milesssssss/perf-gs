@@ -67,7 +67,7 @@ def trained(session: Session, *, iterations: int = 30_000) -> None:
                              gaussians=7_820_000, psnr=26.13, elapsed_s=94.0)
     session.training_completed(ResultInfo(
         iterations=iterations, target_iterations=iterations, wall_s=94.0,
-        splats=7_820_000, psnr=26.13, run_dir="outputs/train/kitchen"))
+        splats=7_820_000, run_dir="outputs/train/kitchen"))
 
 
 # --------------------------------------------------------------------------
@@ -277,7 +277,10 @@ def test_a_finished_run_becomes_the_important_object() -> None:
     assert snap.result_state == ResultState.TRAINED
     assert snap.has_result and snap.unexported
     assert snap.result.summary() == "30,000 iterations · 1m 34s"
-    assert snap.result.quality() == "7.82M splats · 26.13 dB"
+    # NO quality metric: the only PSNR the panel has live is one camera's re-render,
+    # and beside "30,000 iterations" that reads as the dataset-wide test score.
+    assert snap.result.quality() == "7.82M splats"
+    assert not hasattr(snap.result, "psnr")
     assert snap.primary_action == "export"          # the unexported result leads
     assert snap.can_export and snap.can_restart_training and snap.can_clear
 

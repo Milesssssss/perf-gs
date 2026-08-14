@@ -145,6 +145,38 @@ def validate_training_config(args, *, n_cams: int, n_train: int,
                 f"--sad-max-split-factor must be >= 1, got "
                 f"{args.sad_max_split_factor}.")
 
+    # STBN sparse pixel supervision.
+    stbn_fraction = float(getattr(args, "stbn_pixel_fraction", 1.0))
+    if stbn_fraction <= 0.0 or stbn_fraction > 1.0:
+        raise ConfigError(
+            f"--stbn-pixel-fraction must be in (0, 1], got {stbn_fraction}. "
+            f"1.0 = supervise every pixel (the feature off).")
+    if stbn_fraction < 1.0:
+        # Both knobs decide WHICH pixels the backward visits; together they
+        # compose two subsamplings into an effective density neither flag states,
+        # and the reweighting would only compensate for one of them.
+        if int(getattr(args, "backward_pixel_stride", 1)) > 1:
+            raise ConfigError(
+                f"--stbn-pixel-fraction {stbn_fraction} and "
+                f"--backward-pixel-stride {args.backward_pixel_stride} both "
+                f"subsample the backward's pixels; use one or the other.")
+        # 0 = auto (resolved in ShaderSpecialization.from_args); only an explicit
+        # ceiling can contradict the density it has to cover.
+        max_fraction = float(getattr(args, "stbn_max_fraction", 0.0))
+        if 0.0 < max_fraction < stbn_fraction:
+            raise ConfigError(
+                f"--stbn-max-fraction {max_fraction} is below "
+                f"--stbn-pixel-fraction {stbn_fraction}: the backward would "
+                f"stage room for fewer pixels than the run samples.")
+        if int(getattr(args, "stbn_warmup_iters", 0)) > 0 and 0.0 < max_fraction < 1.0:
+            raise ConfigError(
+                f"--stbn-warmup-iters starts the density at 1.0, so an explicit "
+                f"--stbn-max-fraction must be 1.0 (got {max_fraction}). Leave it "
+                f"at 0 (auto) or drop the warmup.")
+        source = str(getattr(args, "stbn_source", "nvidia"))
+        if source == "file" and not str(getattr(args, "stbn_file", "")):
+            raise ConfigError("--stbn-source file requires --stbn-file <path.npy>.")
+
     # The camera split must leave something to train on (and, when the holdout
     # protocol is on, something to evaluate).
     stride = max(args.eval_holdout_stride, 1)

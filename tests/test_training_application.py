@@ -338,3 +338,93 @@ def test_a_dataset_the_loader_rejects_leaves_the_hub_alive(tmp_path) -> None:
     assert snap.dataset_state is DatasetState.ERROR
     assert snap.dataset_error
     assert snap.can_drop, "the hub must still accept another folder"
+
+
+# --- STBN: the mask's temporal axis is per-CAMERA, not per-iteration ----------
+
+def _stbn_loop(target_fraction=0.1, warmup=0, slices=64, seed=0):
+    """A TrainingLoop carrying only what ``_stbn_variables`` reads."""
+    from trainer.frontend.schedule import StbnDensitySchedule
+
+    loop = object.__new__(TrainingLoop)
+    loop.args = SimpleNamespace(stbn_seed=seed)
+    loop.stbn_density = StbnDensitySchedule(target_fraction=target_fraction,
+                                            warmup=warmup)
+    loop.stbn_slices = slices
+    loop.stbn_visits = {}
+    loop.stbn_phase = {}
+    loop.training_step = 1
+    return loop
+
+
+def test_stbn_slice_advances_per_camera_visit_not_per_iteration() -> None:
+    """The mask distributes a pixel's samples along its TEMPORAL axis, and the
+    sequence that axis is meant to track is "successive evaluations of the same
+    image". So drawing A, B, A, C, A must walk A's slices 0,1,2 while B and C
+    each stay on their own first slice — indexing by iteration instead would hand
+    each camera an essentially arbitrary slice per visit and throw the property
+    away."""
+    loop = _stbn_loop()
+    draws = [7, 3, 7, 9, 7, 3]
+    slices = [loop._stbn_variables(cam).slice_index for cam in draws]
+
+    phase = {cam: loop.stbn_phase[cam] for cam in (7, 3, 9)}
+    assert slices == [
+        phase[7] + 0, phase[3] + 0, phase[7] + 1,
+        phase[9] + 0, phase[7] + 2, phase[3] + 1,
+    ]
+    assert loop.stbn_visits == {7: 3, 3: 2, 9: 1}
+
+
+def test_stbn_phases_differ_across_cameras_and_wrap_into_range() -> None:
+    """A shared start would couple the whole dataset to one sequence: every view
+    would sample slice 0's pixels on its first visit, slice 1's on its second,
+    and so on."""
+    loop = _stbn_loop(slices=64)
+    for cam in range(40):
+        loop._stbn_variables(cam)
+    phases = [loop.stbn_phase[cam] for cam in range(40)]
+    assert all(0 <= p < 64 for p in phases)
+    assert len(set(phases)) > 20          # spread out, not all-equal
+
+
+def test_stbn_slice_wraps_at_the_masks_temporal_period() -> None:
+    loop = _stbn_loop(slices=4)
+    slices = [loop._stbn_variables(2).slice_index for _ in range(9)]
+    assert all(0 <= s < 4 for s in slices)
+    assert slices[:4] == slices[4:8]       # one full cycle, then repeat
+
+
+def test_stbn_phase_is_reproducible_and_independent_of_the_camera_draw() -> None:
+    """Phases come from mixing the camera index, NOT from the run's RNG: drawing
+    from that stream would shift every subsequent camera draw and break the
+    sampling order frozen by test_camera_sampling.py."""
+    first = _stbn_loop(seed=5)
+    second = _stbn_loop(seed=5)
+    for cam in (0, 1, 2, 3):
+        assert first._stbn_variables(cam).slice_index == \
+               second._stbn_variables(cam).slice_index
+    reseeded = _stbn_loop(seed=6)
+    assert [reseeded.stbn_phase.get(c) for c in ()] == []      # no eager fill
+    assert any(reseeded._stbn_variables(cam).slice_index
+               != first.stbn_phase[cam] for cam in (0, 1, 2, 3))
+
+
+def test_stbn_variables_absent_when_the_feature_is_off() -> None:
+    """A run without STBN must hand the pipeline None, so every kernel resolves
+    to the full-pixel budget rather than a silently sparse gradient."""
+    loop = _stbn_loop()
+    loop.stbn_density = None
+    assert loop._stbn_variables(0) is None
+
+
+def test_stbn_budget_follows_the_density_ramp() -> None:
+    """The per-tile budget is what the shaders act on, so the ramp has to land in
+    integers: full tile during warmup, then the steady-state count."""
+    from trainer.contracts.codegen import TILE_AREA
+
+    loop = _stbn_loop(target_fraction=0.1, warmup=1000)
+    loop.training_step = 1
+    assert loop._stbn_variables(0).pixels_per_tile == TILE_AREA
+    loop.training_step = 2000
+    assert loop._stbn_variables(0).pixels_per_tile == round(0.1 * TILE_AREA)

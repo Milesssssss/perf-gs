@@ -21,6 +21,7 @@ import pytest
 from trainer.frontend.schedule import (
     ExtinctionHardnessSchedule,
     MeanLearningRateSchedule,
+    StbnDensitySchedule,
 )
 
 def _reference_mean_lr(step, lr_init, lr_final, max_steps):
@@ -128,3 +129,37 @@ def test_extinction_class_disabled_paths() -> None:
     disabled = ExtinctionHardnessSchedule(target=4.0, warmup=-1)
     assert disabled.at(0) == 4.0
     assert disabled.at(10) == 4.0
+
+
+# --- STBN pixel-density ramp ------------------------------------------------
+# Same log-linear shape as the hardness ramp, but descending: full supervision
+# first (sparse pixels hurt the thin structures early densification is trying to
+# create), then geometric decay to the steady-state fraction.
+
+def test_stbn_density_ramps_geometrically_to_the_target() -> None:
+    schedule = StbnDensitySchedule(target_fraction=0.1, warmup=1000)
+    assert schedule.target == 0.1
+    assert schedule.at(1) == pytest.approx(1.0)          # step 1 = full density
+    assert schedule.at(1001) == pytest.approx(0.1)
+    assert schedule.at(5000) == pytest.approx(0.1)       # clamped past the ramp
+    # Log-linear => the midpoint is the geometric mean of 1.0 and the target.
+    assert schedule.at(501) == pytest.approx(math.sqrt(0.1), rel=1e-6)
+    # Monotone descent, so the ramp passes through the intermediate densities
+    # (1.0 -> 0.5 -> 0.25 -> 0.1) instead of sitting near one end.
+    values = [schedule.at(s) for s in range(1, 1002, 50)]
+    assert all(b <= a for a, b in zip(values, values[1:]))
+
+
+def test_stbn_density_without_a_warmup_pins_the_target() -> None:
+    schedule = StbnDensitySchedule(target_fraction=0.25, warmup=0)
+    assert schedule.at(1) == 0.25
+    assert schedule.at(9999) == 0.25
+
+
+def test_stbn_density_disabled_target_never_ramps() -> None:
+    """target 1.0 IS the off switch, so a warmup must not dip below full density
+    and quietly enable sparse supervision for a run that asked for none."""
+    schedule = StbnDensitySchedule(target_fraction=1.0, warmup=500)
+    assert schedule.at(1) == 1.0
+    assert schedule.at(250) == 1.0
+    assert schedule.at(500) == 1.0

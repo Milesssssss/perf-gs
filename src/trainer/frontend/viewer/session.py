@@ -50,6 +50,9 @@ LOG_CAPACITY = 400
 # unresolved failure must not scroll away before it is read.
 NOTICE_TTL_S = 6.0
 MAX_NOTICES = 3
+# Loss samples kept for the graph. The publisher's cadence is --log-every, so this
+# is a window of ticks, not of iterations.
+LOSS_HISTORY = 240
 
 
 class DatasetState(StrEnum):
@@ -215,13 +218,19 @@ class TrainingStats:
 
 @dataclass(frozen=True)
 class ResultInfo:
-    """The reconstruction that currently exists — the object the user acts on."""
+    """The reconstruction that currently exists — the object the user acts on.
+
+    Deliberately carries NO quality metric. The only PSNR the panel has access to
+    live is the reporter's re-render of the ONE camera that iteration sampled, and
+    showing that next to "30,000 iterations" reads as the dataset-wide test score
+    it is not. An honest number costs a sweep over every held-out view — that is
+    what ``--evaluation`` produces, into ``final_psnr.json`` / ``eval_curve.jsonl``.
+    """
 
     iterations: int = 0
     target_iterations: int = 0
     wall_s: float = 0.0
     splats: int = 0
-    psnr: float | None = None
     run_dir: str = ""
     exported_path: str = ""
     exported_mb: float = 0.0
@@ -234,10 +243,8 @@ class ResultInfo:
         return " · ".join(parts)
 
     def quality(self) -> str:
-        parts = [f"{format_count(self.splats)} splats"]
-        if self.psnr is not None:
-            parts.append(f"{self.psnr:.2f} dB")
-        return " · ".join(parts)
+        """The size of the model, which the panel CAN know exactly."""
+        return f"{format_count(self.splats)} splats"
 
 
 @dataclass(frozen=True)
@@ -387,6 +394,9 @@ class Snapshot:
     # visibility the user opts into.
     show_all_config: bool = False
     show_log: bool = False
+    # (iteration, loss) samples for the loss graph, oldest first. Bounded: this is
+    # a shape-of-the-curve readout, not a record — the run's own jsonl is that.
+    loss_history: tuple[tuple[int, float], ...] = ()
 
     # ---- top-level: what state is the application in? ----
 
@@ -840,7 +850,7 @@ class Session:
             stats = TrainingStats(total=int(target_iterations))
             self._snap = replace(self._snap,
                                  training_state=TrainingState.INITIALIZING,
-                                 training_error="", stats=stats,
+                                 training_error="", stats=stats, loss_history=(),
                                  activity=Activity(label="Initializing run"))
 
     def training_running(self) -> None:
@@ -879,10 +889,20 @@ class Session:
 
     def publish_training(self, **fields) -> None:
         """Merge live numbers; fields not passed keep their previous value, so a
-        throughput tick and a loss/psnr tick publish independently."""
+        throughput tick and a loss/psnr tick publish independently.
+
+        A loss value is ALSO appended to :attr:`Snapshot.loss_history` for the
+        graph. Recording it here rather than in a separate call means the graph is
+        fed by whatever cadence the reporter already runs on and costs nothing
+        extra — the loss readback is the expensive part and it is not ours.
+        """
         with self._lock:
-            self._snap = replace(self._snap,
-                                 stats=replace(self._snap.stats, **fields))
+            stats = replace(self._snap.stats, **fields)
+            history = self._snap.loss_history
+            loss = fields.get("loss")
+            if loss is not None:
+                history = (*history, (int(stats.step), float(loss)))[-LOSS_HISTORY:]
+            self._snap = replace(self._snap, stats=stats, loss_history=history)
 
     # ---- result lifecycle ----
 
@@ -931,9 +951,9 @@ class Session:
                 self._snap, dataset_state=DatasetState.EMPTY,
                 dataset=DatasetInfo(), dataset_error="",
                 training_state=TrainingState.IDLE, training_error="",
-                stats=TrainingStats(), result_state=ResultState.NONE,
-                result=ResultInfo(), result_error="", activity=Activity(),
-                confirm=None)
+                stats=TrainingStats(), loss_history=(),
+                result_state=ResultState.NONE, result=ResultInfo(),
+                result_error="", activity=Activity(), confirm=None)
 
     def reset_for_new_run(self) -> None:
         """Between runs on the SAME dataset: the previous run's numbers and result
@@ -941,8 +961,9 @@ class Session:
         with self._lock:
             self._snap = replace(
                 self._snap, training_state=TrainingState.IDLE, training_error="",
-                stats=TrainingStats(), result_state=ResultState.NONE,
-                result=ResultInfo(), result_error="", confirm=None)
+                stats=TrainingStats(), loss_history=(),
+                result_state=ResultState.NONE, result=ResultInfo(),
+                result_error="", confirm=None)
 
     # ---- log (secondary: diagnostics, not user feedback) ----
 

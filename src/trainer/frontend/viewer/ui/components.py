@@ -125,6 +125,83 @@ def activity_block(panel: Panel, activity: Callable[[], Activity], *,
                    visible=lambda: activity().active and activity().determinate)
 
 
+def bucket(values: Sequence[float], rows: int) -> list[float]:
+    """Reduce a series to ``rows`` bucket means, oldest first.
+
+    Buckets are contiguous index ranges, so a long window compresses uniformly
+    instead of dropping samples — a spike survives as a raised bucket rather than
+    disappearing between two picked points.
+    """
+    series = list(values)
+    if not series or rows <= 0:
+        return []
+    if len(series) <= rows:
+        return series
+    out: list[float] = []
+    for index in range(rows):
+        lo = (index * len(series)) // rows
+        hi = max(lo + 1, ((index + 1) * len(series)) // rows)
+        chunk = series[lo:hi]
+        out.append(sum(chunk) / len(chunk))
+    return out
+
+
+def bars(values: Sequence[float], *, rows: int = 10, cells: int = 24,
+         glyph: str = "#") -> list[str]:
+    """A series as horizontal bars, oldest first, autoscaled to its own range.
+
+    WHY BARS AND NOT A LINE. The panel font is PROPORTIONAL (see :mod:`.text`:
+    ``' '`` is 3.21px, ``'#'`` 8.54px), so a character grid does not line up —
+    a plotted curve would shear left and right by whatever mix of glyphs each row
+    happened to contain. A bar built from ONE repeated glyph has width exactly
+    proportional to its length, so bars remain comparable to each other in any
+    font. That is the only chart shape this toolkit can draw honestly.
+
+    Autoscaled to ``[min, max]`` OF THE WINDOW, because a loss curve late in
+    training moves in the third decimal and a zero-based axis would show a flat
+    wall. The caller must therefore print the range (:func:`bar_scale`) — an empty
+    bar means "window minimum", not zero.
+    """
+    series = bucket(values, rows)
+    if not series:
+        return []
+    lo, hi = min(series), max(series)
+    span = hi - lo
+    out = []
+    for value in series:
+        # A flat window gets a single cell: something visible, and honestly not a
+        # magnitude.
+        filled = 1 if span <= 0 else int(round(cells * (value - lo) / span))
+        out.append(glyph * max(0, min(cells, filled)))
+    return out
+
+
+def bar_scale(values: Sequence[float], *, fmt: str = "%.5f") -> str:
+    """The window's range, so the bars above it mean something."""
+    if not values:
+        return ""
+    lo, hi = min(values), max(values)
+    return (f"scale {fmt % lo} .. {fmt % hi}" if hi > lo
+            else f"flat at {fmt % lo}")
+
+
+def chart(panel: Panel, series: Callable[[], Sequence[float]], *, rows: int = 10,
+          cells: int = 24, visible=None) -> None:
+    """Render :func:`bars` into a fixed pool of rows that pull every frame.
+
+    The pool is allocated once (widget order is build order) and unused rows hide
+    themselves, so a chart that has not filled up yet does not reserve blank space.
+    """
+    def line(index: int) -> str:
+        drawn = bars(series(), rows=rows, cells=cells)
+        return f"  {drawn[index]}" if index < len(drawn) else ""
+
+    for index in range(rows):
+        panel.text(lambda i=index: line(i),
+                   visible=(lambda i=index: line(i) != "") if visible is None
+                   else (lambda i=index: bool(visible()) and line(i) != ""))
+
+
 def toasts(panel: Panel, view: View, *, slots: int = 3) -> None:
     """Transient acknowledgements, newest last.
 

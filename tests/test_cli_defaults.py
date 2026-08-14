@@ -32,12 +32,16 @@ EXPECTED_DEFAULTS = {
     "width": None,
     "height": None,
     "preview_every": 3000,
-    "log_every": 0,
+    # Loss/PSNR sampling cadence. Now ON by default (100): it is what feeds the
+    # viewer's LOSS graph and the log lines, at the cost of one re-render +
+    # frame readback per tick. 0 turns it off.
+    "log_every": 100,
     "render_all_every": 0,
     # Master veto over the whole-camera-set passes (eval sweep, final metrics +
-    # .ply, held-out test PSNR). On by default = every one of them keeps whatever
-    # its own flag says, so this addition changed no existing behaviour.
-    "evaluation": True,
+    # .ply, held-out test PSNR). OFF by default: those passes render every camera
+    # and the eval tick lands on the last iteration, which is the entire wait after
+    # a short run "finishes". Pass --evaluation to get them back.
+    "evaluation": False,
     "eval_every": 3000,
     "eval_holdout": 1,
     "eval_holdout_stride": 8,
@@ -108,6 +112,16 @@ EXPECTED_DEFAULTS = {
     "nsight_debug_names": None,
     "flat_bucket_backward": True,
     "backward_pixel_stride": 1,
+    # STBN sparse pixel supervision. 1.0 would be OFF (every pixel supervised,
+    # bit-identical to a build without the feature); the default samples 0.25 of
+    # each tile and scales the surviving gradients by 4. The 0 max-fraction is the
+    # AUTO sentinel (stage the backward for the run's own density).
+    "stbn_pixel_fraction": 0.25,
+    "stbn_warmup_iters": 0,
+    "stbn_max_fraction": 0.0,
+    "stbn_source": "nvidia",
+    "stbn_file": "",
+    "stbn_seed": 0,
     "extinction_hardness": 1.0,
     "extinction_hardness_warmup": 500,
     "final_test_psnr": False,

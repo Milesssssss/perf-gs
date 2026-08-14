@@ -18,6 +18,7 @@
 // binary search AND never launches a saturated (empty) bucket.
 
 #include "checkpoint.slang"   // RASTER_BUCKET_SIZE
+#include "../../common/stbn.slang"
 
 #include "generated/execution_contract.slang"
 // Non-square tiles: WIDTH across, HEIGHT down; pixel-in-tile row stride = WIDTH.
@@ -43,6 +44,17 @@ void tileMaxProcessed(
     uint3 gtid: SV_GroupThreadID,
     RWTexture2D<uint> gaussian_count_per_pixel,
     RWStructuredBuffer<uint> live_bucket_count,
+    // STBN sparse supervision (runtime; see common/stbn.slang). Reducing over
+    // only the SAMPLED pixels is not just an optimization: at a low budget a
+    // tile's deepest ray is usually an unsampled pixel, so counting it would
+    // queue buckets whose every contribution is zero. Runtime-gated (not behind
+    // STBN_ENABLED) so the compile-time-disabled backward still sees the same
+    // live-bucket set — that equivalence is what makes STBN_ENABLED=0 a usable
+    // reference path.
+    StructuredBuffer<uint> stbn_table,
+    uniform uint2 stbn_dims,
+    uniform uint stbn_slice,
+    uniform uint stbn_tile_pixels,
     uniform uint2 frame_dim_px,
     uniform uint num_tiles_x,
     uniform uint num_tiles)
@@ -59,8 +71,10 @@ void tileMaxProcessed(
     // pixel-in-tile: col = tid % WIDTH (row stride WIDTH), row = tid / WIDTH.
     uint2 pixel = uint2(tile_x * TILE_WIDTH  + (tid % TILE_WIDTH),
                         tile_y * TILE_HEIGHT + (tid / TILE_WIDTH));
-    uint processed = (pixel.x < frame_dim_px.x && pixel.y < frame_dim_px.y)
-                     ? gaussian_count_per_pixel[pixel] : 0u;
+    bool contributes = pixel.x < frame_dim_px.x && pixel.y < frame_dim_px.y
+                       && stbnSelected(stbn_table, pixel, stbn_dims, stbn_slice,
+                                       stbn_tile_pixels);
+    uint processed = contributes ? gaussian_count_per_pixel[pixel] : 0u;
     InterlockedMax(gs_tile_max, processed);
     GroupMemoryBarrierWithGroupSync();
 

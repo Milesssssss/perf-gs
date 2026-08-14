@@ -12,6 +12,7 @@ from _ui_testkit import Recorder, RecordingPanel
 from trainer.frontend.settings import SETTINGS, SETTINGS_MAP, TrainingSetup
 from trainer.frontend.viewer.session import (
     KIND_IMAGES,
+    LOSS_HISTORY,
     MODE_HUB,
     OK,
     WARN,
@@ -21,7 +22,12 @@ from trainer.frontend.viewer.session import (
     Session,
     ToolsState,
 )
-from trainer.frontend.viewer.ui.components import notice_line
+from trainer.frontend.viewer.ui.components import (
+    bar_scale,
+    bars,
+    bucket,
+    notice_line,
+)
 from trainer.frontend.viewer.ui.sections import (
     Actions,
     CameraControls,
@@ -29,6 +35,7 @@ from trainer.frontend.viewer.ui.sections import (
     dataset_section,
     diagnostics_section,
     header,
+    loss_section,
     result_section,
     training_section,
     viewer_section,
@@ -72,6 +79,8 @@ def build(session: Session, which: str = "all"):
         configuration_section(panel, view, session.setup, actions,
                               show_all=lambda: view.show_all_config,
                               toggle_all=session.toggle_config_detail)
+    if which in ("all", "loss"):
+        loss_section(panel, view)
     if which in ("all", "diagnostics"):
         diagnostics_section(panel, view, actions, show=lambda: view.show_log)
     return panel, view, recorder
@@ -91,7 +100,7 @@ def trained(session: Session) -> None:
     session.publish_training(step=30_000, total=30_000, gaussians=7_820_000,
                              psnr=26.13, elapsed_s=94.0)
     session.training_completed(ResultInfo(iterations=30_000, wall_s=94.0,
-                                          splats=7_820_000, psnr=26.13,
+                                          splats=7_820_000,
                                           run_dir="outputs/train/kitchen"))
 
 
@@ -306,7 +315,7 @@ def test_a_finished_run_presents_the_result_and_its_next_actions() -> None:
     screen = panel.screen()
     assert "+ Training complete" in screen
     assert "30,000 iterations · 1m 34s" in screen
-    assert "7.82M splats · 26.13 dB" in screen
+    assert "7.82M splats" in screen
     assert panel.visible_buttons() == ["Export PLY", "Train Again (fresh run)",
                                        "Load New Dataset", "Clear Session"]
 
@@ -556,3 +565,117 @@ def test_the_viewer_section_reports_the_camera_it_is_looking_through() -> None:
     screen = panel.screen()
     assert "cam_0001" in screen
     assert "1.25" in screen and "45 deg" in screen
+
+
+# --------------------------------------------------------------------------
+# LOSS graph
+# --------------------------------------------------------------------------
+
+def test_bars_are_built_from_one_repeated_glyph() -> None:
+    """The panel font is proportional, so only a single-glyph bar has a width
+    proportional to its value — a mixed-glyph plot would shear per row."""
+    drawn = bars([0.0, 0.5, 1.0], rows=3, cells=10)
+    assert drawn == ["", "#####", "##########"]
+    assert all(set(line) <= {"#"} for line in drawn)
+
+
+def test_bars_autoscale_to_the_window_and_the_range_is_printed() -> None:
+    """Late in a run the loss moves in the third decimal; a zero-based axis would
+    be a flat wall. The scale line is what keeps that honest."""
+    drawn = bars([0.0302, 0.0301, 0.0300], rows=3, cells=10)
+    assert drawn[0] == "#" * 10 and drawn[-1] == ""
+    assert bar_scale([0.0302, 0.0300]) == "scale 0.03000 .. 0.03020"
+
+
+def test_a_flat_or_tiny_window_still_draws_something_truthful() -> None:
+    assert bars([0.5] * 5, rows=3) == ["#", "#", "#"]
+    assert bar_scale([0.5, 0.5]) == "flat at 0.50000"
+    assert bars([], rows=3) == []
+
+
+def test_long_series_compress_into_buckets_without_dropping_spikes() -> None:
+    flat = [1.0] * 20
+    spiked = list(flat)
+    spiked[10] = 5.0
+    assert bucket(flat, 4) == [1.0, 1.0, 1.0, 1.0]
+    assert max(bucket(spiked, 4)) > 1.0        # the spike raised its bucket
+    assert len(bucket(list(range(97)), 10)) == 10
+
+
+def test_the_loss_section_plots_what_the_reporter_published() -> None:
+    session = _session()
+    panel, view, _ = build(session, "loss")
+    for step in range(1, 61):
+        session.publish_training(step=step * 10, loss=0.03 - step * 0.0004)
+    view.sample()
+    screen = panel.screen()
+    assert "#" in screen                                  # a curve is drawn
+    assert "scale 0.00600 .. 0.02960" in screen
+    assert "iters 10-600" in screen and "60 samples" in screen
+    assert "-80% over the window" in panel.of("section")[0].label
+
+
+def test_the_empty_graph_says_why_it_is_empty() -> None:
+    """--log-every 0 is the default, so this is the state most runs start in: the
+    graph must not read as broken."""
+    session = _session()
+    panel, view, _ = build(session, "loss")
+    view.sample()
+    screen = panel.screen()
+    assert "no samples" in panel.of("section")[0].label
+    assert "--log-every 50" in screen
+    assert "#" not in screen
+
+
+def test_history_is_bounded_and_belongs_to_its_run() -> None:
+    session = _session()
+    for step in range(1, 400):
+        session.publish_training(step=step, loss=1.0 / step)
+    assert len(session.snapshot().loss_history) == LOSS_HISTORY
+    session.training_initializing(3000)
+    assert session.snapshot().loss_history == ()
+
+
+def test_throughput_ticks_do_not_pollute_the_curve() -> None:
+    """The reporter publishes rate and loss on different cadences; only a real
+    loss value is a sample."""
+    session = _session()
+    session.publish_training(step=10, loss=0.5)
+    session.publish_training(step=11, it_per_s=300.0)
+    session.publish_training(step=12, it_per_s=310.0)
+    assert session.snapshot().loss_history == ((10, 0.5),)
+
+
+def test_the_finished_result_reports_no_quality_metric() -> None:
+    """THE BUG: the run summary showed the PSNR of the single camera the last
+    iteration happened to sample, next to "30,000 iterations", which reads as the
+    held-out test score. There is no honest dataset-wide number available without a
+    full sweep, so the panel states none."""
+    session = _session()
+    panel, view, _ = build(session, "result")
+    ready(session)
+    session.publish_training(step=30_000, total=30_000, psnr=26.13, loss=0.0031)
+    trained(session)
+    view.sample()
+    screen = panel.screen()
+    assert "7.82M splats" in screen
+    assert "dB" not in screen
+    assert "loss" not in screen
+
+
+def test_a_live_per_camera_number_is_labelled_as_one_camera() -> None:
+    """During a run the same PSNR IS useful as a live signal — it just may not sit
+    beside the splat count, where it reads as a dataset metric."""
+    session = _session()
+    panel, view, _ = build(session, "training")
+    ready(session)
+    session.training_initializing(30_000)
+    session.training_running()
+    session.publish_training(step=100, total=30_000, gaussians=1_200_000,
+                             psnr=21.40, loss=0.0182)
+    view.sample()
+    lines = [w.rendered() for w in panel.of("text") if w.shown]
+    model = next(line for line in lines if "splats" in line)
+    sampled = next(line for line in lines if "dB" in line)
+    assert "dB" not in model and "loss" not in model     # exact numbers only
+    assert "sampled cam" in sampled and "loss 0.0182" in sampled

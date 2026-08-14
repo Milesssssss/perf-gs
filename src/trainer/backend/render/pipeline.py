@@ -23,6 +23,8 @@ from trainer.config.config import (
     LossConfig,
     RasterConfig,
     RegularizationConfig,
+    StbnConfig,
+    StbnVariables,
 )
 
 from trainer.config.config_types import DensificationMode
@@ -32,6 +34,7 @@ from trainer.backend.densify.densify import DensifyConfig
 from trainer.backend.compute.device import SHADERS_DIR
 from trainer.backend.compute.gpu import CommandBatch, GpuRuntime
 from trainer.backend.compute.gpu_scan import GpuScan, ScanKernels
+from trainer.backend.render import stbn as _stbn
 from trainer.backend.render.kernels import load_kernels
 from trainer.backend.render.losses import ImageLoss
 from trainer.backend.optimize.adam import AdamOptimizer
@@ -97,6 +100,7 @@ class TrainingPipeline:
         loss_config: LossConfig | None = None,
         regularization_config: RegularizationConfig | None = None,
         appearance_config: AppearanceConfig | None = None,
+        stbn_config: StbnConfig | None = None,
         viewer_only: bool = False,
         initial_state: dict | None = None,
         use_persplat_backward: bool = True,
@@ -127,6 +131,13 @@ class TrainingPipeline:
 
         self.appearance_config = appearance_config or AppearanceConfig()
         self._sh_rest_floats = sh_rest_coeffs(self.appearance_config.sh_degree) * 3
+
+        # STBN pixel subsampling. The table is built/uploaded ONCE (a few MB,
+        # content-addressed on disk); only the slice + per-tile budget vary per
+        # iteration. A disabled run still gets a 1-element placeholder because
+        # the kernels declare the parameter unconditionally.
+        self.stbn_config = stbn_config or StbnConfig()
+        self._stbn = self._create_stbn_mask()
 
         load_kernels(device, self, viewer_only=viewer_only)
 
@@ -261,6 +272,57 @@ class TrainingPipeline:
             self.clear_tracking()
             if densify_mode == DensificationMode.STRUCTURE_AWARE:
                 self.clear_structure_scores()
+
+    def _create_stbn_mask(self) -> "_stbn.StbnMask":
+        """Resolve the run's STBN table (or the disabled placeholder).
+
+        The viewer never runs a loss or a backward, so it always takes the
+        placeholder — no reason to spend megabytes on a mask nothing reads.
+        """
+        config = self.stbn_config
+        if self.viewer_only or not config.enabled:
+            return _stbn.upload_disabled_mask(self.device)
+        spec = _stbn.StbnMaskSpec(
+            source=config.source, path=config.file_path, seed=config.seed)
+        mask = _stbn.upload_mask(
+            self.device, spec, _stbn.default_cache_dir() / "cache")
+        print(f"[stbn] {spec.source} mask {spec.width}x{spec.height}x{spec.slices}"
+              f", {_stbn.pixels_per_tile(config.pixel_fraction, TILE_AREA)}"
+              f"/{TILE_AREA} pixels per tile at rho={config.pixel_fraction:g}"
+              f"{' (compacted backward)' if config.backward_compacted else ''}")
+        return mask
+
+    @property
+    def stbn_slices(self) -> int:
+        """Temporal period of the mask — the frontend wraps its per-camera visit
+        counters against this."""
+        return self._stbn.slices
+
+    @property
+    def stbn_capacity(self) -> int:
+        """Per-tile budget the backward staged room for (compile-time)."""
+        return _stbn.pixels_per_tile(self.stbn_config.max_fraction, TILE_AREA)
+
+    def _stbn_kwargs(self, contextual: IterationContextualVariables) -> dict:
+        """The mask parameters for this iteration's kernels.
+
+        A step with no STBN variables (tests, eval, bench, viewer) resolves to
+        the full budget, i.e. every pixel sampled — so an unaware caller gets the
+        exact full-pixel behavior rather than a silently sparse gradient.
+        """
+        variables = contextual.stbn if contextual is not None else None
+        if variables is None or variables.pixels_per_tile <= 0:
+            return self._stbn.shader_kwargs(0, TILE_AREA)
+        budget = int(variables.pixels_per_tile)
+        if self.stbn_config.backward_compacted and budget > self.stbn_capacity:
+            # Silently truncating would drop pixels the loss still weighted for,
+            # biasing the gradient by exactly the ratio nobody asked for.
+            raise ValueError(
+                f"STBN budget {budget} pixels/tile exceeds the {self.stbn_capacity} "
+                f"the backward staged (--stbn-max-fraction "
+                f"{self.stbn_config.max_fraction:g}); raise --stbn-max-fraction.")
+        return self._stbn.shader_kwargs(variables.slice_index,
+                                        min(budget, TILE_AREA))
 
     def on_hot_reload(self) -> None:
         """Refresh reflection-dependent objects after device.reload_all_programs().
@@ -862,11 +924,12 @@ class TrainingPipeline:
                 max_splats=self.max_splats,
             )
 
-    def _run_loss(self) -> None:
+    def _run_loss(self, contextual: IterationContextualVariables) -> None:
         self.image_loss.record(
             self._batch,
             rendered=self.buffers.output_image,
             target=self._active_target,
+            stbn_kwargs=self._stbn_kwargs(contextual),
         )
 
     def _run_backward(self, iterationContext) -> None:
@@ -874,6 +937,11 @@ class TrainingPipeline:
         b = self.buffers
         gb = b.grad_buffers
         sorted_values = self._sorted_values
+        # The mask parameters the loss already applied. tileMaxProcessed always
+        # takes them (runtime-gated), the backward only on the compacted build
+        # (they are declared under #if STBN_ENABLED there).
+        stbn_kwargs = self._stbn_kwargs(iteration_contextual_variables)
+        backward_stbn = stbn_kwargs if self.stbn_config.backward_compacted else {}
 
         with self._marker_group("rasterize_backward"):
             if self.use_persplat_backward:
@@ -888,6 +956,7 @@ class TrainingPipeline:
                             frame_dim_px=spy.uint2(self.width, self.height),
                             num_tiles_x=b.num_tiles_x,
                             num_tiles=num_tiles,
+                            **stbn_kwargs,
                         )
                         self._scan(
                             n=num_tiles,
@@ -931,6 +1000,7 @@ class TrainingPipeline:
                         grad_2d_x_iter=b.grad_2d_x_iter.storage,
                         grad_2d_y_iter=b.grad_2d_y_iter.storage,
                         pixel_phase=self._backward_pixel_phase,
+                        **backward_stbn,
                         extinction_hardness=iteration_contextual_variables.hardness_value,
                     )
                 else:
@@ -958,6 +1028,7 @@ class TrainingPipeline:
                     # SGD pixel-subsampling phase; rotates each backward so the
                     # visited subset alternates (no-op at BACKWARD_PIXEL_STRIDE=1).
                     pixel_phase=self._backward_pixel_phase,
+                    **backward_stbn,
                     extinction_hardness=iteration_contextual_variables.hardness_value,
                 )
 
@@ -1111,7 +1182,7 @@ class TrainingPipeline:
             with self._marker_group("forward"):
                 self._run_forward(iterationContext.camera_entry.camera, contextual)
             with self._marker_group("loss"):
-                self._run_loss()
+                self._run_loss(contextual)
             with self._marker_group("backward"):
                 self._run_backward(iterationContext)
             with self._marker_group("regularization"):

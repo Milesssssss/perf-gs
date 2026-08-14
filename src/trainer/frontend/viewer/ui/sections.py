@@ -52,6 +52,8 @@ from trainer.frontend.viewer.ui.components import (
     GLYPHS,
     activity_block,
     badge,
+    bar_scale,
+    chart,
     confirm_block,
     inline_error,
     metric,
@@ -297,6 +299,8 @@ def _training_live(panel: Panel, view: View, actions: Actions) -> None:
                    visible=lambda: live() and view.stats.total > 0)
     panel.text(lambda: row("  throughput", _timing_text(view)), visible=live)
     panel.text(lambda: row("  model", _model_text(view)), visible=live)
+    panel.text(lambda: row("  sampled cam", _sampled_cam_text(view)),
+               visible=lambda: live() and bool(_sampled_cam_text(view)))
     panel.text(lambda: row("  appearance", _appearance_text(view)),
                visible=lambda: live() and bool(_appearance_text(view)))
     note(panel, lambda: view.activity.detail, lines=2,
@@ -325,13 +329,26 @@ def _timing_text(view: View) -> str:
 
 
 def _model_text(view: View) -> str:
+    """What the panel knows EXACTLY: the live splat count."""
     stats = view.stats
-    parts = [f"{format_count(stats.gaussians)} splats"] if stats.gaussians else []
+    return f"{format_count(stats.gaussians)} splats" if stats.gaussians else "--"
+
+
+def _sampled_cam_text(view: View) -> str:
+    """PSNR/loss for the ONE camera this iteration drew, labelled as such.
+
+    The reporter gets these by re-rendering that single camera, so they are a live
+    signal and not the run's score. Shown under their own label rather than beside
+    the splat count, where they read as a dataset-wide metric — an honest average
+    needs a sweep over every held-out view (``--evaluation``).
+    """
+    stats = view.stats
+    parts = []
     if stats.psnr is not None:
         parts.append(f"{stats.psnr:.2f} dB")
     if stats.loss is not None:
         parts.append(f"loss {stats.loss:.4f}")
-    return f"   {GLYPHS['bullet']} ".join(parts) if parts else "--"
+    return f"   {GLYPHS['bullet']} ".join(parts)
 
 
 def _appearance_text(view: View) -> str:
@@ -530,6 +547,60 @@ def _caption(panel: Panel, setting: Setting) -> None:
 # --------------------------------------------------------------------------
 # VIEWER / CONTROLS / DIAGNOSTICS
 # --------------------------------------------------------------------------
+
+def loss_section(panel: Panel, view: View, *, rows: int = 10) -> None:
+    """The loss curve, as far as the panel can honestly draw one.
+
+    Two things this deliberately does NOT do. It does not sample the loss itself:
+    the only publisher is the reporter's ``report_iteration``, which re-renders the
+    camera and reads the whole image back to the host, so its cadence is
+    ``--log-every`` and adding a second one would put a GPU sync in the hot loop for
+    a decoration. And it does not pretend a zero-based axis: bars are scaled to the
+    window (see :func:`~.components.bars`), with the range printed underneath.
+
+    What is plotted is the reporter's ROLLING MSE of a re-render of the ONE camera
+    that iteration sampled — neither the L1 + SSIM objective the optimizer descends
+    nor an average over the dataset. Good for reading the SHAPE of convergence,
+    which is what a curve is for; the caption says so rather than calling it "loss".
+    """
+    def values() -> list[float]:
+        return [value for _step, value in view.loss_history]
+
+    def summary() -> str:
+        history = view.loss_history
+        if not history:
+            return "no samples"
+        return section_summary(f"{history[-1][1]:.5f}", _loss_trend(history))
+
+    with panel.section("LOSS", label=titled("LOSS", summary)):
+        note(panel, "Rolling MSE of a re-render of the SAMPLED camera, every "
+                    "--log-every iters. Not a dataset metric.",
+             lines=3, visible=lambda: bool(view.loss_history))
+        chart(panel, values, rows=rows)
+        note(panel, lambda: bar_scale(values()), lines=1,
+             visible=lambda: bool(view.loss_history))
+        metric(panel, "  window",
+               lambda: f"iters {view.loss_history[0][0]:,}"
+                       f"-{view.loss_history[-1][0]:,}"
+                       f"  ({len(view.loss_history)} samples)",
+               visible=lambda: bool(view.loss_history))
+        # The honest empty state: the graph is not broken, nothing is sampling.
+        note(panel, "No samples yet. The loss is only read back on a log tick, so "
+                    "this stays empty with --log-every 0 (the default). Pass "
+                    "--log-every 50 to plot it.", lines=4,
+             visible=lambda: not view.loss_history)
+
+
+def _loss_trend(history: Sequence[tuple[int, float]]) -> str:
+    """Change across the window, as a percentage — the number a run is judged by."""
+    if len(history) < 2:
+        return ""
+    first, last = history[0][1], history[-1][1]
+    if first <= 0:
+        return ""
+    delta = 100.0 * (last - first) / first
+    return f"{delta:+.0f}% over the window"
+
 
 def viewer_section(panel: Panel, controls: CameraControls) -> None:
     """Camera: what the viewport is looking through."""

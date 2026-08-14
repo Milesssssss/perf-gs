@@ -1,4 +1,5 @@
 #include "../common/types.slang"
+#include "../common/stbn.slang"
 
 static const int WINDOW_RADIUS = 5;   // 11x11 window
 static const float SIGMA = 1.5;
@@ -91,6 +92,15 @@ void ssimComputeMaps(
 }
 
 // --- Pass 2: convolve the maps, assemble SSIM grad, blend with L1 + alpha ---
+//
+// STBN sparse supervision masks THIS pass, not pass 1. Pass 1's maps describe
+// how the loss at each window CENTER responds to the local statistics, and a
+// selected pixel's window legitimately spans unselected neighbours — starving
+// pass 1 would change the SSIM gradient itself. What we subsample is the
+// chain-rule sum over pixels, dL/dtheta = sum_q (dL/dx_q)(dx_q/dtheta): keeping
+// k of TILE_AREA of its terms and scaling by TILE_AREA/k estimates the FULL
+// SSIM gradient, unbiased, with higher variance. Pass 1 therefore still runs
+// over every pixel and its cost is not reduced by the mask.
 [shader("compute")]
 [numthreads(16, 16, 1)]
 void ssimGradient(
@@ -101,6 +111,10 @@ void ssimGradient(
     RWTexture2D<float4> ssim_m2,
     RWTexture2D<float4> ssim_m3,
     RWTexture2D<float4> dL_dC,
+    StructuredBuffer<uint> stbn_table,
+    uniform uint2 stbn_dims,
+    uniform uint stbn_slice,
+    uniform uint stbn_tile_pixels,
     uniform uint2 frame_dim,
     uniform float lambda_ssim,
     uniform float w_alpha,
@@ -108,6 +122,15 @@ void ssimGradient(
 {
     uint2 p = dtid.xy;
     if (p.x >= frame_dim.x || p.y >= frame_dim.y) return;
+
+    // Unselected pixels: zero gradient, and skip the 121-tap map convolution
+    // below (the one place the mask also saves work in the loss itself).
+    if (!stbnSelected(stbn_table, p, stbn_dims, stbn_slice, stbn_tile_pixels))
+    {
+        dL_dC[p] = float4(0.0);
+        return;
+    }
+    float stbn_scale = stbnWeight(stbn_tile_pixels);
 
     float4 rendered = output_image[p];
     float4 target = target_image[p];
@@ -153,5 +176,5 @@ void ssimGradient(
     if (w_alpha > 0.0)
         grad_alpha = w_alpha * sign(rendered.a - target.a);
 
-    dL_dC[p] = float4(grad_rgb, grad_alpha);
+    dL_dC[p] = float4(grad_rgb * stbn_scale, grad_alpha * stbn_scale);
 }

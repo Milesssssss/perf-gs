@@ -21,5 +21,13 @@ from trainer.frontend.viewer.ui.panel import (
     Panel,
 )
 
-__all__ = ["Dock", "Rect", "InputMap", "Panel",
-           "WRAP", "ELIDE_START", "ELIDE_END", "ELIDE_MIDDLE"]
+__all__ = [
+    "ELIDE_END",
+    "ELIDE_MIDDLE",
+    "ELIDE_START",
+    "WRAP",
+    "Dock",
+    "InputMap",
+    "Panel",
+    "Rect",
+]

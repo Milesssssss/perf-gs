@@ -116,6 +116,7 @@ def _snapshot(*, live: int, viewer_capacity: int = CAPACITY, sh: bool = False,
     """Run the real ``update_gaussians`` against fakes; return (encoder, viewer)."""
     encoder = _Encoder()
     view_buffers = _buffers(count=0, capacity=viewer_capacity, sh=sh)
+    invalidations: list[int] = []
     viewer = SimpleNamespace(
         runtime=_Runtime(encoder),
         max_splats=viewer_capacity,
@@ -126,6 +127,11 @@ def _snapshot(*, live: int, viewer_capacity: int = CAPACITY, sh: bool = False,
             set_active_sh_degree=lambda degree: None,
         ),
         live_splat_count=lambda pipeline: Viewer.live_splat_count(viewer, pipeline),
+        # While training and parked on a test camera the render loop re-rasterizes
+        # ONLY on this signal (see Viewer._scene_due), so a snapshot that failed to
+        # raise it would leave the previous model on screen indefinitely.
+        invalidate_scene=lambda: invalidations.append(1),
+        invalidations=invalidations,
     )
     train = SimpleNamespace(buffers=_buffers(count=live, sh=sh),
                             _active_sh_degree=active_sh_degree)
@@ -172,3 +178,12 @@ def test_nothing_is_copied_before_the_first_splat_exists() -> None:
     assert encoder.copies == []
     assert encoder.uploads[0][1].tolist() == [0]
     assert viewer._has_data is False          # nothing to rasterize yet
+
+
+def test_a_snapshot_invalidates_the_rendered_scene() -> None:
+    """The scene budget (Viewer._scene_due) skips the rasterize while training
+    unless something says the model changed. A snapshot IS that something — and
+    parked on a test camera it is the only trigger there is, so forgetting it
+    would freeze the picture for the whole run."""
+    _, viewer, _ = _snapshot(live=1_000)
+    assert viewer.invalidations == [1]

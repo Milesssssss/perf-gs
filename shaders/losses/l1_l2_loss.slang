@@ -25,6 +25,8 @@
 // gradient scales with the residual — pulls large errors down faster early.
 // lambda_l2 = 0 (default) reproduces the pure-L1 behavior exactly.
 
+#include "../common/stbn.slang"
+
 [shader("compute")]
 [numthreads(16, 16, 1)]
 void computeLossGrad(
@@ -32,12 +34,33 @@ void computeLossGrad(
     RWTexture2D<float4> output_image,
     RWTexture2D<float4> target_image,
     RWTexture2D<float4> dL_dC,
+    // STBN sparse supervision (all runtime; stbn_tile_pixels == TILE_AREA
+    // disables it and the table is then never read). See common/stbn.slang.
+    StructuredBuffer<uint> stbn_table,
+    uniform uint2 stbn_dims,
+    uniform uint stbn_slice,
+    uniform uint stbn_tile_pixels,
     uniform uint2 frame_dim,
     uniform float w_alpha,
     uniform float lambda_l2)
 {
     uint2 p = dtid.xy;
     if (p.x >= frame_dim.x || p.y >= frame_dim.y) return;
+
+    // Sparse supervision: a pixel this slice does not sample gets a ZERO
+    // gradient, which is what makes the backward's skip of it exact rather than
+    // approximate — it would have contributed nothing anyway. dL_dC is fully
+    // rewritten every iteration, so the zero must be WRITTEN, not just skipped.
+    if (!stbnSelected(stbn_table, p, stbn_dims, stbn_slice, stbn_tile_pixels))
+    {
+        dL_dC[p] = float4(0.0);
+        return;
+    }
+    // We keep k of TILE_AREA terms of the per-pixel sum; scale by TILE_AREA/k so
+    // the estimate is unbiased and the LR needs no retuning. Applied HERE rather
+    // than in the backward so every backward variant (per-bucket, per-splat,
+    // per-pixel) inherits it from the one place the mask is defined.
+    float stbn_scale = stbnWeight(stbn_tile_pixels);
 
     float4 rendered = output_image[p];
     float4 target = target_image[p];
@@ -59,5 +82,5 @@ void computeLossGrad(
         grad_alpha = w_alpha * sign(A_rendered - A_target);
     }
 
-    dL_dC[p] = float4(grad_rgb, grad_alpha);
+    dL_dC[p] = float4(grad_rgb * stbn_scale, grad_alpha * stbn_scale);
 }

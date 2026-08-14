@@ -17,6 +17,7 @@ from trainer.config.config import (
     DensificationProperties,
     IterationContext,
     IterationContextualVariables,
+    StbnVariables,
 )
 from trainer.data.dataset import Camera
 from trainer.backend.render.pipeline import TrainingPipeline
@@ -42,7 +43,8 @@ class TestPipeline(TrainingPipeline):
                    active_sh_degree: int | None = None,
                    hardness_value: float = 1.0,
                    structure_tensor=None,
-                   structure_kwargs: dict | None = None) -> None:
+                   structure_kwargs: dict | None = None,
+                   stbn: "StbnVariables | None" = None) -> None:
         """Test convenience: drive one ``Pipeline.train_step`` from a bare
         (camera, lrs) pair by assembling the IterationContext the production
         signature now requires. Production builds this context in the training
@@ -66,6 +68,7 @@ class TestPipeline(TrainingPipeline):
                     structure_tensor_texture=structure_tensor,
                     structure_kwargs=structure_kwargs,
                 ),
+                stbn=stbn,
             ),
         )
         super().train_step(context)
@@ -78,7 +81,8 @@ class TestPipeline(TrainingPipeline):
         perturbations without rebuilding the device + kernels each time."""
         self._load_snapshot(**snapshot)
 
-    def forward_and_loss(self, camera: Camera) -> None:
+    def forward_and_loss(self, camera: Camera,
+                         stbn: "StbnVariables | None" = None) -> None:
         """Run forward + loss only. Used by tests that read ``dL_dC``
         before the backward pass runs.
 
@@ -87,10 +91,18 @@ class TestPipeline(TrainingPipeline):
         helper like :meth:`render` / :meth:`read_output_image` which
         handle the sync. Tests that explicitly sample intermediates
         insert the wait at their own callsite.
+
+        ``stbn`` drives sparse pixel supervision for the STBN tests; ``None``
+        (the default) samples every pixel, which is what every pre-existing
+        caller expects.
         """
         with self.recording("forward_and_loss"):
             self.rasterize(camera)
-            self._run_loss()
+            self._run_loss(IterationContextualVariables(
+                hardness_value=self._extinction_hardness,
+                sh_degree=self._active_sh_degree,
+                stbn=stbn,
+            ))
 
     def step_split_for_active_band_test(self, camera: Camera, lrs: "AdamLRs",
                                          adam_degree: int) -> None:
@@ -126,17 +138,20 @@ class TestPipeline(TrainingPipeline):
         with self.recording("train_step"):
             self._clear_2d_grad_seeds()
             self._run_forward(camera, forward_ctx)
-            self._run_loss()
+            self._run_loss(forward_ctx)
             self._run_backward(backward_ctx)
             self._run_regularization()
             self._adam.step(adam_ctx)
 
-    def backward(self, structure_tensor=None, structure_kwargs: dict | None = None) -> None:
+    def backward(self, structure_tensor=None, structure_kwargs: dict | None = None,
+                 stbn: "StbnVariables | None" = None) -> None:
         """Run the backward rasterizer. Assumes forward + loss have run.
 
         Builds the minimal IterationContext ``_run_backward`` reads (SH degree
         + hardness from the pipeline's applied render state, plus optional
-        structure-accumulation inputs)."""
+        structure-accumulation inputs). ``stbn`` MUST match what
+        :meth:`forward_and_loss` was given — the loss defines the mask and the
+        backward only skips what the loss zeroed."""
         context = IterationContext(
             step_number=self.iteration + 1,
             camera_index=0,
@@ -150,6 +165,7 @@ class TestPipeline(TrainingPipeline):
                     structure_tensor_texture=structure_tensor,
                     structure_kwargs=structure_kwargs,
                 ),
+                stbn=stbn,
             ),
         )
         self._run_backward(context)
