@@ -44,10 +44,13 @@
 #define STBN_ENABLED 0
 #endif
 
-// Compile-time ceiling on the per-tile budget k. It sizes the backward's staged
-// LDS arrays, so a run that never exceeds (say) 16 pixels/tile also gets the
-// occupancy win of a 4x smaller checkpoint stage — not just the shorter loop.
-// The host validates the runtime budget against it (StbnConfig.max_tile_pixels).
+// Compile-time ceiling on the per-tile budget k, sizing the backward's staged
+// arrays. Defaults to a full tile and the host does NOT override it: at an 8x8
+// tile those arrays total under 2 KB of the ~100 KB shared memory per SM, so
+// shrinking them changes nothing measurable (the speedup is the shorter pixel
+// loop, which is driven by the RUNTIME budget). Left as a define so the claim
+// can be A/B'd by hand; the readers clamp the runtime budget to it, so a
+// hand-set value can never overrun the staging.
 #ifndef STBN_MAX_TILE_PIXELS
 #define STBN_MAX_TILE_PIXELS CONTRACT_TILE_AREA
 #endif

@@ -309,7 +309,15 @@ def build_parser() -> argparse.ArgumentParser:
     _shared(parser, "backward_pixel_stride")
     _shared(parser, "stbn_pixel_fraction")
     _shared(parser, "stbn_warmup_iters")
-    _shared(parser, "stbn_max_fraction")
+    parser.add_argument("--stbn-max-fraction", type=float, default=0.0,
+                    help="DIAGNOSTIC. Compile-time per-tile capacity for the "
+                         "STBN backward's staged arrays (STBN_MAX_TILE_PIXELS). "
+                         "0 (default) = auto, which is the only value worth "
+                         "using: at an 8x8 tile the arrays it sizes total 1.5 KB "
+                         "of the ~100 KB shared memory per SM, so shrinking them "
+                         "changes nothing measurable. It exists to A/B that claim "
+                         "- the speedup comes from the shorter pixel loop "
+                         "(--stbn-pixel-fraction), not from the staging.")
     parser.add_argument("--stbn-source", type=str, default="nvidia",
                     choices=["nvidia", "white", "file"],
                     help="Where the spatiotemporal blue noise comes from. "

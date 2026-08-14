@@ -26,58 +26,66 @@
 # once: fetch the mask (NON-COMMERCIAL license, cached in .stbn/, never committed)
 python scripts/data/download_stbn.py
 
-# ~10% of pixels, full density for the first 300 iters
+# the measured sweet spots: 0.5 is free, 0.25 is the knee (see Measured results)
 python scripts/running/v2_train.py --scene datasets/360_v2/bicycle \
-    --stbn-pixel-fraction 0.1 --stbn-warmup-iters 300
+    --stbn-pixel-fraction 0.25
 
 # the control: same count, same code path, arrangement replaced by white noise
-python scripts/running/v2_train.py ... --stbn-pixel-fraction 0.1 --stbn-source white
+python scripts/running/v2_train.py ... --stbn-pixel-fraction 0.25 --stbn-source white
+
+# re-measure the whole trade-off yourself (9 scenes x 5 densities, ~2.5 h)
+python scripts/running/eval_sweep.py \
+    --axis stbn-pixel-fraction --values 1,0.75,0.5,0.25,0.1
 ```
 
 ---
 
-## First measurements (read this before believing in it)
+## Measured results
 
-bicycle, 1500 iters, `--densify-mode structure_aware --sh-degree 0
---mip-splatting --seed 42`, RTX 3090, held-out test PSNR (paper metric):
+**All 9 Mip-NeRF 360 scenes, 3000 iters, quarter-res, structure-aware densify,
+mip-splatting, seed 42, RTX 3090, held-out test PSNR (the paper metric).** Full
+data in `outputs/eval_sweep/stbn_density/` (reproduce with
+`scripts/running/eval_sweep.py --axis stbn-pixel-fraction --values 1,0.75,0.5,0.25,0.1`):
 
-| config | wall | it/s | PSNR | gaussians |
+| rho | PSNR (avg of 9) | vs dense | train time | speedup |
 |---|---|---|---|---|
-| dense (`rho=1`) | 18.4 s | 81.5 | **23.106** | 7.54 M |
-| STBN `rho=0.25` | 14.6 s | 102.8 | 22.647 | 7.09 M |
-| STBN `rho=0.10` | 13.9 s | 107.8 | 21.959 | 6.74 M |
-| white `rho=0.10` | 13.9 s | 108.2 | 21.769 | 6.80 M |
+| 1.0 (off) | 26.463 dB | — | 40.4 s | 1.00x |
+| 0.75 | 26.420 dB | **-0.04** | 37.9 s | 1.07x |
+| 0.50 | 26.423 dB | **-0.04** | 35.2 s | **1.15x** |
+| 0.25 | 26.285 dB | -0.18 | 32.9 s | **1.23x** |
+| 0.10 | 25.842 dB | -0.62 | 31.8 s | 1.27x |
 
-**The speedup is real: -21% wall at `rho=0.25`, -24% at `rho=0.10`.** It saturates
-early because only the backward's per-pixel work shrinks — projection backward,
-SH, Adam, the sort and the forward do not, and SSIM pass 1 does not either.
+Three things this says:
 
-**The quality cost is also real**, and larger than the design hoped: -0.46 dB at
-`rho=0.25` and -1.15 dB at `rho=0.10` at matched iterations. On PSNR vs
-*wall-clock* (`--eval-every 250`, `elapsed_s` excludes eval time) `rho=0.25` is
-roughly break-even for the first ~500 iterations and slightly behind after that;
-`rho=0.10` is behind throughout. So on this configuration sparse supervision does
-**not** yet pay for itself.
+- **Down to rho=0.5 the mask is free.** -0.04 dB is inside run-to-run noise, and
+  0.75 and 0.5 are indistinguishable from each other; several scenes come out
+  *ahead* (flowers +0.04, treehill +0.03, stump +0.01). 15% of training time for
+  nothing measurable.
+- **rho=0.25 is the knee** — 0.18 dB for 1.23x. Past it the trade inverts:
+  rho=0.10 costs 3.5x more quality (-0.62 dB) to buy almost no extra speed
+  (1.23x -> 1.27x). There is no reason to run below 0.25 as a flat density.
+- **The speedup saturates** because only the backward's per-pixel work shrinks.
+  The forward, SH, Adam, the radix sort and SSIM pass 1 are all untouched, and
+  they are most of a step. 1.27x is roughly the ceiling for this design; going
+  further means a sparse FORWARD (see *Known limits*).
 
-Two things in those numbers are worth more than the headline:
+Per-scene, the cost at rho=0.10 lands hardest on the indoor scenes — kitchen
+-1.00, garden -0.86, bonsai -0.83 — and barely registers on the sparse outdoor
+ones (stump -0.40, treehill -0.17). At rho=0.25 the worst scene is kitchen at
+-0.47 dB and four of nine are within 0.05 dB of dense.
 
-- **Blue noise beats its control by +0.19 dB** at the same `rho`, same per-tile
-  count, same code path. The arrangement is doing measurable work, which is the
-  premise the whole design rests on.
-- **The gaussian count drops 10%** (6.74 M vs 7.54 M) at `rho=0.10`. That is the
-  densifier growing less, not Adam converging worse — exactly the failure mode
-  predicted for this regime, and the reason `--stbn-warmup-iters` exists.
+**Blue noise beats its own control.** On bicycle at rho=0.10, STBN scored +0.19 dB
+over `--stbn-source white` at identical density, identical per-tile count and
+identical code path — so the arrangement, not just the sparsity, is doing work.
+That is the premise the whole design rests on, and it is the A/B to re-run if the
+mask is ever regenerated.
 
-Caveat that likely dominates all of the above: a 1500-iteration run is spent
-almost entirely *inside* the densify window (100..1900), which is the worst case
-for sparse supervision. The regime this should be tested in is a long run where
-the sparse steps land in the refinement tail. `--stbn-warmup-iters 400` moved
-`rho=0.10` by only +0.04 dB here, which says a 400-iteration hedge is not enough
-when densification runs to 1900 — try a warmup that covers the window, or the
-variable-density idea in *Known limits*.
-
-The sweep worth running next is `rho in {0.5, 0.25}` at 7k-30k iterations, on
-PSNR vs wall-clock.
+Caveat on the earlier single-scene numbers: a 1500-iteration bicycle-only run put
+rho=0.25 at -0.46 dB, which is 2.5x worse than the 9-scene 3000-iteration result.
+A 1500-iter run is spent almost entirely *inside* the densify window (100..1900),
+which is the worst case for sparse supervision — short single-scene runs
+systematically overstate the cost. Judge this on the table above, not on a quick
+bicycle run.
 
 ---
 
@@ -112,8 +120,8 @@ exactly `k` pixels per tile, everywhere, on every slice. This buys three things:
 
 - the `TILE_AREA/k` reweighting is **exact**, not an expectation;
 - the per-tile gradient budget is uniform, so no tile is starved;
-- the count is known at compile time, so the backward can size its staged LDS
-  arrays (`STBN_MAX_TILE_PIXELS`) and shrink them with `rho`.
+- the count is known per tile, so the backward can walk a compacted list of
+  exactly `k` entries instead of testing all `TILE_AREA` of them.
 
 Ranking only reorders *within* a tile, and a blue-noise mask's per-tile histogram
 is already near-uniform, so what it removes is the count jitter, not the blue
@@ -179,10 +187,14 @@ cheap and safe:
   No divergence, and the wave scans that reconstruct transmittance stay in
   lockstep. (This is the reason a *tile*-aligned mask matters for this
   rasterizer specifically.)
-- **Smaller LDS.** `STAGED_PIXELS` becomes `STBN_MAX_TILE_PIXELS`, so the
-  per-warp checkpoint stage shrinks with `rho`. Shared memory is this kernel's
-  occupancy limiter (see the note in `backward_persplat.slang`), so that is a
-  second, independent win.
+- **NOT smaller LDS**, despite what an earlier version of this doc and a stale
+  comment in `backward_persplat.slang` claimed. Shrinking the staged arrays was
+  supposed to be a second, independent occupancy win. At the 8x8 tile
+  (`NUM_WARPS = 2`) those arrays total under 2 KB of the ~100 KB shared memory per
+  SM, so it buys nothing measurable; the claim was inherited from the 16x16 era,
+  where `gs_checkpoints` alone was 16 KB. `STBN_MAX_TILE_PIXELS` therefore stays
+  at a full tile and `--stbn-max-fraction` is a hand-only diagnostic for
+  re-testing that. All of the speedup is the loop.
 
 `tileMaxProcessed` (`live_buckets.slang`) also reduces over sampled pixels only:
 at a low budget a tile's deepest ray is usually an *unsampled* pixel, and
@@ -241,7 +253,7 @@ first few densify ticks fully supervised.
 |---|---|---|
 | `--stbn-pixel-fraction` | `1.0` | `rho`. 1.0 = off, bit-identical. Runtime uniform. |
 | `--stbn-warmup-iters` | `0` | Steps ramping 1.0 -> `rho`. |
-| `--stbn-max-fraction` | `0` (auto) | Compile-time staged capacity. Auto = the run's own density, or 1.0 when a warmup ramps from full. |
+| `--stbn-max-fraction` | `0` (off) | DIAGNOSTIC. Shrinks the backward's staged arrays; measured to buy nothing at an 8x8 tile (see above). Not in the panel. |
 | `--stbn-source` | `nvidia` | `nvidia` / `white` (control) / `file`. |
 | `--stbn-file` | `""` | A `(slices, height, width)` `.npy` scalar volume. |
 | `--stbn-seed` | `0` | For `white` only; separate from `--seed` so the mask can be re-rolled without moving the camera order. |
@@ -252,7 +264,8 @@ Rejected combinations (`validate_training_config`):
   which pixels the backward visits, and together they compose two subsamplings
   into a density neither flag states while the reweighting compensates for only
   one. The shader `#error`s on the define pair too.
-- an explicit `--stbn-max-fraction` below the density the run actually samples.
+The staged arrays hold a full tile and the readers clamp to it, so no density a
+schedule passes through can outgrow them — there is nothing else to validate.
 
 ## Licensing
 
@@ -291,6 +304,16 @@ arrangement is most of the point.
 
 ## Known limits
 
+- **1.27x is the ceiling for this design.** Only the backward's per-pixel work is
+  sparsified, and the measured speedup is already flat between rho=0.25 and 0.10.
+  Going further needs a sparse FORWARD — each pixel walks its own splat chain
+  independently, so skipping unsampled pixels would cut the blend by ~90% at
+  rho=0.1 (roughly a second 8 ms of a 23 ms step). Two things block it: SSIM
+  pass 1 reads the full rendered image in an 11x11 neighbourhood, so a sparse
+  forward is only sound at `--lambda-ssim 0`; and `output_image` is also the
+  preview/eval/viewer surface, so unsampled pixels would need to hold something
+  sane. A cheaper partial win first: the forward writes `raster_checkpoints` for
+  all 64 pixels per bucket and the backward now reads only k of them.
 - **SSIM pass 1 is not sparsified** (see above), so it remains a fixed cost.
 - **The estimator is unbiased when the slice index is uniform** over the mask's
   64 slices — exactly true once a camera has been drawn a multiple of 64 times.
@@ -301,11 +324,15 @@ arrangement is most of the point.
   same quantity; during training the Gaussians change between visits. The spatial
   stratification and temporal coverage arguments still hold, but treat the
   quality result as an empirical question, not a guarantee.
-- **Densification is the thing to watch** at low `rho`, not smooth-surface PSNR —
-  and the measured 10% gaussian-count deficit says it is already being felt. The
-  next levers, in order: a warmup that covers the whole densify window; feeding
-  the densifier's `grad_2d_*_iter` statistics from a denser mask than the Adam
-  gradient uses; and variable-density STBN, where the per-tile budget follows
-  reconstruction error (sky 2%, texture 10%, foliage 30%) at a fixed average —
-  which would combine TurboGS-style error-guided effort with STBN's coverage.
-  A lower flat `rho` is not one of the levers.
+- **Densification is the thing to watch** at low `rho`, not smooth-surface PSNR.
+  Across the 9-scene sweep the gaussian count falls monotonically with density
+  (4.98 M dense -> 4.80 M at rho=0.1), and the scenes that lose the most PSNR at
+  rho=0.1 are the detailed indoor ones (kitchen -1.00, garden -0.86, bonsai
+  -0.83) rather than the sparse outdoor ones. That is the densifier seeing noisier
+  gradient statistics, not Adam converging worse. Levers, in order: a warmup
+  covering the whole densify window; feeding the densifier's `grad_2d_*_iter`
+  statistics from a denser mask than the Adam gradient uses; and variable-density
+  STBN, where the per-tile budget follows reconstruction error (sky 2%, texture
+  10%, foliage 30%) at a fixed average — combining TurboGS-style error-guided
+  effort with STBN's coverage. A lower flat `rho` is not one of the levers: the
+  sweep shows it buys no time.

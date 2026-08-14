@@ -117,6 +117,13 @@ def _grouped_bar(results, field, ylabel, title, out_path, fmt, axis_label,
             for s in scenes
         ]
         values = values[1:]
+        if not values:
+            # Only the baseline has run so far (a sweep in flight). There is
+            # nothing to compare it against yet, so skip rather than emit an
+            # empty axis — and say so, because this used to fail silently.
+            print(f"[plot] {out_path.name}: only the baseline "
+                  f"({axis_label}={baseline_value}) has results; skipping")
+            return
 
     # Per-value mean over the scenes present FOR THAT VALUE, so a missing cell
     # (sweep still running, or one scene absent) cannot bias the average.
@@ -173,7 +180,7 @@ def _grouped_bar(results, field, ylabel, title, out_path, fmt, axis_label,
         # Bars start at zero (a truncated bar axis misstates ratios); the rotated
         # value labels need real headroom above the tallest bar.
         ax.set_ylim(0, max(finite) * 1.20)
-    ax.legend(frameon=False, ncol=min(len(values), 5), loc="lower center",
+    ax.legend(frameon=False, ncol=max(1, min(len(values), 5)), loc="lower center",
               bbox_to_anchor=(0.5, 1.005), fontsize=8, labelcolor=INK_MUTED)
     fig.tight_layout(rect=(0, 0, 1, 0.92))
     fig.savefig(out_path)

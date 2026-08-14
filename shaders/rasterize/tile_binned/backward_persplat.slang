@@ -190,10 +190,17 @@ static const uint STAGED_PIXELS = TILE_AREA / BACKWARD_PIXEL_STRIDE;
 //static const uint STAGED_PIXELS = TILE_AREA / 1u;
 #endif
 
-groupshared uint2  gs_checkpoints[NUM_WARPS][STAGED_PIXELS]; //Transmitt, R,G and B are already compressed to fp16. The limiting factor in this kernl is the groupshared memory.
-//on a 4080 we have ~100kb of gs mem. Each thread group is using ~25kb, meaning we can have 4 threagroups per SM, each TG is 256 threads == 8 warps. 8*4=32. The max warps in flight is 48 for a 4080, so
-// we cannot go over an occupancy of 2/3. Nsight captures in fact show 50/60% warp occupancy.
-// we most likely cannot compress the gs checkpoints more
+groupshared uint2  gs_checkpoints[NUM_WARPS][STAGED_PIXELS]; //Transmitt, R,G and B are already compressed to fp16.
+// STALE-COMMENT WARNING, kept because it explains a knob that no longer earns its
+// keep: this used to read "the limiting factor in this kernel is the groupshared
+// memory — on a 4080 we have ~100kb, each thread group uses ~25kb, so 4 TGs/SM,
+// 8 warps each = 32 of the 48 max warps => occupancy capped at 2/3". That was
+// true at a 16x16 tile, where NUM_WARPS was 8 and this array alone was
+// 8*256*8 = 16 KB. At the 8x8 tile (TILE_AREA 64 => NUM_WARPS 2) it is
+// 2*64*8 = 1 KB, and the whole per-bucket kernel stages under 2 KB. LDS is
+// nowhere near the limiter any more, so shrinking STAGED_PIXELS buys nothing
+// measurable — the STBN speedup comes from the shorter pixel LOOP, not from
+// smaller staging. Re-measure before trusting any occupancy claim here.
 
 [shader("compute")]
 [numthreads(TILE_AREA, 1, 1)]

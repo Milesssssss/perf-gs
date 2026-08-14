@@ -29,6 +29,12 @@ Idempotent: a cell whose ``test_psnr.json`` already exists is reused unless
 every cell, and the plots + CSV are regenerated each time, so a sweep is readable
 while it is still running.
 
+RUN IT ON AN IDLE GPU. ``train_wall_s`` is wall-clock, so anything else using the
+device — a profiler attached (Nsight, PIX), another trainer, even a live viewer —
+inflates it, and the PSNR column will look fine while every timing is quietly
+wrong. Re-run with ``--force`` if a sweep shared the GPU; there is no way to
+salvage the numbers after the fact.
+
 Outputs, under ``outputs/eval_sweep/<name>/``:
     results.json          one record per cell
     sweep_summary.csv     the table view (scene x value, plus per-value averages)
@@ -132,7 +138,13 @@ def _publish(out_dir: Path, results: list[dict], axis: str, iters: int,
     cmd = [sys.executable, str(REPO / "scripts" / "plots" / "plot_sweep.py"),
            "--results", str(out_dir / "results.json"),
            "--axis-label", axis, "--iters", str(iters)]
-    subprocess.run(cmd, cwd=str(REPO), stdout=subprocess.DEVNULL)
+    # Quiet on success (this runs after every cell), but never SILENT on failure:
+    # a broken plotter used to swallow itself here and the sweep looked healthy
+    # right up until there were no charts at the end.
+    proc = subprocess.run(cmd, cwd=str(REPO), capture_output=True, text=True)
+    if proc.returncode != 0:
+        print(f"[sweep] WARNING: plotting failed (rc={proc.returncode}); results "
+              f"are safe in results.json\n{proc.stderr.strip()[-600:]}", flush=True)
 
 
 def main() -> int:

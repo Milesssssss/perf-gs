@@ -113,10 +113,11 @@ EXPECTED_DEFAULTS = {
     "flat_bucket_backward": True,
     "backward_pixel_stride": 1,
     # STBN sparse pixel supervision. 1.0 would be OFF (every pixel supervised,
-    # bit-identical to a build without the feature); the default samples 0.25 of
-    # each tile and scales the surviving gradients by 4. The 0 max-fraction is the
-    # AUTO sentinel (stage the backward for the run's own density).
-    "stbn_pixel_fraction": 0.25,
+    # bit-identical to a build without the feature); the default samples half of
+    # each tile and scales the surviving gradients by 2 — the density the 9-scene
+    # sweep measured as free (-0.04 dB for 1.15x, see docs/stbn_pixel_sampling.md).
+    # stbn_max_fraction 0 = the diagnostic staged-array override off.
+    "stbn_pixel_fraction": 0.5,
     "stbn_warmup_iters": 0,
     "stbn_max_fraction": 0.0,
     "stbn_source": "nvidia",

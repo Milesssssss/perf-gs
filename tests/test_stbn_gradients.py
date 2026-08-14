@@ -91,11 +91,10 @@ def _pipeline(backend: str, *, compacted: bool, budget: int = BUDGET,
     """A pipeline whose SHADER DEFINES and StbnConfig agree.
 
     ``compacted`` is the only difference between the two paths under test: it
-    injects STBN_ENABLED (+ the staged capacity) and tells the pipeline the
+    injects STBN_ENABLED and tells the pipeline the
     backward now takes the mask parameters.
     """
-    defines = ({"STBN_ENABLED": "1", "STBN_MAX_TILE_PIXELS": f"{budget}u"}
-               if compacted else None)
+    defines = {"STBN_ENABLED": "1"} if compacted else None
     try:
         device = create_device(backend=backend, defines=defines)
     except Exception as exc:                                   # noqa: BLE001
@@ -105,7 +104,6 @@ def _pipeline(backend: str, *, compacted: bool, budget: int = BUDGET,
         loss_config=LossConfig(ssim_weight=ssim, alpha_weight=0.0),
         stbn_config=StbnConfig(
             pixel_fraction=budget / TILE_AREA,
-            max_fraction=budget / TILE_AREA,
             backward_compacted=compacted,
         ),
     )
@@ -297,12 +295,15 @@ def test_sparse_gradient_is_centred_on_the_dense_one_over_a_visit_cycle(
 
 
 @pytest.mark.parametrize("backend", BACKENDS)
-def test_budget_above_the_staged_capacity_is_refused(backend: str) -> None:
-    """Truncating to the staged capacity would drop pixel terms the loss had
-    already reweighted for, biasing the gradient by a ratio nobody chose — so it
-    raises instead."""
+def test_a_budget_of_a_whole_tile_is_representable(backend: str) -> None:
+    """The backward stages a FULL tile and clamps the runtime budget to it, so
+    every budget in [1, TILE_AREA] is expressible - there is no capacity a
+    schedule can outgrow, and therefore nothing to validate against. (There used
+    to be: the staged size was a CLI knob, on the theory that shrinking it bought
+    occupancy. At an 8x8 tile those arrays are under 2 KB of ~100 KB per SM, so it
+    bought nothing and the knob is now a hand-only diagnostic.)"""
     scene, camera = _deep_scene(), _camera()
-    pipeline = _pipeline(backend, compacted=True, budget=BUDGET)
-    with pytest.raises(ValueError, match="exceeds"):
-        _gradients(pipeline, scene, camera,
-                   StbnVariables(slice_index=0, pixels_per_tile=BUDGET * 2))
+    pipeline = _pipeline(backend, compacted=True)
+    grads = _gradients(pipeline, scene, camera,
+                       StbnVariables(slice_index=0, pixels_per_tile=TILE_AREA))
+    assert np.isfinite(grads["opacity"]).all()

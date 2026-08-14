@@ -81,10 +81,6 @@ class StbnConfig:
     # Sparse supervision is hardest on exactly the thin structures early
     # densification is trying to create, so starting dense is the cheap hedge.
     warmup_iters: int = 0
-    # Compile-time CAPACITY ceiling: sizes the backward's staged LDS arrays, so
-    # a run that never samples more than 25% of a tile also gets the occupancy
-    # win, not just the shorter loop. 1.0 = size for a full tile (always safe).
-    max_fraction: float = 1.0
     # True when STBN_ENABLED was injected, i.e. the backward walks the compacted
     # visit list. Deliberately separable from :attr:`enabled`: with the mask on
     # and this off the loss still zeroes unsampled pixels, so the gradient is the

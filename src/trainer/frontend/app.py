@@ -155,9 +155,11 @@ class ShaderSpecialization:
     deals in the semantic value; only this adapter knows the Slang macro name
     and unsigned-literal spelling.
 
-    stbn_pixels_per_tile does the same job for STBN sparse supervision: it turns
-    on the backward's compacted-visit loop (STBN_ENABLED) and sizes its staged
-    arrays (STBN_MAX_TILE_PIXELS). None = the feature is off for this build.
+    stbn_enabled turns on the backward's compacted-visit loop (STBN_ENABLED).
+    The staged-array size (STBN_MAX_TILE_PIXELS) is deliberately NOT set here:
+    at an 8x8 tile those arrays total under 2 KB of the ~100 KB shared memory per
+    SM, so shrinking them buys nothing measurable - the speedup is the shorter
+    pixel loop, which the RUNTIME budget drives.
 
     hardness_is_one specializes the Compositor to the pure alpha-over path when
     the run's extinction hardness is fixed at <= 1 (default): the dead pow-based
@@ -179,29 +181,28 @@ class ShaderSpecialization:
     # Default False = full runtime compositor (safe/back-compat). from_args sets
     # it True when the run's extinction hardness is fixed at <= 1.
     hardness_is_one: bool = False
-    # Per-tile pixel capacity for the STBN backward, or None when this build does
-    # not take the compacted-visit path at all.
-    stbn_pixels_per_tile: int | None = None
+    # Whether this build takes the compacted-visit path in the backward.
+    stbn_enabled: bool = False
+    # DIAGNOSTIC only (--stbn-max-fraction): shrink the backward's staged arrays
+    # to this fraction of a tile. 0 = leave them at the shader default (a full
+    # tile), which is what every real run wants.
+    stbn_staged_fraction: float = 0.0
 
     @classmethod
     def from_args(cls, args: argparse.Namespace) -> "ShaderSpecialization":
         hub = bool(getattr(args, "hub", False))
         fraction = float(getattr(args, "stbn_pixel_fraction", 1.0))
-        # The capacity has to cover the DENSEST point of the schedule. 0 = auto:
-        # the steady-state fraction, or a full tile when a warmup ramps down from
-        # one (sizing that run from its steady state would make the ramp's first
-        # steps ask for more slots than the kernel staged).
-        explicit = float(getattr(args, "stbn_max_fraction", 0.0))
-        ceiling = max(explicit, fraction) if explicit > 0.0 else fraction
+        enabled = fraction < 1.0 and not hub
+        staged = float(getattr(args, "stbn_max_fraction", 0.0) or 0.0)
+        # A warmup ramps from full density, so a shrunken stage could not hold the
+        # ramp's opening steps; ignore the diagnostic rather than truncate them.
         if int(getattr(args, "stbn_warmup_iters", 0)) > 0:
-            ceiling = 1.0
-        stbn_pixels = None
-        if fraction < 1.0 and not hub:
-            stbn_pixels = stbn_module.pixels_per_tile(ceiling, TILE_AREA)
+            staged = 0.0
         return cls(
             backward_pixel_stride=args.backward_pixel_stride,
             hardness_is_one=(not hub and float(args.extinction_hardness) <= 1.0),
-            stbn_pixels_per_tile=stbn_pixels,
+            stbn_enabled=enabled,
+            stbn_staged_fraction=(max(staged, fraction) if enabled and staged else 0.0),
         )
 
     def compiler_defines(self) -> dict[str, str] | None:
@@ -210,9 +211,14 @@ class ShaderSpecialization:
             defines["BACKWARD_PIXEL_STRIDE"] = f"{self.backward_pixel_stride}u"
         if self.hardness_is_one:
             defines["COMPOSITOR_HARDNESS_ONE"] = "1"
-        if self.stbn_pixels_per_tile is not None:
+        if self.stbn_enabled:
             defines["STBN_ENABLED"] = "1"
-            defines["STBN_MAX_TILE_PIXELS"] = f"{self.stbn_pixels_per_tile}u"
+        # Otherwise STBN_MAX_TILE_PIXELS stays at its shader default (a full
+        # tile) - see the class docstring for why sizing it down is not worth a
+        # knob; --stbn-max-fraction exists only to A/B that claim.
+        if self.stbn_staged_fraction > 0.0:
+            defines["STBN_MAX_TILE_PIXELS"] = (
+                f"{stbn_module.pixels_per_tile(self.stbn_staged_fraction, TILE_AREA)}u")
         return defines or None
 
 
@@ -224,12 +230,10 @@ def resolve_stbn_config(args: argparse.Namespace) -> StbnConfig:
     would bind shader parameters the compiled kernel never declared.
     """
     specialization = ShaderSpecialization.from_args(args)
-    capacity = specialization.stbn_pixels_per_tile
     return StbnConfig(
         pixel_fraction=float(getattr(args, "stbn_pixel_fraction", 1.0)),
         warmup_iters=int(getattr(args, "stbn_warmup_iters", 0)),
-        max_fraction=(capacity / TILE_AREA if capacity is not None else 1.0),
-        backward_compacted=capacity is not None,
+        backward_compacted=specialization.stbn_enabled,
         source=str(getattr(args, "stbn_source", "nvidia")),
         file_path=str(getattr(args, "stbn_file", "")),
         seed=int(getattr(args, "stbn_seed", 0)),

@@ -298,11 +298,6 @@ class TrainingPipeline:
         counters against this."""
         return self._stbn.slices
 
-    @property
-    def stbn_capacity(self) -> int:
-        """Per-tile budget the backward staged room for (compile-time)."""
-        return _stbn.pixels_per_tile(self.stbn_config.max_fraction, TILE_AREA)
-
     def _stbn_kwargs(self, contextual: IterationContextualVariables) -> dict:
         """The mask parameters for this iteration's kernels.
 
@@ -313,16 +308,11 @@ class TrainingPipeline:
         variables = contextual.stbn if contextual is not None else None
         if variables is None or variables.pixels_per_tile <= 0:
             return self._stbn.shader_kwargs(0, TILE_AREA)
-        budget = int(variables.pixels_per_tile)
-        if self.stbn_config.backward_compacted and budget > self.stbn_capacity:
-            # Silently truncating would drop pixels the loss still weighted for,
-            # biasing the gradient by exactly the ratio nobody asked for.
-            raise ValueError(
-                f"STBN budget {budget} pixels/tile exceeds the {self.stbn_capacity} "
-                f"the backward staged (--stbn-max-fraction "
-                f"{self.stbn_config.max_fraction:g}); raise --stbn-max-fraction.")
-        return self._stbn.shader_kwargs(variables.slice_index,
-                                        min(budget, TILE_AREA))
+        # The shaders stage a full tile and clamp to it, so any budget in
+        # [1, TILE_AREA] is representable; nothing here can overrun the staging.
+        return self._stbn.shader_kwargs(
+            variables.slice_index,
+            min(int(variables.pixels_per_tile), TILE_AREA))
 
     def on_hot_reload(self) -> None:
         """Refresh reflection-dependent objects after device.reload_all_programs().

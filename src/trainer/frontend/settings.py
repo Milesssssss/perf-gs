@@ -230,7 +230,7 @@ SETTINGS: tuple[Setting, ...] = (
                  "cost. Injected as a compile-time define.",
             launch_only=True,
             note="compile-time: set it with --backward-pixel-stride"),
-    Setting("stbn_pixel_fraction", "STBN pixel fraction", "perf", float, default=0.25,
+    Setting("stbn_pixel_fraction", "STBN pixel fraction", "perf", float, default=.1,
             help="Fraction rho of pixels each backward supervises, chosen by a "
                  "spatiotemporal blue-noise mask (NVIDIA STBN, re-ranked per "
                  "tile so EXACTLY rho*64 of every 8x8 tile is sampled). 1.0 "
@@ -252,18 +252,6 @@ SETTINGS: tuple[Setting, ...] = (
                  "starting dense is the cheap hedge. 0 (default) = the target "
                  "fraction from step 1. No-op at --stbn-pixel-fraction 1.0.",
             minimum=0, maximum=20_000, speed=10, note="0 = no ramp"),
-    Setting("stbn_max_fraction", "STBN staged fraction", "perf", float, default=0.0,
-            help="Compile-time CAPACITY for STBN sampling: the backward stages "
-                 "room for this fraction of a tile (STBN_MAX_TILE_PIXELS "
-                 "define) and the run may not exceed it. 0 (default) = AUTO: "
-                 "follow --stbn-pixel-fraction, so the staged LDS shrinks with "
-                 "the density and buys occupancy on top of the shorter pixel "
-                 "loop; a --stbn-warmup-iters ramp starts at full density, so "
-                 "auto then resolves to 1.0. Pass an explicit value to stage for "
-                 "a density higher than the run's steady state.",
-            minimum=0.0, maximum=1.0, speed=0.01, fmt="%.3f",
-            launch_only=True,
-            note="0 = auto (follow the pixel fraction)"),
     # ---- EVALUATION: the passes that render the WHOLE camera set.
     Setting("evaluation", "eval + final metrics", "eval", bool, default=True,
             help="Run the passes that render every camera: the periodic eval "
