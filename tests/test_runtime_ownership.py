@@ -47,15 +47,16 @@ class _Device:
 
 
 def test_runtime_holds_the_lock_for_queue_operations_only() -> None:
-    """submit (+ its present callback) and the queue-wide idle wait are externally
-    synchronized and take the lock; waiting on ONE submission must not, or whoever
-    waits owns the GPU queue for the whole execution of their own work."""
+    """submit and the queue-wide idle wait are externally synchronized and take the
+    lock. Waiting on ONE submission must not, or whoever waits owns the GPU queue
+    for the whole execution of their own work — and neither must the present
+    callback, so a present that stalls cannot hold the queue shut."""
     lock = _TrackingLock()
     device = _Device(lock)
     runtime = GpuRuntime(device, lock)
 
     def after_submit() -> None:
-        assert lock.depth > 0
+        assert lock.depth == 0, "present must not hold the queue lock"
         device.events.append("present")
 
     handle = runtime.submit(CommandBatch(_Encoder()), after_submit=after_submit)

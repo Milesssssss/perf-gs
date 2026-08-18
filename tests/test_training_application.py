@@ -342,8 +342,9 @@ def test_a_dataset_the_loader_rejects_leaves_the_hub_alive(tmp_path) -> None:
 
 # --- STBN: the mask's temporal axis is per-CAMERA, not per-iteration ----------
 
-def _stbn_loop(target_fraction=0.1, warmup=0, slices=64, seed=0):
+def _stbn_loop(target_fraction=0.1, warmup=0, slices=64, seed=0, independent=False):
     """A TrainingLoop carrying only what ``_stbn_variables`` reads."""
+    import numpy as np
     from trainer.frontend.schedule import StbnDensitySchedule
 
     loop = object.__new__(TrainingLoop)
@@ -353,6 +354,8 @@ def _stbn_loop(target_fraction=0.1, warmup=0, slices=64, seed=0):
     loop.stbn_slices = slices
     loop.stbn_visits = {}
     loop.stbn_phase = {}
+    loop.stbn_independent = independent
+    loop._stbn_rng = np.random.default_rng(seed)
     loop.training_step = 1
     return loop
 
@@ -374,6 +377,22 @@ def test_stbn_slice_advances_per_camera_visit_not_per_iteration() -> None:
         phase[9] + 0, phase[7] + 2, phase[3] + 1,
     ]
     assert loop.stbn_visits == {7: 3, 3: 2, 9: 1}
+
+
+def test_stbn_independent_draws_random_slices_decoupled_from_visits() -> None:
+    """--stbn-independent replaces the per-visit temporal walk with a fresh
+    random slice each step: the same camera no longer marches 0,1,2 through its
+    slices, the visit bookkeeping is left untouched, and two runs with the same
+    seed agree (the slice RNG is separate from the camera draw, so it cannot move
+    the sampling order)."""
+    loop = _stbn_loop(slices=64, seed=7, independent=True)
+    drawn = [loop._stbn_variables(5).slice_index for _ in range(8)]
+    assert all(0 <= s < 64 for s in drawn)
+    assert len(set(drawn)) > 1               # not a fixed or per-visit sequence
+    assert loop.stbn_visits == {} and loop.stbn_phase == {}
+
+    again = _stbn_loop(slices=64, seed=7, independent=True)
+    assert [again._stbn_variables(5).slice_index for _ in range(8)] == drawn
 
 
 def test_stbn_phases_differ_across_cameras_and_wrap_into_range() -> None:

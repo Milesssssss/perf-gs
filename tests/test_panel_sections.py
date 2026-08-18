@@ -679,3 +679,83 @@ def test_a_live_per_camera_number_is_labelled_as_one_camera() -> None:
     sampled = next(line for line in lines if "dB" in line)
     assert "dB" not in model and "loss" not in model     # exact numbers only
     assert "sampled cam" in sampled and "loss 0.0182" in sampled
+
+
+# --- the progress bar must track what is ACTUALLY running --------------------
+
+def _visible_progress(panel):
+    """(fraction, ...) of every progress bar the panel would currently draw."""
+    return [w.binds["fraction"]() for w in panel.of("progress") if w.shown]
+
+
+def test_a_running_step_shows_the_iteration_bar() -> None:
+    session = Session()
+    session.training_initializing(3000)
+    session.training_running()
+    session.publish_training(step=1500, total=3000)
+    panel, _, _ = build(session, "training")
+    assert _visible_progress(panel) == [0.5]
+
+
+def test_the_eval_sweep_replaces_the_iteration_bar_with_its_own() -> None:
+    """THE bug: --eval-every dividing --iters puts the full-camera sweep ON the
+    last iteration, so the iteration bar read "3,000 / 3,000  100.0%" for the
+    minutes that sweep took — a bar claiming the run was done while it plainly
+    was not. Whatever is actually running owns the bar."""
+    session = Session()
+    session.training_initializing(3000)
+    session.training_running()
+    session.publish_training(step=3000, total=3000)
+    session.begin_activity("Evaluating every camera", 0.0)
+    session.set_progress("Evaluating every camera", 0.25,
+                         detail="camera 48/194")
+
+    panel, view, _ = build(session, "training")
+    bars = _visible_progress(panel)
+    assert bars == [0.25], \
+        f"expected only the eval bar at 25%, got {bars}"
+    assert 1.0 not in bars, "the 100% iteration bar is still on screen"
+    # The label says what is running, and the iteration count is still readable
+    # as a secondary row rather than as the headline.
+    assert view.activity.label == "Evaluating every camera"
+    assert view.activity.detail == "camera 48/194"
+
+
+def test_finalizing_shows_the_finalize_bar_not_a_full_iteration_bar() -> None:
+    session = Session()
+    session.training_initializing(3000)
+    session.training_running()
+    session.publish_training(step=3000, total=3000)
+    session.training_finalizing("held-out test PSNR")
+
+    panel, _, _ = build(session, "training")
+    assert _visible_progress(panel) == [0.0]
+
+
+def test_indeterminate_work_parks_the_bar_at_zero_rather_than_lying() -> None:
+    """Activity.fraction is None when no honest number exists; the bar must not
+    invent one (and must not fall back to the iteration fraction)."""
+    session = Session()
+    session.training_initializing(3000)
+    session.training_running()
+    session.publish_training(step=3000, total=3000)
+    session.begin_activity("Rendering every camera")     # no fraction
+
+    panel, _, _ = build(session, "training")
+    assert _visible_progress(panel) == [0.0]
+
+
+def test_the_iteration_bar_returns_once_the_activity_ends() -> None:
+    """The swap is not one-way: when the sweep finishes mid-run the iteration bar
+    has to come back, or the rest of the run shows a stale eval bar."""
+    session = Session()
+    session.training_initializing(3000)
+    session.training_running()
+    session.publish_training(step=2000, total=3000)
+    session.begin_activity("Evaluating every camera", 0.5)
+    panel, view, _ = build(session, "training")
+    assert _visible_progress(panel) == [0.5]
+
+    session.end_activity()
+    view.sample()          # what the render loop does once per frame
+    assert _visible_progress(panel) == [2000 / 3000]

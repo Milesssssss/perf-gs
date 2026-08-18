@@ -145,6 +145,18 @@ The archives are large (~12 GB for the public scenes, ~4.5 GB more for the extra
 
 The extra scenes (flowers, treehill) carry a redistribution caveat from the dataset authors; the script prints a notice before fetching them. See <https://jonbarron.info/mipnerf360/> for details.
 
+Fetch the **Tanks & Temples** and **Deep Blending** scenes (the other datasets the 3DGS papers report on) with a second helper. Both ship in one ~650 MB archive from the INRIA 3DGS authors:
+
+```bash
+# Both -> datasets/tandt/{train,truck} and datasets/db/{drjohnson,playroom}
+python scripts/data/download_tandt_db.py
+
+# Only one dataset (still downloads the combined archive)
+python scripts/data/download_tandt_db.py --set tandt   # or: --set db
+```
+
+Same flags as above (`--dest`, `--force`, `--keep-zip`). These scenes carry their originators' research-use terms; the script prints a notice before fetching. See <https://www.tanksandtemples.org/> and <http://visual.cs.ucl.ac.uk/pubs/deepblending/>.
+
 ## Quickstart
 
 ```bash

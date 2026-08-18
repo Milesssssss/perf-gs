@@ -156,33 +156,21 @@ class Panel:
     # ---- composition -----------------------------------------------------
 
     def _widget_id(self, visible_label: str = "") -> str:
-        """``visible_label`` plus a unique, INVISIBLE ImGui id suffix.
+        """``visible_label`` plus a unique, invisible ImGui id suffix.
 
-        ImGui identifies a widget BY ITS LABEL (``window->GetID(label)``) and
-        hides everything after a ``##``. Every control here puts its caption on
-        the line above (sgl's hard-coded item width pushes a real label off the
-        panel — see the module docstring), so they were all constructed with the
-        same empty label and therefore shared ONE id across the whole window.
-        ImGui tracks a single active id, so the first such widget drawn each
-        frame reclaimed it: a text edit lost focus after one keystroke, and a
-        drag could scrub a different field than the one under the cursor.
-
-        Every id-bearing widget must therefore route its label through here. The
-        suffix is positional, which is stable because the panel is BUILT once and
-        then only re-bound (see :meth:`bind`) — ids do not shuffle between frames.
+        ImGui identifies a widget by its label and hides everything after a
+        ``##``. Controls here put their caption on the line above, so they were all
+        built with the same empty label and shared ONE id across the window: a text
+        edit lost focus after one keystroke, and a drag could scrub a different
+        field. Every id-bearing widget must route its label through here.
         """
         self._widget_seq += 1
         return f"{visible_label}##w{self._widget_seq}"
 
     @staticmethod
     def _relabel(getter: Getter, suffix: str) -> Getter:
-        """Keep a dynamically-labelled widget's id STABLE.
-
-        A ``label`` binding overwrites the label every frame, which would strip
-        the ``##`` suffix that :meth:`_widget_id` added and change the widget's
-        id mid-run — worse than sharing an id, because ImGui would drop any
-        interaction in progress.
-        """
+        """Keep a dynamically-labelled widget's id stable: a ``label`` binding
+        overwrites the label every frame and would strip the ``##`` suffix."""
         return lambda: f"{getter()}{suffix}"
 
     def bind(self, widget: spy.ui.Widget, **getters: Dynamic) -> spy.ui.Widget:

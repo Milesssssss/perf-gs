@@ -42,6 +42,7 @@ def _viewer(*, training: bool, parked: bool, dirty: bool = False) -> Viewer:
     if dirty:
         viewer._scene_dirty.set()
     viewer._last_scene_s = 0.0
+    viewer._frame_budget_off = threading.Event()
     return viewer
 
 
@@ -129,3 +130,34 @@ def test_rig_without_a_callback_still_works() -> None:
     rig = _CameraRig(fovy=60.0, render_size=(8, 8))
     rig.snap_to(-1)          # must not raise
     assert rig.index == -1
+
+
+def test_suspending_the_budget_uncaps_a_still_active_run() -> None:
+    """The eval sweep and the render-all dump BLOCK the training loop, so nothing
+    is competing for the queue while they run - and they are exactly when someone
+    is watching the window, because the iteration counter has stopped moving. The
+    ration has to lift for them even though the run is nominally active."""
+    viewer = _viewer(training=True, parked=False)
+    viewer._last_scene_s = 0.0
+    assert not viewer._scene_due(0.001)          # capped: mid-run, too soon
+
+    Viewer.suspend_frame_budget(viewer)
+    assert viewer._scene_due(0.001)              # uncapped for the duration
+    viewer._scene_dirty.clear()
+    assert viewer._scene_due(0.002)              # ...and it STAYS uncapped
+
+    Viewer.resume_frame_budget(viewer)
+    viewer._scene_dirty.clear()
+    viewer._last_scene_s = 0.002
+    assert not viewer._scene_due(0.003)          # back on the ration
+
+
+def test_suspending_the_budget_also_forces_a_repaint() -> None:
+    """Whatever suspends the budget has usually just changed the model (a densify,
+    an eval render), so the frame on screen is stale; lifting the ration without
+    marking it dirty would leave a parked view showing the old scene."""
+    viewer = _viewer(training=True, parked=True)
+    viewer._scene_dirty.clear()
+    assert not viewer._scene_due(10.0)
+    Viewer.suspend_frame_budget(viewer)
+    assert viewer._scene_dirty.is_set()

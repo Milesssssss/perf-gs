@@ -123,6 +123,7 @@ EXPECTED_DEFAULTS = {
     "stbn_source": "nvidia",
     "stbn_file": "",
     "stbn_seed": 0,
+    "stbn_independent": False,
     "extinction_hardness": 1.0,
     "extinction_hardness_warmup": 500,
     "final_test_psnr": False,

@@ -338,6 +338,17 @@ def build_parser() -> argparse.ArgumentParser:
                     help="Seed for --stbn-source white (ignored otherwise). Kept "
                          "separate from --seed so the mask can be re-rolled "
                          "without changing the camera draw order.")
+    parser.add_argument("--stbn-independent",
+                    action=argparse.BooleanOptionalAction, default=False,
+                    help="Draw a fresh RANDOM mask slice each step instead of "
+                         "advancing the temporal axis per camera visit. This "
+                         "turns the spatiotemporal mask into an INDEPENDENT-"
+                         "per-step mask (same slice pool, temporal ordering "
+                         "broken) — the ablation baseline that isolates what the "
+                         "temporal axis buys over independently drawn masks. The "
+                         "slice RNG is seeded from --stbn-seed, kept separate "
+                         "from the camera draw so it can't shift the sampling "
+                         "order. Only used when --stbn-pixel-fraction < 1.")
     _shared(parser, "extinction_hardness")
     _shared(parser, "extinction_hardness_warmup")
     parser.add_argument("--final-test-psnr", action="store_true", default=False,

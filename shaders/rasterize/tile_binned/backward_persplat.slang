@@ -190,17 +190,9 @@ static const uint STAGED_PIXELS = TILE_AREA / BACKWARD_PIXEL_STRIDE;
 //static const uint STAGED_PIXELS = TILE_AREA / 1u;
 #endif
 
-groupshared uint2  gs_checkpoints[NUM_WARPS][STAGED_PIXELS]; //Transmitt, R,G and B are already compressed to fp16.
-// STALE-COMMENT WARNING, kept because it explains a knob that no longer earns its
-// keep: this used to read "the limiting factor in this kernel is the groupshared
-// memory — on a 4080 we have ~100kb, each thread group uses ~25kb, so 4 TGs/SM,
-// 8 warps each = 32 of the 48 max warps => occupancy capped at 2/3". That was
-// true at a 16x16 tile, where NUM_WARPS was 8 and this array alone was
-// 8*256*8 = 16 KB. At the 8x8 tile (TILE_AREA 64 => NUM_WARPS 2) it is
-// 2*64*8 = 1 KB, and the whole per-bucket kernel stages under 2 KB. LDS is
-// nowhere near the limiter any more, so shrinking STAGED_PIXELS buys nothing
-// measurable — the STBN speedup comes from the shorter pixel LOOP, not from
-// smaller staging. Re-measure before trusting any occupancy claim here.
+groupshared uint2  gs_checkpoints[NUM_WARPS][STAGED_PIXELS]; // (T,RGB) as fp16
+// 1 KB at the 8x8 tile (NUM_WARPS 2); the kernel stages under 2 KB total, so LDS
+// is not the occupancy limiter. It was at 16x16, where this array alone was 16 KB.
 
 [shader("compute")]
 [numthreads(TILE_AREA, 1, 1)]
@@ -796,7 +788,7 @@ void backwardRasterizePerBucket(
     GroupMemoryBarrierWithGroupSync();
     if (!bucket_valid) return;
 
-    // This lane's splat (index within the tile's sorted list).
+    // This lane's splat (index within the tile's sorted list)
     uint local_splat = local_bucket * RASTER_BUCKET_SIZE + lane;
     bool splat_valid = (local_splat < tile_count);
     uint g_idx = 0u;
@@ -815,18 +807,11 @@ void backwardRasterizePerBucket(
     float  acc_absx = 0.0;
     float  acc_absy = 0.0;
 
-    // Build the primitive record once per lane via the SAME IBlendablePrimitive
-    // conformer the forward uses (GaussianPrimitive), so coverage()/color() +
-    // their bwd_diff define the gaussian's differentiable behavior in ONE place.
-    // Masked lanes get a zero prim (finite results; scan identities via alpha=0).
     GaussianPrimitive prim = splat_valid ? GaussianPrimitive.make(blend_only_data.mean, blend_only_data.cov2d,
                                  blend_only_data.opacity, blend_only_data.sh0,
                                  blend_only_data.opacity_compensation) : GaussianPrimitive.make(float2(0.0), float3(0.0), 0.0, float3(0.0), 0.0);
     float3 c_i = prim.color();
 
-    // --- Pixel loop: all 32 lanes lockstep so the wave scans stay valid ---
-    // `v` indexes the VISIT: all TILE_AREA pixels with STBN off, or just the
-    // `visit_count` sampled ones with it on (see the visit-list comment above).
     [loop]
     for (uint v = 0u; v < visit_count; ++v)
     {
@@ -857,27 +842,29 @@ void backwardRasterizePerBucket(
 #if !STBN_ENABLED
         uint checkpoint_slot = (p - phase) / BACKWARD_PIXEL_STRIDE;
 #endif
-        float T_checkpoint; float3 C_checkpoint;
-        unpackCheckpoint(gs_checkpoints[warp_idx][checkpoint_slot], T_checkpoint, C_checkpoint);
-
         float2 pixel_center = float2(pixel) + 0.5;
 
-        // Inline per-pixel dL_dC (was gs_dLdC[p]). In-bounds here (processed>0
-        // implies pix_valid). Warp-uniform broadcast.
-        float4 dLdC4 = dL_dC_texture[pixel];
-        float3 dL_dC = dLdC4.rgb;
+
+        float T_checkpoint; float3 C_checkpoint;
+        unpackCheckpoint(gs_checkpoints[warp_idx][checkpoint_slot], T_checkpoint, C_checkpoint);
+        float dLdC_c, dLdC_C_checkpoint;
+        {
+            float3 dL_dC = dL_dC_texture[pixel].rgb;
+            dLdC_c = dot(dL_dC, c_i);
+            dLdC_C_checkpoint = dot(dL_dC, C_checkpoint);
+        }
 
         float alpha = 0.0;
-        float alpha_grad_scale = 0.0;
+        bool alpha_unclamped = false;
         if (contributes)
         {
             float alpha_raw = prim.coverage(pixel_center);
             alpha = min(alpha_raw, ALPHA_MAX);
-            alpha_grad_scale = (alpha_raw <= ALPHA_MAX) ? 1.0 : 0.0;
+            alpha_unclamped = (alpha_raw <= ALPHA_MAX);
             if (alpha < ALPHA_MIN_TRACK)
             {
                 alpha = 0.0;
-                alpha_grad_scale = 0.0;
+                alpha_unclamped = false;
             }
         }
 
@@ -889,13 +876,13 @@ void backwardRasterizePerBucket(
         float T_step = comp.transmittance(alpha);
 
 #if BACKWARD_BLEND_SCAN_MODE == 0
-        float dLdC_weight = dot(dL_dC, c_i) * comp.weight(alpha);
+        float dLdC_weight = dLdC_c * comp.weight(alpha);
         float T_prefix, dLdC_C_in_front_prefix;
         blendPrefixExclusive(T_step, dLdC_weight, lane, T_prefix, dLdC_C_in_front_prefix);
         float T_i     = T_checkpoint * T_prefix;
         float alpha_T = comp.weight(alpha) * T_i;
         float dLdC_contrib = dLdC_weight * T_i;
-        float dLdC_C_in_front = dot(dL_dC, C_checkpoint) + T_checkpoint * dLdC_C_in_front_prefix;
+        float dLdC_C_in_front = dLdC_C_checkpoint + T_checkpoint * dLdC_C_in_front_prefix;
 #else
         float T_prefix = WavePrefixProduct(T_step);
         float T_i     = T_checkpoint * T_prefix;
@@ -909,30 +896,27 @@ void backwardRasterizePerBucket(
 
         if (contributes)
         {
-            float  dL_dA = dLdC4.a;
-            // Inline per-pixel T_final / C_total (was gs_Tfinal/gs_Ctotal).
-            float4 out_px  = output_image[pixel];
-            float  T_final = 1.0 - out_px.a;
-            float3 C_total = out_px.rgb;
-            float  oneMinusAlpha = 1.0 - alpha;
+            // Re-read the two texels instead of carrying them through the scan
+            // (see the scalar-collapse note above). Only contributing lanes pay,
+            // and both are L1-hot from this iteration's earlier read.
+            float4 dLdC4 = dL_dC_texture[pixel];
+            float4 C_total = output_image[pixel];
+            float  T_final = 1.0 - C_total.a;
 
-            acc_color += dL_dC * alpha_T;
+            acc_color += dLdC4.rgb * alpha_T;
 
 #if BACKWARD_BLEND_SCAN_MODE == 0
-            float dLdC_Cbehind = dot(dL_dC, C_total) - dLdC_C_in_front - dLdC_contrib;
-            float dL_dalpha = comp.coverageGrad(alpha, dot(dL_dC, c_i), T_i, dLdC_Cbehind, dL_dA, T_final);
+            float dLdC_Cbehind = dot(dLdC4.rgb, C_total.rgb) - dLdC_C_in_front - dLdC_contrib;
+            float dL_dalpha = comp.coverageGrad(alpha, dLdC_c, T_i, dLdC_Cbehind, dLdC4.a, T_final);
 #else
-            float3 C_behind = C_total - C_in_front - contrib; //remember that C_total = C_in_front + contrib_this_prim + C_behind, easy
-            // Route the coverage-gradient through the SAME Compositor as the fused
-            // path so both scan modes honor extinction_hardness (bit-identical at
-            // hardness=1: coverageGrad reduces to c_i*T_i - C_behind/(1-alpha)).
-            float dL_dalpha = comp.coverageGrad(alpha, dot(dL_dC, c_i), T_i, dot(dL_dC, C_behind), dL_dA, T_final);
+            //remember that C_total = C_in_front + contrib_this_prim + C_behind, easy
+            float3 C_behind = C_total.rgb - C_in_front - contrib;
+            float dL_dalpha = comp.coverageGrad(alpha, dLdC_c, T_i,
+                                                dot(dLdC4.rgb, C_behind), dLdC4.a, T_final);
 #endif
-            float dL_d_alpha_raw = dL_dalpha * alpha_grad_scale;
-
             var dp_prim = diffPair(prim);
 
-            bwd_diff(primitiveCoverage<GaussianPrimitive>)(dp_prim, pixel_center, dL_d_alpha_raw);
+            bwd_diff(primitiveCoverage<GaussianPrimitive>)(dp_prim, pixel_center, alpha_unclamped ? dL_dalpha : 0.0);
 
             acc_mean2d += dp_prim.d.mean;
             acc_cov2d  += dp_prim.d.cov2d;
@@ -947,13 +931,12 @@ void backwardRasterizePerBucket(
         }
     }
 
-    // --- Per-splat projection seed + atomics (one lane per splat) ---
     if (splat_valid)
     {
         //rendered color is produced by taking the sh0 coeff, multiplying it by SH_C0 and adding 0.5. So the grad wrt to
         //Loss is SH_C0*dL_dC_i, where dL_dC_i is the accumulated seed sum(dL_dC * alpha_T) from the pixel loop above.
         acc_color *= SH_C0;
-        
+
         if (BACKWARD_PIXEL_STRIDE > 1u)
         {
             float s = float(BACKWARD_PIXEL_STRIDE);

@@ -237,6 +237,7 @@ def resolve_stbn_config(args: argparse.Namespace) -> StbnConfig:
         source=str(getattr(args, "stbn_source", "nvidia")),
         file_path=str(getattr(args, "stbn_file", "")),
         seed=int(getattr(args, "stbn_seed", 0)),
+        independent=bool(getattr(args, "stbn_independent", False)),
     )
 
 
@@ -1277,6 +1278,11 @@ class TrainingLoop:
         self.stbn_slices = self.runtime.pipeline.stbn_slices
         self.stbn_visits: dict[int, int] = {}
         self.stbn_phase: dict[int, int] = {}
+        # --stbn-independent: a fresh random slice each step instead of the
+        # per-visit walk, from an RNG kept separate from the camera draw so it
+        # cannot shift the sampling order. The independent-per-step baseline.
+        self.stbn_independent = stbn_config.independent
+        self._stbn_rng = np.random.default_rng(int(getattr(self.args, "stbn_seed", 0)))
 
         self.training_step = 0
         self.gaussian_count = scene.initial_gaussian_count
@@ -1369,15 +1375,21 @@ class TrainingLoop:
         if self.stbn_density is None:
             return None
         slices = max(self.stbn_slices, 1)
+        pixels = stbn_module.pixels_per_tile(
+            self.stbn_density.at(self.training_step), TILE_AREA)
+        if self.stbn_independent:
+            # A fresh random slice each step: consecutive steps draw independent
+            # masks from the same pool, so the temporal axis contributes nothing.
+            return StbnVariables(slice_index=int(self._stbn_rng.integers(slices)),
+                                 pixels_per_tile=pixels)
         if camera_index not in self.stbn_phase:
             mixed = int(camera_index) * 2654435761 + int(self.args.stbn_seed) * 40503
             self.stbn_phase[camera_index] = mixed % slices
         visit = self.stbn_visits.get(camera_index, 0)
         self.stbn_visits[camera_index] = visit + 1
-        fraction = self.stbn_density.at(self.training_step)
         return StbnVariables(
             slice_index=(visit + self.stbn_phase[camera_index]) % slices,
-            pixels_per_tile=stbn_module.pixels_per_tile(fraction, TILE_AREA),
+            pixels_per_tile=pixels,
         )
 
     def _next_iteration(self) -> IterationContext:
@@ -1491,16 +1503,17 @@ class TrainingLoop:
 
         if context.step_number > 1 and context.events.render_all:
             state = self.runtime.viewer.state
-            state.set_detail("rendering every camera")
-            try:
-                render_all_cameras(
-                    self.runtime.pipeline,
-                    self.scene.colmapScene,
-                    context.step_number,
-                    self.paths.cameras,
-                )
-            finally:
-                state.set_detail("")
+            state.begin_activity("Rendering every camera")
+            with self.runtime.viewer.unthrottled():
+                try:
+                    render_all_cameras(
+                        self.runtime.pipeline,
+                        self.scene.colmapScene,
+                        context.step_number,
+                        self.paths.cameras,
+                    )
+                finally:
+                    state.end_activity()
 
         self._record_psnr_curve_if_due(context)
         self._run_evaluation_if_due(context)
@@ -1552,26 +1565,37 @@ class TrainingLoop:
         # is the whole visible wait after training "ends". The iteration counter
         # cannot show it (it is pinned at N/N), so the sweep says so itself.
         state = self.runtime.viewer.state
-        try:
-            self.eval_time_total = run_eval_sweep(
-                pipeline=self.runtime.pipeline,
-                scene=self.scene.colmapScene,
-                it=context.step_number,
-                test_indices=self.scene.test_indices,
-                targets_srgb=self.targets.srgb,
-                targets_linear=self.targets.linear,
-                cams_dir=self.paths.cameras,
-                eval_curve_json=stream,
-                t_start=self.started_at,
-                eval_time_total=self.eval_time_total,
-                eval_holdout=bool(self.args.eval_holdout),
-                progress=lambda done, total:
-                    state.set_detail(f"evaluating camera {done}/{total}"),
-            )
-        finally:
-            state.set_detail("")
+        state.begin_activity("Evaluating every camera", 0.0)
+        # The sweep BLOCKS the loop, so the viewer is not competing with anything
+        # for the queue while it runs - and this is exactly when someone is looking
+        # at the window, because the iteration counter has stopped.
+        with self.runtime.viewer.unthrottled():
+            try:
+                self.eval_time_total = run_eval_sweep(
+                    pipeline=self.runtime.pipeline,
+                    scene=self.scene.colmapScene,
+                    it=context.step_number,
+                    test_indices=self.scene.test_indices,
+                    targets_srgb=self.targets.srgb,
+                    targets_linear=self.targets.linear,
+                    cams_dir=self.paths.cameras,
+                    eval_curve_json=stream,
+                    t_start=self.started_at,
+                    eval_time_total=self.eval_time_total,
+                    eval_holdout=bool(self.args.eval_holdout),
+                    progress=lambda done, total: state.set_progress(
+                        "Evaluating every camera",
+                        (done / total) if total else None,
+                        detail=f"camera {done}/{total}"),
+                )
+            finally:
+                state.end_activity()
 
     def _complete_training_loop(self) -> TrainingResult:
+        # The last iteration is done, so nothing after this point competes with a
+        # training step: give the viewer the GPU back HERE rather than after the
+        # held-out PSNR pass (which renders every test camera) has also run.
+        self.runtime.viewer.set_training_active(False)
         self.runtime.pipeline.runtime.wait_for_idle()
         if self.extinction_hardness_schedule is not None:
             self.runtime.pipeline.set_extinction_hardness(self.extinction_hardness_schedule.target)

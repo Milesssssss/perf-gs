@@ -59,38 +59,27 @@ class RegularizationConfig:
 
 @dataclass(frozen=True)
 class StbnConfig:
-    """Spatiotemporal-blue-noise pixel subsampling policy (OFF by default).
+    """Spatiotemporal-blue-noise pixel subsampling policy (OFF at 1.0).
 
-    ``pixel_fraction`` is the steady-state fraction rho of pixels each backward
-    supervises; ``1.0`` means "every pixel", i.e. the feature disabled and the
-    pipeline bit-identical to a build without it. See
-    :mod:`trainer.backend.render.stbn` for the mask and
-    docs/stbn_pixel_sampling.md for the whole design.
-
-    Everything here is a runtime uniform except the two compile-time facts, and
-    those are recorded rather than derived because the SHADER DEFINES are fixed
-    when the device is created — which in hub mode is before the panel that sets
-    the rest exists. A config whose ``backward_compacted`` disagreed with the
-    injected define would bind parameters the shader never declared.
+    ``backward_compacted`` records whether STBN_ENABLED was actually injected,
+    rather than deriving it: the shader defines are fixed when the device is
+    created, which in hub mode is before the panel that sets the rest exists, and
+    a config disagreeing with the define would bind parameters the kernel never
+    declared. With the mask on and this off the loss still zeroes unsampled
+    pixels, so the gradient is the sparse one without the pixel-loop savings.
     """
 
-    # Steady-state fraction rho of pixels each backward supervises. 1.0 = the
-    # feature is off and the pipeline is bit-identical to a build without it.
+    # Steady-state fraction rho of pixels each backward supervises.
     pixel_fraction: float = 1.0
     # Iterations spent ramping the density from 1.0 down to pixel_fraction.
-    # Sparse supervision is hardest on exactly the thin structures early
-    # densification is trying to create, so starting dense is the cheap hedge.
     warmup_iters: int = 0
-    # True when STBN_ENABLED was injected, i.e. the backward walks the compacted
-    # visit list. Deliberately separable from :attr:`enabled`: with the mask on
-    # and this off the loss still zeroes unsampled pixels, so the gradient is the
-    # sparse one while the backward keeps its exact full-pixel loop. That is a
-    # correct-but-slow REFERENCE configuration, and what the equivalence test
-    # compares the fast path against.
     backward_compacted: bool = False
     source: str = "nvidia"
     file_path: str = ""
     seed: int = 0
+    # Draw a random slice each step (--stbn-independent) instead of the per-visit
+    # temporal walk — the independent-per-step baseline for the temporal ablation.
+    independent: bool = False
 
     @property
     def enabled(self) -> bool:

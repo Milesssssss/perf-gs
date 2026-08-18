@@ -763,9 +763,14 @@ class Session:
                                  activity=Activity(label=label, fraction=fraction))
 
     def set_progress(self, label: str = "", fraction: float | None = None,
-                     active: bool = True) -> None:
+                     active: bool = True, detail: str | None = None) -> None:
         """Update the current activity. Shaped to match the progress parsers, which
-        emit ``(label, fraction)`` per output line."""
+        emit ``(label, fraction)`` per output line.
+
+        ``detail`` is optional so a per-item callback ("camera 12/194") can publish
+        the bar and its caption in ONE locked update instead of a set_progress +
+        set_detail pair; omitted, the existing detail is preserved.
+        """
         with self._lock:
             if not active:
                 self._snap = replace(self._snap, activity=Activity())
@@ -774,7 +779,7 @@ class Session:
             self._snap = replace(self._snap, activity=Activity(
                 label=label or current.label,
                 fraction=current.fraction if fraction is None else fraction,
-                detail=current.detail))
+                detail=current.detail if detail is None else str(detail)))
 
     def set_detail(self, detail: str = "") -> None:
         """Refine the current activity ("evaluating camera 12/194") without

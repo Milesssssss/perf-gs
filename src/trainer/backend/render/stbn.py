@@ -1,101 +1,33 @@
 """Tile-stratified spatiotemporal blue-noise (STBN) pixel-sampling masks.
 
-WHAT THIS IS FOR
-----------------
-Training on every pixel of every sampled view is the default, but most 3DGS
-pixel gradients are highly redundant: once a region is fit, its per-pixel
-gradient contributes almost nothing. This module builds the sampling mask for
-an OPT-IN sparse-supervision mode: each backward visits only a fraction rho of
-the pixels, and the surviving terms are reweighted by 1/rho so the gradient
-stays an unbiased estimator of the full-image gradient.
+Builds the sampling mask for the opt-in sparse-supervision mode: each backward
+supervises a fraction rho of the pixels, reweighted by 1/rho so the gradient
+stays an unbiased estimate of the full-image one. Which pixels matters —
+independent draws clump spatially and leave pixels unsampled for many visits,
+where blue noise spreads them in both.
 
-WHICH pixels are visited matters. Independent Bernoulli(rho) draws clump
-spatially AND have unlucky temporal runs (a pixel can go many visits without
-ever being sampled). Spatiotemporal blue noise is designed for exactly this:
-every xy slice is a spatial blue-noise mask, and the sequence of values at a
-fixed pixel is well distributed along the temporal axis, so thresholding it at
-rho yields a well-spread point set on every visit AND fair coverage across
-visits.
+Sources (``StbnMaskSpec.source``):
+  nvidia  the published 128x128x64 scalar set from github.com/NVIDIA-RTX/STBN,
+          fetched by scripts/data/download_stbn.py (NON-COMMERCIAL license, so
+          the download is opt-in and the assets are never vendored)
+  file    any (slices, height, width) scalar volume
+  white   independent random per-tile permutations - the control
 
-WHERE THE NOISE COMES FROM
---------------------------
-NVIDIA's pregenerated scalar STBN (``source="nvidia"``, the default): the
-128x128x64 ``stbn_scalar_2Dx1Dx1D`` set from
-<https://github.com/NVIDIA-RTX/STBN>, produced by that SDK's ScalarApp
-(void-and-cluster) and published with
+The mask is re-ranked WITHIN each tile, so every tile of every slice holds a
+permutation of 0..TILE_AREA-1 and "rank < k" selects exactly k pixels per tile.
+That makes the 1/rho weight exact and the selected sets nested across densities.
+The slice index is a camera's VISIT count plus a per-camera phase, not the
+iteration - see TrainingLoop._stbn_variables.
 
-    Wolfe, Morrical, Akenine-Moller, Ramamoorthi, "Scalar Spatiotemporal Blue
-    Noise Masks", arXiv:2112.09629 / EGSR 2022.
+GPU layout (:func:`pack_table`), one uint per voxel, block-major:
 
-Fetch it with ``python scripts/data/download_stbn.py``, which caches it outside
-version control: those assets are licensed for NON-COMMERCIAL research and
-evaluation only, so the download is opt-in and never vendored. Measured on the
-asset after tile stratification (pinned by tests/test_stbn.py):
-
-    rho=0.09  slice low-frequency power    0.007   (white noise: 0.051)
-    rho=0.09  consecutive-visit hits/pixel 0.000   (independent: 0.554)
-
-i.e. ~8x less spatial clumping, and at low density a pixel essentially never
-gets sampled on two consecutive visits of the same camera.
-
-The other two sources feed the identical downstream machinery:
-``source="file"`` ranks any ``(slices, height, width)`` scalar volume you hand
-it -- including one you generate yourself by building NVIDIA's ScalarApp, or any
-other STBN asset -- and ``source="white"`` is the honest CONTROL, an independent
-random permutation per tile. White exists to answer "what does the blue noise
-actually buy?" with a run rather than an argument; it is not a substitute.
-
-There is deliberately no built-in generator. An earlier local void-and-cluster
-implementation measured ~4x worse spatially than the published asset
-(low-frequency power 0.027 vs 0.007) while taking 30s to build, which is a trap:
-a run would quietly get a much weaker mask than the one the design was reasoned
-about. Generating good STBN is the upstream SDK's job.
-
-WHAT WE CHANGE ABOUT THE MASK
------------------------------
-Two deliberate departures, both driven by how our backward is shaped:
-
-1. TILE STRATIFICATION. Thresholding the raw mask globally gives each 8x8 tile a
-   RANDOM count around rho*64: measured on NVIDIA's slice 0 at rho=0.1, per-tile
-   counts run from 2 to 11 around a mean of 6.5. Our backward is organized per
-   tile, so we instead re-rank the mask WITHIN each tile, making every tile of
-   every slice a permutation of ``0..TILE_AREA-1``. Thresholding "rank < k" then
-   selects EXACTLY k pixels per tile, everywhere, on every slice. That makes the
-   1/rho reweighting exact (rho = k/TILE_AREA), keeps the per-tile gradient
-   budget uniform, and lets the kernels size their staged arrays at compile
-   time. Ranking only reorders within a tile, and a blue-noise mask's per-tile
-   histogram is already near-uniform, so what this removes is the count jitter,
-   not the blue noise (the measured numbers above are POST-stratification).
-
-2. RANKS, NOT SCALARS. Because the mask is now a per-tile permutation we store
-   the RANK instead of the original 0..255 value. The selection test is the
-   exact integer compare ``rank < k``, and the sets are NESTED
-   (``{rank<k} subset {rank<k'}`` for k<k'), so a density SCHEDULE
-   (100% early -> 25% -> 10%) walks a progressive sequence rather than
-   re-rolling an unrelated mask at every phase change.
-
-TEMPORAL AXIS = PER-IMAGE VISIT COUNT
--------------------------------------
-The slice index is NOT the global training iteration: it is the number of times
-THAT training image has been drawn, plus a fixed per-image phase (see
-``TrainingLoop._stbn_slice_for``). Successive evaluations of the same image walk
-the temporal sequence, which is the axis the mask was built to be
-well-distributed along. Per-image phases keep every camera from marching through
-the same slices in lockstep.
-
-GPU LAYOUT
-----------
-:func:`pack_table` emits one ``uint`` per voxel, block-major, packing BOTH
-directions of the per-tile permutation:
-
-    packed[block_base + i] = rank_of_pixel_i | (pixel_of_rank_i << 16)
-
+    packed[block_base + i] = rank(pixel i) | (pixel of rank i) << 16
     block_base = ((slice * blocks_y + by) * blocks_x + bx) * TILE_AREA
 
-The low half answers "is pixel i selected?" (rank < k) for the loss kernels;
-the high half answers "which pixel is the j-th selected one?" so the backward
-can iterate a COMPACTED list of k pixels instead of testing all TILE_AREA
-(see shaders/common/stbn.slang).
+Low half answers "is pixel i selected?" for the loss kernels; high half answers
+"which pixel is the j-th selected one?" so the backward walks a compacted list.
+
+Full design and the measured density/quality trade-off: docs/stbn_pixel_sampling.md
 """
 
 from __future__ import annotations

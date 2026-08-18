@@ -152,9 +152,6 @@ def validate_training_config(args, *, n_cams: int, n_train: int,
             f"--stbn-pixel-fraction must be in (0, 1], got {stbn_fraction}. "
             f"1.0 = supervise every pixel (the feature off).")
     if stbn_fraction < 1.0:
-        # Both knobs decide WHICH pixels the backward visits; together they
-        # compose two subsamplings into an effective density neither flag states,
-        # and the reweighting would only compensate for one of them.
         if int(getattr(args, "backward_pixel_stride", 1)) > 1:
             raise ConfigError(
                 f"--stbn-pixel-fraction {stbn_fraction} and "

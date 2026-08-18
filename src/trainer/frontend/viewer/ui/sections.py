@@ -293,10 +293,25 @@ def _training_live(panel: Panel, view: View, actions: Actions) -> None:
     def live() -> bool:
         return view.training_live
 
+    # An activity outranks the iteration counter: the eval sweep lands on the last
+    # iteration whenever --eval-every divides --iters, so the iteration bar would
+    # otherwise sit pinned at 100% for as long as the sweep and the finalize take.
+    def stepping() -> bool:
+        return live() and not view.activity.active
+
+    def working() -> bool:
+        return live() and view.activity.active
+
     status_line(panel, lambda: str(view.training_state).upper(),
-                lambda: _iteration_text(view), visible=live)
+                lambda: _iteration_text(view), visible=stepping)
     panel.progress(lambda: view.stats.fraction,
-                   visible=lambda: live() and view.stats.total > 0)
+                   visible=lambda: stepping() and view.stats.total > 0)
+
+    status_line(panel, lambda: str(view.training_state).upper(),
+                lambda: view.activity.label, visible=working)
+    # fraction None == indeterminate; park at zero rather than invent a position.
+    panel.progress(lambda: view.activity.fraction or 0.0, visible=working)
+    panel.text(lambda: row("  iteration", _iteration_text(view)), visible=working)
     panel.text(lambda: row("  throughput", _timing_text(view)), visible=live)
     panel.text(lambda: row("  model", _model_text(view)), visible=live)
     panel.text(lambda: row("  sampled cam", _sampled_cam_text(view)),

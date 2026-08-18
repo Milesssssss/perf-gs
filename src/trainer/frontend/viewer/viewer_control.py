@@ -30,6 +30,7 @@ copy per publish.
 """
 from __future__ import annotations
 
+import contextlib
 import threading
 import time
 from typing import TYPE_CHECKING
@@ -228,6 +229,25 @@ class ViewerSession:
             self._viewer.set_training_active(active)
         elif active:
             self.state.training_running()
+
+    @contextlib.contextmanager
+    def unthrottled(self):
+        """Render at full rate for the duration: the trainer is not stepping.
+
+        The viewer rations scene renders while training steps compete for the queue
+        (see ``Viewer._scene_due``). An eval sweep or a render-all dump is NOT that
+        situation — the loop is blocked on it — so the ration is pure loss there,
+        and those phases are exactly when someone is watching the window because
+        nothing else is happening. No-op with ``--no-viewer``.
+        """
+        if self._viewer is None:
+            yield
+            return
+        self._viewer.suspend_frame_budget()
+        try:
+            yield
+        finally:
+            self._viewer.resume_frame_budget()
 
     def is_paused(self) -> bool:
         """Whether the viewer's Pause button currently has training suspended."""

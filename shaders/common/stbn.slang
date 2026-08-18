@@ -1,34 +1,4 @@
 // Tile-stratified spatiotemporal blue-noise (STBN) pixel selection.
-//
-// OPT-IN sparse supervision: instead of every pixel of the sampled view feeding
-// the backward, only k of each tile's TILE_AREA pixels do, and the surviving
-// terms are scaled by TILE_AREA/k. The chain rule over pixels,
-//     dL/dtheta = sum_q (dL/dx_q) (dx_q/dtheta),
-// is a SUM over pixels, so keeping a random subset S and dividing by its
-// expected density is an unbiased estimator of the full-image gradient — for
-// any image loss, including the windowed SSIM term (we subsample the terms of
-// that sum, not the loss itself). See src/trainer/backend/render/stbn.py for
-// where the mask comes from (NVIDIA's published scalar STBN, re-ranked per tile)
-// and docs/stbn_pixel_sampling.md for the reasoning.
-//
-// TABLE LAYOUT (built by stbn.py: pack_table)
-//   packed[block_base + i] = rank(pixel i) | (pixel of rank i) << 16
-//   block_base = ((slice * blocks_y + by) * blocks_x + bx) * TILE_AREA
-// Every (slice, tile) block holds a PERMUTATION of 0..TILE_AREA-1, so
-// "rank < k" selects exactly k pixels per tile — no per-tile count jitter, and
-// the compensation weight TILE_AREA/k is exact rather than an expectation.
-//
-// The two halves serve the two consumers:
-//   * low  16 bits, indexed BY PIXEL -> "is this pixel selected?" (loss kernels)
-//   * high 16 bits, indexed BY SLOT  -> "which pixel is the j-th selected one?"
-//     so the backward walks a COMPACTED list of k pixels instead of testing all
-//     TILE_AREA of them. That compaction is where the speedup comes from; the
-//     loop trip count drops with k rather than staying at TILE_AREA.
-//
-// Selection depends only on (pixel, slice) — both warp-uniform across the lanes
-// of a bucket, which all own splats of the SAME tile — so every lane skips the
-// same pixels together. No wave divergence, and the wave scans in the backward
-// stay in lockstep.
 
 #ifndef TRAINER_COMMON_STBN_SLANG
 #define TRAINER_COMMON_STBN_SLANG
@@ -64,9 +34,6 @@ static const uint STBN_TILE_AREA   = CONTRACT_TILE_AREA;
 static const uint STBN_RANK_MASK = 0xFFFFu;
 static const uint STBN_INVERSE_SHIFT = 16u;
 
-// Is the mask doing anything? The host passes budget == TILE_AREA (select
-// everything) to disable it, and binds a dummy 1-element table in that case, so
-// every reader MUST take this early-out before touching the table.
 bool stbnActive(uint budget)
 {
     return budget > 0u && budget < STBN_TILE_AREA;

@@ -303,10 +303,8 @@ class FlyCamera:
 MOVE_TAGS = frozenset({"w", "a", "s", "d", "q", "e", "r", "t"})
 ROLL_SPEED_DEG_S = 60.0
 
-# Scene re-renders per second while FREE-FLYING during training (see
-# Viewer._scene_due). A viewer frame costs about what a training step does, so an
-# unthrottled ~60 fps was taking most of the GPU from the trainer; 15 is still
-# fluid to fly with. Parked on a test camera the rate is zero — the scene is
+# Scene re-renders per second while free-flying during training (see
+# Viewer._scene_due). Parked on a test camera the rate is zero: the scene is
 # re-rendered only when new gaussians arrive.
 TRAINING_SCENE_FPS = 15.0
 
@@ -490,18 +488,13 @@ class Viewer:
         self.state = state if state is not None else Session()
         # Hub mode adds the DATASET section (drag-drop + reconstruct/train).
         self._hub = self.state.mode == MODE_HUB
-        # --- Scene-render budget WHILE TRAINING (see _scene_due) --------------
-        # The panel keeps painting every frame; only the SCENE rasterize is
-        # throttled, because that is the part that costs a training step's worth
-        # of GPU (bin_count + radix sort + blend over the whole model).
-        # Set == the model or the view changed, so the scene must be re-rendered
-        # even if the budget would otherwise skip it. Written from the TRAINER
-        # thread (update_gaussians), read/cleared on the render thread — an Event
-        # for the same reason _suspend / _grab are. Initialized BEFORE the rig,
-        # whose on_change callback writes it.
+        # Scene-render budget while training (see _scene_due). Written from the
+        # trainer thread, read/cleared on the render thread.
         self._scene_dirty = threading.Event()
         self._scene_dirty.set()
         self._last_scene_s = 0.0
+        # Set == budget off despite an active run (the trainer is not stepping).
+        self._frame_budget_off = threading.Event()
         # The camera rig owns the fly camera and the test-camera snapping; the
         # panel binds to it directly, so the dropdown and the camera cannot
         # disagree and attach_scene needs no dirty-flag dance in the loop.
@@ -715,36 +708,33 @@ class Viewer:
             time.sleep(poll)
 
     def invalidate_scene(self) -> None:
-        """Mark the rendered scene stale, so the next frame re-rasterizes it.
+        """Mark the rendered scene stale so the next frame re-rasterizes it.
 
-        Anything that changes WHAT should be on screen — new gaussians, a camera
-        snap, a resize, a pipeline swap — has to call this, because while training
-        the render loop otherwise assumes the last image is still good.
+        Anything that changes what should be on screen (new gaussians, a camera
+        snap, a resize, a pipeline swap) must call this: while training, the render
+        loop otherwise assumes the last image is still good.
         """
         self._scene_dirty.set()
+
+    def suspend_frame_budget(self) -> None:
+        """Render at full rate even though a run is active, for the phases where
+        the trainer is not submitting steps (eval sweep, render-all, finalize)."""
+        self._frame_budget_off.set()
+        self.invalidate_scene()
+
+    def resume_frame_budget(self) -> None:
+        self._frame_budget_off.clear()
 
     def _scene_due(self, now: float) -> bool:
         """Whether to re-rasterize the scene this frame.
 
-        The viewer's frame does the same work as a training step, and unthrottled
-        it takes roughly 60 of them per second — which is why attaching the viewer
-        cost ~4x throughput early in a run, when a step is cheap and the model is
-        small. So while the trainer is competing for the queue, the scene is
-        rendered on a budget:
-
-          * PARKED ON A TEST CAMERA — the view cannot move (any navigation calls
-            ``_CameraRig.leave``), so there is nothing to animate: render only
-            when new gaussians actually arrive. This is the mode for watching a
-            held-out view converge, and it costs one render per snapshot.
-          * FREE-FLY — the camera can move at any moment, so it must animate;
-            capped at :data:`TRAINING_SCENE_FPS`, enough to fly by and far below
-            the ~60 that starves the trainer.
-          * NOT TRAINING — nothing to share the GPU with, so no budget at all.
-
-        The UI pass is NOT gated by this: the panel, log and progress bar keep
-        painting every frame, so the window stays responsive at 60Hz regardless.
+        A viewer frame does about as much GPU work as a training step, so while the
+        trainer is competing for the queue the scene is rendered on a budget:
+        parked on a test camera it cannot move, so only new gaussians trigger a
+        render; free-flying it is capped at TRAINING_SCENE_FPS. The UI pass is not
+        gated by this, so the panel stays responsive either way.
         """
-        if not self._training_active:
+        if not self._training_active or self._frame_budget_off.is_set():
             return True
         if self._scene_dirty.is_set():
             return True
