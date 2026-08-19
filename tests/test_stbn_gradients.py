@@ -23,6 +23,8 @@ repeat visits — the property that lets the learning rate stay untouched.
 
 from __future__ import annotations
 
+import dataclasses
+
 import numpy as np
 import pytest
 
@@ -87,12 +89,18 @@ def _camera():
 
 
 def _pipeline(backend: str, *, compacted: bool, budget: int = BUDGET,
-              ssim: float = 0.0) -> TestPipeline:
+              ssim: float = 0.0,
+              select_mode: str = stbn.SELECT_GLOBAL) -> TestPipeline:
     """A pipeline whose SHADER DEFINES and StbnConfig agree.
 
     ``compacted`` is the only difference between the two paths under test: it
     injects STBN_ENABLED and tells the pipeline the
     backward now takes the mask parameters.
+
+    ``select_mode`` picks how the density chooses pixels. The reference-vs-
+    compacted equivalence must hold for BOTH, since the layout deliberately hides
+    the mode from the shader — under a global threshold the per-tile count varies
+    and the backward takes its loop bound from the table.
     """
     defines = {"STBN_ENABLED": "1"} if compacted else None
     try:
@@ -105,8 +113,23 @@ def _pipeline(backend: str, *, compacted: bool, budget: int = BUDGET,
         stbn_config=StbnConfig(
             pixel_fraction=budget / TILE_AREA,
             backward_compacted=compacted,
+            select_mode=select_mode,
         ),
     )
+
+
+def _expected_mask(select_mode: str, budget: int, slice_index: int):
+    """The frame-sized mask the shader should have applied.
+
+    Derived from the SAME helper the production table is built from, so the test
+    pins the shader against the host's definition of the selection rather than
+    against a re-implementation that could drift from it.
+    """
+    spec = dataclasses.replace(_asset_or_skip(), select_mode=select_mode,
+                               fraction=budget / TILE_AREA)
+    selected = stbn.selected_volume(spec, budget)[slice_index % spec.slices]
+    return np.take(np.take(selected, np.arange(H) % spec.height, axis=0),
+                   np.arange(W) % spec.width, axis=1)
 
 
 def _gradients(pipeline: TestPipeline, scene, camera,
@@ -144,19 +167,24 @@ def _compare(a: dict, b: dict, *, label_a: str, label_b: str,
 # ------------------------------------------------------------------ the loss
 
 @pytest.mark.parametrize("backend", BACKENDS)
-def test_loss_zeroes_unsampled_pixels_and_scales_the_sampled_ones(backend: str) -> None:
+@pytest.mark.parametrize("select_mode",
+                         [stbn.SELECT_GLOBAL, stbn.SELECT_TILE_RANK])
+def test_loss_zeroes_unsampled_pixels_and_scales_the_sampled_ones(
+        backend: str, select_mode: str) -> None:
     """The mask is DEFINED here, so pin it against the mask table directly.
 
     Unsampled pixels must be exactly zero (the backward's licence to skip them),
-    and sampled ones must be the dense gradient times TILE_AREA/k (the unbiasing
-    weight). Comparing against a full-density run of the same scene makes this a
-    statement about the mask alone, with the photometric math cancelling out.
+    and sampled ones must be the dense gradient times TILE_AREA/k. That weight is
+    UNIFORM in both modes: a global threshold selects each pixel with probability
+    rho, so 1/rho is the correct importance weight for the image sum, and a
+    per-tile weight would re-impose exactly the tile-grid structure the global
+    mode exists to remove. Comparing against a full-density run of the same scene
+    makes this a statement about the mask alone, the photometric math cancelling.
     """
-    spec = _asset_or_skip()
-    ranks = stbn.build_rank_volume(spec)
     slice_index = 11
+    expected = _expected_mask(select_mode, BUDGET, slice_index)
 
-    pipeline = _pipeline(backend, compacted=False)
+    pipeline = _pipeline(backend, compacted=False, select_mode=select_mode)
     scene, camera = _deep_scene(), _camera()
 
     pipeline.set_primitive_from_numpy(**scene)
@@ -170,16 +198,17 @@ def test_loss_zeroes_unsampled_pixels_and_scales_the_sampled_ones(backend: str) 
     pipeline.device.wait_for_idle()
     sparse = pipeline.buffers.dL_dC_texture.to_numpy()[..., :3].astype(np.float64)
 
-    # The mask the shader should have applied, tiled over the frame.
-    expected = stbn.selected_mask(ranks, BUDGET)[slice_index % spec.slices]
-    expected = np.take(np.take(expected, np.arange(H) % spec.height, axis=0),
-                       np.arange(W) % spec.width, axis=1)
-
     assert (sparse[~expected] == 0.0).all(), "unsampled pixels are not zeroed"
-    # Exactly k per tile reached the gradient, so the count is not approximate.
+
     per_tile = expected.reshape(H // TILE_HEIGHT, TILE_HEIGHT,
                                 W // TILE_WIDTH, TILE_WIDTH).sum(axis=(1, 3))
-    assert per_tile.min() == per_tile.max() == BUDGET
+    if select_mode == stbn.SELECT_TILE_RANK:
+        # Exactly k per tile, by construction — that IS the mode.
+        assert per_tile.min() == per_tile.max() == BUDGET
+    else:
+        # A global threshold constrains the SLICE, not the tile, so the counts
+        # must be free to vary while still averaging to the requested density.
+        assert per_tile.min() <= BUDGET <= per_tile.max()
 
     weight = TILE_AREA / BUDGET
     np.testing.assert_allclose(sparse[expected], dense[expected] * weight,

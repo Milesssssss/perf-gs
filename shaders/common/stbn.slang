@@ -5,34 +5,33 @@
 
 #include "generated/execution_contract.slang"
 
-// Compile-time: does the backward take the compacted-visit path at all? 0
-// (default) keeps the exact full-pixel loop, bit-for-bit, with no added
-// register or LDS cost. The loss kernels need no define — they mask at runtime
-// (see stbnSelected), which is what makes STBN_ENABLED=0 a usable REFERENCE
-// path: the same sparse gradient, just without the pixel-loop savings.
 #ifndef STBN_ENABLED
 #define STBN_ENABLED 0
 #endif
 
-// Compile-time ceiling on the per-tile budget k, sizing the backward's staged
-// arrays. Defaults to a full tile and the host does NOT override it: at an 8x8
-// tile those arrays total under 2 KB of the ~100 KB shared memory per SM, so
-// shrinking them changes nothing measurable (the speedup is the shorter pixel
-// loop, which is driven by the RUNTIME budget). Left as a define so the claim
-// can be A/B'd by hand; the readers clamp the runtime budget to it, so a
-// hand-set value can never overrun the staging.
 #ifndef STBN_MAX_TILE_PIXELS
 #define STBN_MAX_TILE_PIXELS CONTRACT_TILE_AREA
 #endif
 
-// Prefixed to avoid colliding with the TILE_* constants the rasterizer shaders
-// declare for themselves (textual #include => one file scope).
 static const uint STBN_TILE_WIDTH  = CONTRACT_TILE_WIDTH;
 static const uint STBN_TILE_HEIGHT = CONTRACT_TILE_HEIGHT;
 static const uint STBN_TILE_AREA   = CONTRACT_TILE_AREA;
 
-static const uint STBN_RANK_MASK = 0xFFFFu;
-static const uint STBN_INVERSE_SHIFT = 16u;
+// Packed table layout, one uint32 per voxel (see stbn.py:pack_selection):
+//   bits  0..7   slot of this pixel in its tile's selected list, 0xFF = none
+//   bits  8..15  pixel-in-tile index of the slot-i selected pixel (i < count)
+//   bits 16..23  selected pixels in this tile, replicated across the block
+//
+// The table carries the SELECTED SET, not a ranking, so nothing here knows or
+// cares whether that set came from a global slice threshold or a per-tile
+// argsort. Per-tile counts therefore VARY under a global threshold, which is why
+// the backward reads stbnTileCount instead of assuming the nominal budget.
+static const uint STBN_SLOT_MASK = 0xFFu;
+static const uint STBN_SLOT_NONE = 0xFFu;
+static const uint STBN_COMPACT_SHIFT = 8u;
+static const uint STBN_COMPACT_MASK = 0xFFu;
+static const uint STBN_COUNT_SHIFT = 16u;
+static const uint STBN_COUNT_MASK = 0xFFu;
 
 bool stbnActive(uint budget)
 {
@@ -67,15 +66,19 @@ uint stbnBlockBase(uint2 pixel, uint2 dims, uint slice)
 // this indexes the block directly.
 uint stbnPixelInBlock(uint2 pixel)
 {
-    return (pixel.y % STBN_TILE_HEIGHT) * STBN_TILE_WIDTH
-           + (pixel.x % STBN_TILE_WIDTH);
+    return (pixel.y % STBN_TILE_HEIGHT) * STBN_TILE_WIDTH + (pixel.x % STBN_TILE_WIDTH);
 }
 
-// Rank of a pixel within its (slice, tile) block, in [0, TILE_AREA).
-uint stbnRank(StructuredBuffer<uint> table, uint2 pixel, uint2 dims, uint slice)
+// Raw packed word for a pixel.
+uint stbnWord(StructuredBuffer<uint> table, uint2 pixel, uint2 dims, uint slice)
 {
-    return table[stbnBlockBase(pixel, dims, slice) + stbnPixelInBlock(pixel)]
-           & STBN_RANK_MASK;
+    return table[stbnBlockBase(pixel, dims, slice) + stbnPixelInBlock(pixel)];
+}
+
+// This pixel's slot in its tile's selected list, or STBN_SLOT_NONE.
+uint stbnSlot(StructuredBuffer<uint> table, uint2 pixel, uint2 dims, uint slice)
+{
+    return stbnWord(table, pixel, dims, slice) & STBN_SLOT_MASK;
 }
 
 // Does this pixel feed the gradient on this slice? True everywhere when the
@@ -85,14 +88,23 @@ bool stbnSelected(StructuredBuffer<uint> table, uint2 pixel, uint2 dims,
 {
     if (!stbnActive(budget))
         return true;
-    return stbnRank(table, pixel, dims, slice) < budget;
+    return stbnSlot(table, pixel, dims, slice) != STBN_SLOT_NONE;
+}
+
+// How many of this tile's pixels are selected on this slice. Under a global
+// threshold this is NOT the nominal budget — it varies tile to tile (measured
+// 11..21 at a nominal 16 on the NVIDIA asset) — so the backward's compacted loop
+// must take its bound from here rather than from the uniform.
+uint stbnTileCount(StructuredBuffer<uint> table, uint block_base)
+{
+    return (table[block_base] >> STBN_COUNT_SHIFT) & STBN_COUNT_MASK;
 }
 
 // The `slot`-th selected pixel of a block, as a pixel-in-tile index. Slots
-// [0, budget) are exactly the selected pixels, in rank order.
+// [0, stbnTileCount) are exactly the selected pixels.
 uint stbnPixelAtSlot(StructuredBuffer<uint> table, uint block_base, uint slot)
 {
-    return table[block_base + slot] >> STBN_INVERSE_SHIFT;
+    return (table[block_base + slot] >> STBN_COMPACT_SHIFT) & STBN_COMPACT_MASK;
 }
 
 #endif // TRAINER_COMMON_STBN_SLANG

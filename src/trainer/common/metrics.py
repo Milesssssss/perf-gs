@@ -36,7 +36,10 @@ def ssim_gaussian_window(window_size: int = 11, sigma: float = 1.5) -> np.ndarra
 
 
 # Separable 2D window (11x11, sigma=1.5) == reference create_window(11, ...).
-_WIN_2D = np.outer(ssim_gaussian_window(11, 1.5), ssim_gaussian_window(11, 1.5))
+# _WIN_1D is the factor actually applied (once per axis); _WIN_2D remains the
+# literal 11x11 kernel the equivalence test correlates against.
+_WIN_1D = ssim_gaussian_window(11, 1.5)
+_WIN_2D = np.outer(_WIN_1D, _WIN_1D)
 
 
 def ssim(rendered: np.ndarray, target: np.ndarray) -> float:
@@ -49,8 +52,17 @@ def ssim(rendered: np.ndarray, target: np.ndarray) -> float:
     pixels & channels (size_average=True). Validated against the torch
     reference to ~1e-6. Do NOT "optimize" the padding/window — fidelity to the
     reference is what makes it comparable to the SAD-GS / 3DGS SSIM column.
+
+    The window IS applied separably (two 1D passes instead of one 11x11 pass),
+    which is NOT such an optimization: ``_WIN_2D`` is by construction
+    ``outer(g, g)``, and zero-extension factorizes across axes the same way, so
+    the two forms are the same linear operator. Measured agreement is 1e-15 —
+    float64 round-off — for a 5x speedup, and SSIM at ~1 MP dominates the cost
+    of every evaluation sweep. tests/test_metrics_ssim_separable.py pins the
+    equivalence against the literal 11x11 correlation, so a future edit that
+    breaks it fails loudly rather than quietly moving every SSIM column.
     """
-    from scipy.ndimage import correlate  # scipy is always present
+    from scipy.ndimage import correlate1d  # scipy is always present
 
     r = rendered.astype(np.float64)
     t = target.astype(np.float64)
@@ -60,11 +72,13 @@ def ssim(rendered: np.ndarray, target: np.ndarray) -> float:
 
     C1 = 0.01 ** 2
     C2 = 0.03 ** 2
-    w = _WIN_2D
+    w1d = _WIN_1D
 
     def filt(img2d: np.ndarray) -> np.ndarray:
-        # 'constant' mode with cval=0 == torch conv2d zero-padding=5.
-        return correlate(img2d, w, mode="constant", cval=0.0)
+        # 'constant' mode with cval=0 == torch conv2d zero-padding=5, applied
+        # once per axis (see the docstring: same operator as the 11x11 window).
+        rows = correlate1d(img2d, w1d, axis=0, mode="constant", cval=0.0)
+        return correlate1d(rows, w1d, axis=1, mode="constant", cval=0.0)
 
     ssim_channels = []
     for c in range(r.shape[-1]):

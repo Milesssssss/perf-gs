@@ -80,6 +80,12 @@ class StbnConfig:
     # Draw a random slice each step (--stbn-independent) instead of the per-visit
     # temporal walk — the independent-per-step baseline for the temporal ablation.
     independent: bool = False
+    # How a density picks pixels: "global" thresholds the whole slice (the
+    # NVIDIA point set; per-tile counts vary), "tile_rank" keeps exactly k per
+    # 8x8 tile (uniform work, but a different sampling process that measurably
+    # degrades the blue mask AND flatters the white control). See
+    # trainer.backend.render.stbn for the measured difference.
+    select_mode: str = "global"
 
     @property
     def enabled(self) -> bool:
@@ -124,7 +130,7 @@ class IterationContextualVariables:
     hardness_value: float
     sh_degree: int
     densification_variables: DensificationProperties | None = None
-    stbn: StbnVariables | None = None
+    contextual_stbn: StbnVariables | None = None
 
 @dataclass(frozen=True)
 class IterationContext:

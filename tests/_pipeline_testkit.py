@@ -68,7 +68,7 @@ class TestPipeline(TrainingPipeline):
                     structure_tensor_texture=structure_tensor,
                     structure_kwargs=structure_kwargs,
                 ),
-                stbn=stbn,
+                contextual_stbn=stbn,
             ),
         )
         super().train_step(context)
@@ -101,7 +101,7 @@ class TestPipeline(TrainingPipeline):
             self._run_loss(IterationContextualVariables(
                 hardness_value=self._extinction_hardness,
                 sh_degree=self._active_sh_degree,
-                stbn=stbn,
+                contextual_stbn=stbn,
             ))
 
     def step_split_for_active_band_test(self, camera: Camera, lrs: "AdamLRs",
@@ -165,7 +165,7 @@ class TestPipeline(TrainingPipeline):
                     structure_tensor_texture=structure_tensor,
                     structure_kwargs=structure_kwargs,
                 ),
-                stbn=stbn,
+                contextual_stbn=stbn,
             ),
         )
         self._run_backward(context)

@@ -71,9 +71,7 @@ void tileMaxProcessed(
     // pixel-in-tile: col = tid % WIDTH (row stride WIDTH), row = tid / WIDTH.
     uint2 pixel = uint2(tile_x * TILE_WIDTH  + (tid % TILE_WIDTH),
                         tile_y * TILE_HEIGHT + (tid / TILE_WIDTH));
-    bool contributes = pixel.x < frame_dim_px.x && pixel.y < frame_dim_px.y
-                       && stbnSelected(stbn_table, pixel, stbn_dims, stbn_slice,
-                                       stbn_tile_pixels);
+    bool contributes = pixel.x < frame_dim_px.x && pixel.y < frame_dim_px.y && stbnSelected(stbn_table, pixel, stbn_dims, stbn_slice, stbn_tile_pixels);
     uint processed = contributes ? gaussian_count_per_pixel[pixel] : 0u;
     InterlockedMax(gs_tile_max, processed);
     GroupMemoryBarrierWithGroupSync();

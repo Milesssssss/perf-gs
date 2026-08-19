@@ -122,12 +122,28 @@ EXPECTED_DEFAULTS = {
     "stbn_max_fraction": 0.0,
     "stbn_source": "nvidia",
     "stbn_file": "",
+    # Global slice threshold: the faithful reading of the NVIDIA asset. The
+    # per-tile-rank variant is kept as a selectable ablation.
+    "stbn_select_mode": "global",
     "stbn_seed": 0,
     "stbn_independent": False,
     "extinction_hardness": 1.0,
     "extinction_hardness_warmup": 500,
     "final_test_psnr": False,
     "compute_final_metrics": False,
+    # Paper-suite instrumentation (scripts/running/eval_stbn_ablation.py). All
+    # OFF by default and all strictly post-loop or sampled, so a run that does
+    # not ask for them is byte-for-byte the run it was before they existed.
+    "run_report": False,
+    "save_test_renders": False,
+    "render_fps_frames": 0,
+    "stage_timing_every": 0,
+    # None (not ()) so "no explicit ladder" is distinguishable from "an empty
+    # one was passed"; ScheduleConfig.from_args normalizes both to ().
+    "eval_iters": None,
+    "eval_lpips": False,
+    # On by default: unchanged behavior for every existing caller.
+    "write_ground_truths": True,
 }
 
 

@@ -70,7 +70,11 @@ class TrainingSchedule:
 
         do_log = (c.log_every > 0
                   and ((it % c.log_every == 0) or (it == 1) or (it == c.iterations)))
-        do_eval = c.eval_every > 0 and (it % c.eval_every == 0)
+        # Union of the periodic cadence and the explicit checkpoint ladder, so
+        # --eval-iters can add irregular points without --eval-every having to
+        # divide them all (and without firing on every common multiple).
+        do_eval = ((c.eval_every > 0 and (it % c.eval_every == 0))
+                   or (it in c.eval_iters))
         do_psnr = (c.psnr_curve_enabled
                    and ((it + 1) % max(1, c.psnr_curve_every) == 0))
         do_morton = (c.morton_every > 0 and it % c.morton_every == 0

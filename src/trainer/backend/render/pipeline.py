@@ -282,8 +282,27 @@ class TrainingPipeline:
         config = self.stbn_config
         if self.viewer_only or not config.enabled:
             return _stbn.upload_disabled_mask(self.device)
+        if (config.select_mode == _stbn.SELECT_GLOBAL
+                and int(config.warmup_iters) > 0):
+            # A global threshold bakes the density into the table, so a ramping
+            # runtime budget would change the 1/rho WEIGHT while the MASK stayed
+            # at the target density — a silently biased gradient. tile_rank keeps
+            # density as a runtime knob (rank < k) and does support the ramp.
+            raise ValueError(
+                "--stbn-warmup-iters > 0 is incompatible with "
+                "--stbn-select-mode global: a global threshold fixes the "
+                "selected set when the table is built, so the density cannot "
+                "ramp at runtime and the 1/rho weight would no longer match the "
+                "mask. Use --stbn-warmup-iters 0, or "
+                "--stbn-select-mode tile_rank if you need the ramp.")
         spec = _stbn.StbnMaskSpec(
-            source=config.source, path=config.file_path, seed=config.seed)
+            source=config.source, path=config.file_path, seed=config.seed,
+            select_mode=config.select_mode,
+            # A global threshold decides membership over the whole slice, so the
+            # table it produces is specific to the density. The steady-state
+            # fraction is the right one to build for: a warmup ramp only ever
+            # raises the density above it, and the schedule clamps to the table.
+            fraction=float(config.pixel_fraction))
         mask = _stbn.upload_mask(
             self.device, spec, _stbn.default_cache_dir() / "cache")
         print(f"[stbn] {spec.source} mask {spec.width}x{spec.height}x{spec.slices}"
@@ -305,7 +324,7 @@ class TrainingPipeline:
         the full budget, i.e. every pixel sampled — so an unaware caller gets the
         exact full-pixel behavior rather than a silently sparse gradient.
         """
-        variables = contextual.stbn if contextual is not None else None
+        variables = contextual.contextual_stbn if contextual is not None else None
         if variables is None or variables.pixels_per_tile <= 0:
             return self._stbn.shader_kwargs(0, TILE_AREA)
         # The shaders stage a full tile and clamp to it, so any budget in
@@ -994,8 +1013,6 @@ class TrainingPipeline:
                         extinction_hardness=iteration_contextual_variables.hardness_value,
                     )
                 else:
-                  # Transposed per-splat backward: one workgroup (TILE_AREA
-                  # threads) per tile, splat-parallel with checkpoint reconstruction.
                   self._dispatch(self.k_backward_persplat, "backward_persplat",
                     thread_count=[num_tiles * TILE_AREA, 1, 1],
                     blend_data=b.blend_data.storage,

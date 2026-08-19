@@ -61,7 +61,11 @@ class RunArtifacts:
         # convergence plotting. This stream is ALSO the loop's gate: no stream, no
         # sweep (see TrainingLoop._run_evaluation_if_due), so --no-evaluation stops
         # the whole-camera-set render here rather than in the hot path.
-        do_eval = args.eval_every > 0 and args.evaluation
+        # --eval-iters counts as asking for sweeps too: this stream IS the loop's
+        # gate, so an explicit checkpoint ladder with --eval-every 0 would
+        # otherwise be silently dropped.
+        do_eval = ((args.eval_every > 0 or bool(getattr(args, "eval_iters", None)))
+                   and args.evaluation)
         eval_curve_json = _stream("eval_curve.jsonl") if do_eval else None
         # Pre-densify PSNR curve (--psnr-curve): a focused TEST-set PSNR sample
         # taken one iter before each densify step, streamed to psnr_curve.jsonl.

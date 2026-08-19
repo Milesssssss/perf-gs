@@ -65,6 +65,12 @@ class ScheduleConfig:
     morton_every: int
     stream_every: int
     mip_enabled: bool
+    # Explicit extra eval checkpoints, UNION-ed with the eval_every cadence. A
+    # convergence study wants an irregular ladder (250, 500, 750, 1000, 1500,
+    # 2000, ...) that no single interval expresses; expressing it as
+    # --eval-every 250 would buy four sweeps nobody asked for, and each sweep
+    # renders and scores the whole held-out set. Empty tuple = old behavior.
+    eval_iters: tuple[int, ...] = ()
 
     @classmethod
     def from_args(cls, args) -> "ScheduleConfig":
@@ -86,6 +92,8 @@ class ScheduleConfig:
             morton_every=args.morton_every,
             stream_every=args.stream_every,
             mip_enabled=bool(args.mip_splatting),
+            eval_iters=tuple(sorted({
+                int(v) for v in (getattr(args, "eval_iters", None) or ())})),
         )
 
 

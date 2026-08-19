@@ -282,7 +282,12 @@ void backwardRasterizePerSplat(
     // one block of the mask. Slot j of that block is the j-th sampled pixel.
     uint stbn_base = stbnBlockBase(uint2(tile_origin_x, tile_origin_y),
                                    stbn_dims, stbn_slice);
-    uint visit_count = min(stbn_tile_pixels, STBN_VISIT_CAPACITY);
+    // From the TABLE, not the uniform: under a global slice threshold the
+    // per-tile count varies (the uniform is only the nominal density), and using
+    // the uniform here would walk past the end of a sparse tile's list and
+    // re-supervise pixels the mask excluded.
+    uint visit_count = min(stbnTileCount(stbn_table, stbn_base),
+                           STBN_VISIT_CAPACITY);
     if (tid < visit_count)
         gs_stbn_visit[0][tid] = stbnPixelAtSlot(stbn_table, stbn_base, tid);
 #else
@@ -760,11 +765,17 @@ void backwardRasterizePerBucket(
     // Each warp owns a bucket of a DIFFERENT tile, so the mask block — and
     // therefore the visit list — is per warp, not per workgroup. Its 32 lanes
     // cooperatively fill it, then the pixel loop reads it warp-uniformly.
-    uint visit_count = min(stbn_tile_pixels, STBN_VISIT_CAPACITY);
+    // 0 for an invalid bucket: tile_origin_* is only meaningful when the bucket
+    // is, and the warp returns right after the barrier anyway (the loop at the
+    // bottom is the only later reader). The count comes from the TABLE because a
+    // global slice threshold makes it vary per tile.
+    uint visit_count = 0u;
     if (bucket_valid)
     {
         uint stbn_base = stbnBlockBase(uint2(tile_origin_x, tile_origin_y),
                                        stbn_dims, stbn_slice);
+        visit_count = min(stbnTileCount(stbn_table, stbn_base),
+                          STBN_VISIT_CAPACITY);
         uint cp_base = checkpointIndex(cp_bucket, 0u);
         for (uint k = lane; k < visit_count; k += RASTER_BUCKET_SIZE)
         {

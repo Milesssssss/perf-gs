@@ -53,6 +53,14 @@ def build_parser() -> argparse.ArgumentParser:
                          "Writes results to eval_curve.jsonl in the run dir with "
                          "iter, elapsed_s (pure training wall-clock, excluding eval "
                          "time), and avg_psnr_lin/srgb/srgb_masked.")
+    parser.add_argument("--eval-iters", type=int, nargs="*", default=None,
+                    help="explicit extra iterations to run the --eval-every "
+                         "sweep at, UNION-ed with the --eval-every cadence "
+                         "(e.g. --eval-iters 250 500 750 1000 1500 2000 2500 "
+                         "3000). For an irregular convergence ladder: a single "
+                         "interval that hit all of those would also fire on "
+                         "every other multiple, and each sweep renders and "
+                         "scores the entire held-out set. Default none.")
     parser.add_argument("--eval", dest="eval_holdout", type=int, default=1,
                     help="1 (default) = on and holdout; 0 = train on all")
     parser.add_argument("--eval-holdout-stride", type=int, default=8,
@@ -334,6 +342,24 @@ def build_parser() -> argparse.ArgumentParser:
                     help="Path to a (slices, height, width) .npy scalar STBN "
                          "volume for --stbn-source file. Also overrides the "
                          "cached asset path for --stbn-source nvidia.")
+    parser.add_argument("--stbn-select-mode", type=str, default="global",
+                    choices=["global", "tile_rank"],
+                    help="Which pixels a density selects. 'global' (default): "
+                         "threshold the WHOLE 128x128 slice and keep its lowest "
+                         "rho fraction — the point set NVIDIA's construction is "
+                         "about, since their spatial energy function couples "
+                         "samples across the entire slice. The 8x8 execution "
+                         "tile then merely LOOKS UP that mask, and per-tile "
+                         "counts vary (measured 16+/-1.4 at a nominal 16). "
+                         "'tile_rank': rank within each 8x8 tile and keep "
+                         "exactly k per tile — uniform per-tile work, but a "
+                         "different sampling process whose per-tile threshold "
+                         "lets pixels cluster across tile boundaries. Measured "
+                         "at rho=0.25 it costs ~30%% of the blue mask's "
+                         "low-frequency suppression AND makes the white-noise "
+                         "control ~24%% bluer than true white, compressing the "
+                         "blue-vs-white contrast from both ends. Kept as an "
+                         "ablation. Incompatible with --stbn-warmup-iters > 0.")
     parser.add_argument("--stbn-seed", type=int, default=0,
                     help="Seed for --stbn-source white (ignored otherwise). Kept "
                          "separate from --seed so the mask can be re-rolled "
@@ -358,4 +384,56 @@ def build_parser() -> argparse.ArgumentParser:
                          "Lightweight: renders just the test cams, no full "
                          "per-camera PNG dump / PLY. Does not affect train_wall_s.")
     parser.add_argument("--compute-final-metrics", action="store_true", default=False)
+    parser.add_argument("--run-report", action="store_true", default=False,
+                    help="After the timed loop, write run_report.json: PER-VIEW "
+                         "held-out PSNR/SSIM (not just the mean), the timing "
+                         "split (train_active_s = train_wall_s minus every "
+                         "mid-loop observation), trainer-owned GPU allocation, "
+                         "the adapter/API the run bound, the resolved train/test "
+                         "split, and the STBN asset's content hash. Additive: "
+                         "test_psnr.json keeps its schema. Renders only the "
+                         "held-out cams (no .ply, no full camera dump), and runs "
+                         "after train_wall_s is frozen, so it cannot move a "
+                         "training number. Needs --evaluation.")
+    parser.add_argument("--save-test-renders", action="store_true", default=False,
+                    help="With --run-report, also write each held-out render to "
+                         "<run>/test_renders/cam_NNNN.png. Lets LPIPS (and "
+                         "contact sheets / error maps) be computed later, out of "
+                         "process, without re-training. Metrics themselves are "
+                         "always computed from the float render, never the PNG.")
+    parser.add_argument("--render-fps-frames", type=int, default=0,
+                    help="With --run-report, measure steady-state render "
+                         "throughput over N serialized frames of one held-out "
+                         "camera (0 = skip). Serialized (one wait_for_idle per "
+                         "frame), so it reports per-frame latency rather than "
+                         "pipelined throughput.")
+    parser.add_argument("--eval-lpips", action="store_true", default=False,
+                    help="Also compute LPIPS (AlexNet) on the held-out split — "
+                         "in the --eval-every/--eval-iters sweeps and in "
+                         "--run-report. Needs torch + the lpips package; when "
+                         "they are missing the column is null (never silently "
+                         "substituted) and the run is unaffected. Runs on the "
+                         "CPU so it cannot contend with the GPU workload being "
+                         "timed, ~50 ms/view, and it lands inside the "
+                         "already-excluded observation window.")
+    parser.add_argument("--write-ground-truths",
+                    action=argparse.BooleanOptionalAction, default=True,
+                    help="Dump one cams/cam_NN/gt.png per camera at startup (on "
+                         "by default — it is the reference the cams/iter_*.png "
+                         "renders are read against). Pass "
+                         "--no-write-ground-truths for a sweep: the GT is "
+                         "identical across every run of a scene, so writing it "
+                         "per run costs hundreds of MB per cell for bytes that "
+                         "are already on disk. Only skip it if something else "
+                         "owns a copy.")
+    parser.add_argument("--stage-timing-every", type=int, default=0,
+                    help="SAMPLED per-stage GPU timing: install the timestamp "
+                         "timer on one iteration in N and write "
+                         "stage_timing.{jsonl,json} (raw per-marker ms per "
+                         "sample, plus per-window means). 0 (default) = off. "
+                         "Reading timestamps needs a host drain the hot path "
+                         "never does, so this PERTURBS the loop; the measured "
+                         "cost is reported as sample_overhead_s so it can be "
+                         "checked rather than assumed. 25 samples ~120 "
+                         "iterations of a 3k run.")
     return parser

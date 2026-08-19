@@ -61,6 +61,8 @@ from trainer.frontend.schedule import (
 )
 from trainer.frontend.reporting.outputs import RunArtifacts
 from trainer.frontend.evaluation.post_training import run_post_training
+from trainer.frontend.evaluation import run_report as run_report_module
+from trainer.frontend.profiling.stage_timing import StageTimingRecorder
 from trainer.frontend.queue_limiter import QueueLimiter
 from trainer.frontend.training_preflight import (
     build_densify_configs,
@@ -68,6 +70,12 @@ from trainer.frontend.training_preflight import (
     resolve_holdout_split,
     resolve_loss_and_lrs,
 )
+
+# Import time, used as this process's t0 for the run report's process_wall_s. It
+# trails the real process start by the import graph's cost (slangpy, cv2), so a
+# suite driver that needs the authoritative total measures it from the parent —
+# this is the in-process approximation, labelled as such.
+_PROCESS_STARTED_AT = time.time()
 
 from trainer.frontend.viewer.session import (
     ERROR,
@@ -144,6 +152,19 @@ class TrainingResult:
     wall_time_seconds: float
     psnr_curve: list[dict]
     started_at: float
+    # Wall-clock spent OBSERVING the run from inside the loop (--eval-every
+    # sweeps, --psnr-curve ticks, log/preview re-renders). It is contained in
+    # wall_time_seconds, so subtracting it gives the active training time — the
+    # only figure a sparse-vs-dense speed claim may use, since it must not
+    # depend on how often quality was measured. 0.0 for an unobserved run.
+    #
+    # This is the IN-WINDOW subset only. wall_time_seconds is frozen right after
+    # the final train_step, so the final iteration's observations fall outside it
+    # already; observation_total_seconds keeps the full figure for reporting.
+    observation_seconds: float = 0.0
+    observation_total_seconds: float = 0.0
+    # StageTimingRecorder when --stage-timing-every is set, else None.
+    stage_timing: Any = None
 
 
 @dataclass(frozen=True)
@@ -238,6 +259,7 @@ def resolve_stbn_config(args: argparse.Namespace) -> StbnConfig:
         file_path=str(getattr(args, "stbn_file", "")),
         seed=int(getattr(args, "stbn_seed", 0)),
         independent=bool(getattr(args, "stbn_independent", False)),
+        select_mode=str(getattr(args, "stbn_select_mode", "global")),
     )
 
 
@@ -880,21 +902,7 @@ class TrainingApplication:
         post-training action (see :meth:`_hub_train_scene`).
         """
         # ---- launch training loop --------------------
-        result = TrainingLoop(
-            args=self.args,
-            scene=self._sceneContext,
-            targets=self._targets,
-            runtime=self._training_runtime,
-            densify_mode=self._densify_mode,
-            densify_config=self.densify_config,
-            base_lrs=self._base_lrs,
-            target_textures=self.target_textures,
-            structure_textures=self.structure_textures,
-            mean_lr=self._mean_lr,
-            paths=self.paths,
-            extinction_hardness_schedule=self._extinction,
-            appearance_schedule=self._appearance_schedule,
-        ).launch_training_loop()
+        result = self.build_training_loop().launch_training_loop()
 
         # -----Post-training----------------------------------------
         # Its own phase, with its own progress: everything below renders cameras
@@ -957,8 +965,10 @@ class TrainingApplication:
             use_alpha=self.args.w_alpha > 0,
         )
         # The per-cam GT is the reference every cams/cam_XX/iter_*.png is read
-        # against, so it is written for every run, hub or CLI.
-        self.targets.write_ground_truths(self.paths.cameras)
+        # against, so it is written for every run, hub or CLI — unless a sweep
+        # opts out, having already cached one copy per scene elsewhere.
+        if getattr(self.args, "write_ground_truths", True):
+            self.targets.write_ground_truths(self.paths.cameras)
 
     def _create_device(self) -> None:
         """Create the GPU device + shared queue lock. Split out from pipeline
@@ -1100,6 +1110,32 @@ class TrainingApplication:
             reporter=reporter,
         )
 
+    def build_training_loop(self) -> "TrainingLoop":
+        """The configured loop for the prepared context, WITHOUT running it.
+
+        Extracted from :meth:`_run_training_and_post` so that a harness which
+        needs a real, mid-training GPU state — ``scripts/running/bench_iter.py``
+        for frozen-iteration timing, the paper suite's gradient probe for a
+        trained scene at iteration N — can drive ``advance_to_capture`` itself
+        instead of duplicating a thirteen-argument construction against private
+        attributes. ``prepare_training_context`` must have run first.
+        """
+        return TrainingLoop(
+            args=self.args,
+            scene=self._sceneContext,
+            targets=self._targets,
+            runtime=self._training_runtime,
+            densify_mode=self._densify_mode,
+            densify_config=self.densify_config,
+            base_lrs=self._base_lrs,
+            target_textures=self.target_textures,
+            structure_textures=self.structure_textures,
+            mean_lr=self._mean_lr,
+            paths=self.paths,
+            extinction_hardness_schedule=self._extinction,
+            appearance_schedule=self._appearance_schedule,
+        )
+
     def _write_resolved_config(self) -> None:
         sceneContext = self._sceneContext
         base_lrs = self._base_lrs
@@ -1151,23 +1187,90 @@ class TrainingApplication:
 
     def _write_final_test_psnr(self, result: TrainingResult) -> None:
         # --no-evaluation vetoes this: it renders every held-out camera.
-        if (not self.args.final_test_psnr or self.args.profile_run or not self.args.evaluation):
+        want_report = bool(getattr(self.args, "run_report", False))
+        if (self.args.profile_run or not self.args.evaluation
+                or not (self.args.final_test_psnr or want_report)):
             return
 
         sceneContext = self._sceneContext
-        psnr, count = eval_test_psnr_srgb(self._pipeline, sceneContext.colmapScene, sceneContext.test_indices, self._targets.srgb)
+        # One render pass serves both files. --run-report needs every view's own
+        # metrics, and the mean of those IS the paper metric, so asking
+        # eval_test_psnr_srgb for the mean as well would render the held-out set
+        # twice for the same number.
+        per_view: list[dict] = []
+        quality: dict = {}
+        if want_report:
+            renders_dir = (self.paths.root / "test_renders"
+                           if getattr(self.args, "save_test_renders", False)
+                           else None)
+            per_view, quality = run_report_module.evaluate_test_views(
+                self._pipeline, sceneContext.colmapScene,
+                sceneContext.test_indices, self._targets.srgb,
+                render_dir=renders_dir,
+                with_lpips=bool(getattr(self.args, "eval_lpips", False)),
+                progress=lambda done, total: self._publish_finalize(
+                    f"held-out view {done}/{total}", 0.05 + 0.5 * done / max(total, 1)),
+            )
+            psnr = quality.get("psnr_srgb") or 0.0
+            count = int(self._pipeline.buffers.num_gaussians_counter
+                        .to_numpy().view(np.uint32)[0])
+        else:
+            psnr, count = eval_test_psnr_srgb(
+                self._pipeline, sceneContext.colmapScene,
+                sceneContext.test_indices, self._targets.srgb)
 
-        (self.paths.root / "test_psnr.json").write_text(json.dumps({
-            "psnr_srgb": psnr,
-            "n_gaussians": count,
-            "n_test_cams": len(sceneContext.test_indices),
-            "train_wall_s": result.wall_time_seconds,
-            "iters": result.iterations,
-            "flat_bucket_backward": bool(self.args.flat_bucket_backward),
-        }, indent=2))
+        active_s = max(0.0, result.wall_time_seconds - result.observation_seconds)
 
-        print(f"[final-test-psnr] TEST PSNR sRGB = {psnr:.3f} dB over "
-              f"{len(sceneContext.test_indices)} held-out cams  (n_gaussians={count})")
+        if self.args.final_test_psnr:
+            (self.paths.root / "test_psnr.json").write_text(json.dumps({
+                "psnr_srgb": psnr,
+                "n_gaussians": count,
+                "n_test_cams": len(sceneContext.test_indices),
+                "train_wall_s": result.wall_time_seconds,
+                # Additive: train_wall_s keeps its exact old meaning, and these
+                # separate the loop's own cost from the cost of watching it.
+                "train_active_s": active_s,
+                "observation_s": result.observation_seconds,
+                "iters": result.iterations,
+                "flat_bucket_backward": bool(self.args.flat_bucket_backward),
+            }, indent=2))
+
+            print(f"[final-test-psnr] TEST PSNR sRGB = {psnr:.3f} dB over "
+                  f"{len(sceneContext.test_indices)} held-out cams  (n_gaussians={count})")
+
+        if want_report:
+            frames = int(getattr(self.args, "render_fps_frames", 0) or 0)
+            render = (run_report_module.measure_render_fps(
+                          self._pipeline, sceneContext.colmapScene,
+                          sceneContext.test_indices[0], frames)
+                      if frames > 0 and sceneContext.test_indices
+                      else {"frames": 0, "fps": None, "ms_per_frame": None})
+            report = run_report_module.build_report(
+                pipeline=self._pipeline,
+                scene_context=sceneContext,
+                args=self.args,
+                run_name=self.run_name,
+                result=result,
+                per_view=per_view,
+                quality=quality,
+                render=render,
+                loop_timing={
+                    "observation_s": result.observation_seconds,
+                    "observation_total_s": result.observation_total_seconds,
+                },
+                process_started_at=_PROCESS_STARTED_AT,
+            )
+            if result.stage_timing is not None:
+                report["stage_timing"] = result.stage_timing.summary()
+            path = run_report_module.write_run_report(report, self.paths.root)
+            fps = render.get("fps")
+            print(f"[run-report] {len(per_view)} held-out views  "
+                  f"psnr={psnr:.3f} dB  ssim={quality.get('ssim_srgb') or 0.0:.4f}  "
+                  f"active={active_s:.1f}s (wall {result.wall_time_seconds:.1f}s, "
+                  f"observation {result.observation_seconds:.1f}s)  "
+                  f"n_g={count}"
+                  + (f"  render={fps:.1f} fps" if fps else "")
+                  + f"  -> {path}")
 
     @property
     def _sceneContext(self) -> SceneContext:
@@ -1290,6 +1393,18 @@ class TrainingLoop:
         self.psnr_curve_records: list[dict] = []
         self.started_at = 0.0
         self.post_iteration_clean_timing = 0.0
+        # Wall-clock spent inside _produce_observations — the whole observation
+        # surface (eval sweeps, psnr-curve ticks, log/preview re-renders,
+        # render-all dumps) in one number, because it is measured around the one
+        # call that owns all of them rather than summed per feature.
+        # ``_in_wall`` is the subset that lands before train_wall_s is frozen,
+        # and is therefore the only part that may be subtracted from it.
+        self.observation_seconds = 0.0
+        self.observation_in_wall_seconds = 0.0
+        self._stage_timing = StageTimingRecorder(
+            every=int(getattr(args, "stage_timing_every", 0) or 0),
+            total_iters=int(args.iters),
+        )
 
     def launch_training_loop(self) -> TrainingResult:
         self._begin_training_loop()
@@ -1307,7 +1422,21 @@ class TrainingLoop:
                 self._record_current_timing()
 
             self._apply_mutations(it_context)
+            # Timed as one block: everything in here MEASURES the run rather
+            # than advancing it, and train_active_s is train_wall_s minus this.
+            observed_at = time.perf_counter()
             should_continue = self._produce_observations(it_context)
+            spent = time.perf_counter() - observed_at
+            self.observation_seconds += spent
+            # ...but only the part INSIDE the timing window may be subtracted.
+            # train_wall_s is frozen by _record_current_timing immediately after
+            # the final train_step, so the final iteration's observations (the
+            # last eval sweep, the end-of-run preview dump) are already outside
+            # it. Counting them again would subtract them twice and, on a short
+            # run whose observations dwarf its training, drive the active time to
+            # zero.
+            if it_context.step_number != self.args.iters:
+                self.observation_in_wall_seconds += spent
             self._present_profile_frame_if_enabled()
 
             if not should_continue:
@@ -1392,6 +1521,13 @@ class TrainingLoop:
             pixels_per_tile=pixels,
         )
 
+    def _timed_stbn_variables(self, camera_index: int) -> "StbnVariables | None":
+        started = time.perf_counter()
+        try:
+            return self._stbn_variables(camera_index)
+        finally:
+            self._stage_timing.add_host("mask_sampling", (time.perf_counter() - started) * 1e3)
+
     def _next_iteration(self) -> IterationContext:
         self.training_step += 1
         camera_index = self.sampler.next()
@@ -1421,7 +1557,7 @@ class TrainingLoop:
                     # ALSO -> the product is hacky way to hide that our magic hyperparms should all be normalized
                     structure_kwargs={"per_view_grad_thresh": (self.args.sad_freq_grad_threshold * self.scene.width * self.scene.height * 3.0) if self._should_accumulate_structure(self.training_step) else None}
                 ),
-                stbn=self._stbn_variables(camera_index),
+                contextual_stbn=self._timed_stbn_variables(camera_index),
             ),
         )
 
@@ -1446,9 +1582,13 @@ class TrainingLoop:
             raise SystemExit(0)
 
     def _execute_training_step(self, context: IterationContext) -> None:
+        pipeline = self.runtime.pipeline
+        # No-op unless --stage-timing-every selected this iteration.
+        self._stage_timing.before_step(context.step_number, pipeline)
 
-        self.runtime.pipeline.train_step(context)
+        pipeline.train_step(context)
 
+        self._stage_timing.after_step(context.step_number, pipeline)
         self.runtime.queue_limiter.record(self.runtime.pipeline.last_submit_id)
         self._stream_viewer_snapshot_if_due(context)
 
@@ -1463,8 +1603,15 @@ class TrainingLoop:
         pipeline = self.runtime.pipeline
 
         if events.densify:
+            # Host wall-clock: densify is its own submit outside train_step's
+            # marker tree, and it reads buffers back (so it is largely
+            # synchronous already). Recorded as host_ms, never mixed into a GPU
+            # marker total.
+            densify_started = time.perf_counter()
             outcome = self.runtime.densifier.run(
                 context.step_number, events, self.gaussian_count)
+            self._stage_timing.add_host(
+                "densify_prune", (time.perf_counter() - densify_started) * 1e3)
             self.gaussian_count = outcome.count
             self.runtime.reporter.report_densify(outcome)
 
@@ -1583,6 +1730,7 @@ class TrainingLoop:
                     t_start=self.started_at,
                     eval_time_total=self.eval_time_total,
                     eval_holdout=bool(self.args.eval_holdout),
+                    with_lpips=bool(getattr(self.args, "eval_lpips", False)),
                     progress=lambda done, total: state.set_progress(
                         "Evaluating every camera",
                         (done / total) if total else None,
@@ -1600,11 +1748,23 @@ class TrainingLoop:
         if self.extinction_hardness_schedule is not None:
             self.runtime.pipeline.set_extinction_hardness(self.extinction_hardness_schedule.target)
         self.runtime.reporter.report_complete(self.training_step, self.post_iteration_clean_timing)
+        if self._stage_timing.enabled:
+            self._stage_timing.write(self.paths.root)
+            summary = self._stage_timing.summary()
+            print(f"[stage-timing] {summary['sampled_iters']} sampled iters "
+                  f"(1 in {summary['sample_every']}), measured overhead "
+                  f"{summary['sample_overhead_s']:.2f}s of "
+                  f"{self.post_iteration_clean_timing:.1f}s wall "
+                  f"({100.0 * summary['sample_overhead_s'] / max(self.post_iteration_clean_timing, 1e-9):.2f}%)")
         return TrainingResult(
             iterations=self.training_step,
             wall_time_seconds=self.post_iteration_clean_timing,
             psnr_curve=self.psnr_curve_records,
             started_at=self.started_at,
+            observation_seconds=self.observation_in_wall_seconds,
+            observation_total_seconds=self.observation_seconds,
+            stage_timing=(self._stage_timing if self._stage_timing.enabled
+                          else None),
         )
 
 

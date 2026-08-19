@@ -13,19 +13,47 @@ Sources (``StbnMaskSpec.source``):
   file    any (slices, height, width) scalar volume
   white   independent random per-tile permutations - the control
 
-The mask is re-ranked WITHIN each tile, so every tile of every slice holds a
-permutation of 0..TILE_AREA-1 and "rank < k" selects exactly k pixels per tile.
-That makes the 1/rho weight exact and the selected sets nested across densities.
+Which pixels a density selects is set by ``StbnMaskSpec.select_mode``, and the
+choice matters more than it looks:
+
+  global (default)  Threshold the WHOLE slice — keep its lowest rho fraction.
+                    This is the point set NVIDIA's construction is about: their
+                    spatial energy function couples samples across the entire
+                    slice, and the published frequency properties are those of a
+                    single global threshold. The 8x8 execution tiling is then
+                    purely an implementation detail that looks up an
+                    already-decided mask, and per-tile counts are free to vary
+                    (measured 16 +/- 1.4 on the asset at rho=0.25).
+
+  tile_rank         Rank within each 8x8 tile and keep exactly k per tile. This
+                    is a DIFFERENT sampling process — the effective threshold
+                    varies from tile to tile — and it measurably degrades both
+                    ends of the comparison: on the asset it costs ~30% of the
+                    low-frequency suppression, and it makes the white-noise
+                    control ~24% bluer than true white by forcing 16/tile on a
+                    process whose natural tile counts span 5..31. Kept as a
+                    legitimate ablation, not as the faithful reading.
+
+The 1/rho unbiasing weight is UNIFORM in both modes (see stbnWeight), not
+per-tile. A global threshold selects each pixel with probability rho, so 1/rho is
+the correct importance weight for the image sum; a per-tile TILE_AREA/count
+weight would re-impose exactly the tile-grid structure the global mode removes.
+
 The slice index is a camera's VISIT count plus a per-camera phase, not the
 iteration - see TrainingLoop._stbn_variables.
 
-GPU layout (:func:`pack_table`), one uint per voxel, block-major:
+GPU layout (:func:`pack_selection`), one uint per voxel, block-major:
 
-    packed[block_base + i] = rank(pixel i) | (pixel of rank i) << 16
+    packed[block_base + i] =  slot(pixel i)            // bits 0..7, 0xFF = none
+                            | compacted(i) << 8        // i-th selected pixel
+                            | count        << 16       // selected in this tile
     block_base = ((slice * blocks_y + by) * blocks_x + bx) * TILE_AREA
 
-Low half answers "is pixel i selected?" for the loss kernels; high half answers
-"which pixel is the j-th selected one?" so the backward walks a compacted list.
+The low field answers "is pixel i supervised?" for the loss kernels with no
+notion of a threshold; the middle answers "which pixel is the i-th selected
+one?" so the backward walks a compacted list; the high field is that list's
+length. Because the table carries the SET rather than a ranking, the shader
+cannot tell which selection mode produced it — which is the point.
 
 Full design and the measured density/quality trade-off: docs/stbn_pixel_sampling.md
 """
@@ -61,10 +89,27 @@ _FETCH_HINT = (
     "script's docstring), or point --stbn-source file --stbn-file at your own "
     "scalar STBN volume")
 
-# Ranks are packed into the low 16 bits, the inverse permutation into the high
-# 16. TILE_AREA is 64 today; the split leaves room for far larger tiles.
-_RANK_MASK = 0xFFFF
-_INVERSE_SHIFT = 16
+SELECT_GLOBAL = "global"
+SELECT_TILE_RANK = "tile_rank"
+SELECT_MODES = (SELECT_GLOBAL, SELECT_TILE_RANK)
+
+# GPU table layout, one uint32 per voxel, block-major (see the module docstring
+# for the index formula). Three 8-bit fields, all that a 64-pixel tile needs:
+#
+#   bits  0..7   slot of this pixel in its tile's selected list, or SLOT_NONE
+#   bits  8..15  pixel-in-tile index of the slot-i selected pixel (i < count)
+#   bits 16..23  number of selected pixels in this tile, replicated per voxel
+#
+# The count is replicated rather than kept in a side buffer because the bits are
+# free and it costs the reader one fetch from a cache line it already touches.
+# Replicating it is what lets the SHADER be selection-mode agnostic: it reads a
+# compacted list and a length, and never needs to know how the set was chosen.
+_SLOT_MASK = 0xFF
+_SLOT_NONE = 0xFF                 # 0..63 are valid slots, so 0xFF is free
+_COMPACT_SHIFT = 8
+_COMPACT_MASK = 0xFF
+_COUNT_SHIFT = 16
+_COUNT_MASK = 0xFF
 
 
 def default_cache_dir() -> Path:
@@ -91,6 +136,36 @@ class StbnMaskSpec:
     height: int = NVIDIA_HEIGHT
     slices: int = NVIDIA_SLICES
     source: str = SOURCE_NVIDIA
+    # Which pixels a density selects.
+    #
+    #   "global"     threshold the WHOLE slice: keep the lowest
+    #                round(fraction * width * height) values. This is the point
+    #                set NVIDIA's construction is about — the spatial energy
+    #                function couples samples across the entire slice, and their
+    #                published frequency properties are those of a single global
+    #                threshold. The 8x8 execution tiling is then purely an
+    #                implementation detail: it looks up an already-decided mask.
+    #
+    #   "tile_rank"  rank within each 8x8 tile and keep exactly k per tile.
+    #                Convenient (uniform per-tile work, exact 1/rho per tile) but
+    #                it is a DIFFERENT sampling process: the effective threshold
+    #                varies per tile, which lets pixels on either side of a tile
+    #                boundary both survive and cluster in a way the global
+    #                ranking specifically avoids. Measured on the NVIDIA asset at
+    #                rho=0.25 it costs ~30% of the low-frequency suppression
+    #                (0.0033 -> 0.0047), and it makes the white-noise CONTROL
+    #                ~24% bluer than true white (0.048 -> 0.037) by forcing
+    #                16/tile on a process whose natural tile counts span 5..31 —
+    #                so it compresses the blue-vs-white contrast from both ends.
+    #                Kept because it is a legitimate ablation ("STBN-ranked
+    #                per-tile stratified sampling"), not because it is the
+    #                faithful reading of the asset.
+    select_mode: str = SELECT_GLOBAL
+    # The density the table is built FOR. Only "global" needs it — a global
+    # threshold decides membership over the whole slice, so the selected set (and
+    # hence the compacted list and the per-tile counts) depends on the density.
+    # "tile_rank" ignores it and derives k from the runtime budget.
+    fraction: float = 0.25
     # Only meaningful for source="white".
     seed: int = 0
     # source="file": the scalar volume to rank per tile. source="nvidia":
@@ -118,10 +193,44 @@ class StbnMaskSpec:
     def voxels(self) -> int:
         return self.slices * self.height * self.width
 
+    @property
+    def selected_per_slice(self) -> int:
+        """Pixels a ``global`` threshold keeps per slice.
+
+        Quantized to a whole number of per-tile budgets — ``pixels_per_tile(rho) *
+        blocks`` — rather than to ``round(rho * width * height)``, for two reasons
+        that are both correctness, not tidiness:
+
+        1. The 1/rho unbiasing WEIGHT the shaders apply is derived from the
+           per-tile budget (``stbnWeight``), which has 1/TILE_AREA resolution. If
+           the selected count did not agree with it, the weight would be wrong by
+           the quantization error — at rho=0.10 that is round(6.4)=6 versus 6.4,
+           a +6.6% inflation of every gradient. Adam absorbs a uniform scale, but
+           the densifier's ``--grad-thresh`` is an ABSOLUTE threshold, so an
+           inflated gradient densifies more eagerly. Silent, and it would have
+           shown up as "sparse supervision grows more Gaussians".
+        2. It makes the two selection modes exactly density-matched at every
+           density, so the ``global`` vs ``tile_rank`` ablation compares the
+           ARRANGEMENT of a fixed number of pixels rather than confounding it with
+           a slightly different pixel count.
+
+        Never 0 and never the whole slice: an empty mask would give every splat
+        zero gradient, and a full one is the mask-off path.
+        """
+        total = self.height * self.width
+        if self.fraction >= 1.0:
+            return total
+        per_tile = pixels_per_tile(float(self.fraction), self.tile_area)
+        return int(min(total, max(1, per_tile * self.blocks_x * self.blocks_y)))
+
     def validate(self) -> None:
         if self.source not in SOURCES:
             raise ValueError(
                 f"unknown STBN source {self.source!r}; expected one of {list(SOURCES)}")
+        if self.select_mode not in SELECT_MODES:
+            raise ValueError(
+                f"unknown STBN select_mode {self.select_mode!r}; expected one of "
+                f"{list(SELECT_MODES)}")
         if self.tile_width != TILE_WIDTH or self.tile_height != TILE_HEIGHT:
             raise ValueError(
                 f"STBN tile {self.tile_width}x{self.tile_height} must match the "
@@ -157,7 +266,19 @@ class StbnMaskSpec:
         return nvidia_volume_path()
 
     def cache_key(self) -> str:
-        """Filename stem identifying this spec's table on disk."""
+        """Filename stem identifying this spec's table on disk.
+
+        Includes the selection mode AND the density, for BOTH modes. The packed
+        table carries the selected SET (not a ranking), so it is density-specific
+        in every mode — unlike the old rank-based table, where density was a
+        runtime comparison and one table served all densities.
+
+        This bit us: omitting the density for ``tile_rank`` meant a table built at
+        rho=0.09375 was served for a rho=0.25 run. The mask was 9.4% dense while
+        the shaders applied the 25% weight, so every gradient was 2.67x too small,
+        densification starved, and the run lost ~0.5 dB — with nothing anywhere
+        reporting an error.
+        """
         if self.source == SOURCE_WHITE:
             tag = f"white_s{self.seed}"
         else:
@@ -168,7 +289,8 @@ class StbnMaskSpec:
             tag = (f"{self.source}_{source_path.stem}"
                    f"_{stat.st_size}_{int(stat.st_mtime)}")
         return (f"stbn_{self.width}x{self.height}x{self.slices}"
-                f"_t{self.tile_width}x{self.tile_height}_{tag}")
+                f"_t{self.tile_width}x{self.tile_height}"
+                f"_{self.select_mode}{self.selected_per_slice}_{tag}")
 
 
 # ----------------------------------------------------------------------------
@@ -257,39 +379,162 @@ def load_scalar_volume(spec: StbnMaskSpec) -> np.ndarray:
 
 
 def build_rank_volume(spec: StbnMaskSpec) -> np.ndarray:
-    """``(slices, height, width)`` uint16 ranks; each tile holds a permutation
-    of ``0..tile_area-1``."""
+    """``(slices, height, width)`` uint16 per-tile ranks; each tile holds a
+    permutation of ``0..tile_area-1``.
+
+    This is the ``tile_rank`` construction. It remains the definition of that
+    mode and is still what the density/quality metrics below characterize; the
+    ``global`` mode goes through :func:`global_selected_mask` instead.
+    """
     spec.validate()
     if spec.source == SOURCE_WHITE:
         return _white_ranks(spec)
     return rank_volume_from_scalar(load_scalar_volume(spec), spec)
 
 
+def _scalar_volume(spec: StbnMaskSpec) -> np.ndarray:
+    """The scalar field a spec ranks, whatever its source.
+
+    White noise is generated at full slice resolution here (rather than as
+    per-tile permutations) so that a global threshold sees a genuine independent
+    field — which is the whole point of the control.
+    """
+    if spec.source == SOURCE_WHITE:
+        rng = np.random.default_rng(spec.seed)
+        return rng.random((spec.slices, spec.height, spec.width))
+    array = np.asarray(load_scalar_volume(spec), dtype=np.float64)
+    return array[:spec.slices, :spec.height, :spec.width]
+
+
+def global_selected_mask(spec: StbnMaskSpec) -> np.ndarray:
+    """``(slices, height, width)`` bool: the lowest ``fraction`` of EACH SLICE.
+
+    One threshold per slice, applied across the whole slice — the point set
+    NVIDIA's spatial energy function was optimized for. Implemented as a rank
+    (argsort) rather than a literal value comparison so the kept count is exact
+    despite the asset's 8-bit quantization: at 128x128 there are only 256 levels
+    for 16384 pixels, so a value threshold would land mid-level and overshoot or
+    undershoot by tens of pixels. A stable sort breaks ties by flat pixel index,
+    which keeps the table reproducible.
+
+    Note what this does NOT do: it does not constrain how many selected pixels
+    land in any given 8x8 tile. On the NVIDIA asset at rho=0.25 the per-tile
+    count comes out 16 +/- 1.4 (range 11..21); on white noise, 16 +/- 3.4 (range
+    5..31). That variation is the honest consequence of sampling a global field,
+    and the shader handles it by reading a per-tile count.
+    """
+    spec.validate()
+    volume = _scalar_volume(spec)
+    keep = spec.selected_per_slice
+    total = spec.height * spec.width
+    mask = np.zeros((spec.slices, total), dtype=bool)
+    for index in range(spec.slices):
+        order = np.argsort(volume[index].reshape(-1), kind="stable")
+        mask[index, order[:keep]] = True
+    return mask.reshape(spec.slices, spec.height, spec.width)
+
+
+def selected_volume(spec: StbnMaskSpec,
+                    pixels_per_tile_budget: int | None = None) -> np.ndarray:
+    """The boolean selection a spec realizes, for either mode.
+
+    The single place that answers "which pixels does this configuration
+    supervise?", so the GPU table, the tests and the sampling diagnostics cannot
+    drift from each other.
+    """
+    spec.validate()
+    if spec.select_mode == SELECT_GLOBAL:
+        return global_selected_mask(spec)
+    budget = (pixels_per_tile_budget if pixels_per_tile_budget is not None
+              else pixels_per_tile(spec.fraction, spec.tile_area))
+    return selected_mask(build_rank_volume(spec), budget)
+
+
 # ----------------------------------------------------------------------------
 # GPU table packing + cache
 # ----------------------------------------------------------------------------
 
-def pack_table(ranks: np.ndarray, spec: StbnMaskSpec) -> np.ndarray:
-    """Pack a rank volume into the block-major ``uint32`` table the shaders read.
+def pack_selection(selected: np.ndarray, spec: StbnMaskSpec) -> np.ndarray:
+    """Pack a boolean selection into the block-major ``uint32`` table.
 
-    ``packed[block_base + i] = rank(pixel i) | (pixel of rank i) << 16`` — the
-    permutation and its inverse, one fetch each. See the module docstring for
-    the index formula and shaders/common/stbn.slang for the reader.
+    ``packed[block_base + i] = slot(i) | compacted(i) << 8 | count << 16`` where
+
+      * ``slot(i)`` is pixel i's position in its tile's selected list, or
+        ``_SLOT_NONE`` when it is not selected — so "is this pixel supervised?"
+        is one fetch and one compare, with no notion of a threshold;
+      * ``compacted(i)`` is the pixel-in-tile index of the i-th selected pixel,
+        the list the backward walks;
+      * ``count`` is how many of the tile's 64 pixels are selected, replicated
+        across the block so the backward's loop bound is one fetch.
+
+    Deliberately takes a SELECTION rather than a rank volume: that is what makes
+    the layout mode-agnostic. Whether the set was chosen by a global threshold or
+    by a per-tile argsort is settled before this function, and the shader is
+    unable to tell the difference. Slots are assigned in ascending pixel-in-tile
+    order, which is arbitrary but fixed — the backward sums over the tile's
+    selected pixels and the order does not affect the result.
     """
     index = _block_voxel_index(spec)
-    per_block = ranks.reshape(-1)[index].astype(np.uint32)   # (t, by, bx, area)
-    inverse = np.argsort(per_block, axis=-1).astype(np.uint32)
-    return np.ascontiguousarray((per_block | (inverse << _INVERSE_SHIFT)).reshape(-1))
+    flags = selected.reshape(-1)[index]                      # (t, by, bx, area)
+    counts = flags.sum(axis=-1).astype(np.uint32)            # (t, by, bx)
+    if int(counts.max(initial=0)) > _COUNT_MASK:
+        raise ValueError(
+            f"per-tile selected count {int(counts.max())} exceeds the "
+            f"{_COUNT_MASK} the packed layout can hold")
+
+    # Slot of each selected pixel = its rank among the tile's selected pixels in
+    # ascending pixel-in-tile order; cumsum-1 over the flags gives exactly that.
+    slots = np.cumsum(flags, axis=-1) - 1
+    slots = np.where(flags, slots, _SLOT_NONE).astype(np.uint32)
+
+    # Compacted list: the pixel indices of the selected pixels, in the same
+    # order, left-packed. argsort on (not selected) is stable, so the selected
+    # indices come first in ascending order.
+    order = np.argsort(~flags, axis=-1, kind="stable").astype(np.uint32)
+
+    packed = (slots
+              | (order << _COMPACT_SHIFT)
+              | (counts[..., None].astype(np.uint32) << _COUNT_SHIFT))
+    return np.ascontiguousarray(packed.reshape(-1))
 
 
-def unpack_table(packed: np.ndarray,
-                 spec: StbnMaskSpec) -> tuple[np.ndarray, np.ndarray]:
-    """Inverse of :func:`pack_table`, block-major ``(ranks, inverse)``. Test
-    affordance: lets a test assert the GPU-visible bytes, not just the source
-    array they were derived from."""
-    blocks = packed.reshape(spec.slices, spec.blocks_y, spec.blocks_x, spec.tile_area)
-    return ((blocks & _RANK_MASK).astype(np.uint16),
-            (blocks >> _INVERSE_SHIFT).astype(np.uint16))
+def unpack_table(packed: np.ndarray, spec: StbnMaskSpec
+                 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Inverse of :func:`pack_selection`, block-major ``(slots, compacted,
+    counts)``.
+
+    Test affordance: lets a test assert the GPU-VISIBLE bytes rather than the
+    array they were derived from, which is where a packing bug would otherwise
+    hide until it showed up as a quietly wrong gradient.
+    """
+    blocks = packed.reshape(spec.slices, spec.blocks_y, spec.blocks_x,
+                           spec.tile_area)
+    return ((blocks & _SLOT_MASK).astype(np.uint16),
+            ((blocks >> _COMPACT_SHIFT) & _COMPACT_MASK).astype(np.uint16),
+            ((blocks >> _COUNT_SHIFT) & _COUNT_MASK).astype(np.uint16)[..., 0])
+
+
+def build_table(spec: StbnMaskSpec) -> np.ndarray:
+    """The packed GPU table for ``spec``, for either selection mode."""
+    return pack_selection(selected_volume(spec), spec)
+
+
+def _table_matches(packed: np.ndarray, spec: StbnMaskSpec) -> bool:
+    """Does a cached table actually realize ``spec``'s density?
+
+    Shape and dtype are far too weak a check: every table of a given volume size
+    has the same shape and dtype regardless of its density or selection mode, so a
+    key collision serves a silently wrong mask. That happened — a 9.375%-dense
+    table was served for a 25% run, and the only symptom was 0.5 dB of lost
+    quality. Verifying the count the shaders will actually read makes such a
+    collision a rebuild rather than a wrong result.
+    """
+    try:
+        counts = ((packed >> _COUNT_SHIFT) & _COUNT_MASK).reshape(
+            spec.slices, spec.blocks_y, spec.blocks_x, spec.tile_area)[..., 0]
+        return int(counts.sum(axis=(1, 2)).max()) == spec.selected_per_slice
+    except Exception:                                      # noqa: BLE001
+        return False
 
 
 def load_or_build(spec: StbnMaskSpec, cache_dir: Path | str | None) -> np.ndarray:
@@ -307,12 +552,16 @@ def load_or_build(spec: StbnMaskSpec, cache_dir: Path | str | None) -> np.ndarra
         if path.is_file():
             try:
                 cached = np.load(path)
-                if cached.shape == (spec.voxels,) and cached.dtype == np.uint32:
+                if (cached.shape == (spec.voxels,)
+                        and cached.dtype == np.uint32
+                        and _table_matches(cached, spec)):
                     return cached
+                print(f"[stbn] rebuilding {path.name}: cached table does not "
+                      f"match the requested spec", flush=True)
             except (OSError, ValueError):
                 pass                      # fall through and rebuild
 
-    packed = pack_table(build_rank_volume(spec), spec)
+    packed = build_table(spec)
     if path is not None:
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -381,18 +630,7 @@ def upload_disabled_mask(device: Any) -> StbnMask:
     return StbnMask(table=buffer, dims=(TILE_WIDTH, TILE_HEIGHT), slices=1)
 
 
-# ----------------------------------------------------------------------------
-# Density resolution + quality metrics (used by the schedule and the tests)
-# ----------------------------------------------------------------------------
-
 def pixels_per_tile(fraction: float, tile_area: int = TILE_AREA) -> int:
-    """The integer per-tile budget k realizing a requested pixel fraction.
-
-    Rounds to the nearest achievable density and never returns 0: a tile that
-    contributed nothing at all would leave its splats with no gradient
-    whatsoever, a qualitatively worse failure than a coarse budget.
-    ``fraction >= 1`` returns the full tile, i.e. the mask off.
-    """
     if fraction >= 1.0:
         return tile_area
     return int(min(tile_area, max(1, round(float(fraction) * tile_area))))
