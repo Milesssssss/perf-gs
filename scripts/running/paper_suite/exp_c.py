@@ -37,7 +37,7 @@ from .results import ResultSet
 
 CURVE_COLUMNS = (
     "scene", "dataset_family", "regime", "seed", "pixel_fraction", "iter",
-    "active_train_s", "psnr_srgb", "ssim_srgb", "lpips_alex", "n_gaussians",
+    "active_train_s", "psnr_srgb", "ssim_srgb", "lpips", "n_gaussians",
     "n_eval_cams", "eval_dt_s", "cell_key",
 )
 
@@ -45,7 +45,7 @@ AGGREGATE_COLUMNS = (
     "regime", "iter", "n_scenes", "scenes_expected", "complete",
     "active_train_s_mean", "active_train_s_std",
     "psnr_srgb_mean", "psnr_srgb_std",
-    "ssim_srgb_mean", "lpips_alex_mean", "lpips_alex_std",
+    "ssim_srgb_mean", "lpips_mean", "lpips_std",
     "n_gaussians_mean", "n_gaussians_std",
 )
 
@@ -92,7 +92,7 @@ def _curve_rows(results: ResultSet, scenes, fraction, seed) -> list[dict]:
                     "active_train_s": point.get("elapsed_s"),
                     "psnr_srgb": point.get("psnr_srgb"),
                     "ssim_srgb": point.get("ssim_srgb"),
-                    "lpips_alex": point.get("lpips_alex"),
+                    "lpips": point.get("lpips"),
                     "n_gaussians": point.get("n_gaussians"),
                     "n_eval_cams": point.get("n_eval_cams"),
                     "eval_dt_s": point.get("eval_dt_s"),
@@ -117,7 +117,7 @@ def _aggregate(curve_rows: list[dict], scenes) -> list[dict]:
                 "complete": len(present) == len(scenes),
             }
             for key in ("active_train_s", "psnr_srgb", "ssim_srgb",
-                        "lpips_alex", "n_gaussians"):
+                        "lpips", "n_gaussians"):
                 summary = stats.mean_std([r.get(key) for r in picked])
                 row[f"{key}_mean"] = summary["mean"]
                 row[f"{key}_std"] = summary["std"]
@@ -219,7 +219,7 @@ def _figure_aggregate(aggregate: list[dict], figures_dir: Path,
         return
     panels = [("active_train_s_mean", "psnr_srgb_mean",
                "active train time (s)", "held-out PSNR (dB)"),
-              ("active_train_s_mean", "lpips_alex_mean",
+              ("active_train_s_mean", "lpips_mean",
                "active train time (s)", "held-out LPIPS"),
               ("iter", "psnr_srgb_mean", "iteration", "held-out PSNR (dB)"),
               ("active_train_s_mean", "n_gaussians_mean",

@@ -51,26 +51,17 @@ def run_post_training(
     psnr_curve: list[dict] | None = None,
     progress: Callable[[str, float], None] = lambda _label, _fraction: None,
 ) -> None:
-    """Compute + report the final metrics and export the trained PLY.
-
-    ``progress(label, fraction)`` is called at each step so a viewer can show what
-    this pass is doing — it renders every camera, which is the bulk of the wait
-    after the last iteration.
-    """
 
     if args.profile_run:
         print("[profile-run] finished; skipping final metrics / PLY export.")
         return
 
-    # --compute-final-metrics renders the WHOLE camera set (and writes the .ply
-    # from the same block), which --no-evaluation vetoes.
     metrics = args.compute_final_metrics and args.evaluation
     if args.compute_final_metrics and not args.evaluation:
         print("[post-training] --no-evaluation: skipping the final metrics pass "
               "and the .ply export.")
 
-    # Deferred import: top-level would create a circular import (app imports this
-    # module at load, before PsNRPlotWriter is defined).
+
     from trainer.frontend.app import PsNRPlotWriter
     PsNRPlotWriter.write(
         enabled=args.psnr_curve,
@@ -81,19 +72,11 @@ def run_post_training(
         scene=scene,
     )
 
-    # Mip-Splatting: refresh the 3D filter one last time so the final metrics
-    # render reflects the FINAL gaussian positions. The periodic recompute above
-    # skips the last ~100 iters, so without this the reported PSNR would use a
-    # filter ~100-200 iters stale.   
     if args.mip_splatting and metrics:
         progress("refreshing the 3D filter", 0.2)
         pipeline.compute_3d_filter()
         #_log_filter3d("final")
 
-    # Post-training per-camera metrics. Include BOTH the full-frame PSNR
-    # (linear and sRGB) and the foreground-masked sRGB PSNR — the latter
-    # is the honest silhouette metric (avoids the black-background inflation
-    # that misled us on the v1 10k run).
     print("computing final per-camera metrics...")
     per_cam: list[dict] = []
     total_mse_lin = 0.0

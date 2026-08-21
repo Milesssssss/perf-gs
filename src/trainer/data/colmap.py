@@ -1,25 +1,3 @@
-"""COLMAP text-format loader.
-
-Parses a COLMAP sparse reconstruction in text form
-(``cameras.txt``, ``images.txt``, ``points3D.txt``) into our trainer's
-data structures. Binary ``.bin`` format is not supported — v1's data
-generation tool emits text, and a binary parser is v2+ work.
-
-COLMAP conventions:
-- Image y-axis points DOWN (row 0 = top of image).
-- Camera looks down +Z in camera frame.
-- Quaternion is (w, x, y, z) representing a world -> camera rotation.
-- Translation ``t`` is the world -> camera translation (post-rotation).
-- Pinhole camera: ``SIMPLE_PINHOLE`` has one focal length ``f`` (fx = fy
-  = f). ``PINHOLE`` has separate ``fx, fy``.
-
-Our trainer conventions:
-- View matrix row-major, maps world point to camera-space point.
-- Projection maps camera point to clip space with ``P[0][0] = 2fx/W``,
-  ``P[1][1] = 2fy/H`` (NDC y up — we flip sign below).
-- Quaternion (w, x, y, z).
-"""
-
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -48,11 +26,6 @@ class ColmapDataset:
 
 
 def _quat_wxyz_to_rotmat(q: np.ndarray) -> np.ndarray:
-    """Convert (w, x, y, z) quaternion to 3x3 rotation matrix.
-
-    Same formula as our shader's ``matrixFromQuaternion`` for
-    consistency; operates in numpy for CPU use.
-    """
     q = np.asarray(q, dtype=np.float64)
     q = q / np.linalg.norm(q)
     w, x, y, z = q
@@ -92,9 +65,6 @@ def _parse_cameras(path: Path) -> dict[int, dict]:
 
 
 def _parse_images(path: Path) -> list[dict]:
-    """Return list of dicts with keys
-    {image_id, qw, qx, qy, qz, tx, ty, tz, camera_id, name}.
-    Ignores the per-image feature-point lines (every second data line)."""
     entries: list[dict] = []
     with path.open("r") as f:
         lines = [ln.strip() for ln in f if ln.strip() and not ln.startswith("#")]
@@ -131,14 +101,6 @@ def _parse_points3d(path: Path) -> tuple[np.ndarray, np.ndarray]:
 
 def _view_matrix(qw: float, qx: float, qy: float, qz: float,
                  tx: float, ty: float, tz: float) -> np.ndarray:
-    """Build a row-major 4x4 view matrix from COLMAP's world->camera
-    quaternion + translation.
-
-    COLMAP stores R and t such that ``x_cam = R @ x_world + t``.
-    So the view matrix is:
-        [ R | t ]
-        [ 0 | 1 ]
-    """
     R = _quat_wxyz_to_rotmat(np.array([qw, qx, qy, qz]))
     M = np.eye(4, dtype=np.float32)
     M[:3, :3] = R
@@ -149,24 +111,6 @@ def _view_matrix(qw: float, qx: float, qy: float, qz: float,
 def _projection_matrix(fx: float, fy: float, cx: float, cy: float,
                        width: int, height: int,
                        z_near: float = 0.01, z_far: float = 100.0) -> np.ndarray:
-    """Build a row-major 4x4 projection matrix mapping view space to clip.
-
-    Given pinhole intrinsics ``(fx, fy, cx, cy)`` for an image of size
-    ``(width, height)``, produces the clip-space matrix such that:
-      P[0][0] = 2 fx / W           # matches our shader's focal recovery
-      P[1][1] = 2 fy / H
-      P[0][2] = 2 cx / W - 1       # NDC x offset for off-center principal
-      P[1][2] = 2 cy / H - 1       # NDC y offset
-      P[2][2] = far / (far - near)
-      P[2][3] = -far*near / (far - near)
-      P[3][2] = 1
-
-    Both COLMAP pixel-y and our shader's ``mean_2d.y = uv * H`` pixel
-    space are row-0-at-top (y down). No sign flip on row 1 is needed
-    because the shader's final ``uv * H`` step already inverts NDC y
-    into pixel-row convention. Verified against the FOV matrix builder
-    in dataset.py::build_projection_matrix which has the same sign.
-    """
     M = np.zeros((4, 4), dtype=np.float32)
     M[0, 0] = 2.0 * fx / width
     M[1, 1] = 2.0 * fy / height
@@ -179,11 +123,6 @@ def _projection_matrix(fx: float, fy: float, cx: float, cy: float,
 
 
 def _srgb_colors_to_sh0(srgb: np.ndarray) -> np.ndarray:
-    """Convert sRGB [0,1] point colors to the SH band-0 (DC) coefficient the
-    renderer expects: color = 0.5 + C0*sh0  =>  sh0 = (color - 0.5)/C0.
-    COLORSPACE: the loss now runs in sRGB (INRIA/gsplat/SADGS convention), so
-    we seed sh0 DIRECTLY from the sRGB color — no linearization. No clamp/
-    logit — sh0 is unbounded (affine), which is the point of the SH0 switch."""
     return ((srgb - 0.5) / _SH_C0).astype(np.float32)
 
 
@@ -271,7 +210,6 @@ def _parse_images_bin(path: Path) -> list[dict]:
 
 
 def _parse_points3d_bin(path: Path) -> tuple[np.ndarray, np.ndarray]:
-    """Parse COLMAP binary points3D.bin. Returns (positions, colors)."""
     import struct
     pts: list[list[float]] = []
     colors: list[list[float]] = []
@@ -298,15 +236,6 @@ def load_colmap(
     downsample: int = 1,
     init_opacity: float = 0.1,
 ) -> ColmapDataset:
-    """Load a COLMAP scene, auto-detecting text vs binary format.
-
-    Resolution is determined by (in priority order):
-      1. Explicit ``width``/``height`` if provided.
-      2. ``downsample`` factor applied to native resolution.
-         If ``images_N`` directory exists, images are loaded from there
-         (already downsampled); otherwise full-res images are resized on load.
-      3. Native resolution (downsample=1, no width/height).
-    """
     scene_dir = Path(scene_dir)
 
     # Choose image directory: images_N if it exists, else images.
@@ -330,26 +259,8 @@ def load_colmap(
         imgs = _parse_images_bin(sparse_dir / "images.bin")
         pts3d, pts_colors = _parse_points3d_bin(sparse_dir / "points3D.bin")
 
-    # Sort views by image name. COLMAP writes images in registration order,
-    # NOT filename order; 3DGS/SAD-GS sort by name (readColmapSceneInfo:
-    # `sorted(..., key=lambda x: x.image_name)`) BEFORE applying the every-8th
-    # eval holdout. Matching that sort here makes `scene.images[i]` index the
-    # same frame the paper's split does, so the holdout (i % 8 == 0) selects
-    # the identical test cameras on any scene — not just ones whose record
-    # order happens to already be sequential.
     imgs = sorted(imgs, key=lambda r: r["name"])
 
-    # Native resolution, PER VIEW. A COLMAP model that went through
-    # image_undistorter has one PINHOLE camera per image, each cropped to that
-    # view's own valid region, so sizes legitimately differ by a few pixels
-    # (e.g. 778x518 / 777x517 / 776x516 across one scene). This used to be a hard
-    # error, which made every undistorted reconstruction unloadable.
-    #
-    # The renderer has ONE target resolution, so the most COMMON native size
-    # becomes the target (that majority of views is then read straight off disk
-    # with no resampling at all) and every camera's intrinsics are scaled by ITS
-    # OWN native size further down. The off-size views are resized on load, which
-    # is exactly what the --downsample path already does for every view.
     size_counts: dict[tuple[int, int], int] = {}
     for rec in imgs:
         cam = cams[rec["camera_id"]]

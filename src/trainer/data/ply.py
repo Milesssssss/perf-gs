@@ -1,13 +1,3 @@
-"""3DGS ``.ply`` format IO — load an existing point cloud, write gaussians out.
-
-Co-locates the read and write of the 3DGS PLY layout so the field convention
-(per-axis log scales, ``wxyz`` quaternion, pre-sigmoid opacity, SH band-0 DC
-color) lives in one place. This module is pure (numpy + plyfile) and imports no
-pipeline/GPU code, so it stays in the shared ``data`` layer;
-:func:`trainer.backend.export.save_ply` reads the GPU buffers and delegates the
-serialization here.
-"""
-
 from __future__ import annotations
 
 from pathlib import Path
@@ -25,20 +15,6 @@ _PLY_REQUIRED_FIELDS = (
 
 
 def load_ply(path: str | Path) -> dict[str, np.ndarray]:
-    """Load a 3DGS-format ``.ply`` into numpy arrays matching
-    :func:`trainer.backend.memory.buffers.write_gaussians` inputs.
-
-    The 3DGS convention:
-    - ``x, y, z`` — world position
-    - ``scale_0..2`` — log-scale per axis
-    - ``rot_0..3`` — quaternion (w, x, y, z)
-    - ``opacity`` — pre-sigmoid (inverse sigmoid applied at render)
-    - ``f_dc_0..2`` — SH zeroth-order coefficient (DC term)
-
-    Opacity in the ``.ply`` is pre-sigmoid; this loader returns the [0,1]
-    probability (``write_gaussians`` converts back to logit before upload). The
-    DC term maps to ``sh0`` directly (color = 0.5 + C0*sh0), no round-trip.
-    """
     path = Path(path)
     if not path.exists():
         raise FileNotFoundError(f"ply not found: {path}")
@@ -103,19 +79,6 @@ def load_ply(path: str | Path) -> dict[str, np.ndarray]:
 
 def write_gaussian_ply(gaussians: np.ndarray, path: str | Path,
                        features_rest: np.ndarray | None = None) -> None:
-    """Write a structured Gaussian array (``gaussian_numpy_dtype``) as a
-    3DGS-format ``.ply``. Inverse of :func:`load_ply`.
-
-    Opacity is written as the pre-sigmoid logit (as the GPU holds it), and
-    ``sh0`` is written directly as ``f_dc`` (color = 0.5 + C0*sh0 IS sRGB,
-    matching the 3DGS PLY convention), so no color round-trip.
-
-    ``features_rest`` (optional, shape ``(N, rest_floats)`` in our coeff-major
-    ``[coeff*3 + channel]`` layout) adds the higher SH bands as ``f_rest_*``,
-    written in the INRIA channel-major order (all coeffs of R, then G, then B)
-    so standard 3DGS viewers infer the degree from the count. Omitted for the
-    SH0 model (14-field PLY, unchanged).
-    """
     mean = gaussians["mean"]
     log_scale = gaussians["log_scale"]
     rot_quat = gaussians["rot_quat"]

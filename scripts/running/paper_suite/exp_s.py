@@ -40,7 +40,7 @@ from . import stats
 from . import tables
 from .results import RAW_COLUMNS, ResultSet
 
-METRICS = ("psnr_srgb", "ssim_srgb", "lpips_alex", "train_active_s",
+METRICS = ("psnr_srgb", "ssim_srgb", "lpips", "train_active_s",
            "n_gaussians")
 
 DELTA_COLUMNS = (
@@ -58,7 +58,7 @@ BY_SCENE_COLUMNS = (
 
 SUMMARY_COLUMNS = (
     "regime", "select_mode", "n_scenes", "psnr_srgb_mean", "psnr_srgb_std",
-    "ssim_srgb_mean", "lpips_alex_mean", "train_active_s_mean",
+    "ssim_srgb_mean", "lpips_mean", "train_active_s_mean",
     "n_gaussians_mean",
 )
 
@@ -120,7 +120,7 @@ def _figure(delta_rows: list[dict], figures_dir: Path) -> None:
     if plt is None:
         return
     panels = [("psnr_srgb", "$\\Delta$ PSNR (dB)"),
-              ("lpips_alex", "$\\Delta$ LPIPS"),
+              ("lpips", "$\\Delta$ LPIPS"),
               ("train_active_s", "$\\Delta$ active train (s)")]
     # Rotated tick labels on three panels each with its own y-label; the extra
     # width is what lets tight_layout resolve the decorations instead of warning.
@@ -170,7 +170,7 @@ def _latex(summary_rows: list[dict], delta_rows: list[dict],
                 cfg.SELECT_MODE_LABELS[mode],
                 tables.num(row.get("psnr_srgb_mean"), 3),
                 tables.num(row.get("ssim_srgb_mean"), 4),
-                tables.num(row.get("lpips_alex_mean"), 4),
+                tables.num(row.get("lpips_mean"), 4),
                 tables.num(row.get("train_active_s_mean"), 1),
             ])
         delta = next((r for r in delta_rows if r["regime"] == regime

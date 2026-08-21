@@ -282,12 +282,22 @@ void backwardRasterizePerSplat(
     // one block of the mask. Slot j of that block is the j-th sampled pixel.
     uint stbn_base = stbnBlockBase(uint2(tile_origin_x, tile_origin_y),
                                    stbn_dims, stbn_slice);
-    // From the TABLE, not the uniform: under a global slice threshold the
+    // From the TABLE when the mask is ON: under a global slice threshold the
     // per-tile count varies (the uniform is only the nominal density), and using
-    // the uniform here would walk past the end of a sparse tile's list and
+    // the uniform would walk past the end of a sparse tile's list and
     // re-supervise pixels the mask excluded.
-    uint visit_count = min(stbnTileCount(stbn_table, stbn_base),
-                           STBN_VISIT_CAPACITY);
+    //
+    // When the mask is OFF, the table must NOT be consulted: it still describes
+    // some density, so reading its count here would visit only that many pixels
+    // while the loss weighted all TILE_AREA of them by 1.0 — a backward that
+    // silently drops 75% of the image and reports a gradient 1/rho too small.
+    // (That path only exists in an STBN_ENABLED build with the mask disabled,
+    // i.e. the dense reference of a gradient diagnostic, which is exactly where
+    // it was caught.) The compacted list is a full permutation of the tile, so
+    // visiting TILE_AREA slots covers every pixel exactly once.
+    uint visit_count = stbnActive(stbn_tile_pixels)
+        ? min(stbnTileCount(stbn_table, stbn_base), STBN_VISIT_CAPACITY)
+        : TILE_AREA;
     if (tid < visit_count)
         gs_stbn_visit[0][tid] = stbnPixelAtSlot(stbn_table, stbn_base, tid);
 #else
@@ -774,8 +784,12 @@ void backwardRasterizePerBucket(
     {
         uint stbn_base = stbnBlockBase(uint2(tile_origin_x, tile_origin_y),
                                        stbn_dims, stbn_slice);
-        visit_count = min(stbnTileCount(stbn_table, stbn_base),
-                          STBN_VISIT_CAPACITY);
+        // Table count when the mask is on; the full tile when it is off — see the
+        // per-workgroup site above for why consulting the table with the mask
+        // disabled silently drops most of the image.
+        visit_count = stbnActive(stbn_tile_pixels)
+            ? min(stbnTileCount(stbn_table, stbn_base), STBN_VISIT_CAPACITY)
+            : TILE_AREA;
         uint cp_base = checkpointIndex(cp_bucket, 0u);
         for (uint k = lane; k < visit_count; k += RASTER_BUCKET_SIZE)
         {

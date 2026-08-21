@@ -27,12 +27,6 @@ import numpy as np
 from trainer.config.config import IterationEvents
 
 class TrainingSchedule:
-    """Answers ``events_at(it)`` from an immutable :class:`ScheduleConfig`.
-
-    The logic mirrors the original inline v2_train loop EXACTLY (proven by
-    tests/test_training_schedule.py) so wiring it into the loop is a
-    behavior-preserving swap.
-    """
 
     def __init__(self, cfg: ScheduleConfig) -> None:
         self._cfg = cfg
@@ -138,23 +132,6 @@ class ExtinctionHardnessSchedule:
         return float(np.exp(np.log(self._target) * t))
 
 class StbnDensitySchedule:
-    """Per-iteration STBN pixel density: full supervision, then a ramp down to
-    the steady-state fraction.
-
-    Sparse supervision is hardest on exactly the thin, high-frequency structures
-    (leaves, grass, fences, small specular highlights) that early densification
-    is trying to create Gaussians for: a splat covering a handful of pixels can
-    get ZERO samples on a given visit, and it is the densifier's gradient
-    statistics — not the Adam step — that suffer most from that. So the density
-    starts at 1.0 and ramps down, spending the dense pixels where they buy the
-    most and the sparse ones over the long refinement tail.
-
-    The ramp is log-linear (rho = target**t), matching
-    :class:`ExtinctionHardnessSchedule`: geometric in the quantity that matters
-    (the fraction), so it passes through the intermediate densities — 1.0 ->
-    0.5 -> 0.25 -> 0.1 — rather than spending most of the window near one end.
-    ``warmup <= 0`` pins the target from step 1.
-    """
 
     def __init__(self, target_fraction: float, warmup: int) -> None:
         self._target = float(target_fraction)

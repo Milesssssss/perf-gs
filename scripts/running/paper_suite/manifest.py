@@ -65,7 +65,7 @@ class CellRecord:
     # Results.
     psnr_srgb: float | None = None
     ssim_srgb: float | None = None
-    lpips_alex: float | None = None
+    lpips: float | None = None
     n_gaussians: int | None = None
     render_fps: float | None = None
     # Scene / protocol facts, per cell (resolution differs by dataset because

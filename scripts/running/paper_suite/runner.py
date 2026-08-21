@@ -77,7 +77,7 @@ def _fold_run_report(record: CellRecord, report: dict) -> None:
     record.observation_s = timing.get("observation_s")
     record.psnr_srgb = quality.get("psnr_srgb")
     record.ssim_srgb = quality.get("ssim_srgb")
-    record.lpips_alex = quality.get("lpips_alex")
+    record.lpips = quality.get("lpips")
     record.n_gaussians = model.get("n_gaussians")
     record.render_fps = render.get("fps")
     record.gpu_alloc_capacity_mb = memory.get("total_mb")
@@ -204,7 +204,7 @@ def run_cell(cell: cfg.Cell, manifest: Manifest, *, python: str,
     record.status = STATUS_OK
     print(f"[suite] done   {cell.key}  psnr={record.psnr_srgb:.3f} dB  "
           f"ssim={(record.ssim_srgb or 0):.4f}  "
-          f"lpips={record.lpips_alex if record.lpips_alex is None else round(record.lpips_alex, 4)}  "
+          f"lpips={record.lpips if record.lpips is None else round(record.lpips, 4)}  "
           f"active={record.train_active_s:.1f}s  "
           f"process={record.process_wall_s:.1f}s  n_g={record.n_gaussians}",
           flush=True)

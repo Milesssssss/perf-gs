@@ -65,8 +65,8 @@ if str(_HERE) not in sys.path:
 
 from paper_suite import config as cfg
 from paper_suite import env as env_module
-from paper_suite import (exp_a, exp_b, exp_c, exp_d, exp_e, exp_f, exp_g, exp_s,
-                         report)
+from paper_suite import (exp_a, exp_b, exp_c, exp_d, exp_e, exp_f, exp_f2, exp_g,
+                         exp_s, report)
 from paper_suite import output_layout
 from paper_suite.manifest import Manifest
 from paper_suite.results import ResultSet
@@ -107,6 +107,23 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--no-qualitative", action="store_true",
                        help="omit Experiment G (contact sheets are the bulk of "
                             "the output's file count)")
+    parser.add_argument("--gradient-study", action="store_true",
+                       help="Run ONLY Experiment F2, the controlled "
+                            "gradient-fidelity study: freeze real training "
+                            "states and compare each sparse strategy's gradient "
+                            "against the dense one on identical Gaussians, "
+                            "camera, prediction and loss. Trains nothing and "
+                            "takes no optimizer step. Kept off the default path "
+                            "because it is hours of measurement in its own right.")
+    parser.add_argument("--gradient-study-scenes",
+                       default=",".join(exp_f2.STUDY_SCENES))
+    parser.add_argument("--gradient-study-cameras", type=int, default=8)
+    parser.add_argument("--gradient-study-single-masks", type=int, default=4)
+    parser.add_argument("--gradient-study-sequences", type=int, default=2)
+    parser.add_argument("--gradient-study-states", type=int, nargs="*",
+                       default=list(exp_f2.STUDY_STATES))
+    parser.add_argument("--gradient-study-k", type=int, nargs="*",
+                       default=list(exp_f2.STUDY_K))
     parser.add_argument("--cell-timeout-s", type=float,
                        default=DEFAULT_CELL_TIMEOUT_S)
     parser.add_argument("--max-views-per-scene", type=int, default=None,
@@ -197,6 +214,35 @@ def main() -> int:
         "last_invocation": " ".join(sys.argv),
         "last_started_at": env_module.utc_now(),
     }
+
+    if args.gradient_study:
+        # Measurement-only mode: no training grid, no manifest cells. Writes into
+        # gradient_analysis/ and findings_gradient_study.json so it cannot
+        # overwrite a completed suite's report.
+        started = time.perf_counter()
+        study_scenes = tuple(s.strip() for s in
+                             args.gradient_study_scenes.split(",") if s.strip())
+        print(f"[suite] gradient study only: scenes={list(study_scenes)} "
+              f"states={args.gradient_study_states} "
+              f"K<={max(args.gradient_study_k)} "
+              f"cameras={args.gradient_study_cameras}")
+        finding = exp_f2.run(
+            out, python=args.python, scenes=study_scenes,
+            states=tuple(args.gradient_study_states),
+            k_values=tuple(sorted(args.gradient_study_k)),
+            cameras=args.gradient_study_cameras,
+            single_masks=args.gradient_study_single_masks,
+            sequences=args.gradient_study_sequences,
+            fraction=cfg.PRIMARY_FRACTION, force=args.force,
+            skip_runs=analyze_only)
+        (out["root"] / "findings_gradient_study.json").write_text(
+            json.dumps(finding, indent=2, default=str))
+        path = report.build_gradient_study(
+            finding, environment=environment, out_root=out["root"])
+        print(f"\n[suite] gradient study done in "
+              f"{(time.perf_counter() - started) / 3600:.2f}h")
+        print(f"[suite] report: {path}")
+        return 0
 
     started = time.perf_counter()
     if analyze_only:

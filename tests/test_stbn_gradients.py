@@ -215,6 +215,35 @@ def test_loss_zeroes_unsampled_pixels_and_scales_the_sampled_ones(
                                rtol=1e-5, atol=1e-6)
 
 
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_mask_off_in_a_compacted_build_matches_a_plain_dense_backward(
+        backend: str) -> None:
+    """A mask-OFF backward inside an STBN_ENABLED build must be the dense gradient.
+
+    This is the dense REFERENCE that any sparse-vs-dense comparison is measured
+    against, and it is easy to get wrong in a way nothing else notices: the
+    compacted path takes its pixel-loop bound from the mask table, which still
+    describes some density even when the mask is disabled. Reading it
+    unconditionally made the "dense" backward visit only rho of the pixels while
+    the loss weighted all of them by 1.0 — a gradient exactly 1/rho too small,
+    with the sparse runs then looking 1/rho too LARGE.
+
+    ``test_full_budget_is_bit_identical_to_no_mask_at_all`` cannot catch this:
+    both of its arms take the mask-off path, so both would be wrong together.
+    This compares against a build that has no STBN code at all.
+    """
+    scene, camera = _deep_scene(), _camera()
+
+    plain = _pipeline(backend, compacted=False)
+    reference = _gradients(plain, scene, camera, None)
+
+    compacted = _pipeline(backend, compacted=True)
+    measured = _gradients(compacted, scene, camera, None)
+
+    _compare(measured, reference, label_a="compacted(mask off)",
+             label_b="plain dense")
+
+
 # --------------------------------------------------- reference vs compacted
 
 @pytest.mark.parametrize("backend", BACKENDS)

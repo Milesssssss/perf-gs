@@ -1,36 +1,3 @@
-"""Paper-grade per-run report: held-out per-view metrics + full provenance.
-
-``--final-test-psnr`` answers one question (mean held-out PSNR) with one number.
-A paper needs the whole cell: every held-out view's own PSNR/SSIM, the render
-PNGs a perceptual metric and a contact sheet can be built from later, the split
-that produced them, what the device actually was, and a timing breakdown that
-separates *training* from *observing the training*.
-
-This module is that report, and it is strictly ADDITIVE:
-
-  * it runs only under ``--run-report``, after the timed loop and after
-    ``_record_current_timing`` has already frozen ``train_wall_s``, so nothing
-    here can move a training number;
-  * it never touches optimizer / densify / mask state — it renders cameras and
-    reads buffers;
-  * ``test_psnr.json`` keeps its existing schema (other plot scripts parse it);
-    the rich record goes to ``run_report.json`` next to it.
-
-The timing split is the part worth being pedantic about. ``train_wall_s`` is
-wall-clock across the loop, so any mid-run observation (an ``--eval-every``
-sweep, a ``--psnr-curve`` tick) is inside it. Sparse-vs-dense speed claims must
-not depend on how often we chose to measure quality, so the loop accumulates the
-cost of every observation and this report subtracts it:
-
-    train_active_s = train_wall_s - observation_s
-
-Both are reported, never just the flattering one. A run with no mid-training
-evaluation has ``observation_s == 0`` and the two are equal.
-
-LPIPS is deliberately NOT computed here: it needs torch, and importing torch into
-the trainer process would put a second framework beside the GPU we are timing.
-The saved test renders exist so LPIPS can be computed afterwards, out of process.
-"""
 from __future__ import annotations
 
 import hashlib
@@ -59,18 +26,9 @@ DEFAULT_FPS_FRAMES = 60
 FPS_WARMUP_FRAMES = 5
 
 
-# ---------------------------------------------------------------------------
-# Device / asset provenance
-# ---------------------------------------------------------------------------
 
 def device_info(pipeline: "TrainingPipeline") -> dict:
-    """What the application itself can see about the device it ran on.
 
-    Deliberately sourced from the graphics API rather than from ``nvidia-smi``:
-    this is the adapter the run actually bound. The suite driver records the
-    external driver view separately, so a mismatch between the two is visible
-    rather than silently reconciled.
-    """
     info: dict[str, Any] = {}
     try:
         device = pipeline.device
@@ -309,7 +267,7 @@ def evaluate_test_views(
         }
         # Computed from the same float render as PSNR/SSIM, before any PNG
         # round trip, so all three metrics describe one identical image.
-        record["lpips_alex"] = (perceptual.lpips(rendered, target)
+        record["lpips"] = (perceptual.lpips(rendered, target)
                                 if lpips_ready else None)
         if render_dir is not None:
             name = f"cam_{cam_i:04d}.png"
@@ -330,16 +288,16 @@ def evaluate_test_views(
         # Paper metric: the MEAN of per-image scores over the held-out split.
         "psnr_srgb": _mean("psnr_srgb"),
         "ssim_srgb": _mean("ssim_srgb"),
-        "lpips_alex": _mean("lpips_alex"),
+        "lpips": _mean("lpips"),
         # Spread ACROSS VIEWS of one run — not a seed-to-seed uncertainty. The
         # suite computes the across-seed std separately; conflating them would
         # overstate what a single run establishes.
         "psnr_srgb_std_views": _std("psnr_srgb"),
         "ssim_srgb_std_views": _std("ssim_srgb"),
-        "lpips_alex_std_views": _std("lpips_alex"),
+        "lpips_std_views": _std("lpips"),
         "n_test_views": len(per_view),
         "n_lpips_views": sum(1 for r in per_view
-                             if r.get("lpips_alex") is not None),
+                             if r.get("lpips") is not None),
         "renders_dir": (str(render_dir) if render_dir is not None else None),
     }
     if with_lpips:

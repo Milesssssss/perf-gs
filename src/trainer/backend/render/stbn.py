@@ -612,6 +612,30 @@ def upload_mask(device: Any, spec: StbnMaskSpec,
                     slices=spec.slices)
 
 
+def upload_packed_table(device: Any, packed: np.ndarray,
+                        spec: StbnMaskSpec) -> StbnMask:
+    """Upload an ALREADY-PACKED table, bypassing the spec-driven builders.
+
+    For diagnostics that need a mask no ``StbnMaskSpec`` describes — e.g. the
+    temporal-only control in the gradient study, whose per-pixel schedule is
+    constructed directly rather than ranked from a scalar volume. Training never
+    takes this path; it exists so an evaluation can define a mask without
+    inventing a new production source.
+    """
+    if packed.shape != (spec.voxels,) or packed.dtype != np.uint32:
+        raise ValueError(
+            f"packed table must be uint32[{spec.voxels}], got "
+            f"{packed.dtype}{packed.shape}")
+    buffer = device.create_buffer(
+        size=packed.nbytes,
+        usage=spy.BufferUsage.shader_resource | spy.BufferUsage.unordered_access,
+        label="stbn_table_custom",
+    )
+    buffer.copy_from_numpy(np.ascontiguousarray(packed).view(np.uint8))
+    return StbnMask(table=buffer, dims=(spec.width, spec.height),
+                    slices=spec.slices)
+
+
 def upload_disabled_mask(device: Any) -> StbnMask:
     """A 1-element placeholder table for runs with the mask off.
 

@@ -38,7 +38,7 @@ import numpy as np
 HIGHER_IS_BETTER = {
     "psnr_srgb": True,
     "ssim_srgb": True,
-    "lpips_alex": False,
+    "lpips": False,
     "train_active_s": False,
     "train_wall_s": False,
     "n_gaussians": None,        # neither: descriptive only
@@ -49,7 +49,7 @@ HIGHER_IS_BETTER = {
 METRIC_LABELS = {
     "psnr_srgb": "PSNR (dB)",
     "ssim_srgb": "SSIM",
-    "lpips_alex": "LPIPS",
+    "lpips": "LPIPS",
     "train_active_s": "active train (s)",
     "train_wall_s": "wall train (s)",
     "n_gaussians": "Gaussians",

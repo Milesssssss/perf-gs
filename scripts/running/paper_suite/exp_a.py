@@ -52,16 +52,16 @@ CONTRASTS: tuple[tuple[str, str, str, str], ...] = (
      "25% supervision against dense supervision"),
 )
 
-METRICS: tuple[str, ...] = ("psnr_srgb", "ssim_srgb", "lpips_alex",
+METRICS: tuple[str, ...] = ("psnr_srgb", "ssim_srgb", "lpips",
                             "train_active_s", "n_gaussians", "render_fps")
-QUALITY_METRICS: tuple[str, ...] = ("psnr_srgb", "ssim_srgb", "lpips_alex")
+QUALITY_METRICS: tuple[str, ...] = ("psnr_srgb", "ssim_srgb", "lpips")
 
 SCENE_SUMMARY_COLUMNS = (
     "scene", "dataset_family", "dataset_family_group", "regime",
     "pixel_fraction", "n_seeds", "seeds_expected", "complete",
     "psnr_srgb_mean", "psnr_srgb_std", "psnr_srgb_min", "psnr_srgb_max",
     "ssim_srgb_mean", "ssim_srgb_std",
-    "lpips_alex_mean", "lpips_alex_std",
+    "lpips_mean", "lpips_std",
     "train_active_s_mean", "train_active_s_std",
     "train_wall_s_mean", "process_wall_s_mean",
     "n_gaussians_mean", "n_gaussians_std",
@@ -74,7 +74,7 @@ DATASET_SUMMARY_COLUMNS = (
     "scenes_expected", "complete",
     "psnr_srgb_mean", "psnr_srgb_std",
     "ssim_srgb_mean", "ssim_srgb_std",
-    "lpips_alex_mean", "lpips_alex_std",
+    "lpips_mean", "lpips_std",
     "train_active_s_mean", "train_active_s_std",
     "n_gaussians_mean", "render_fps_mean",
 )
@@ -115,7 +115,7 @@ def _scene_rows(results: ResultSet, scenes, seeds, fraction) -> list[dict]:
                 "seeds_expected": len(seeds),
                 "complete": len(cells) == len(seeds),
             }
-            for metric in ("psnr_srgb", "ssim_srgb", "lpips_alex",
+            for metric in ("psnr_srgb", "ssim_srgb", "lpips",
                            "train_active_s", "n_gaussians"):
                 summary = stats.mean_std([c.metric(metric) for c in cells])
                 row[f"{metric}_mean"] = summary["mean"]
@@ -178,7 +178,7 @@ def _dataset_rows(results: ResultSet, scenes, seeds, fraction) -> list[dict]:
                 # Scene-then-seed pooling would weight a scene by how many of its
                 # seeds survived. Average within a scene first so every scene
                 # counts once, which is also the unit the CIs use.
-                for metric in ("psnr_srgb", "ssim_srgb", "lpips_alex",
+                for metric in ("psnr_srgb", "ssim_srgb", "lpips",
                                "train_active_s", "n_gaussians", "render_fps"):
                     per_scene = []
                     for scene in sorted(present_scenes):
@@ -308,7 +308,7 @@ def _figure_per_scene_bars(results: ResultSet, scenes, seeds, fraction,
 
     panels = [("psnr_srgb", "held-out PSNR (dB)"),
               ("ssim_srgb", "held-out SSIM"),
-              ("lpips_alex", "held-out LPIPS (lower better)"),
+              ("lpips", "held-out LPIPS (lower better)"),
               ("train_active_s", "active train time (s)")]
     fig, axes = plt.subplots(len(panels), 1,
                              figsize=(max(figs.FIG_WIDTH_DOUBLE,
@@ -364,7 +364,7 @@ def _figure_paired_deltas(objects, figures_dir: Path) -> None:
         return
     panels = [("psnr_srgb", "$\\Delta$ PSNR (dB)"),
               ("ssim_srgb", "$\\Delta$ SSIM"),
-              ("lpips_alex", "$\\Delta$ LPIPS")]
+              ("lpips", "$\\Delta$ LPIPS")]
     names = [c[2] for c in CONTRASTS]
     fig, axes = plt.subplots(1, len(panels),
                              figsize=(figs.FIG_WIDTH_DOUBLE, 2.6))
@@ -433,7 +433,7 @@ def _latex_main(dataset_rows: list[dict], latex_dir: Path, fraction: float,
                 tables.num(row.get("psnr_srgb_mean"), 2),
                 tables.num(row.get("psnr_srgb_std"), 2),
                 tables.num(row.get("ssim_srgb_mean"), 4),
-                tables.num(row.get("lpips_alex_mean"), 4),
+                tables.num(row.get("lpips_mean"), 4),
                 tables.num(row.get("train_active_s_mean"), 1),
                 tables.num((row.get("n_gaussians_mean") or 0) / 1000.0, 0)
                 if row.get("n_gaussians_mean") else tables.LATEX_NA,
@@ -473,14 +473,14 @@ def _latex_ablation(delta_rows: list[dict], latex_dir: Path,
     rows: list[list[str]] = []
     for contrast in wanted:
         for metric, digits in (("psnr_srgb", 3), ("ssim_srgb", 4),
-                               ("lpips_alex", 4)):
+                               ("lpips", 4)):
             row = index.get((contrast, metric))
             if row is None:
                 continue
             rows.append([
                 (pretty[contrast] if metric == "psnr_srgb" else ""),
                 {"psnr_srgb": "PSNR (dB)", "ssim_srgb": "SSIM",
-                 "lpips_alex": "LPIPS"}[metric],
+                 "lpips": "LPIPS"}[metric],
                 tables.num(row.get("mean_delta"), digits, plus=True),
                 tables.num(row.get("std_delta_scenes"), digits),
                 tables.ci_cell(row, digits),
@@ -530,7 +530,7 @@ def _latex_family(dataset_rows: list[dict], latex_dir: Path,
                 str(row.get("n_scenes", "")),
                 tables.num(row.get("psnr_srgb_mean"), 2),
                 tables.num(row.get("ssim_srgb_mean"), 4),
-                tables.num(row.get("lpips_alex_mean"), 4),
+                tables.num(row.get("lpips_mean"), 4),
                 tables.num(row.get("train_active_s_mean"), 1),
             ])
     body = tables.latex_table(

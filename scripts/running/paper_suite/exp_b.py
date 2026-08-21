@@ -36,7 +36,7 @@ SWEEP_COLUMNS = (
     "grouping", "group", "regime", "pixel_fraction", "n_scenes", "n_cells",
     "scenes_expected", "complete", "timing_corrected",
     "psnr_srgb_mean", "psnr_srgb_std",
-    "ssim_srgb_mean", "lpips_alex_mean",
+    "ssim_srgb_mean", "lpips_mean",
     "psnr_gap_vs_dense_mean", "psnr_gap_vs_dense_std",
     "ssim_gap_vs_dense_mean",
     "lpips_gap_vs_dense_mean", "lpips_gap_vs_dense_std",
@@ -48,7 +48,7 @@ GAP_BY_SCENE_COLUMNS = (
     "scene", "dataset_family", "regime", "pixel_fraction", "seed",
     "psnr_srgb", "dense_psnr_srgb", "psnr_gap_vs_dense",
     "ssim_srgb", "dense_ssim_srgb", "ssim_gap_vs_dense",
-    "lpips_alex", "dense_lpips_alex", "lpips_gap_vs_dense",
+    "lpips", "dense_lpips", "lpips_gap_vs_dense",
     "train_active_s", "dense_train_active_s", "speedup_vs_dense",
     "n_gaussians", "timing_corrected",
 )
@@ -63,7 +63,7 @@ CONTRAST_COLUMNS = (
 
 GAP_METRICS = (("psnr_srgb", "psnr_gap_vs_dense"),
                ("ssim_srgb", "ssim_gap_vs_dense"),
-               ("lpips_alex", "lpips_gap_vs_dense"))
+               ("lpips", "lpips_gap_vs_dense"))
 
 
 def _dense_index(results: ResultSet, seed: int) -> dict[str, dict]:
@@ -73,7 +73,7 @@ def _dense_index(results: ResultSet, seed: int) -> dict[str, dict]:
         out[result.cell.scene] = {
             "psnr_srgb": result.metric("psnr_srgb"),
             "ssim_srgb": result.metric("ssim_srgb"),
-            "lpips_alex": result.metric("lpips_alex"),
+            "lpips": result.metric("lpips"),
             "train_active_s": result.metric("train_active_s"),
         }
     return out
@@ -124,9 +124,9 @@ def _gap_rows(results: ResultSet, scenes, fractions, seed: int) -> list[dict]:
                     "ssim_srgb": result.metric("ssim_srgb"),
                     "dense_ssim_srgb": reference.get("ssim_srgb"),
                     "ssim_gap_vs_dense": gap("ssim_srgb"),
-                    "lpips_alex": result.metric("lpips_alex"),
-                    "dense_lpips_alex": reference.get("lpips_alex"),
-                    "lpips_gap_vs_dense": gap("lpips_alex"),
+                    "lpips": result.metric("lpips"),
+                    "dense_lpips": reference.get("lpips"),
+                    "lpips_gap_vs_dense": gap("lpips"),
                     "train_active_s": active,
                     "dense_train_active_s": dense_active,
                     "speedup_vs_dense": ((dense_active / active)
@@ -172,7 +172,7 @@ def _aggregate(gap_rows: list[dict], scenes, fractions) -> list[dict]:
                         "timing_corrected": any(r["timing_corrected"]
                                                 for r in picked),
                     }
-                    for key in ("psnr_srgb", "ssim_srgb", "lpips_alex",
+                    for key in ("psnr_srgb", "ssim_srgb", "lpips",
                                 "psnr_gap_vs_dense", "ssim_gap_vs_dense",
                                 "lpips_gap_vs_dense", "train_active_s",
                                 "speedup_vs_dense", "n_gaussians"):
@@ -191,7 +191,7 @@ def _contrasts(results: ResultSet, scenes, fractions, seed: int) -> list[dict]:
     rows: list[dict] = []
     for fraction in fractions:
         for treatment, baseline, name in pairs:
-            for metric in ("psnr_srgb", "ssim_srgb", "lpips_alex",
+            for metric in ("psnr_srgb", "ssim_srgb", "lpips",
                            "train_active_s"):
                 treat = results.metric_map(metric, regime=treatment,
                                            fraction=fraction, seeds=(seed,),
@@ -274,7 +274,7 @@ def _figure_contrasts(contrast_rows: list[dict], figures_dir: Path,
     if plt is None:
         return
     panels = [("psnr_srgb", "$\\Delta$ PSNR (dB)"),
-              ("lpips_alex", "$\\Delta$ LPIPS (negative = better)")]
+              ("lpips", "$\\Delta$ LPIPS (negative = better)")]
     contrasts = [("stbn_vs_iid", "STBN $-$ IID white", "#009E73", "D"),
                  ("stbn_vs_indep_blue", "STBN $-$ indep. blue", "#56B4E9", "^"),
                  ("indep_blue_vs_iid", "indep. blue $-$ IID", "#E69F00", "s")]
@@ -334,7 +334,7 @@ def _latex_sweep(aggregate: list[dict], latex_dir: Path, fractions) -> None:
                 cfg.REGIME_LABELS[regime],
                 tables.num(row.get("psnr_srgb_mean"), 2),
                 tables.num(row.get("psnr_gap_vs_dense_mean"), 3, plus=True),
-                tables.num(row.get("lpips_alex_mean"), 4),
+                tables.num(row.get("lpips_mean"), 4),
                 tables.num(row.get("lpips_gap_vs_dense_mean"), 4, plus=True),
                 tables.num(row.get("train_active_s_mean"), 1) + corrected,
                 tables.num(row.get("speedup_vs_dense_mean"), 2),

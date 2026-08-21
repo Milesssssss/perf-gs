@@ -219,16 +219,11 @@ class FlyCamera:
         return self._up
 
     def roll_by(self, degrees: float) -> None:
-        """Roll about the forward axis (R/T). Rotates the reference up so the
-        tilt PERSISTS through subsequent mouse-look (which levels to ref_up)."""
         ref = self._rotate_about(self._ref_up, self._fwd, math.radians(degrees))
         self._ref_up = ref / (np.linalg.norm(ref) + 1e-12)
         self._rebuild_from_ref()
 
     def set_ref_up_to_current(self) -> None:
-        """Y key: adopt the current view's up as the new up reference. Mouse-look
-        then keeps the horizon level to what you're looking at right now, and any
-        roll in the current view becomes the new zero-roll reference."""
         self._ref_up = self._up / (np.linalg.norm(self._up) + 1e-12)
 
     def move(self, keys: set, dt: float):
@@ -249,19 +244,11 @@ class FlyCamera:
             self.eye -= self._up * vel
 
     def adjust_speed(self, steps: float) -> None:
-        """Scale the movement speed by mouse-wheel ``steps`` (~25% per notch,
-        multiplicative), clamped to a sane range. All WASD/QE motion uses this
-        one speed."""
         if steps:
             self.speed *= 1.25 ** steps
             self.speed = float(max(1e-3, min(self.speed, 1e5)))
 
     def rotate(self, dx: float, dy: float):
-        """Mouse-look about the reference up (self._ref_up): yaw about ref_up,
-        pitch about the current right, then rebuild right PERPENDICULAR to
-        ref_up. Looking around can never roll the view no matter the drag path
-        (right stays in the ref_up plane) — only R/T and Y change the roll
-        reference. Levels to the SCENE's up (whatever ref_up holds), not +Y."""
         yaw = math.radians(dx * self.sensitivity)     # drag-right -> look right
         pitch = math.radians(-dy * self.sensitivity)  # drag-up -> look up
         f = self._rotate_about(self._fwd, self._ref_up, yaw)
@@ -284,8 +271,6 @@ class FlyCamera:
         self._up = R[1].astype(np.float64)
         self._fwd = R[2].astype(np.float64)
         self._orthonormalize()
-        # Level subsequent mouse-look to this camera's up (the scene's up as it
-        # sees it), so looking around from a snapped test cam stays upright.
         self._ref_up = self._up.copy()
 
     def get_camera(self, width: int, height: int, fovy: float = 45.0,
@@ -302,23 +287,10 @@ class FlyCamera:
 #: Key tags whose motion drops the "parked on a test camera" state.
 MOVE_TAGS = frozenset({"w", "a", "s", "d", "q", "e", "r", "t"})
 ROLL_SPEED_DEG_S = 60.0
-
-# Scene re-renders per second while free-flying during training (see
-# Viewer._scene_due). Parked on a test camera the rate is zero: the scene is
-# re-rendered only when new gaussians arrive.
 TRAINING_SCENE_FPS = 15.0
 
 
 class _CameraRig:
-    """Free-fly camera + held-out test-camera snapping.
-
-    Owns what the render loop used to keep in an ad-hoc dict (which test camera
-    we are parked on, the exact-projection camera to render while parked, the
-    active vertical FOV). C/V, the panel dropdown and manual navigation all go
-    through :meth:`snap_to`, and the panel binds its readouts to :meth:`names` /
-    :meth:`selection` / :meth:`label` — so the selector and the camera can never
-    disagree.
-    """
 
     def __init__(self, *, fovy: float, render_size: tuple[int, int],
                  test_cameras: list[tuple[str, Camera]] | None = None,
@@ -350,12 +322,7 @@ class _CameraRig:
         exact = "exact proj" if self.exact is not None else "fly proj"
         return f"cam {self.index + 1}/{len(self.test_cameras)}  {name}  ({exact})"
 
-    # ---- state changes ----
     def set_test_cameras(self, cameras, snap: bool = False) -> None:
-        """Replace the dropdown's camera list. ``snap`` parks on the first one
-        instead of dropping to free-fly — the point-cloud preview needs it, since
-        the fly camera starts at the origin and a scene reconstructed anywhere
-        else would be off-screen with nothing to say the data had loaded."""
         self.test_cameras = list(cameras or [])
         self.snap_to(0 if snap and self.test_cameras else -1)
 
@@ -371,10 +338,6 @@ class _CameraRig:
         fovy = _fovy_from_proj(target.proj_matrix)
         if fovy is not None:
             self.fovy = fovy
-        # Render the test camera EXACTLY (view+proj) when its resolution matches
-        # the render target, else fall back to the fly-cam perspective. Exact
-        # proj removes the last raster-side difference vs eval (principal point,
-        # exact fx/fy).
         self.index = index
         self.exact = (target if tuple(target.image_size) == self._render_size
                       else None)
@@ -482,22 +445,12 @@ class Viewer:
         self.fovy = fovy
         self.hot_reload = hot_reload
         self.sh_degree = sh_degree
-        # Session state shared with the orchestrator (phase, progress, log,
-        # training stats, dataset commands). Always present, so every panel
-        # binding has something to read even for a plain `train` run.
         self.state = state if state is not None else Session()
-        # Hub mode adds the DATASET section (drag-drop + reconstruct/train).
         self._hub = self.state.mode == MODE_HUB
-        # Scene-render budget while training (see _scene_due). Written from the
-        # trainer thread, read/cleared on the render thread.
         self._scene_dirty = threading.Event()
         self._scene_dirty.set()
         self._last_scene_s = 0.0
-        # Set == budget off despite an active run (the trainer is not stepping).
         self._frame_budget_off = threading.Event()
-        # The camera rig owns the fly camera and the test-camera snapping; the
-        # panel binds to it directly, so the dropdown and the camera cannot
-        # disagree and attach_scene needs no dirty-flag dance in the loop.
         self._rig = _CameraRig(fovy=fovy, render_size=(width, height),
                                test_cameras=test_cameras,
                                on_change=self.invalidate_scene)
@@ -509,26 +462,12 @@ class Viewer:
         self._stop_event = threading.Event()
 
         self._start_event = threading.Event()
-        # Set == training paused; the trainer blocks on wait_while_paused() each
-        # iteration. Toggled by the viewer's Pause/Resume button.
         self._pause_event = threading.Event()
-        # Set == the user asked to end the run early (Stop). The training loop's
-        # continue condition polls it, so the run finalizes normally instead of
-        # being torn down mid-iteration.
         self._stop_training = threading.Event()
-        # Set == skip ALL GPU work in the render loop. The hub sets this while it
-        # does heavy pipeline/target setup on the main thread, so those uploads
-        # don't race the render thread on the shared queue.
         self._suspend = threading.Event()
-        # Reflects the trainer's state so the panel can show "training" vs
-        # "inspecting init". The trainer sets this True once it starts looping.
         self._training_active = False
-        # Set == save the next rendered frame to a PNG (P key / programmatic).
         self._grab = threading.Event()
 
-        # Serializes the main loop's paint against the one on_resize does from
-        # inside the OS modal-resize loop — and against reconfigure_model, which
-        # must not swap the pipeline out from under a frame.
         self._render_lock = threading.RLock()
         self._explicit_sort_pairs = max_sort_pairs
         self._mip_enabled = mip_enabled
@@ -556,10 +495,6 @@ class Viewer:
             gpu_lock=self.gpu_lock,
             viewer_only=True,
             appearance_config=AppearanceConfig(sh_degree=sh_degree),
-            # Mirror the trainer's Mip-Splatting raster policy so the viewer
-            # low-passes the same tiny high-frequency gaussians eval does;
-            # without this those splats render raw and show aggressive
-            # higher-order SH color the eval render suppresses.
             raster_config=RasterConfig(mip_enabled=mip_enabled,
                                        kernel_size=mip_kernel_size),
         )
@@ -569,17 +504,6 @@ class Viewer:
 
     def reconfigure_model(self, *, max_splats: int, sh_degree: int,
                           mip_enabled: bool, mip_kernel_size: float) -> bool:
-        """Rebuild the viewer's pipeline for a model the hub just reconfigured.
-
-        ``max_splats`` sizes the snapshot buffers, ``sh_degree`` decides whether a
-        ``features_rest`` buffer exists at all, and the Mip settings pick the raster
-        path plus the ``filter_3D`` buffer — all fixed at pipeline construction. So
-        when the panel's TRAINING SETUP changes any of them, the viewer's pipeline
-        has to be rebuilt or the snapshot copy would target the wrong buffers.
-
-        Call with rendering suspended (the hub already is, while it builds the run).
-        Returns True if a rebuild happened. Cheap no-op when nothing changed.
-        """
         if (max_splats == self.max_splats and sh_degree == self.sh_degree
                 and mip_enabled == self._mip_enabled
                 and mip_kernel_size == self._mip_kernel_size):
@@ -601,13 +525,6 @@ class Viewer:
         return True
 
     def live_splat_count(self, train_pipeline: TrainingPipeline) -> int:
-        """The trainer's active splat count, read back to the host.
-
-        ONE uint32. It costs a readback (a staging copy queued behind the work in
-        flight, hence the queue scope), and it buys the snapshot below the right to
-        copy the ACTIVE range instead of the whole allocation — which is sized for
-        ``--max-splats`` and is mostly untouched tail for most of a run.
-        """
         with self.runtime.queue_scope():
             counter = train_pipeline.buffers.num_gaussians_counter.to_numpy()
         return int(counter.view(np.uint32)[0])
@@ -622,46 +539,20 @@ class Viewer:
         if src.sh_enabled and dst.sh_enabled:
             _copy_splats(encoder, src.features_rest.storage,
                          dst.features_rest.storage, count, src.max_splats)
-        # Mip-Splatting: copy the per-gaussian 3D smoothing filter so the viewer
-        # applies the SAME low-pass eval does. filter_3D depends on gaussian
-        # positions, so it must be refreshed with every snapshot (post-densify).
         if self._pipeline.raster_config.mip_enabled:
             src_f = getattr(src, "filter_3D", None)
             dst_f = getattr(dst, "filter_3D", None)
             if src_f is not None and dst_f is not None:
                 _copy_splats(encoder, src_f.storage, dst_f.storage,
                              count, src.max_splats)
-        # The viewer's count is what we COPIED, written INSIDE this batch rather
-        # than copied from the trainer's counter: the readback above can be a
-        # densify behind by the time we get here, and a count ahead of the copied
-        # range would have the rasterizer walk uninitialized tail. Same batch means
-        # the viewer's next frame sees the count and its data together — one queue,
-        # so a submitted batch is atomic with respect to frames.
-        encoder.upload_buffer_data(dst.num_gaussians_counter.storage, 0,
-                                   np.array([count], dtype=np.uint32))
+       
+        encoder.upload_buffer_data(dst.num_gaussians_counter.storage, 0,np.array([count], dtype=np.uint32))
         self.runtime.submit(batch)
-        # Mirror the trainer's CURRENT active SH degree so the viewer shows the
-        # same bands as eval. The degree schedule ramps during training; pinning
-        # the viewer at max over-shows half-trained higher bands eval (at the
-        # scheduled degree) does not.
         self._pipeline.set_active_sh_degree(train_pipeline._active_sh_degree)
         self._has_data = count > 0
-        # New model: the last scene image is stale, so the next frame must
-        # re-rasterize even while the training budget is throttling (parked on a
-        # test camera this is the ONLY thing that triggers a render).
         self.invalidate_scene()
 
     def preview_points(self, initial_points: dict) -> int:
-        """Show a COLMAP-derived initial point cloud in the viewer's own pipeline.
-
-        The hub calls this once a dataset is ready but before Train is pressed, so
-        there is no training pipeline to snapshot from yet — the points go straight
-        into the view pipeline's buffers instead. Returns how many were uploaded.
-
-        SH is pinned to band 0 for the preview: an SfM cloud only carries DC
-        color, and the higher bands in these buffers belong to whatever was shown
-        before (a previous preview, or nothing at all).
-        """
         means = np.asarray(initial_points["means"], dtype=np.float32)
         count = min(means.shape[0], self.max_splats)
         if count < means.shape[0]:
@@ -682,13 +573,6 @@ class Viewer:
         return count
 
     def clear_view(self) -> None:
-        """Blank the display: no gaussians, no camera list (the hub's Clear).
-
-        The buffers keep their allocation — ``_has_data`` is what gates
-        rasterization — so the next preview or snapshot fills them straight back
-        in. What this DOES drop is the last run's picture, which would otherwise
-        sit on screen next to a panel that says there is no dataset.
-        """
         with self._render_lock:      # no frame mid-read of the buffers
             self._has_data = False
         self._rig.set_test_cameras([])
@@ -708,17 +592,9 @@ class Viewer:
             time.sleep(poll)
 
     def invalidate_scene(self) -> None:
-        """Mark the rendered scene stale so the next frame re-rasterizes it.
-
-        Anything that changes what should be on screen (new gaussians, a camera
-        snap, a resize, a pipeline swap) must call this: while training, the render
-        loop otherwise assumes the last image is still good.
-        """
         self._scene_dirty.set()
 
     def suspend_frame_budget(self) -> None:
-        """Render at full rate even though a run is active, for the phases where
-        the trainer is not submitting steps (eval sweep, render-all, finalize)."""
         self._frame_budget_off.set()
         self.invalidate_scene()
 
@@ -726,14 +602,6 @@ class Viewer:
         self._frame_budget_off.clear()
 
     def _scene_due(self, now: float) -> bool:
-        """Whether to re-rasterize the scene this frame.
-
-        A viewer frame does about as much GPU work as a training step, so while the
-        trainer is competing for the queue the scene is rendered on a budget:
-        parked on a test camera it cannot move, so only new gaussians trigger a
-        render; free-flying it is capped at TRAINING_SCENE_FPS. The UI pass is not
-        gated by this, so the panel stays responsive either way.
-        """
         if not self._training_active or self._frame_budget_off.is_set():
             return True
         if self._scene_dirty.is_set():
@@ -743,47 +611,23 @@ class Viewer:
         return (now - self._last_scene_s) >= (1.0 / TRAINING_SCENE_FPS)
 
     def set_training_active(self, active: bool = True) -> None:
-        """The trainer tells the viewer whether it is inside the loop.
-
-        Only the Pause button needs this (there is nothing to pause otherwise);
-        the run's STATE is published by the orchestrator, which is the only place
-        that knows the difference between initializing, running and finalizing.
-        """
         self._training_active = active
         if active:
             self.state.training_running()
 
     def attach_scene(self, test_cameras, snap: bool = False) -> None:
-        """Populate the camera dropdown from a scene chosen at runtime (hub flow).
-        Thread-safe hand-off: the combo's items/value are bound to the rig, so the
-        next frame picks the new list up on its own. ``snap`` parks on the first
-        camera (see ``_CameraRig.set_test_cameras``).
-        """
         self._rig.set_test_cameras(test_cameras, snap=snap)
 
     def suspend_rendering(self) -> None:
-        """Pause all GPU work in the render loop (hub uses this during setup).
-
-        Also frees the GIL: a painting frame holds it through the submit wait and
-        every panel binding, which starves CPU-heavy work on other threads (see
-        ``ViewerSession.suspend_rendering``)."""
         self._suspend.set()
 
     def resume_rendering(self) -> None:
         self._suspend.clear()
 
     def is_paused(self) -> bool:
-        """True while the Pause button has training suspended."""
         return self._pause_event.is_set()
 
     def pause_training(self) -> None:
-        """Ask the trainer to pause, and say so NOW.
-
-        The trainer notices at its next iteration boundary, so the button
-        publishes the INTENT ("Pausing") and the trainer publishes the fact (see
-        :meth:`wait_while_paused`). Without the first half the panel would look
-        unchanged for up to an iteration.
-        """
         if self._training_active and not self._pause_event.is_set():
             self._pause_event.set()
             self.state.begin_activity("Pausing")
@@ -794,37 +638,21 @@ class Viewer:
             self.state.begin_activity("Resuming")
 
     def toggle_pause(self) -> None:
-        """Flip pause/resume (keyboard shortcut; the panel has both buttons)."""
         (self.resume_training if self._pause_event.is_set()
          else self.pause_training)()
 
     def request_stop_training(self) -> None:
-        """Stop the run EARLY, keeping what it has optimized so far.
-
-        Not a cancel: the loop breaks at the next iteration boundary and the run
-        finalizes normally, so the partially trained result is still a result the
-        user can inspect and export. Clears any pause, or a paused run would never
-        reach the check.
-        """
         self._stop_training.set()
         self._pause_event.clear()
         self.state.training_stopping()
 
     def stop_requested(self) -> bool:
-        """Polled by the training loop's continue condition."""
         return self._stop_training.is_set()
 
     def clear_stop_request(self) -> None:
-        """Before a new run: a stop belongs to the run that was stopped."""
         self._stop_training.clear()
 
     def wait_while_paused(self, poll: float = 0.05) -> None:
-        """Block the caller (the trainer) while paused, releasing if the viewer
-        window closes so a paused+closed viewer can't hang training forever.
-
-        Publishes PAUSED/RUNNING from HERE — the trainer thread is the only place
-        that knows when the pause actually took effect.
-        """
         if not self._pause_event.is_set():
             return
         self.state.training_paused()
@@ -851,8 +679,6 @@ class Viewer:
         except Exception as e:
             print(f"[Viewer] crashed: {e}")
 
-    # ---- UI composition (nothing below this lives in the hot loop) --------
-
     def _set_up_ref(self) -> None:
         self._rig.cam.set_ref_up_to_current()
         print("[Viewer] up reference set to current view")
@@ -874,9 +700,6 @@ class Viewer:
             print(f"[Viewer] frame grab failed: {e}")
 
     def _build_input(self, mouse: dict) -> InputMap:
-        """Key bindings AND their help text. Adding a control is one line here;
-        ``describe()`` feeds the panel's CONTROLS section, so the on-screen help
-        can never drift from the real bindings."""
         keys = InputMap().hold_many([
             (spy.KeyCode.w, "w"), (spy.KeyCode.a, "a"), (spy.KeyCode.s, "s"),
             (spy.KeyCode.d, "d"), (spy.KeyCode.q, "q"), (spy.KeyCode.e, "e"),
@@ -898,14 +721,6 @@ class Viewer:
                 .document("F1", "show / hide panel"))
 
     def _panel_actions(self) -> Actions:
-        """Bind every panel action to a one-shot request on the session.
-
-        Nothing here does work: a click posts intent and returns, so a slow
-        operation can never block the render thread. The orchestrator picks the
-        request up and drives the state machine (see ``TrainingApplication``).
-        Pause/resume/stop are the exception — they are the viewer's own events, so
-        they publish immediately, which is what makes them feel instant.
-        """
         return Actions(
             browse=None,          # no file dialog in this windowing layer
             install_tools=lambda: self.state.request("install_tools"),
@@ -931,24 +746,15 @@ class Viewer:
         )
 
     def _build_panel(self, view, keys: InputMap) -> Panel:
-        """Compose the panel in LIFECYCLE order: state, dataset, training, result,
-        configuration, viewer, controls, diagnostics.
-
-        Every widget PULLS its value from a getter each frame, so a state
-        transition changes the UI without rebuilding anything, and extending it
-        means adding a line to a section in :mod:`.ui.sections`.
-        """
         panel = Panel(self.device, title="Scatto-GS trainer", anchor="left",
                       thickness=430.0, min_thickness=380.0)
         actions = self._panel_actions()
         header(panel, view)
+
         if self._hub:
-            # Outside the hub the dataset and the run are already chosen by the
-            # time the window exists, so these would all be read-only.
             dataset_section(panel, view, actions)
+
         training_section(panel, view, actions)
-        # Viewer-only by construction: the curve exists to be watched while a run
-        # goes, which is the one thing a headless run cannot do.
         loss_section(panel, view)
         if self._hub:
             result_section(panel, view, actions)
@@ -972,34 +778,21 @@ class Viewer:
         window = spy.Window(width=self.width, height=self.height, title="Scatto-GS")
 
         surface = self.device.create_surface(window)
-        # Present in a NON-sRGB format: output_image already holds sRGB-encoded
-        # color (renderer composites in sRGB, like the stored PNGs), so the blit
-        # must not re-apply the sRGB OETF. A default/sRGB surface double-encodes
-        # -> washed-out viewer while the PNGs look correct.
         present_format = _linear_present_format(surface)
         print(f"[Viewer] surface preferred={surface.info.preferred_format} "
               f"-> presenting as {present_format}")
         surface.configure(width=self.width, height=self.height, format=present_format)
-        # The configured surface size is the SINGLE source of truth for a frame
-        # (drives surface config, camera aspect, ui.layout, ui.begin, and the blit
-        # target) — mixing this with the live window size mis-projected the panel.
         surf_w, surf_h = self.width, self.height
         render_lock = self._render_lock   # main-loop vs on_resize vs reconfigure
 
-        # One consistent state snapshot per frame feeds EVERY binding (see
-        # StateView): no two widgets can show state from different instants.
         view = self.state.view()
         mouse = {"captured": False, "x": 0.0, "y": 0.0}
         keys = self._build_input(mouse)
         ui = self._build_panel(view, keys)
-        # ImGui puts a close box on the panel's title bar; F1 brings it back (and
-        # gives an unobstructed look at the scene on demand).
         keys.press(spy.KeyCode.f1, ui.toggle)
         print(f"[Viewer] panel: {ui.dock.thickness_px:.0f}px wide "
               f"(display scale {ui.dock.scale:.2f}x)")
 
-        # --- Mouse: look (drag) + scroll-to-speed. Camera control, not a widget,
-        #     so it stays here; the UI only reports whether it ate the event. ---
         def on_key(event):
             if ui.handle_keyboard(event):
                 return  # UI consumed it (typing in a widget)
@@ -1028,9 +821,6 @@ class Viewer:
                 self.state.drop(str(paths[0]))
 
         def _reconfigure(w, h):
-            """Match the swapchain to the window. No window.resize / aspect-snap
-            (that fought the drag). configure() rebuilds the swapchain; GPU must
-            be idle first. Early-outs when the size is unchanged."""
             nonlocal surf_w, surf_h
             if w <= 0 or h <= 0 or (w, h) == (surf_w, surf_h):
                 return
@@ -1038,23 +828,13 @@ class Viewer:
                 self.runtime.wait_for_idle()
                 surface.configure(width=w, height=h, format=present_format)
             surf_w, surf_h = w, h
-            # The camera aspect changed, so the last scene image no longer matches
-            # the window — without this, resizing while parked on a test camera
-            # would blit a stale frame into the new shape for as long as the
-            # snapshot cadence takes.
             self.invalidate_scene()
 
         def render_frame():
-            """Paint one frame. Uses surf_w/surf_h for EVERYTHING (ui.layout,
-            ui.begin's ImGui DisplaySize, the camera aspect, the blit target) so
-            the docked panel can never be mis-projected for a frame. The UI always
-            draws; the scene is rasterized+blitted only once gaussians exist."""
             with render_lock:
                 if self._suspend.is_set():   # hub setup owns the GPU queue
                     return
                 w, h = surf_w, surf_h
-                # layout THEN refresh: bindings wrap their text to the panel's
-                # current content width, so a panel resize re-flows text live.
                 ui.layout(w, h)
                 ui.refresh()
                 surface_tex = surface.acquire_next_image()
@@ -1063,9 +843,6 @@ class Viewer:
                 batch = self.runtime.command_batch("viewer_frame")
                 enc = batch.encoder
                 if self._has_data:
-                    # Re-rasterize only when the budget allows (see _scene_due);
-                    # the blit happens either way, so a skipped frame re-presents
-                    # the last scene image while the UI pass below stays live.
                     now = time.perf_counter()
                     if self._scene_due(now):
                         camera = self._rig.camera(self.width, self.height, w / h)
@@ -1078,11 +855,6 @@ class Viewer:
                         self._last_scene_s = now
                     enc.blit(surface_tex, self._pipeline.buffers.output_image)
                 else:
-                    # Nothing else writes the target before the UI pass, and that
-                    # pass must LOAD (else it would erase the scene blit above),
-                    # so an un-cleared swapchain image shows whatever was in it
-                    # LAST time it came round — which smeared several stale copies
-                    # of the panel's edge across the hub window during a resize.
                     enc.clear_texture_float(surface_tex, clear_value=BACKDROP)
                 ui.begin(w, h, window)
                 ui.end(surface_tex, enc)
@@ -1093,10 +865,6 @@ class Viewer:
                     self._save_frame()
 
         def on_resize(w, h):
-            """Render LIVE during a resize. sgl fires on_resize on THIS render
-            thread from inside window.process_events()'s Win32 modal-resize loop,
-            so painting here is the only way to track the drag — the old debounce
-            skipped rendering and let the OS stretch a stale frame (the glitch)."""
             if self._suspend.is_set():
                 return
             try:
@@ -1125,14 +893,9 @@ class Viewer:
             if watcher:
                 watcher.poll()
 
-            # Keep the surface matched to the window (catches a resize that
-            # arrived while suspended or that on_resize didn't service). Cheap —
-            # early-outs when unchanged.
+            # Keep the surface matched to the window
             _reconfigure(window.width, window.height)
 
-            # --- per-frame STATE, once per loop iteration (NOT inside
-            #     render_frame, so a paint triggered from on_resize can't advance
-            #     the camera or re-sample state mid-drag). ---
             now = time.perf_counter()
             dt = min(now - last_time, 0.1)
             last_time = now

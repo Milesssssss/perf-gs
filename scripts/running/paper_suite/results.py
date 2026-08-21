@@ -231,7 +231,7 @@ class ResultSet:
                 "status": record.status,
                 "psnr_srgb": record.psnr_srgb,
                 "ssim_srgb": record.ssim_srgb,
-                "lpips_alex": record.lpips_alex,
+                "lpips": record.lpips,
                 "train_active_s": record.train_active_s,
                 "train_wall_s": record.train_wall_s,
                 "observation_s": record.observation_s,
@@ -268,7 +268,7 @@ class ResultSet:
 RAW_COLUMNS = (
     "scene", "dataset_family", "dataset_family_group", "regime", "seed",
     "pixel_fraction", "select_mode", "iters", "status", "psnr_srgb", "ssim_srgb",
-    "lpips_alex",
+    "lpips",
     "train_active_s", "train_wall_s", "observation_s", "process_wall_s",
     "n_gaussians", "render_fps",
     "gpu_device_peak_mb", "gpu_device_baseline_mb",
@@ -281,7 +281,7 @@ RAW_COLUMNS = (
 
 PER_VIEW_COLUMNS = (
     "scene", "dataset_family", "regime", "seed", "pixel_fraction", "cam_idx",
-    "image_name", "psnr_srgb", "ssim_srgb", "lpips_alex", "width", "height",
+    "image_name", "psnr_srgb", "ssim_srgb", "lpips", "width", "height",
     "cell_key",
 )
 
@@ -302,7 +302,7 @@ def per_view_rows(results: Iterable[CellResult]) -> list[dict]:
                 "image_name": view.get("image_name"),
                 "psnr_srgb": view.get("psnr_srgb"),
                 "ssim_srgb": view.get("ssim_srgb"),
-                "lpips_alex": view.get("lpips_alex"),
+                "lpips": view.get("lpips"),
                 "width": view.get("width"),
                 "height": view.get("height"),
                 "cell_key": cell.key,

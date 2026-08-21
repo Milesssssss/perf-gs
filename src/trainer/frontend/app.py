@@ -1381,9 +1381,6 @@ class TrainingLoop:
         self.stbn_slices = self.runtime.pipeline.stbn_slices
         self.stbn_visits: dict[int, int] = {}
         self.stbn_phase: dict[int, int] = {}
-        # --stbn-independent: a fresh random slice each step instead of the
-        # per-visit walk, from an RNG kept separate from the camera draw so it
-        # cannot shift the sampling order. The independent-per-step baseline.
         self.stbn_independent = stbn_config.independent
         self._stbn_rng = np.random.default_rng(int(getattr(self.args, "stbn_seed", 0)))
 
@@ -1394,11 +1391,6 @@ class TrainingLoop:
         self.started_at = 0.0
         self.post_iteration_clean_timing = 0.0
         # Wall-clock spent inside _produce_observations — the whole observation
-        # surface (eval sweeps, psnr-curve ticks, log/preview re-renders,
-        # render-all dumps) in one number, because it is measured around the one
-        # call that owns all of them rather than summed per feature.
-        # ``_in_wall`` is the subset that lands before train_wall_s is frozen,
-        # and is therefore the only part that may be subtracted from it.
         self.observation_seconds = 0.0
         self.observation_in_wall_seconds = 0.0
         self._stage_timing = StageTimingRecorder(
@@ -1428,13 +1420,6 @@ class TrainingLoop:
             should_continue = self._produce_observations(it_context)
             spent = time.perf_counter() - observed_at
             self.observation_seconds += spent
-            # ...but only the part INSIDE the timing window may be subtracted.
-            # train_wall_s is frozen by _record_current_timing immediately after
-            # the final train_step, so the final iteration's observations (the
-            # last eval sweep, the end-of-run preview dump) are already outside
-            # it. Counting them again would subtract them twice and, on a short
-            # run whose observations dwarf its training, drive the active time to
-            # zero.
             if it_context.step_number != self.args.iters:
                 self.observation_in_wall_seconds += spent
             self._present_profile_frame_if_enabled()
@@ -1490,25 +1475,11 @@ class TrainingLoop:
         )
 
     def _stbn_variables(self, camera_index: int) -> "StbnVariables | None":
-        """This step's mask slice + per-tile budget, advancing the drawn camera's
-        own visit counter.
-
-        Called exactly once per iteration (from :meth:`_next_iteration`), because
-        it MUTATES the visit counter — a second call for the same step would skip
-        a slice. The phase is an integer mix of the camera index rather than a
-        draw from the run's RNG so it cannot perturb the camera sampling order,
-        which is frozen by tests/test_camera_sampling.py. (Not ``hash()``:
-        multiplicative mixing is reproducible by inspection and stays so if the
-        seed ever becomes a string.)
-        """
         if self.stbn_density is None:
             return None
         slices = max(self.stbn_slices, 1)
-        pixels = stbn_module.pixels_per_tile(
-            self.stbn_density.at(self.training_step), TILE_AREA)
+        pixels = stbn_module.pixels_per_tile(self.stbn_density.at(self.training_step), TILE_AREA)
         if self.stbn_independent:
-            # A fresh random slice each step: consecutive steps draw independent
-            # masks from the same pool, so the temporal axis contributes nothing.
             return StbnVariables(slice_index=int(self._stbn_rng.integers(slices)),
                                  pixels_per_tile=pixels)
         if camera_index not in self.stbn_phase:
@@ -1603,15 +1574,12 @@ class TrainingLoop:
         pipeline = self.runtime.pipeline
 
         if events.densify:
-            # Host wall-clock: densify is its own submit outside train_step's
-            # marker tree, and it reads buffers back (so it is largely
-            # synchronous already). Recorded as host_ms, never mixed into a GPU
-            # marker total.
             densify_started = time.perf_counter()
             outcome = self.runtime.densifier.run(
                 context.step_number, events, self.gaussian_count)
-            self._stage_timing.add_host(
-                "densify_prune", (time.perf_counter() - densify_started) * 1e3)
+
+            self._stage_timing.add_host("densify_prune", (time.perf_counter() - densify_started) * 1e3)
+
             self.gaussian_count = outcome.count
             self.runtime.reporter.report_densify(outcome)
 

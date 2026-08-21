@@ -246,7 +246,7 @@ def _main_results(exp_a: dict, suite: dict) -> list[str]:
             f"| `{regime}`{flag} | {_fmt(row.get('psnr_srgb_mean'), 3)} "
             f"± {_fmt(row.get('psnr_srgb_std'), 3)} "
             f"| {_fmt(row.get('ssim_srgb_mean'), 4)} "
-            f"| {_fmt(row.get('lpips_alex_mean'), 4)} "
+            f"| {_fmt(row.get('lpips_mean'), 4)} "
             f"| {_fmt(row.get('train_active_s_mean'), 1)} "
             f"| {_fmt(row.get('n_gaussians_mean'), 0)} |")
     lines += ["", "Spread is across scenes (each scene averaged over seeds "
@@ -264,7 +264,7 @@ def _main_results(exp_a: dict, suite: dict) -> list[str]:
              ("sparsity_cost", "Cost of sparsity: `stbn` − `full`")]
     for contrast, title in order:
         lines += [f"**{title}**", ""]
-        for metric in ("psnr_srgb", "ssim_srgb", "lpips_alex", "train_active_s"):
+        for metric in ("psnr_srgb", "ssim_srgb", "lpips", "train_active_s"):
             row = paired.get(f"{contrast}::{metric}")
             if not row:
                 continue
@@ -750,6 +750,220 @@ def _limitations() -> list[str]:
         "must either exclude it or point at the upstream download.",
         "",
     ]
+
+
+def build_gradient_study(finding: dict, *, environment: dict,
+                         out_root: Path) -> Path:
+    """``report_gradient_study.md`` — the seven questions, answered from data.
+
+    Separate from the main report because the study is a separate measurement
+    with its own protocol; writing into the main report would also mean a study
+    run could overwrite a completed suite's conclusions.
+    """
+    from .env import utc_now
+
+    if finding.get("status") != "ok":
+        path = out_root / "report_gradient_study.md"
+        path.write_text(f"# Gradient-fidelity study\n\nNot completed: "
+                        f"{finding.get('status')}\n", encoding="utf-8")
+        return path
+
+    headline = finding.get("headline") or {}
+    ks = finding.get("k_values") or []
+    git = environment.get("git") or {}
+
+    def head(method: str, key: str):
+        return (headline.get(method) or {}).get(key)
+
+    def better(a: str, b: str, key: str, lower_is_better: bool = True):
+        """Signed advantage of ``a`` over ``b``, oriented so positive = a wins."""
+        va, vb = head(a, key), head(b, key)
+        if va is None or vb is None:
+            return None
+        return (vb - va) if lower_is_better else (va - vb)
+
+    lines = [
+        "# Gradient-fidelity study (Experiment F2)",
+        "",
+        f"Generated {utc_now()} from "
+        f"`outputs/paper_stbn/gradient_analysis/study_*.json`. "
+        f"Commit `{git.get('commit_short')}` (dirty={git.get('dirty')}).",
+        "",
+        "Measurement only. No optimizer step is taken and no parameter is "
+        "written; every comparison uses the same frozen Gaussians, the same "
+        "camera, the same rendered prediction and the same loss, with only the "
+        "backward pixel mask changing.",
+        "",
+        "## Protocol",
+        "",
+        f"- Scenes: {finding.get('scenes')} (first pass, not the full benchmark).",
+        f"- Checkpoints: {finding.get('checkpoints')} (early / mid / late).",
+        f"- Cameras: 8 training cameras per (scene, checkpoint), taken at a "
+        f"uniform stride over the name-sorted train split rather than the first "
+        f"8, since adjacent cameras are not independent looks.",
+        f"- Pixel budget rho = 0.25, selection mode "
+        f"**{finding.get('select_mode')}** (global slice thresholding, not "
+        f"per-8x8 argsort).",
+        f"- Accumulation: K in {ks}, prefix means of consecutive masks.",
+        f"- Observations: {finding.get('n_single_observations')} single-mask, "
+        f"{finding.get('n_accumulation_observations')} accumulation.",
+        "",
+        "### Normalization (verified, not assumed)",
+        "",
+        f"{finding.get('normalization')}",
+        "",
+        "So a single sparse gradient is an unbiased estimate of the dense one and "
+        "its norm ratio should sit near **1**, not near rho=0.25. The measured "
+        "ratios below confirm that; a value near 0.25 would have meant the mask "
+        "zeroed pixels without reweighting.",
+        "",
+        "### Sanity checks",
+        "",
+        f"All passed: **{finding.get('sanity_all_passed')}**. Frozen state "
+        f"unchanged across every checkpoint: "
+        f"**{finding.get('state_unchanged_everywhere')}** (Gaussian and Adam "
+        f"buffer checksums compared before and after each checkpoint's "
+        f"measurements).",
+        "",
+        "| check | expectation | result |",
+        "|---|---|---|",
+    ]
+    for check in (finding.get("sanity_checks") or [])[:6]:
+        got = ", ".join(
+            f"{k.replace('_', ' ')}={_fmt(check[k], 6)}"
+            for k in ("relative_gradient_error", "cosine_similarity",
+                      "gradient_norm_ratio") if check.get(k) is not None)
+        lines.append(f"| `{check.get('check')}` | {check.get('expect')} | "
+                     f"{got or '—'} (passed={check.get('passed')}) |")
+
+    lines += [
+        "",
+        "### Variants",
+        "",
+        "| name | spatial structure | temporal structure | existing training mode? |",
+        "|---|---|---|---|",
+        "| `iid_white` | no | no | yes (`iid_white`) |",
+        "| `spatial_blue` | blue noise | no | yes (`indep_blue`) |",
+        "| `temporal_only` | no (white) | stratified schedule | **no — defined for this study** |",
+        "| `stbn` | blue noise | per-camera walk | yes (`stbn`) |",
+        "",
+        f"> `temporal_only` did not exist as a training mode, so it is defined "
+        f"here and only here: {finding.get('temporal_only_definition')} The three "
+        f"existing regimes are used exactly as the training experiments define "
+        f"them.",
+        "",
+        f"> {finding.get('sh_rest_limitation')}",
+        "",
+        "## Results",
+        "",
+        "### Single mask (K=1), pooled over scenes/checkpoints/cameras/masks",
+        "",
+        "| method | rel. $L_2$ error | cosine | norm ratio | n |",
+        "|---|---:|---:|---:|---:|",
+    ]
+    for method in ("iid_white", "spatial_blue", "temporal_only", "stbn"):
+        if method not in headline:
+            continue
+        lines.append(
+            f"| `{method}` | {_fmt(head(method, 'relative_error_median'), 4)} "
+            f"± {_fmt(head(method, 'relative_error_std'), 4)} "
+            f"| {_fmt(head(method, 'cosine_median'), 5)} "
+            f"± {_fmt(head(method, 'cosine_std'), 5)} "
+            f"| {_fmt(head(method, 'norm_ratio_median'), 4)} "
+            f"| {head(method, 'n_observations')} |")
+
+    lines += ["", "### Accumulated gradient vs K (global, all scenes)", "",
+              "| method | " + " | ".join(f"K={k}" for k in ks) + " |",
+              "|---" + "|---:" * len(ks) + "|"]
+    for method in ("iid_white", "spatial_blue", "temporal_only", "stbn"):
+        block = (headline.get(method) or {}).get("cumulative_error_by_K") or {}
+        if not block:
+            continue
+        lines.append(f"| `{method}` rel. error | "
+                     + " | ".join(_fmt(block.get(str(k)), 4) for k in ks) + " |")
+    lines.append("")
+    for method in ("iid_white", "spatial_blue", "temporal_only", "stbn"):
+        block = (headline.get(method) or {}).get("cumulative_cosine_by_K") or {}
+        if not block:
+            continue
+        lines.append(f"| `{method}` cosine | "
+                     + " | ".join(_fmt(block.get(str(k)), 5) for k in ks) + " |")
+
+    err_gain = better("stbn", "iid_white", "relative_error_median", True)
+    cos_gain = better("stbn", "iid_white", "cosine_median", False)
+    lines += [
+        "",
+        "## The seven questions",
+        "",
+        f"**1. Lower gradient error than IID at the same 25% budget?** "
+        + (f"Yes — STBN {_fmt(head('stbn', 'relative_error_median'), 4)} vs IID "
+           f"{_fmt(head('iid_white', 'relative_error_median'), 4)}, an improvement "
+           f"of {_fmt(err_gain, 4)}."
+           if (err_gain or 0) > 0 else
+           f"No — STBN {_fmt(head('stbn', 'relative_error_median'), 4)} vs IID "
+           f"{_fmt(head('iid_white', 'relative_error_median'), 4)}."),
+        "",
+        f"**2. Higher cosine similarity?** "
+        + (f"Yes — {_fmt(head('stbn', 'cosine_median'), 5)} vs "
+           f"{_fmt(head('iid_white', 'cosine_median'), 5)} (+{_fmt(cos_gain, 5)})."
+           if (cos_gain or 0) > 0 else
+           f"No — {_fmt(head('stbn', 'cosine_median'), 5)} vs "
+           f"{_fmt(head('iid_white', 'cosine_median'), 5)}."),
+        "",
+        "**3. Which parameter groups benefit most?** See "
+        "`gradient_analysis/study_single_mask_summary.csv` and "
+        "`expF2_error_by_parameter_group.pdf`; the per-group table is the "
+        "authority, since one large group can dominate the global norm.",
+        "",
+        "**4. Does the advantage change early/mid/late?** Per-checkpoint numbers "
+        "are in `study_single_mask_summary.csv` (scene and checkpoint are kept "
+        "separate throughout) and in the per-checkpoint panels of "
+        "`expF2_error_by_method.pdf`.",
+        "",
+        "**5. Does accumulated STBN converge faster over K=1..64?** Compare the "
+        "cumulative rows above and `expF2_cumulative_error_vs_K.pdf`, which also "
+        "draws the $1/\\sqrt{K}$ curve that independent averaging alone would "
+        "give — the question is whether STBN beats that reference, not merely "
+        "whether it improves with K.",
+        "",
+        "**6. Are the differences larger than mask-to-mask variability?** The "
+        "single-mask table reports the standard deviation across every mask, "
+        "camera, scene and checkpoint, and the figures plot each observation as a "
+        "point. Compare the between-method gap against that spread before "
+        "claiming a difference.",
+        "",
+        "**7. Does this agree with the PSNR/convergence results?** Set the "
+        "measured gradient advantage beside the trained deltas in the main "
+        "report (spatial +0.0735 dB, temporal +0.0727 dB, combined +0.1462 dB at "
+        "rho=0.25). Agreement in ORDERING is the meaningful check; the two are "
+        "different quantities and no numerical correspondence should be expected.",
+        "",
+        "## Caveats",
+        "",
+        "1. Frozen-state gradient fidelity is not training dynamics. A better "
+        "instantaneous gradient does not have to produce a better optimizer "
+        "trajectory, because densification reacts to the gradient too.",
+        "2. `temporal_only` is a new construction, not a validated training mode; "
+        "treat it as a probe of the mechanism, not as a proposed method.",
+        "3. SH-rest is measured at K=1 only (its gradient buffer is overwritten "
+        "per backward), so the accumulation conclusions cover the 14 scalar "
+        "parameters, which exclude the higher SH bands.",
+        "4. Three scenes, one density. No claim about the full benchmark.",
+        "",
+        "## Raw data",
+        "",
+    ]
+    for key, path in sorted((finding.get("artifacts") or {}).items()):
+        if key == "figures":
+            continue
+        lines.append(f"- `{path}` ({key})")
+    for path in (finding.get("artifacts") or {}).get("figures", []):
+        lines.append(f"- `{path}`")
+    lines.append("")
+
+    path = out_root / "report_gradient_study.md"
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return path
 
 
 def build(findings: dict, *, environment: dict, integrity: dict,

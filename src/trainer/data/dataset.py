@@ -1,9 +1,3 @@
-"""Camera model and view/projection matrix helpers.
-
-``Camera`` dataclass + builders for the view and projection matrices, plus the
-SH band-0 color constant. 3DGS ``.ply`` IO lives in :mod:`trainer.data.ply`.
-"""
-
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -27,12 +21,6 @@ class Camera:
 
 
 def build_view_matrix(eye: np.ndarray, target: np.ndarray, up: np.ndarray) -> np.ndarray:
-    """Right-handed look-at view matrix (world -> view).
-
-    Convention: camera looks down +Z in view space (positive view-space depth
-    is in front of the camera). This matches the shader's ``depth_vs > 0``
-    visibility cull.
-    """
     eye = np.asarray(eye, dtype=np.float32).reshape(3)
     target = np.asarray(target, dtype=np.float32).reshape(3)
     up = np.asarray(up, dtype=np.float32).reshape(3)
@@ -60,14 +48,6 @@ def build_projection_matrix(
     z_near: float,
     z_far: float,
 ) -> np.ndarray:
-    """Right-handed pinhole perspective, mapping view-space +Z into clip
-    space such that ``mean_clip.w > 0`` for visible points and NDC xy lies in
-    ``[-1, 1]``.
-
-    The Jacobian in ``projectGaussian3DTo2D`` assumes ``P[0][0]`` and
-    ``P[1][1]`` are the pixel-space focal lengths scaled by
-    ``2 / frame_dim``; i.e. standard ``cot(fovy/2)`` / aspect form.
-    """
     f = 1.0 / np.tan(0.5 * fovy_radians)
 
     M = np.zeros((4, 4), dtype=np.float32)

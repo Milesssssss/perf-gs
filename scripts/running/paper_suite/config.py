@@ -55,7 +55,28 @@ REPO = Path(__file__).resolve().parents[3]
 # Bump when a change to the invocation would invalidate cached cells. The hash
 # includes this, so a bump forces every cell to be recognized as stale rather
 # than silently mixing old and new training semantics in one table.
-SUITE_SCHEMA = "paper_stbn/v1"
+SUITE_SCHEMA = "paper_stbn/v2"
+
+# --downsample divides the COLMAP CAMERA resolution, which is not always the
+# resolution of the files on disk. Tanks & Temples is the trap: its intrinsics are
+# 1959x1090 while the distributed JPEGs are 980x545, so --downsample 1 upscales
+# them 2x and trains on interpolated pixels. /2 lands on the native file size.
+#
+# Resulting widths, matching what 3DGS evaluates (images_4 for Mip-NeRF 360
+# outdoor, images_2 for indoor, as-distributed for T&T and Deep Blending; all
+# under the 1600px cap that 3DGS's default -r -1 would otherwise impose):
+#
+#   bicycle   1236x821     garden   1296x840
+#   kitchen   1557x1039    room     1557x1037
+#   train      979x545     truck     978x545
+#   drjohnson 1332x876     playroom 1264x832
+DOWNSAMPLE_BY_FAMILY: dict[str, int] = {
+    "mipnerf360_outdoor": 4,
+    "mipnerf360_indoor": 2,
+    "tanks_and_temples": 2,
+    "deep_blending": 1,
+}
+CAMERA_WIDTH_CAP = 1600
 
 OUTPUT_ROOT = REPO / "outputs" / "paper_stbn"
 TRAIN_ROOT = REPO / "outputs" / "train"
@@ -153,7 +174,6 @@ BASE_ARGS: tuple[str, ...] = (
     "--sh-degree", "3",
     "--densify-mode", "structure_aware",
     "--mip-splatting",
-    "--downsample", "4",
     "--eval", "1",
     "--eval-holdout-stride", "8",
     "--no-viewer",
@@ -178,6 +198,10 @@ def fraction_tag(fraction: float) -> str:
     in density order.
     """
     return f"f{int(round(float(fraction) * 1000)):04d}"
+
+
+def scene_downsample(scene: str) -> int:
+    return DOWNSAMPLE_BY_FAMILY.get(scene_family(scene), 4)
 
 
 def scene_family(scene: str) -> str:
@@ -253,7 +277,7 @@ class Cell:
     # wall-clock contains sweeps the other's does not.
     convergence: bool = False
     stage_timing: bool = False
-    save_renders: bool = False
+    save_renders: bool = True
     write_ground_truths: bool = False
     render_fps: bool = True
     # Which experiments consume this cell. Bookkeeping only — never part of the
@@ -270,7 +294,7 @@ class Cell:
         which is the one confusion this key exists to prevent.
         """
         parts = [self.scene, self.regime, fraction_tag(self.fraction),
-                 f"s{self.seed}", f"i{self.iters}"]
+                 f"s{self.seed}", f"i{self.iters}", f"d{self.downsample}"]
         # Dense ignores the mask entirely, so tagging it would split one shared
         # baseline into two identical runs.
         if self.regime != "full":
@@ -284,6 +308,10 @@ class Cell:
     @property
     def family(self) -> str:
         return scene_family(self.scene)
+
+    @property
+    def downsample(self) -> int:
+        return scene_downsample(self.scene)
 
     @property
     def family_group(self) -> str:
@@ -330,6 +358,7 @@ class Cell:
             "--scene", str(directory),
             "--iters", str(self.iters),
             "--seed", str(self.seed),
+            "--downsample", str(self.downsample),
             *BASE_ARGS,
             *regime_flags(self.regime, self.fraction, self.select_mode),
             *self.instrumentation_args(),
@@ -403,7 +432,7 @@ def build_plan(scenes: tuple[str, ...] = SCENES,
                     # the render dump; the other seeds stay unobserved so their
                     # wall-clock is a clean speed reference.
                     convergence=primary,
-                    save_renders=primary,
+                    save_renders=True,
                     write_ground_truths=is_gt_owner,
                 )
                 add(cell, "A")
@@ -477,6 +506,7 @@ def plan_summary(cells: list[Cell]) -> dict:
         "by_seed": tally(lambda c: c.seed),
         "by_fraction": tally(lambda c: c.fraction),
         "by_select_mode": tally(lambda c: c.select_mode),
+        "by_downsample": tally(lambda c: c.downsample),
         "with_convergence": sum(1 for c in cells if c.convergence),
         "with_stage_timing": sum(1 for c in cells if c.stage_timing),
         "with_saved_renders": sum(1 for c in cells if c.save_renders),
