@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Sweep ONE training flag across the Mip-NeRF 360 scenes; collect PSNR + time.
 
 Generalizes ``eval_mipnerf_sweep.py``, which could only sweep ``--sh-degree``.

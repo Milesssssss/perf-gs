@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Assemble ``report.md`` from the findings each experiment returned.
 
 Written to be read by someone deciding what to claim in a paper, so the standard

@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """The panel's sections: one per concept, in lifecycle order.
 
     header            what state am I in, what just happened, what next

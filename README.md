@@ -125,6 +125,19 @@ Scenes use the Mip-NeRF 360 layout (a COLMAP `sparse/` folder plus `images/`). P
 
 ## Datasets
 
+The download helpers cover **three datasets**, obtained separately by users:
+
+| Dataset | Project / attribution | Included scene selection |
+| --- | --- | --- |
+| Mip-NeRF 360 | [Barron et al., CVPR 2022](https://jonbarron.info/mipnerf360/) | bicycle, bonsai, counter, garden, kitchen, room, stump; optional flowers and treehill |
+| Tanks & Temples | [Knapitsch et al., ACM TOG 2017](https://www.tanksandtemples.org/) | train, truck |
+| Deep Blending | [Hedman et al., ACM TOG 2018](https://visual.cs.ucl.ac.uk/pubs/deepblending/) | drjohnson, playroom |
+
+Raw datasets are not part of the current tracked source tree. Dataset and
+derived-asset terms are separate from the source-code license; see
+[NOTICE.md](NOTICE.md#research-datasets-downloaded-separately) before downloading
+or redistributing them. Public availability does not imply unrestricted rights.
+
 Fetch the [Mip-NeRF 360](https://jonbarron.info/mipnerf360/) dataset with the helper script (standard library only, no extra dependencies):
 
 ```bash
@@ -155,7 +168,7 @@ python scripts/data/download_tandt_db.py
 python scripts/data/download_tandt_db.py --set tandt   # or: --set db
 ```
 
-Same flags as above (`--dest`, `--force`, `--keep-zip`). These scenes carry their originators' research-use terms; the script prints a notice before fetching. See <https://www.tanksandtemples.org/> and <http://visual.cs.ucl.ac.uk/pubs/deepblending/>.
+Same flags as above (`--dest`, `--force`, `--keep-zip`). The script prints a terms notice before fetching. Review the terms for the specific archive and intended use; see [Tanks & Temples](https://www.tanksandtemples.org/), [Deep Blending](https://visual.cs.ucl.ac.uk/pubs/deepblending/), and the dataset qualifications in [NOTICE.md](NOTICE.md#research-datasets-downloaded-separately).
 
 ## Quickstart
 
@@ -197,6 +210,15 @@ This is a research trainer. The happy path (Mip-NeRF 360, SH0, structure-aware d
 - [ ] Refactor to allow easier integration of neural backbone for primitive prediction
 - [ ] Ideally this becomes a fast and efficient differentiable blended-primitive renderer that allows rapid experimentation of NVS and/or generative 3D experiments
 
-## Acknowledgements
+## License and third-party notices
 
-Built on the ideas in 3D Gaussian Splatting (Kerbl et al.), FasterGS, Mip-Splatting, AbsGS, and Structure-Aware Densification (SAD-GS) + so many other papers that I will hopefully remember to reference all, and on the [Slang](https://shader-slang.org) and SlangPy toolchain from the shader-slang project. The Mip-NeRF 360 dataset is used for evaluation.
+EA-owned source code is provided under the [EA license](LICENSE). Included
+third-party code retains its original copyrights and license terms; the EA
+license does not relicense those portions. See [NOTICE.md](NOTICE.md) for copied
+or ported code, separately installed dependencies, optional downloaded assets,
+and dataset attribution. Research references remain documented alongside the
+relevant algorithms.
+
+## CONTRIBUTING
+
+Before you can contribute, EA must have a Contributor License Agreement (CLA) on file that has been signed by each contributor. You can sign [here](https://electronicarts.na1.echosign.com/public/esignWidget?wid=CBFCIBAA3AAABLblqZhByHRvZqmltGtliuExmuV-WNzlaJGPhbSRg2ufuPsM3P0QmILZjLpkGslg24-UJtek*).

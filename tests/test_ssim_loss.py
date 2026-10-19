@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Golden test for the SSIM loss gradient (losses/ssim_loss.slang).
 
 The SSIM loss path had NO coverage before this file — test_gradients and

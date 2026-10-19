@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Phase 1 validation for the Mip-Splatting 3D smoothing filter.
 
 Confirms shaders/mip/compute_3d_filter.slang compiles and Pipeline.compute_3d_filter
@@ -60,6 +62,39 @@ def test_compute_3d_filter_basic(backend: str) -> None:
     assert live[1] > live[0], f"expected filter to grow with depth: {live}"
     # Empty slots stay zero.
     assert np.all(dead == 0.0), "empty slots must remain zero"
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_filter_indirect_live_count_and_dead_tail(backend: str) -> None:
+    """Cross the 65,535-group boundary, then shrink to an empty population.
+
+    Only filter resources are needed here; avoid allocating a complete second
+    training pipeline just to exercise a large dispatch and its tail clear.
+    """
+    from bench_mip_filter import MipFilterProbe
+
+    try:
+        device = create_device(backend=backend)
+    except Exception as exc:
+        pytest.skip(f"backend {backend!r} unavailable: {exc}")
+    capacity, live = 100_000, 65_539
+    p = MipFilterProbe(device, capacity, live)
+    cam = simple_camera(width=64, height=64, eye=(0, 0, 0), target=(0, 0, 3))
+    p.set_mipsplatting_cameras([cam])
+    p.buffers.filter_3D.copy_from_numpy(np.full(capacity, -123.0, np.float32))
+    p.compute_3d_filter()
+    p.runtime.wait_for_submit(p.last_submit_id)
+    f = p.buffers.filter_3D.to_numpy()
+    assert np.all(f[:live] > 0), "second dispatch row was not computed"
+    assert np.all(f[live:] == 0), "dead slots were not cleared"
+    np.testing.assert_array_equal(p.buffers.mip_filter_dispatch_args.to_numpy()[:3],
+                                  np.array([65535, 2, 1], np.uint32))
+
+    p.buffers.num_gaussians_counter.copy_from_numpy(np.zeros(1, np.uint32))
+    p.compute_3d_filter()
+    p.runtime.wait_for_submit(p.last_submit_id)
+    assert np.all(p.buffers.filter_3D.to_numpy() == 0), "stale filters survived shrink"
+    device.close()
 
 
 @pytest.mark.parametrize("backend", BACKENDS)

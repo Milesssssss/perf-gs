@@ -1,4 +1,6 @@
 #!/usr/bin/env python
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Entry point for the ESC harness.
 
 Adds this directory (``scripts/eval``) to ``sys.path`` so the ``esc`` package

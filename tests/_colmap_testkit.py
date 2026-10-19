@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Builds a minimal on-disk COLMAP text model for tests.
 
 Shared so the loader tests and the hub-preview tests describe the same kind of

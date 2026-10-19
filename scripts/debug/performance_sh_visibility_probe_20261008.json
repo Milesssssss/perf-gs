@@ -1,0 +1,11 @@
+{
+  "source": "in-memory diagnostic visibility gate; production source untouched",
+  "live": 1638877,
+  "visible_gaussians": 506818,
+  "invisible_fraction": 0.6907528752920444,
+  "visible_blend_records_bit_exact": true,
+  "median_gpu_ms": {
+    "all_live": 0.5586147308349609,
+    "visible_only": 0.1894235610961914
+  }
+}

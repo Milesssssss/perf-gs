@@ -1,3 +1,9 @@
+// EA-authored port and modifications only:
+// Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+// Original sorting code: Copyright (c) 2024 Thomas Smith (MIT).
+// The original portions retain their MIT terms; see licenses/GPUSorting-MIT.txt.
+// See NOTICE.md for source attribution and port details.
+
 // Device-level LSD radix sort ported from Thomas Smith's GPUSorting
 // (b0nes164/GPUSorting, MIT). Reduce-then-scan variant (Upsweep -> Scan ->
 // Downsweep), no cross-workgroup spin loops or forward-progress requirement.

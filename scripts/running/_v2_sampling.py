@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Per-iteration train-camera sampling for the v2 trainer.
 
 Isolates the "which camera do we optimize this step" responsibility behind one

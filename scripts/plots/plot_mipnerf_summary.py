@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Aggregate per-scene psnr_curve.json files into a paper-style summary.
 
 Given a folder whose subdirectories each hold a ``psnr_curve.json`` (as written

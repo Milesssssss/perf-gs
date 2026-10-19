@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Multi-scale structure-tensor analysis for structure-aware densification.
 
 Implements the image-side preprocessing of Lyu et al., "Faster 3D Gaussian

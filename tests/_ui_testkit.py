@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Device-free harness for the viewer panel.
 
 A section builder declares widgets and binds getters to them; :class:`RecordingPanel`

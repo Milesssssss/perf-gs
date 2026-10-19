@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 // SnugBox (Speedy-Splat §4.1.1): tight axis-aligned bounding box of the
 // ellipse where the Gaussian's alpha = opacity * exp(power) exceeds the
 // 1/255 display threshold. Factoring in opacity gives a much tighter

@@ -1,0 +1,18 @@
+{
+  "source": "isolated existing sort kernels on identical real unsorted input; no production modifications",
+  "pairs": 3278310,
+  "tiles": 15965,
+  "max_tile_id": 15964,
+  "zero_high_bytes": 2,
+  "outputs_bit_exact": true,
+  "median": {
+    "6": {
+      "gpu_ms": 0.7367134094238281,
+      "host_record_ms": 1.0263000149279833
+    },
+    "8": {
+      "gpu_ms": 0.9562969207763672,
+      "host_record_ms": 1.2562000192701817
+    }
+  }
+}

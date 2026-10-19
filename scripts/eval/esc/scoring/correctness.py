@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Correctness ``C`` — the 40%-weight dimension.
 
     C = successful agent runs / total agent runs

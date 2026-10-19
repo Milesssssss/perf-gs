@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Reusable panel components — the UI's visual language, in one place.
 
 Every section is built from these, so a status badge, a metric row or an inline

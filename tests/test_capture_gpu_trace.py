@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """External Nsight capture command construction."""
 
 from __future__ import annotations

@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 // Evaluate a 2D gaussian at a pixel, given its screen-space mean,
 // packed (cov_00, cov_01, cov_11) covariance, and pre-sigmoid opacity
 // logit. Returns the opacity-modulated alpha: ``sigmoid(opacity_logit) *

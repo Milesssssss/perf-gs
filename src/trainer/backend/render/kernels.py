@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Data-driven compute-kernel loading for the Pipeline.
 
 Replaces the ~40 hand-written ``self.k_x = mk(dir / "file.slang", "entry")``
@@ -48,6 +50,16 @@ KERNEL_SPECS: tuple[tuple[str, str, str], ...] = (
     ("ssim_maps",            "losses/ssim_loss.slang",                         "ssimComputeMaps"),
     ("ssim_grad",            "losses/ssim_loss.slang",                         "ssimGradient"),
     ("regularization",       "losses/regularization.slang",                    "addRegularization"),
+    # losses / importance-guided sparse sampling (adaptive STBN). Runs between
+    # the dense loss and the backward; see adaptive_sampler.py for the order.
+    ("importance_reduce",    "losses/adaptive_importance.slang",               "importanceReduce"),
+    ("importance_blur_x",    "losses/adaptive_importance.slang",               "importanceBlurX"),
+    ("importance_blur_y",    "losses/adaptive_importance.slang",               "importanceBlurY"),
+    ("importance_stats",     "losses/adaptive_importance.slang",               "importanceStats"),
+    ("importance_resolve",   "losses/adaptive_importance.slang",               "importanceResolve"),
+    ("importance_histogram", "losses/adaptive_importance.slang",               "importanceHistogram"),
+    ("solve_lambda",         "losses/adaptive_importance.slang",               "solveLambda"),
+    ("apply_adaptive",       "losses/adaptive_importance.slang",               "applyAdaptive"),
     # sort
     ("radix_init_global_hist", "sort/device_radix_sort.slang",                 "initGlobalHist"),
     ("radix_prepare_dispatch", "sort/device_radix_sort.slang",                 "prepareDispatchArgs"),
@@ -77,9 +89,12 @@ KERNEL_SPECS: tuple[tuple[str, str, str], ...] = (
     ("scatter_compact_features", "densify/scatter_compact.slang",              "scatterCompactFeatures"),
     ("scatter_compact_adam_rest", "densify/scatter_compact.slang",             "scatterCompactAdamRest"),
     ("scatter_compact_eta_only", "densify/scatter_compact.slang",              "scatterCompactEtaOnly"),
+    ("active_copy_prepare_args", "densify/copy_active.slang",                  "prepareActiveCopyArgs"),
+    ("copy_active_records",      "densify/copy_active.slang",                  "copyActiveRecords"),
     ("opacity_reset",        "densify/opacity_reset.slang",                    "resetOpacity"),
     ("densify_snapshot",     "densify/densify_dispatch.slang",                 "snapshotCount"),
     ("densify_prepare_args", "densify/densify_dispatch.slang",                 "prepareDensifyArgs"),
+    ("structure_split_prepare_args", "densify/densify_dispatch.slang",         "prepareStructureSplitArgs"),
     # structure-aware densification (SAD-GS)
     ("score_structure_aware", "densify/score_structure_aware.slang",           "scoreStructureAware"),
     ("clear_structure_scores", "densify/score_structure_aware.slang",          "clearStructureScores"),
@@ -102,6 +117,8 @@ KERNEL_SPECS: tuple[tuple[str, str, str], ...] = (
     ("scan_block_sums",      "common/scan.slang",                              "scanBlockSums"),
     ("add_block_offsets",    "common/scan.slang",                              "addBlockOffsets"),
     # mip-splatting (3D smoothing filter; 2D filter lives in project.slang)
+    ("mip_filter_prepare_args", "mip/compute_3d_filter.slang",                  "prepareMipFilterArgs"),
+    ("mip_filter_clear_tail", "mip/compute_3d_filter.slang",                    "clearMipFilterTail"),
     ("compute_3d_filter",    "mip/compute_3d_filter.slang",                    "computeMip3DFilter"),
 )
 

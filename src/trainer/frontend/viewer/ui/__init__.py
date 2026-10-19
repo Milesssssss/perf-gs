@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Viewer UI toolkit: a docked, state-bound panel plus input mapping.
 
   * :mod:`.text`     — measured font metrics; wrap/elide so nothing is clipped

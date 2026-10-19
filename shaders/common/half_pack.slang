@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 // fp16-into-uint32 packing for the optional SH buffers. Native 16-bit storage
 // buffers aren't relied on here (mirrors checkpoint.slang, which packs T/RGB the
 // same way with f32tof16), so this works without the 16-bit-storage extension.

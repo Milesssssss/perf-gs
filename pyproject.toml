@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 [build-system]
 requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
@@ -7,6 +9,7 @@ name = "slang-3dgs-trainer"
 version = "0.0.1"
 description = "3D Gaussian Splatting trainer built on SlangPy + slang-rhi"
 requires-python = ">=3.10"
+license = {file = "LICENSE"}
 dependencies = [
     "slangpy",
     "numpy",
@@ -28,6 +31,9 @@ dev = [
     "pytest",
     "ruff",
 ]
+
+[tool.setuptools]
+license-files = ["LICENSE", "NOTICE.md", "licenses/*.txt", "licenses/*.md"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

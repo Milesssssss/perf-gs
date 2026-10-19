@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Enforce GpuRuntime as the sole owner of command encoders and queue waits."""
 
 from __future__ import annotations

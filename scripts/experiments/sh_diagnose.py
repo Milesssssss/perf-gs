@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """SH3 diagnosis: is the higher-band signal NOT LEARNED or LEARNED-BUT-USELESS?
 
 Two cheap, decisive probes on a finished SH3 checkpoint (no extra training):

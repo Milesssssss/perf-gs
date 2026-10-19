@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """GPU buffer/texture allocation for the trainer.
 
 Trainer allocation includes forward, backward, optimizer, and densification
@@ -129,9 +131,12 @@ class ScratchArena:
     is a uint NDBuffer; ``storage`` re-types cleanly to any element type at bind
     (a raw VkBuffer carries no element type — the shader param supplies it),
     verified for Gaussian3D / AdamState / uint. ``capacity_bytes`` is the usable
-    byte span (>= every routed resource's byte size)."""
+    byte span (>= every routed resource's byte size). Active-count commits use
+    GPU indirect copies, including each live SoA component prefix; ``copy_back``
+    retains the explicit byte-copy path for callers without a GPU count."""
     buffer: spy.NDBuffer
     capacity_bytes: int
+    copy_dispatch_args: spy.NDBuffer
 
     @property
     def storage(self):
@@ -352,6 +357,10 @@ class GaussianBuffers:
     # the workgroups it needs (~1-3M gaussians vs max_splats=10M = 4x fewer
     # workgroups). Also requires BufferUsage.indirect_argument.
     adam_dispatch_args: spy.NDBuffer = field(init=False)     # uint[3]
+    # Mip recomputation launches one workgroup per LIVE gaussian, tiled over
+    # two dispatch dimensions when the live population exceeds 65,535.
+    mip_filter_dispatch_args: spy.NDBuffer = field(init=False)  # uint[6]: compute + tail clear
+    mip_filter_previous_count: spy.NDBuffer = field(init=False)  # uint[2]: live count + clear end
 
     # --- structure-aware densification (SAD-GS, arXiv 2604.28016) ---
     # Per-axis multiview frequency-violation accumulators, name -> uint[max_splats].
@@ -540,13 +549,13 @@ class _Alloc:
     def i64_buffer(self, label: str, *shape) -> spy.NDBuffer:
         return self.typed_buffer(label, "int64_t", *shape)
 
-    def indirect_buffer(self, label: str) -> spy.NDBuffer:
+    def indirect_buffer(self, label: str, records: int = 1) -> spy.NDBuffer:
         # Indirect-arg buffers need BufferUsage.indirect_argument in addition
         # to shader_resource | unordered_access (the NDBuffer default) so the
         # kernel can WRITE the args AND the driver can READ them as dispatch
         # args (uint[3] = groups_x, 1, 1).
         return _make_labeled_ndbuffer(
-            self.device, "uint", (3,), label,
+            self.device, "uint", (3 * records,), label,
             _DEFAULT_BUFFER_USAGE | spy.BufferUsage.indirect_argument)
 
     def tex(self, fmt: spy.Format, label: str,
@@ -589,7 +598,9 @@ def _make_scratch_arena(allocator: "_Alloc", types: "_ShaderTypes",
     nbytes = scratch_resource_bytes(types, max_splats, sh_rest_floats)
     n_uints = (nbytes + 3) // 4
     buf = allocator.uint_buffer("densification.scratch_arena", n_uints)
-    return ScratchArena(buffer=buf, capacity_bytes=n_uints * 4)
+    return ScratchArena(
+        buffer=buf, capacity_bytes=n_uints * 4,
+        copy_dispatch_args=allocator.indirect_buffer("densification.arena_copy_args"))
 
 
 def allocate(
@@ -736,6 +747,12 @@ def allocate(
     )
     # Adam indirect-dispatch args (populated every iter from num_gaussians_counter).
     buffers.adam_dispatch_args = allocator.indirect_buffer("adam_dispatch_args")
+    buffers.mip_filter_dispatch_args = allocator.indirect_buffer("mip_filter_dispatch_args", records=2)
+    buffers.mip_filter_previous_count = allocator.uint_buffer("mip_filter_previous_count", 2)
+    # First recomputation initializes the entire dead tail; later calls only
+    # clear slots that ceased to be live. Counts never leave the GPU thereafter.
+    buffers.mip_filter_previous_count.copy_from_numpy(
+        np.array([max_splats, max_splats], dtype=np.uint32))
 
     # --- structure-aware densification (SAD-GS) ---
     buffers.eta = EtaResources(

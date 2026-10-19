@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Tests for the paper suite's statistical core and cell identity.
 
 These functions decide the numbers that would go in a paper, and every one of

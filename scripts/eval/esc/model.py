@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Immutable value objects that flow through the harness.
 
 These carry *no behaviour* beyond trivial derived properties. All scoring logic

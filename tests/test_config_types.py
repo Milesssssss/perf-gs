@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Characterization + contract tests for trainer.config_types (frontend slice 2).
 
 Freezes the enum values and the resolution of the confusing CLI boolean flags

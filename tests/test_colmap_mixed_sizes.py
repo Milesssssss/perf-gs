@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """A COLMAP model with per-view image sizes must load.
 
 ``colmap image_undistorter`` emits one PINHOLE camera per image, each cropped to

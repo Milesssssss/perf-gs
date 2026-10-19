@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 // Optional view-dependent SH backward (per-gaussian; runs only when sh_degree>0).
 //
 // The per-pixel blend backward already accumulated the color gradient into

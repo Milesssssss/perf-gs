@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 // Transposed (per-splat) backward rasterizer.
 //
 // The per-pixel backward (backward.slang) parallelizes over pixels and
@@ -916,7 +918,7 @@ void backwardRasterizePerBucket(
         float3 C_in_front = C_checkpoint + float3(
             WavePrefixSum(contrib.x),
             WavePrefixSum(contrib.y),
-            WavePrefixSum(contrib.z));
+            WavePrefixSum(contrib.z)); //note:WavePrefixSum is exclusive! 
 #endif
 
         if (contributes)

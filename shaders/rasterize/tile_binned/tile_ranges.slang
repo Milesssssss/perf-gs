@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 // Post-sort: identify per-tile [start, end) ranges in the sorted pair
 // array. One thread per sorted entry; each thread writes tile_start and
 // tile_end at the boundaries where the neighbour's tile_id differs.

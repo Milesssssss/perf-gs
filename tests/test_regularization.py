@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Opacity/scale regularization gradient test.
 
 Validates shaders/losses/regularization.slang, which had NO coverage before.

@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Overlay + average PSNR-vs-iteration curves from one or more runs.
 
 Consumes the ``psnr_curve.json`` files written by ``v2_train.py --psnr-curve``

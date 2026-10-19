@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Chart a one-axis sweep: held-out PSNR + train time per scene, plus the table.
 
 Reads the ``results.json`` written by ``scripts/running/eval_sweep.py`` and, next

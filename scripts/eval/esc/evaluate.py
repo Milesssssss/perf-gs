@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Paired evaluation — turn a codebase + agent into an :class:`EscResult`.
 
 The orchestrator runs every change task across every seed in an isolated

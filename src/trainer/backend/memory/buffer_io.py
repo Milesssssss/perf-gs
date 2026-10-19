@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """CPU-side data marshalling into the trainer's GPU buffers.
 
 Separated from :mod:`trainer.buffers` (which owns GPU resource allocation and

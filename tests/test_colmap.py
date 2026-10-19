@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """COLMAP camera-alignment tests.
 
 Verify that our Python-side parsing of ``cameras.txt``/``images.txt``/

@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Image-space loss recording, decoupled from the primitive rasterizer.
 
 Extracts ``Pipeline._run_loss``'s SSIM / L1+L2 logic so the loss can be recorded

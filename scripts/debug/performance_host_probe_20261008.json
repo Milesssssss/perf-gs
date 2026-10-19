@@ -1,0 +1,124 @@
+{
+  "source": "process-local diagnostic overrides only; fixed camera/parameters; no production modifications",
+  "scenario": {
+    "capacity": 3000000,
+    "resolution": [
+      1237,
+      822
+    ],
+    "step": 1560,
+    "sh_degree": 0,
+    "pixel_fraction": 0.1,
+    "live": 1639527,
+    "steps_per_repeat": 96,
+    "repeats": 3,
+    "queue_depth": 5
+  },
+  "results": {
+    "normal": {
+      "median_record_ms": 2.2698499960824847,
+      "median_completed_ms_per_step": 5.453681248278978,
+      "repeats": [
+        {
+          "record_median_ms": 2.2698499960824847,
+          "completed_ms_per_step": 5.2684833329597796,
+          "queue_wait_total_ms": 247.28809902444482
+        },
+        {
+          "record_median_ms": 2.2540000500157475,
+          "completed_ms_per_step": 5.493732290536475,
+          "queue_wait_total_ms": 265.31109982170165
+        },
+        {
+          "record_median_ms": 2.641350030899048,
+          "completed_ms_per_step": 5.453681248278978,
+          "queue_wait_total_ms": 238.35430014878511
+        }
+      ]
+    },
+    "no_debug_markers": {
+      "median_record_ms": 2.28299992159009,
+      "median_completed_ms_per_step": 5.388417708066602,
+      "repeats": [
+        {
+          "record_median_ms": 2.3588499752804637,
+          "completed_ms_per_step": 5.388417708066602,
+          "queue_wait_total_ms": 247.55290080793202
+        },
+        {
+          "record_median_ms": 2.0287501392886043,
+          "completed_ms_per_step": 5.328030206631714,
+          "queue_wait_total_ms": 268.3951996732503
+        },
+        {
+          "record_median_ms": 2.28299992159009,
+          "completed_ms_per_step": 5.465999999917888,
+          "queue_wait_total_ms": 261.4266015589237
+        }
+      ]
+    },
+    "static_camera_no_upload": {
+      "median_record_ms": 2.170399995520711,
+      "median_completed_ms_per_step": 5.481020833637255,
+      "repeats": [
+        {
+          "record_median_ms": 2.0623999880626798,
+          "completed_ms_per_step": 5.481020833637255,
+          "queue_wait_total_ms": 288.8319995254278
+        },
+        {
+          "record_median_ms": 2.1882998989894986,
+          "completed_ms_per_step": 5.27374166752755,
+          "queue_wait_total_ms": 256.3764008227736
+        },
+        {
+          "record_median_ms": 2.170399995520711,
+          "completed_ms_per_step": 5.554736458482997,
+          "queue_wait_total_ms": 292.5371991004795
+        }
+      ]
+    },
+    "both": {
+      "median_record_ms": 1.9506999524310231,
+      "median_completed_ms_per_step": 5.305977082268025,
+      "repeats": [
+        {
+          "record_median_ms": 1.9156001508235931,
+          "completed_ms_per_step": 5.5632885414524935,
+          "queue_wait_total_ms": 315.61179948039353
+        },
+        {
+          "record_median_ms": 1.9506999524310231,
+          "completed_ms_per_step": 5.305977082268025,
+          "queue_wait_total_ms": 285.2561988402158
+        },
+        {
+          "record_median_ms": 2.2780500585213304,
+          "completed_ms_per_step": 5.266438541487635,
+          "queue_wait_total_ms": 242.3863005824387
+        }
+      ]
+    },
+    "counter_readback_every10": {
+      "median_record_ms": 2.1286499686539173,
+      "median_completed_ms_per_step": 5.687657292583026,
+      "repeats": [
+        {
+          "record_median_ms": 2.1286499686539173,
+          "completed_ms_per_step": 6.018687500424373,
+          "queue_wait_total_ms": 82.09830080159009
+        },
+        {
+          "record_median_ms": 1.9846499199047685,
+          "completed_ms_per_step": 5.687657292583026,
+          "queue_wait_total_ms": 90.35820048302412
+        },
+        {
+          "record_median_ms": 2.394600072875619,
+          "completed_ms_per_step": 5.656780209392309,
+          "queue_wait_total_ms": 61.70149985700846
+        }
+      ]
+    }
+  }
+}

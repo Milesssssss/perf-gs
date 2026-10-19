@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 // Shared SH-rest carry helpers for the densify split/clone variants.
 //
 // The optional features_rest coefficients + their Adam moments must follow each

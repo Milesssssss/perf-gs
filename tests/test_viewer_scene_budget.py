@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """The viewer's scene-render budget while training.
 
 A viewer frame does the same work as a training step — bin_count, the 8-pass

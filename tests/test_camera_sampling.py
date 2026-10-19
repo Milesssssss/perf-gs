@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Characterization test: freeze the per-iteration train-camera draw.
 
 NON-NEGOTIABLE: the ``ours`` vs ``sadgs`` sampling order and the exact RNG

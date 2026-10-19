@@ -1,0 +1,4402 @@
+{
+  "scope": "CPU phases plus selected GPU timestamps; normal async scheduling retained; queries read only after final normal drain",
+  "configuration": {
+    "scene": "bicycle",
+    "iters": 1100,
+    "capacity": 600000,
+    "resolution": [
+      618,
+      411
+    ],
+    "SH": 0,
+    "sampling_fraction": 0.1,
+    "viewer": false,
+    "evaluation": false,
+    "position_lr_max_steps": 3000
+  },
+  "completed_loop_s": 52.48862269986421,
+  "final_population": 580161,
+  "gpu_before": {
+    "devices": [
+      {
+        "memory.total": "16376",
+        "memory.used": "13945",
+        "utilization.gpu": "35",
+        "clocks.current.graphics": "1410",
+        "clocks.current.memory": "5001"
+      }
+    ]
+  },
+  "gpu_after": {
+    "devices": [
+      {
+        "memory.total": "16376",
+        "memory.used": "15249",
+        "utilization.gpu": "99",
+        "clocks.current.graphics": "2760",
+        "clocks.current.memory": "11201"
+      }
+    ]
+  },
+  "selected_ticks": [
+    {
+      "iter": 100,
+      "gpu_ms": {
+        "clear_grads": 0.024557113647460938,
+        "forward": 23.07581901550293,
+        "clear": 0.01430511474609375,
+        "cluster_cull": 0.016450881958007812,
+        "bin_count": 0.021457672119140625,
+        "scan_tile_offsets": 0.024557113647460938,
+        "bin_emit": 6.340742111206055,
+        "radix_sort": 15.883207321166992,
+        "pass_0": 3.0155181884765625,
+        "pass_1": 1.7511844635009766,
+        "pass_2": 5.08427619934082,
+        "pass_3": 0.6966590881347656,
+        "pass_4": 5.516290664672852,
+        "pass_5": 1.3587474822998047,
+        "pass_6": 1.7027854919433594,
+        "pass_7": 0.4227161407470703,
+        "identify_tile_ranges": 0.026702880859375,
+        "bucket_scan": 0.009298324584960938,
+        "rasterize": 0.7312297821044922,
+        "loss": 0.21004676818847656,
+        "backward": 0.16498565673828125,
+        "rasterize_backward": 0.13113021850585938,
+        "live_bucket_compaction": 0.01430511474609375,
+        "projection_backward": 0.01430511474609375,
+        "structure_accum": 0.009298324584960938,
+        "accumulate_iter": 0.021457672119140625,
+        "regularization": 0.0,
+        "adam": 0.7035732269287109,
+        "adam_main": 0.6973743438720703,
+        "densify_simple": 0.19049644470214844,
+        "arena_copy_back": 0.04935264587402344,
+        "densify_tracking": 0.01239776611328125,
+        "morton_sort": 4.225254058837891,
+        "mip_filter": 0.4475116729736328
+      },
+      "cpu": {
+        "iter": 100,
+        "phase_ms": {
+          "context": 0.06760004907846451,
+          "prepare_queue": 25.914300000295043,
+          "train_record": 2.7252999134361744,
+          "snapshot": 0.003200024366378784,
+          "filler": 101.51259996928275,
+          "Morton_record": 33.50179991684854,
+          "Mip_record": 62.750899931415915,
+          "mutations": 198.99150007404387,
+          "observations": 0.05110003985464573
+        },
+        "iteration_host_ms": 227.75300010107458
+      },
+      "waits": [
+        {
+          "iter": 100,
+          "phase": "prepare_queue",
+          "kind": "wait_for_submit",
+          "ms": 25.903700152412057
+        }
+      ]
+    },
+    {
+      "iter": 200,
+      "gpu_ms": {
+        "clear_grads": 0.024557113647460938,
+        "forward": 24.73163604736328,
+        "clear": 0.01239776611328125,
+        "cluster_cull": 0.01430511474609375,
+        "bin_count": 0.020503997802734375,
+        "scan_tile_offsets": 0.0247955322265625,
+        "bin_emit": 7.118701934814453,
+        "radix_sort": 16.669750213623047,
+        "pass_0": 4.173755645751953,
+        "pass_1": 2.4175643920898438,
+        "pass_2": 4.344940185546875,
+        "pass_3": 1.569509506225586,
+        "pass_4": 9.243488311767578,
+        "pass_5": 1.2226104736328125,
+        "pass_6": 2.461671829223633,
+        "pass_7": 0.4978179931640625,
+        "identify_tile_ranges": 0.025510787963867188,
+        "bucket_scan": 0.009059906005859375,
+        "rasterize": 0.8265972137451172,
+        "loss": 0.20074844360351562,
+        "backward": 0.7567405700683594,
+        "rasterize_backward": 0.720977783203125,
+        "live_bucket_compaction": 0.014543533325195312,
+        "projection_backward": 0.6091594696044922,
+        "structure_accum": 0.010251998901367188,
+        "accumulate_iter": 0.022649765014648438,
+        "regularization": 0.0,
+        "adam": 0.06341934204101562,
+        "adam_main": 0.05841255187988281,
+        "densify_simple": 0.2448558807373047,
+        "arena_copy_back": 0.058650970458984375,
+        "densify_tracking": 0.01239776611328125,
+        "morton_sort": 10.40792465209961,
+        "mip_filter": 1.8687248229980469
+      },
+      "cpu": {
+        "iter": 200,
+        "phase_ms": {
+          "context": 0.10279985144734383,
+          "prepare_queue": 25.58150002732873,
+          "train_record": 3.0188001692295074,
+          "snapshot": 0.002600019797682762,
+          "filler": 0.6065999623388052,
+          "Morton_record": 1.7904001288115978,
+          "Mip_record": 0.8175999391824007,
+          "mutations": 3.495400073006749,
+          "observations": 0.04620011895895004
+        },
+        "iteration_host_ms": 32.24730025976896
+      },
+      "waits": [
+        {
+          "iter": 200,
+          "phase": "prepare_queue",
+          "kind": "wait_for_submit",
+          "ms": 25.566699914634228
+        }
+      ]
+    },
+    {
+      "iter": 500,
+      "gpu_ms": {
+        "clear_grads": 0.02574920654296875,
+        "forward": 28.596162796020508,
+        "clear": 0.01430511474609375,
+        "cluster_cull": 0.020265579223632812,
+        "bin_count": 0.025510787963867188,
+        "scan_tile_offsets": 0.024557113647460938,
+        "bin_emit": 9.948015213012695,
+        "radix_sort": 17.65155792236328,
+        "pass_0": 10.851383209228516,
+        "pass_1": 6.911754608154297,
+        "pass_2": 10.126352310180664,
+        "pass_3": 3.8299560546875,
+        "pass_4": 11.411666870117188,
+        "pass_5": 3.8175582885742188,
+        "pass_6": 5.781412124633789,
+        "pass_7": 1.6865730285644531,
+        "identify_tile_ranges": 0.6022453308105469,
+        "bucket_scan": 0.009298324584960938,
+        "rasterize": 0.2918243408203125,
+        "loss": 0.8797645568847656,
+        "backward": 0.21409988403320312,
+        "rasterize_backward": 0.18334388732910156,
+        "live_bucket_compaction": 0.01430511474609375,
+        "projection_backward": 0.016450881958007812,
+        "structure_accum": 0.009298324584960938,
+        "accumulate_iter": 0.018358230590820312,
+        "regularization": 0.00095367431640625,
+        "adam": 0.9698867797851562,
+        "adam_main": 0.9646415710449219,
+        "densify_structure": 4.314184188842773,
+        "arena_copy_back": 0.47087669372558594,
+        "densify_tracking": 0.02765655517578125,
+        "morton_sort": 38.57088088989258,
+        "mip_filter": 8.306503295898438
+      },
+      "cpu": {
+        "iter": 500,
+        "phase_ms": {
+          "context": 0.08019991219043732,
+          "prepare_queue": 31.46179998293519,
+          "train_record": 2.9928998555988073,
+          "snapshot": 0.003800028935074806,
+          "SAD": 166.00019996985793,
+          "Morton_record": 1.2107000220566988,
+          "Mip_record": 0.17220014706254005,
+          "mutations": 187.97519989311695,
+          "observations": 0.05249981768429279
+        },
+        "iteration_host_ms": 222.56639949046075
+      },
+      "waits": [
+        {
+          "iter": 500,
+          "phase": "prepare_queue",
+          "kind": "wait_for_submit",
+          "ms": 31.449600122869015
+        },
+        {
+          "iter": 500,
+          "phase": "SAD",
+          "kind": "wait_for_submit",
+          "ms": 47.00260004028678
+        }
+      ]
+    },
+    {
+      "iter": 1000,
+      "gpu_ms": {
+        "clear_grads": 0.024557113647460938,
+        "forward": 54.03852462768555,
+        "clear": 0.0133514404296875,
+        "cluster_cull": 0.0705718994140625,
+        "bin_count": 0.033855438232421875,
+        "scan_tile_offsets": 0.024557113647460938,
+        "bin_emit": 22.027254104614258,
+        "radix_sort": 31.46958351135254,
+        "pass_0": 12.065887451171875,
+        "pass_1": 4.962444305419922,
+        "pass_2": 12.597322463989258,
+        "pass_3": 4.951000213623047,
+        "pass_4": 13.496160507202148,
+        "pass_5": 4.242181777954102,
+        "pass_6": 5.984306335449219,
+        "pass_7": 2.4526119232177734,
+        "identify_tile_ranges": 0.02765655517578125,
+        "bucket_scan": 0.010251998901367188,
+        "rasterize": 0.3542900085449219,
+        "loss": 0.8356571197509766,
+        "backward": 1.3537406921386719,
+        "rasterize_backward": 0.25081634521484375,
+        "live_bucket_compaction": 0.01621246337890625,
+        "projection_backward": 0.048160552978515625,
+        "structure_accum": 1.0771751403808594,
+        "accumulate_iter": 0.022649765014648438,
+        "regularization": 0.0011920928955078125,
+        "adam": 0.23436546325683594,
+        "adam_main": 0.22840499877929688,
+        "densify_structure": 2.8815269470214844,
+        "arena_copy_back": 0.3371238708496094,
+        "densify_tracking": 0.023603439331054688,
+        "morton_sort": 31.460285186767578,
+        "mip_filter": 5.767345428466797
+      },
+      "cpu": {
+        "iter": 1000,
+        "phase_ms": {
+          "context": 0.0879999715834856,
+          "prepare_queue": 46.71490006148815,
+          "train_record": 3.2091999892145395,
+          "snapshot": 0.002400018274784088,
+          "SAD": 343.3759999461472,
+          "Morton_record": 1.6597001813352108,
+          "Mip_record": 0.28629996813833714,
+          "mutations": 345.8964000456035,
+          "observations": 0.04929979331791401
+        },
+        "iteration_host_ms": 395.9601998794824
+      },
+      "waits": [
+        {
+          "iter": 1000,
+          "phase": "prepare_queue",
+          "kind": "wait_for_submit",
+          "ms": 46.701200073584914
+        },
+        {
+          "iter": 1000,
+          "phase": "SAD",
+          "kind": "wait_for_submit",
+          "ms": 340.64549999311566
+        }
+      ]
+    }
+  ],
+  "boundary_iterations": [
+    {
+      "iter": 94,
+      "phase_ms": {
+        "context": 0.06609992124140263,
+        "prepare_queue": 26.80850005708635,
+        "train_record": 2.2680999245494604,
+        "snapshot": 0.001700129359960556,
+        "mutations": 0.00690016895532608,
+        "observations": 0.003800028935074806
+      },
+      "iteration_host_ms": 29.155100230127573
+    },
+    {
+      "iter": 95,
+      "phase_ms": {
+        "context": 0.06650015711784363,
+        "prepare_queue": 28.429799946025014,
+        "train_record": 2.19259993173182,
+        "snapshot": 0.001700129359960556,
+        "mutations": 0.007400056347250938,
+        "observations": 0.003600027412176132
+      },
+      "iteration_host_ms": 30.701600247994065
+    },
+    {
+      "iter": 96,
+      "phase_ms": {
+        "context": 0.06729993037879467,
+        "prepare_queue": 26.185299968346953,
+        "train_record": 3.11879999935627,
+        "snapshot": 0.002299901098012924,
+        "mutations": 0.009800074622035027,
+        "observations": 0.005400041118264198
+      },
+      "iteration_host_ms": 29.38889991492033
+    },
+    {
+      "iter": 97,
+      "phase_ms": {
+        "context": 0.09369989857077599,
+        "prepare_queue": 23.021799977868795,
+        "train_record": 2.4945999030023813,
+        "snapshot": 0.001600012183189392,
+        "mutations": 0.00700005330145359,
+        "observations": 0.00400003045797348
+      },
+      "iteration_host_ms": 25.62269987538457
+    },
+    {
+      "iter": 98,
+      "phase_ms": {
+        "context": 0.06820005364716053,
+        "prepare_queue": 30.80549999140203,
+        "train_record": 2.475900109857321,
+        "snapshot": 0.001600012183189392,
+        "mutations": 0.007100170478224754,
+        "observations": 0.00400003045797348
+      },
+      "iteration_host_ms": 33.3623003680259
+    },
+    {
+      "iter": 99,
+      "phase_ms": {
+        "context": 0.06720004603266716,
+        "prepare_queue": 29.649300035089254,
+        "train_record": 2.337999874725938,
+        "snapshot": 0.001600012183189392,
+        "mutations": 0.006499933078885078,
+        "observations": 0.00409991480410099
+      },
+      "iteration_host_ms": 32.066699815914035
+    },
+    {
+      "iter": 100,
+      "phase_ms": {
+        "context": 0.06760004907846451,
+        "prepare_queue": 25.914300000295043,
+        "train_record": 2.7252999134361744,
+        "snapshot": 0.003200024366378784,
+        "filler": 101.51259996928275,
+        "Morton_record": 33.50179991684854,
+        "Mip_record": 62.750899931415915,
+        "mutations": 198.99150007404387,
+        "observations": 0.05110003985464573
+      },
+      "iteration_host_ms": 227.75300010107458
+    },
+    {
+      "iter": 101,
+      "phase_ms": {
+        "context": 0.0738000962883234,
+        "prepare_queue": 0.013299984857439995,
+        "train_record": 2.0574999507516623,
+        "snapshot": 0.001200009137392044,
+        "mutations": 0.005600042641162872,
+        "observations": 0.0016998965293169022
+      },
+      "iteration_host_ms": 2.1530999802052975
+    },
+    {
+      "iter": 102,
+      "phase_ms": {
+        "context": 0.032400013878941536,
+        "prepare_queue": 0.004899920895695686,
+        "train_record": 1.545199891552329,
+        "snapshot": 0.00090012326836586,
+        "mutations": 0.00400003045797348,
+        "observations": 0.0012998934835195541
+      },
+      "iteration_host_ms": 1.5886998735368252
+    },
+    {
+      "iter": 103,
+      "phase_ms": {
+        "context": 0.028799986466765404,
+        "prepare_queue": 0.004600035026669502,
+        "train_record": 1.542000100016594,
+        "snapshot": 0.00090012326836586,
+        "mutations": 0.003800028935074806,
+        "observations": 0.001400010660290718
+      },
+      "iteration_host_ms": 1.5815002843737602
+    },
+    {
+      "iter": 104,
+      "phase_ms": {
+        "context": 0.027900096029043198,
+        "prepare_queue": 0.004700152203440666,
+        "train_record": 1.5229000709950924,
+        "snapshot": 0.0008998904377222061,
+        "mutations": 0.003800028935074806,
+        "observations": 0.001400010660290718
+      },
+      "iteration_host_ms": 1.561600249260664
+    },
+    {
+      "iter": 105,
+      "phase_ms": {
+        "context": 0.028099864721298218,
+        "prepare_queue": 0.004699919372797012,
+        "train_record": 2.6706999633461237,
+        "snapshot": 0.0012998934835195541,
+        "mutations": 0.005300156772136688,
+        "observations": 0.0018998980522155762
+      },
+      "iteration_host_ms": 2.7119996957480907
+    },
+    {
+      "iter": 106,
+      "phase_ms": {
+        "context": 0.040999846532940865,
+        "prepare_queue": 10.114599950611591,
+        "train_record": 1.9505999516695738,
+        "snapshot": 0.0014998950064182281,
+        "mutations": 0.005400041118264198,
+        "observations": 0.002300133928656578
+      },
+      "iteration_host_ms": 12.115399818867445
+    },
+    {
+      "iter": 194,
+      "phase_ms": {
+        "context": 0.06950017996132374,
+        "prepare_queue": 27.707000030204654,
+        "train_record": 4.02110000140965,
+        "snapshot": 0.002200016751885414,
+        "mutations": 0.009899958968162537,
+        "observations": 0.005100155249238014
+      },
+      "iteration_host_ms": 31.814800342544913
+    },
+    {
+      "iter": 195,
+      "phase_ms": {
+        "context": 0.08780020289123058,
+        "prepare_queue": 19.833700032904744,
+        "train_record": 2.4942001327872276,
+        "snapshot": 0.003400025889277458,
+        "mutations": 0.012499978765845299,
+        "observations": 0.006299931555986404
+      },
+      "iteration_host_ms": 22.43790030479431
+    },
+    {
+      "iter": 196,
+      "phase_ms": {
+        "context": 0.14759995974600315,
+        "prepare_queue": 26.639300165697932,
+        "train_record": 2.3898000363260508,
+        "snapshot": 0.001600012183189392,
+        "mutations": 0.006800051778554916,
+        "observations": 0.003500143066048622
+      },
+      "iteration_host_ms": 29.18860036879778
+    },
+    {
+      "iter": 197,
+      "phase_ms": {
+        "context": 0.06640003994107246,
+        "prepare_queue": 26.246799854561687,
+        "train_record": 2.540400018915534,
+        "snapshot": 0.002100132405757904,
+        "mutations": 0.0070999376475811005,
+        "observations": 0.004299916326999664
+      },
+      "iteration_host_ms": 28.86709989979863
+    },
+    {
+      "iter": 198,
+      "phase_ms": {
+        "context": 0.07890001870691776,
+        "prepare_queue": 23.529700003564358,
+        "train_record": 2.7237001340836287,
+        "snapshot": 0.00190013088285923,
+        "mutations": 0.007999828085303307,
+        "observations": 0.003600027412176132
+      },
+      "iteration_host_ms": 26.345800142735243
+    },
+    {
+      "iter": 199,
+      "phase_ms": {
+        "context": 0.08019991219043732,
+        "prepare_queue": 27.244600001722574,
+        "train_record": 3.627799917012453,
+        "snapshot": 0.002800021320581436,
+        "mutations": 0.010899966582655907,
+        "observations": 0.005499925464391708
+      },
+      "iteration_host_ms": 30.971799744293094
+    },
+    {
+      "iter": 200,
+      "phase_ms": {
+        "context": 0.10279985144734383,
+        "prepare_queue": 25.58150002732873,
+        "train_record": 3.0188001692295074,
+        "snapshot": 0.002600019797682762,
+        "filler": 0.6065999623388052,
+        "Morton_record": 1.7904001288115978,
+        "Mip_record": 0.8175999391824007,
+        "mutations": 3.495400073006749,
+        "observations": 0.04620011895895004
+      },
+      "iteration_host_ms": 32.24730025976896
+    },
+    {
+      "iter": 201,
+      "phase_ms": {
+        "context": 0.05730008706450462,
+        "prepare_queue": 120.97000004723668,
+        "train_record": 3.410100005567074,
+        "snapshot": 0.0014998950064182281,
+        "mutations": 0.0066999346017837524,
+        "observations": 0.003800028935074806
+      },
+      "iteration_host_ms": 124.44939999841154
+    },
+    {
+      "iter": 202,
+      "phase_ms": {
+        "context": 0.06509991362690926,
+        "prepare_queue": 22.27170020341873,
+        "train_record": 2.926400164142251,
+        "snapshot": 0.00200001522898674,
+        "mutations": 0.0076999422162771225,
+        "observations": 0.0038999132812023163
+      },
+      "iteration_host_ms": 25.276800151914358
+    },
+    {
+      "iter": 203,
+      "phase_ms": {
+        "context": 0.07640011608600616,
+        "prepare_queue": 0.009699957445263863,
+        "train_record": 1.9396001007407904,
+        "snapshot": 0.00100000761449337,
+        "mutations": 0.004899920895695686,
+        "observations": 0.00200001522898674
+      },
+      "iteration_host_ms": 2.033600118011236
+    },
+    {
+      "iter": 204,
+      "phase_ms": {
+        "context": 0.0342000275850296,
+        "prepare_queue": 5.615799920633435,
+        "train_record": 1.6715999227017164,
+        "snapshot": 0.001100124791264534,
+        "mutations": 0.004400033503770828,
+        "observations": 0.00200001522898674
+      },
+      "iteration_host_ms": 7.329100044444203
+    },
+    {
+      "iter": 205,
+      "phase_ms": {
+        "context": 0.04400010220706463,
+        "prepare_queue": 0.10200007818639278,
+        "train_record": 1.6417999286204576,
+        "snapshot": 0.00090012326836586,
+        "mutations": 0.00409991480410099,
+        "observations": 0.001400010660290718
+      },
+      "iteration_host_ms": 1.7942001577466726
+    },
+    {
+      "iter": 206,
+      "phase_ms": {
+        "context": 0.029199989512562752,
+        "prepare_queue": 22.68650010228157,
+        "train_record": 2.120800083503127,
+        "snapshot": 0.001400010660290718,
+        "mutations": 0.0066999346017837524,
+        "observations": 0.0034999102354049683
+      },
+      "iteration_host_ms": 24.84810003079474
+    },
+    {
+      "iter": 494,
+      "phase_ms": {
+        "context": 0.07059983909130096,
+        "prepare_queue": 46.74340016208589,
+        "train_record": 3.0533000826835632,
+        "snapshot": 0.001800013706088066,
+        "mutations": 0.0074999406933784485,
+        "observations": 0.00400003045797348
+      },
+      "iteration_host_ms": 49.880600068718195
+    },
+    {
+      "iter": 495,
+      "phase_ms": {
+        "context": 0.06940006278455257,
+        "prepare_queue": 47.589899972081184,
+        "train_record": 3.5534000489860773,
+        "snapshot": 0.002499902620911598,
+        "mutations": 0.009800074622035027,
+        "observations": 0.00500003807246685
+      },
+      "iteration_host_ms": 51.23000009916723
+    },
+    {
+      "iter": 496,
+      "phase_ms": {
+        "context": 0.08370005525648594,
+        "prepare_queue": 48.14599989913404,
+        "train_record": 2.691200003027916,
+        "snapshot": 0.0018998980522155762,
+        "mutations": 0.007300172001123428,
+        "observations": 0.004200031980872154
+      },
+      "iteration_host_ms": 50.93430005945265
+    },
+    {
+      "iter": 497,
+      "phase_ms": {
+        "context": 0.06470014341175556,
+        "prepare_queue": 44.870899990200996,
+        "train_record": 2.235300140455365,
+        "snapshot": 0.001500127837061882,
+        "mutations": 0.006299931555986404,
+        "observations": 0.003400025889277458
+      },
+      "iteration_host_ms": 47.18210035935044
+    },
+    {
+      "iter": 498,
+      "phase_ms": {
+        "context": 0.06640003994107246,
+        "prepare_queue": 43.86269999668002,
+        "train_record": 2.568300114944577,
+        "snapshot": 0.0018998980522155762,
+        "mutations": 0.006600050255656242,
+        "observations": 0.004100147634744644
+      },
+      "iteration_host_ms": 46.51000024750829
+    },
+    {
+      "iter": 499,
+      "phase_ms": {
+        "context": 0.06309989839792252,
+        "prepare_queue": 44.758199946954846,
+        "train_record": 2.551799872890115,
+        "snapshot": 0.001700129359960556,
+        "mutations": 0.007200054824352264,
+        "observations": 0.003800028935074806
+      },
+      "iteration_host_ms": 47.38579993136227
+    },
+    {
+      "iter": 500,
+      "phase_ms": {
+        "context": 0.08019991219043732,
+        "prepare_queue": 31.46179998293519,
+        "train_record": 2.9928998555988073,
+        "snapshot": 0.003800028935074806,
+        "SAD": 166.00019996985793,
+        "Morton_record": 1.2107000220566988,
+        "Mip_record": 0.17220014706254005,
+        "mutations": 187.97519989311695,
+        "observations": 0.05249981768429279
+      },
+      "iteration_host_ms": 222.56639949046075
+    },
+    {
+      "iter": 501,
+      "phase_ms": {
+        "context": 0.09039998985826969,
+        "prepare_queue": 0.01850002445280552,
+        "train_record": 3.025999991223216,
+        "snapshot": 0.0016998965293169022,
+        "mutations": 0.008599832653999329,
+        "observations": 0.005500158295035362
+      },
+      "iteration_host_ms": 3.150699893012643
+    },
+    {
+      "iter": 502,
+      "phase_ms": {
+        "context": 0.07050018757581711,
+        "prepare_queue": 0.009600073099136353,
+        "train_record": 2.1340001840144396,
+        "snapshot": 0.0012998934835195541,
+        "mutations": 0.005699926987290382,
+        "observations": 0.00390014611184597
+      },
+      "iteration_host_ms": 2.225000411272049
+    },
+    {
+      "iter": 503,
+      "phase_ms": {
+        "context": 0.05540018901228905,
+        "prepare_queue": 0.007100170478224754,
+        "train_record": 1.7500000540167093,
+        "snapshot": 0.001200009137392044,
+        "mutations": 0.005299923941493034,
+        "observations": 0.003400025889277458
+      },
+      "iteration_host_ms": 1.8224003724753857
+    },
+    {
+      "iter": 504,
+      "phase_ms": {
+        "context": 0.04770001396536827,
+        "prepare_queue": 24.615000002086163,
+        "train_record": 2.878699917346239,
+        "snapshot": 0.001600012183189392,
+        "mutations": 0.009600073099136353,
+        "observations": 0.00390014611184597
+      },
+      "iteration_host_ms": 27.55650016479194
+    },
+    {
+      "iter": 505,
+      "phase_ms": {
+        "context": 0.07329997606575489,
+        "prepare_queue": 5.330400075763464,
+        "train_record": 3.2244001049548388,
+        "snapshot": 0.0027997884899377823,
+        "mutations": 0.01300009898841381,
+        "observations": 0.00400003045797348
+      },
+      "iteration_host_ms": 8.647900074720383
+    },
+    {
+      "iter": 506,
+      "phase_ms": {
+        "context": 0.08919998072087765,
+        "prepare_queue": 76.59179996699095,
+        "train_record": 2.949699992313981,
+        "snapshot": 0.002299901098012924,
+        "mutations": 0.009699957445263863,
+        "observations": 0.004800036549568176
+      },
+      "iteration_host_ms": 79.64749983511865
+    },
+    {
+      "iter": 994,
+      "phase_ms": {
+        "context": 0.06699981167912483,
+        "prepare_queue": 59.019500156864524,
+        "train_record": 2.5875000283122063,
+        "snapshot": 0.00190013088285923,
+        "mutations": 0.008500181138515472,
+        "observations": 0.0038999132812023163
+      },
+      "iteration_host_ms": 61.68830022215843
+    },
+    {
+      "iter": 995,
+      "phase_ms": {
+        "context": 0.076299998909235,
+        "prepare_queue": 70.04719995893538,
+        "train_record": 4.157899878919125,
+        "snapshot": 0.00200001522898674,
+        "mutations": 0.009899958968162537,
+        "observations": 0.005400041118264198
+      },
+      "iteration_host_ms": 74.29869985207915
+    },
+    {
+      "iter": 996,
+      "phase_ms": {
+        "context": 0.08759996853768826,
+        "prepare_queue": 32.729299971833825,
+        "train_record": 2.1893999073654413,
+        "snapshot": 0.001600012183189392,
+        "mutations": 0.006700167432427406,
+        "observations": 0.0038999132812023163
+      },
+      "iteration_host_ms": 35.018499940633774
+    },
+    {
+      "iter": 997,
+      "phase_ms": {
+        "context": 0.06570015102624893,
+        "prepare_queue": 48.62029990181327,
+        "train_record": 3.064599819481373,
+        "snapshot": 0.0017997808754444122,
+        "mutations": 0.007400056347250938,
+        "observations": 0.00390014611184597
+      },
+      "iteration_host_ms": 51.76369985565543
+    },
+    {
+      "iter": 998,
+      "phase_ms": {
+        "context": 0.0771000050008297,
+        "prepare_queue": 59.162900084629655,
+        "train_record": 2.9633999802172184,
+        "snapshot": 0.002200016751885414,
+        "mutations": 0.008500181138515472,
+        "observations": 0.004499917849898338
+      },
+      "iteration_host_ms": 62.218600185588
+    },
+    {
+      "iter": 999,
+      "phase_ms": {
+        "context": 0.08269981481134892,
+        "prepare_queue": 56.66680005379021,
+        "train_record": 2.858899999409914,
+        "snapshot": 0.002300133928656578,
+        "mutations": 0.009899958968162537,
+        "observations": 0.00500003807246685
+      },
+      "iteration_host_ms": 59.62559999898076
+    },
+    {
+      "iter": 1000,
+      "phase_ms": {
+        "context": 0.0879999715834856,
+        "prepare_queue": 46.71490006148815,
+        "train_record": 3.2091999892145395,
+        "snapshot": 0.002400018274784088,
+        "SAD": 343.3759999461472,
+        "Morton_record": 1.6597001813352108,
+        "Mip_record": 0.28629996813833714,
+        "mutations": 345.8964000456035,
+        "observations": 0.04929979331791401
+      },
+      "iteration_host_ms": 395.9601998794824
+    },
+    {
+      "iter": 1001,
+      "phase_ms": {
+        "context": 0.07329997606575489,
+        "prepare_queue": 0.011899974197149277,
+        "train_record": 2.3490998428314924,
+        "snapshot": 0.001300126314163208,
+        "mutations": 0.00519980676472187,
+        "observations": 0.002300133928656578
+      },
+      "iteration_host_ms": 2.4430998601019382
+    },
+    {
+      "iter": 1002,
+      "phase_ms": {
+        "context": 0.0350000336766243,
+        "prepare_queue": 0.005100155249238014,
+        "train_record": 1.566499937325716,
+        "snapshot": 0.0008998904377222061,
+        "mutations": 0.00400003045797348,
+        "observations": 0.001400010660290718
+      },
+      "iteration_host_ms": 1.6129000578075647
+    },
+    {
+      "iter": 1003,
+      "phase_ms": {
+        "context": 0.028200214728713036,
+        "prepare_queue": 0.004299916326999664,
+        "train_record": 1.5435998793691397,
+        "snapshot": 0.00090012326836586,
+        "mutations": 0.004299916326999664,
+        "observations": 0.001300126314163208
+      },
+      "iteration_host_ms": 1.582600176334381
+    },
+    {
+      "iter": 1004,
+      "phase_ms": {
+        "context": 0.02810009755194187,
+        "prepare_queue": 25.81339981406927,
+        "train_record": 4.352699965238571,
+        "snapshot": 0.002499902620911598,
+        "mutations": 0.024700071662664413,
+        "observations": 0.012299977242946625
+      },
+      "iteration_host_ms": 30.233699828386307
+    },
+    {
+      "iter": 1005,
+      "phase_ms": {
+        "context": 0.12209988199174404,
+        "prepare_queue": 1.1720000766217709,
+        "train_record": 3.763900138437748,
+        "snapshot": 0.002100132405757904,
+        "mutations": 0.008800067007541656,
+        "observations": 0.004899920895695686
+      },
+      "iteration_host_ms": 5.073800217360258
+    },
+    {
+      "iter": 1006,
+      "phase_ms": {
+        "context": 0.07609999738633633,
+        "prepare_queue": 29.67499988153577,
+        "train_record": 3.045199904590845,
+        "snapshot": 0.00200001522898674,
+        "mutations": 0.0078000593930482864,
+        "observations": 0.004200031980872154
+      },
+      "iteration_host_ms": 32.81029989011586
+    }
+  ],
+  "dispatch_host_timings": [
+    {
+      "iter": 100,
+      "marker": "grad_clear",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.06900005973875523
+    },
+    {
+      "iter": 100,
+      "marker": "grad_clear",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.01659989356994629
+    },
+    {
+      "iter": 100,
+      "marker": "grad_clear",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.009599840268492699
+    },
+    {
+      "iter": 100,
+      "marker": "grad_clear",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.00909995287656784
+    },
+    {
+      "iter": 100,
+      "marker": "grad_clear",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.008400063961744308
+    },
+    {
+      "iter": 100,
+      "marker": "grad_clear",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.008200062438845634
+    },
+    {
+      "iter": 100,
+      "marker": "clear_textures",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.0412999652326107
+    },
+    {
+      "iter": 100,
+      "marker": "clear_tile_ranges",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.021999934688210487
+    },
+    {
+      "iter": 100,
+      "marker": "build_cluster_aabb",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.030800001695752144
+    },
+    {
+      "iter": 100,
+      "marker": "cull_clusters_frustum",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.022499822080135345
+    },
+    {
+      "iter": 100,
+      "marker": "bin_count",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.04719989374279976
+    },
+    {
+      "iter": 100,
+      "marker": "bin_emit",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.03629992716014385
+    },
+    {
+      "iter": 100,
+      "marker": "radix_prepare_dispatch",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.021399930119514465
+    },
+    {
+      "iter": 100,
+      "marker": "radix_init_global_hist",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.012400094419717789
+    },
+    {
+      "iter": 100,
+      "marker": "radix_upsweep",
+      "phase": "train_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.041800085455179214
+    },
+    {
+      "iter": 100,
+      "marker": "radix_scan",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.018900027498602867
+    },
+    {
+      "iter": 100,
+      "marker": "radix_downsweep",
+      "phase": "train_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.03900006413459778
+    },
+    {
+      "iter": 100,
+      "marker": "radix_upsweep",
+      "phase": "train_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.019900035113096237
+    },
+    {
+      "iter": 100,
+      "marker": "radix_scan",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.011899974197149277
+    },
+    {
+      "iter": 100,
+      "marker": "radix_downsweep",
+      "phase": "train_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.023300061002373695
+    },
+    {
+      "iter": 100,
+      "marker": "radix_upsweep",
+      "phase": "train_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.02410006709396839
+    },
+    {
+      "iter": 100,
+      "marker": "radix_scan",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.011699972674250603
+    },
+    {
+      "iter": 100,
+      "marker": "radix_downsweep",
+      "phase": "train_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.022799940779805183
+    },
+    {
+      "iter": 100,
+      "marker": "radix_upsweep",
+      "phase": "train_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.01850002445280552
+    },
+    {
+      "iter": 100,
+      "marker": "radix_scan",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.01109996810555458
+    },
+    {
+      "iter": 100,
+      "marker": "radix_downsweep",
+      "phase": "train_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.022399937734007835
+    },
+    {
+      "iter": 100,
+      "marker": "radix_upsweep",
+      "phase": "train_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.01829979009926319
+    },
+    {
+      "iter": 100,
+      "marker": "radix_scan",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.01100008375942707
+    },
+    {
+      "iter": 100,
+      "marker": "radix_downsweep",
+      "phase": "train_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.028300099074840546
+    },
+    {
+      "iter": 100,
+      "marker": "radix_upsweep",
+      "phase": "train_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.044599873945117
+    },
+    {
+      "iter": 100,
+      "marker": "radix_scan",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.026999972760677338
+    },
+    {
+      "iter": 100,
+      "marker": "radix_downsweep",
+      "phase": "train_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.0420999713242054
+    },
+    {
+      "iter": 100,
+      "marker": "radix_upsweep",
+      "phase": "train_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.023899832740426064
+    },
+    {
+      "iter": 100,
+      "marker": "radix_scan",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.013400102034211159
+    },
+    {
+      "iter": 100,
+      "marker": "radix_downsweep",
+      "phase": "train_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.02359994687139988
+    },
+    {
+      "iter": 100,
+      "marker": "radix_upsweep",
+      "phase": "train_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.018600141629576683
+    },
+    {
+      "iter": 100,
+      "marker": "radix_scan",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.019499799236655235
+    },
+    {
+      "iter": 100,
+      "marker": "radix_downsweep",
+      "phase": "train_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.024300068616867065
+    },
+    {
+      "iter": 100,
+      "marker": "identify_tile_ranges",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.021999934688210487
+    },
+    {
+      "iter": 100,
+      "marker": "bucket_count",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.03269989974796772
+    },
+    {
+      "iter": 100,
+      "marker": "forward",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.05000014789402485
+    },
+    {
+      "iter": 100,
+      "marker": "tile_max_processed",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.04650000482797623
+    },
+    {
+      "iter": 100,
+      "marker": "scatter_live_buckets",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.02310005947947502
+    },
+    {
+      "iter": 100,
+      "marker": "bucket_prepare_dispatch",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.015799887478351593
+    },
+    {
+      "iter": 100,
+      "marker": "backward_persbucket",
+      "phase": "train_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.08679996244609356
+    },
+    {
+      "iter": 100,
+      "marker": "projection_backward",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.07280008867383003
+    },
+    {
+      "iter": 100,
+      "marker": "score_structure_aware",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.06969994865357876
+    },
+    {
+      "iter": 100,
+      "marker": "accumulate_iter",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.037400051951408386
+    },
+    {
+      "iter": 100,
+      "marker": "decide_actions_simple",
+      "phase": "filler",
+      "api": "_dispatch",
+      "host_ms": 19.374300027266145
+    },
+    {
+      "iter": 100,
+      "marker": "densify_snapshot",
+      "phase": "filler",
+      "api": "_dispatch",
+      "host_ms": 4.718800075352192
+    },
+    {
+      "iter": 100,
+      "marker": "densify_prepare_args",
+      "phase": "filler",
+      "api": "_dispatch",
+      "host_ms": 0.0467000063508749
+    },
+    {
+      "iter": 100,
+      "marker": "split_and_clone",
+      "phase": "filler",
+      "api": "_dispatch_indirect",
+      "host_ms": 39.86130002886057
+    },
+    {
+      "iter": 100,
+      "marker": "densify_snapshot",
+      "phase": "filler",
+      "api": "_dispatch",
+      "host_ms": 0.03860006108880043
+    },
+    {
+      "iter": 100,
+      "marker": "build_prune_mask",
+      "phase": "filler",
+      "api": "_dispatch",
+      "host_ms": 5.732800113037229
+    },
+    {
+      "iter": 100,
+      "marker": "scatter_compact_gaussian",
+      "phase": "filler",
+      "api": "_dispatch",
+      "host_ms": 5.28179993852973
+    },
+    {
+      "iter": 100,
+      "marker": "active_copy_prepare_args",
+      "phase": "filler",
+      "api": "_dispatch",
+      "host_ms": 5.644199904054403
+    },
+    {
+      "iter": 100,
+      "marker": "copy_active_records",
+      "phase": "filler",
+      "api": "_dispatch_indirect",
+      "host_ms": 7.903099991381168
+    },
+    {
+      "iter": 100,
+      "marker": "scatter_compact_adam",
+      "phase": "filler",
+      "api": "_dispatch",
+      "host_ms": 6.127799861133099
+    },
+    {
+      "iter": 100,
+      "marker": "active_copy_prepare_args",
+      "phase": "filler",
+      "api": "_dispatch",
+      "host_ms": 0.031000003218650818
+    },
+    {
+      "iter": 100,
+      "marker": "copy_active_records",
+      "phase": "filler",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.03560003824532032
+    },
+    {
+      "iter": 100,
+      "marker": "scatter_compact_eta_only",
+      "phase": "filler",
+      "api": "_dispatch",
+      "host_ms": 5.8877000119537115
+    },
+    {
+      "iter": 100,
+      "marker": "densify_snapshot",
+      "phase": "filler",
+      "api": "_dispatch",
+      "host_ms": 0.031299889087677
+    },
+    {
+      "iter": 100,
+      "marker": "clear_tracking",
+      "phase": "mutations",
+      "api": "_dispatch",
+      "host_ms": 0.7827000226825476
+    },
+    {
+      "iter": 100,
+      "marker": "morton_snapshot",
+      "phase": "Morton_record",
+      "api": "_dispatch",
+      "host_ms": 0.031000003218650818
+    },
+    {
+      "iter": 100,
+      "marker": "morton_encode",
+      "phase": "Morton_record",
+      "api": "_dispatch",
+      "host_ms": 10.09989995509386
+    },
+    {
+      "iter": 100,
+      "marker": "radix_prepare_dispatch",
+      "phase": "Morton_record",
+      "api": "_dispatch",
+      "host_ms": 0.028800219297409058
+    },
+    {
+      "iter": 100,
+      "marker": "radix_init_global_hist",
+      "phase": "Morton_record",
+      "api": "_dispatch",
+      "host_ms": 0.0195999164134264
+    },
+    {
+      "iter": 100,
+      "marker": "radix_upsweep",
+      "phase": "Morton_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.06110011599957943
+    },
+    {
+      "iter": 100,
+      "marker": "radix_scan",
+      "phase": "Morton_record",
+      "api": "_dispatch",
+      "host_ms": 0.032700132578611374
+    },
+    {
+      "iter": 100,
+      "marker": "radix_downsweep",
+      "phase": "Morton_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.06789993494749069
+    },
+    {
+      "iter": 100,
+      "marker": "radix_upsweep",
+      "phase": "Morton_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.050999922677874565
+    },
+    {
+      "iter": 100,
+      "marker": "radix_scan",
+      "phase": "Morton_record",
+      "api": "_dispatch",
+      "host_ms": 0.025399960577487946
+    },
+    {
+      "iter": 100,
+      "marker": "radix_downsweep",
+      "phase": "Morton_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.04329998046159744
+    },
+    {
+      "iter": 100,
+      "marker": "radix_upsweep",
+      "phase": "Morton_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.031200004741549492
+    },
+    {
+      "iter": 100,
+      "marker": "radix_scan",
+      "phase": "Morton_record",
+      "api": "_dispatch",
+      "host_ms": 0.018499791622161865
+    },
+    {
+      "iter": 100,
+      "marker": "radix_downsweep",
+      "phase": "Morton_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.03690016455948353
+    },
+    {
+      "iter": 100,
+      "marker": "radix_upsweep",
+      "phase": "Morton_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.029199989512562752
+    },
+    {
+      "iter": 100,
+      "marker": "radix_scan",
+      "phase": "Morton_record",
+      "api": "_dispatch",
+      "host_ms": 0.024300068616867065
+    },
+    {
+      "iter": 100,
+      "marker": "radix_downsweep",
+      "phase": "Morton_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.03829994238913059
+    },
+    {
+      "iter": 100,
+      "marker": "radix_upsweep",
+      "phase": "Morton_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.030900118872523308
+    },
+    {
+      "iter": 100,
+      "marker": "radix_scan",
+      "phase": "Morton_record",
+      "api": "_dispatch",
+      "host_ms": 0.021600164473056793
+    },
+    {
+      "iter": 100,
+      "marker": "radix_downsweep",
+      "phase": "Morton_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.03609992563724518
+    },
+    {
+      "iter": 100,
+      "marker": "radix_upsweep",
+      "phase": "Morton_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.028499867767095566
+    },
+    {
+      "iter": 100,
+      "marker": "radix_scan",
+      "phase": "Morton_record",
+      "api": "_dispatch",
+      "host_ms": 0.01610000617802143
+    },
+    {
+      "iter": 100,
+      "marker": "radix_downsweep",
+      "phase": "Morton_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.03600004129111767
+    },
+    {
+      "iter": 100,
+      "marker": "radix_upsweep",
+      "phase": "Morton_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.031200004741549492
+    },
+    {
+      "iter": 100,
+      "marker": "radix_scan",
+      "phase": "Morton_record",
+      "api": "_dispatch",
+      "host_ms": 0.021300045773386955
+    },
+    {
+      "iter": 100,
+      "marker": "radix_downsweep",
+      "phase": "Morton_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.04779989831149578
+    },
+    {
+      "iter": 100,
+      "marker": "radix_upsweep",
+      "phase": "Morton_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.03650016151368618
+    },
+    {
+      "iter": 100,
+      "marker": "radix_scan",
+      "phase": "Morton_record",
+      "api": "_dispatch",
+      "host_ms": 0.02050003968179226
+    },
+    {
+      "iter": 100,
+      "marker": "radix_downsweep",
+      "phase": "Morton_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.0420999713242054
+    },
+    {
+      "iter": 100,
+      "marker": "morton_scatter_gaussian",
+      "phase": "Morton_record",
+      "api": "_dispatch",
+      "host_ms": 7.647000020369887
+    },
+    {
+      "iter": 100,
+      "marker": "active_copy_prepare_args",
+      "phase": "Morton_record",
+      "api": "_dispatch",
+      "host_ms": 0.042899977415800095
+    },
+    {
+      "iter": 100,
+      "marker": "copy_active_records",
+      "phase": "Morton_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.05020014941692352
+    },
+    {
+      "iter": 100,
+      "marker": "morton_scatter_adam",
+      "phase": "Morton_record",
+      "api": "_dispatch",
+      "host_ms": 6.162599893286824
+    },
+    {
+      "iter": 100,
+      "marker": "active_copy_prepare_args",
+      "phase": "Morton_record",
+      "api": "_dispatch",
+      "host_ms": 0.041800085455179214
+    },
+    {
+      "iter": 100,
+      "marker": "copy_active_records",
+      "phase": "Morton_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.05530007183551788
+    },
+    {
+      "iter": 100,
+      "marker": "morton_scatter_eta",
+      "phase": "Morton_record",
+      "api": "_dispatch",
+      "host_ms": 7.498499937355518
+    },
+    {
+      "iter": 100,
+      "marker": "mip_filter_prepare_args",
+      "phase": "Mip_record",
+      "api": "_dispatch",
+      "host_ms": 18.889399943873286
+    },
+    {
+      "iter": 100,
+      "marker": "mip_filter_clear",
+      "phase": "Mip_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 13.846900081261992
+    },
+    {
+      "iter": 100,
+      "marker": "compute_3d_filter",
+      "phase": "Mip_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 29.696600046008825
+    },
+    {
+      "iter": 200,
+      "marker": "grad_clear",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.07409998215734959
+    },
+    {
+      "iter": 200,
+      "marker": "grad_clear",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.02310005947947502
+    },
+    {
+      "iter": 200,
+      "marker": "grad_clear",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.013200100511312485
+    },
+    {
+      "iter": 200,
+      "marker": "grad_clear",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.015300000086426735
+    },
+    {
+      "iter": 200,
+      "marker": "grad_clear",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.013699987903237343
+    },
+    {
+      "iter": 200,
+      "marker": "grad_clear",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.015599885955452919
+    },
+    {
+      "iter": 200,
+      "marker": "clear_textures",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.05070003680884838
+    },
+    {
+      "iter": 200,
+      "marker": "clear_tile_ranges",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.02759997732937336
+    },
+    {
+      "iter": 200,
+      "marker": "build_cluster_aabb",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.03920006565749645
+    },
+    {
+      "iter": 200,
+      "marker": "cull_clusters_frustum",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.02869986928999424
+    },
+    {
+      "iter": 200,
+      "marker": "bin_count",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.06180000491440296
+    },
+    {
+      "iter": 200,
+      "marker": "bin_emit",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.059900106862187386
+    },
+    {
+      "iter": 200,
+      "marker": "radix_prepare_dispatch",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.032400013878941536
+    },
+    {
+      "iter": 200,
+      "marker": "radix_init_global_hist",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.017999904230237007
+    },
+    {
+      "iter": 200,
+      "marker": "radix_upsweep",
+      "phase": "train_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.0575000885874033
+    },
+    {
+      "iter": 200,
+      "marker": "radix_scan",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.034400029107928276
+    },
+    {
+      "iter": 200,
+      "marker": "radix_downsweep",
+      "phase": "train_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.03900006413459778
+    },
+    {
+      "iter": 200,
+      "marker": "radix_upsweep",
+      "phase": "train_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.021300045773386955
+    },
+    {
+      "iter": 200,
+      "marker": "radix_scan",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.012400094419717789
+    },
+    {
+      "iter": 200,
+      "marker": "radix_downsweep",
+      "phase": "train_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.040700193494558334
+    },
+    {
+      "iter": 200,
+      "marker": "radix_upsweep",
+      "phase": "train_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.03469991497695446
+    },
+    {
+      "iter": 200,
+      "marker": "radix_scan",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.02050003968179226
+    },
+    {
+      "iter": 200,
+      "marker": "radix_downsweep",
+      "phase": "train_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.04029995761811733
+    },
+    {
+      "iter": 200,
+      "marker": "radix_upsweep",
+      "phase": "train_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.028700102120637894
+    },
+    {
+      "iter": 200,
+      "marker": "radix_scan",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.012800097465515137
+    },
+    {
+      "iter": 200,
+      "marker": "radix_downsweep",
+      "phase": "train_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.023999949917197227
+    },
+    {
+      "iter": 200,
+      "marker": "radix_upsweep",
+      "phase": "train_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.01919991336762905
+    },
+    {
+      "iter": 200,
+      "marker": "radix_scan",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.011499971151351929
+    },
+    {
+      "iter": 200,
+      "marker": "radix_downsweep",
+      "phase": "train_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.032400013878941536
+    },
+    {
+      "iter": 200,
+      "marker": "radix_upsweep",
+      "phase": "train_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.0325001310557127
+    },
+    {
+      "iter": 200,
+      "marker": "radix_scan",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.017700018361210823
+    },
+    {
+      "iter": 200,
+      "marker": "radix_downsweep",
+      "phase": "train_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.060999998822808266
+    },
+    {
+      "iter": 200,
+      "marker": "radix_upsweep",
+      "phase": "train_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.028999987989664078
+    },
+    {
+      "iter": 200,
+      "marker": "radix_scan",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.019300030544400215
+    },
+    {
+      "iter": 200,
+      "marker": "radix_downsweep",
+      "phase": "train_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.05070003680884838
+    },
+    {
+      "iter": 200,
+      "marker": "radix_upsweep",
+      "phase": "train_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.02519995905458927
+    },
+    {
+      "iter": 200,
+      "marker": "radix_scan",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.013899989426136017
+    },
+    {
+      "iter": 200,
+      "marker": "radix_downsweep",
+      "phase": "train_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.025099841877818108
+    },
+    {
+      "iter": 200,
+      "marker": "identify_tile_ranges",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.02219993621110916
+    },
+    {
+      "iter": 200,
+      "marker": "bucket_count",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.0195999164134264
+    },
+    {
+      "iter": 200,
+      "marker": "forward",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.037400051951408386
+    },
+    {
+      "iter": 200,
+      "marker": "tile_max_processed",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.032400013878941536
+    },
+    {
+      "iter": 200,
+      "marker": "scatter_live_buckets",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.018899794667959213
+    },
+    {
+      "iter": 200,
+      "marker": "bucket_prepare_dispatch",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.014799879863858223
+    },
+    {
+      "iter": 200,
+      "marker": "backward_persbucket",
+      "phase": "train_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.08379993960261345
+    },
+    {
+      "iter": 200,
+      "marker": "projection_backward",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.07299985736608505
+    },
+    {
+      "iter": 200,
+      "marker": "score_structure_aware",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.055999960750341415
+    },
+    {
+      "iter": 200,
+      "marker": "accumulate_iter",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.02740020863711834
+    },
+    {
+      "iter": 200,
+      "marker": "decide_actions_simple",
+      "phase": "filler",
+      "api": "_dispatch",
+      "host_ms": 0.048900023102760315
+    },
+    {
+      "iter": 200,
+      "marker": "densify_snapshot",
+      "phase": "filler",
+      "api": "_dispatch",
+      "host_ms": 0.018300022929906845
+    },
+    {
+      "iter": 200,
+      "marker": "densify_prepare_args",
+      "phase": "filler",
+      "api": "_dispatch",
+      "host_ms": 0.012399861589074135
+    },
+    {
+      "iter": 200,
+      "marker": "split_and_clone",
+      "phase": "filler",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.02759997732937336
+    },
+    {
+      "iter": 200,
+      "marker": "densify_snapshot",
+      "phase": "filler",
+      "api": "_dispatch",
+      "host_ms": 0.011699972674250603
+    },
+    {
+      "iter": 200,
+      "marker": "build_prune_mask",
+      "phase": "filler",
+      "api": "_dispatch",
+      "host_ms": 0.02040015533566475
+    },
+    {
+      "iter": 200,
+      "marker": "scatter_compact_gaussian",
+      "phase": "filler",
+      "api": "_dispatch",
+      "host_ms": 0.021399930119514465
+    },
+    {
+      "iter": 200,
+      "marker": "active_copy_prepare_args",
+      "phase": "filler",
+      "api": "_dispatch",
+      "host_ms": 0.01850002445280552
+    },
+    {
+      "iter": 200,
+      "marker": "copy_active_records",
+      "phase": "filler",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.0241999514400959
+    },
+    {
+      "iter": 200,
+      "marker": "scatter_compact_adam",
+      "phase": "filler",
+      "api": "_dispatch",
+      "host_ms": 0.021999934688210487
+    },
+    {
+      "iter": 200,
+      "marker": "active_copy_prepare_args",
+      "phase": "filler",
+      "api": "_dispatch",
+      "host_ms": 0.011599855497479439
+    },
+    {
+      "iter": 200,
+      "marker": "copy_active_records",
+      "phase": "filler",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.015399884432554245
+    },
+    {
+      "iter": 200,
+      "marker": "scatter_compact_eta_only",
+      "phase": "filler",
+      "api": "_dispatch",
+      "host_ms": 0.05339994095265865
+    },
+    {
+      "iter": 200,
+      "marker": "densify_snapshot",
+      "phase": "filler",
+      "api": "_dispatch",
+      "host_ms": 0.013299984857439995
+    },
+    {
+      "iter": 200,
+      "marker": "clear_tracking",
+      "phase": "mutations",
+      "api": "_dispatch",
+      "host_ms": 0.04169996827840805
+    },
+    {
+      "iter": 200,
+      "marker": "morton_snapshot",
+      "phase": "Morton_record",
+      "api": "_dispatch",
+      "host_ms": 0.5942999850958586
+    },
+    {
+      "iter": 200,
+      "marker": "morton_encode",
+      "phase": "Morton_record",
+      "api": "_dispatch",
+      "host_ms": 0.04109996370971203
+    },
+    {
+      "iter": 200,
+      "marker": "radix_prepare_dispatch",
+      "phase": "Morton_record",
+      "api": "_dispatch",
+      "host_ms": 0.01859990879893303
+    },
+    {
+      "iter": 200,
+      "marker": "radix_init_global_hist",
+      "phase": "Morton_record",
+      "api": "_dispatch",
+      "host_ms": 0.011800089851021767
+    },
+    {
+      "iter": 200,
+      "marker": "radix_upsweep",
+      "phase": "Morton_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.026799971237778664
+    },
+    {
+      "iter": 200,
+      "marker": "radix_scan",
+      "phase": "Morton_record",
+      "api": "_dispatch",
+      "host_ms": 0.015799887478351593
+    },
+    {
+      "iter": 200,
+      "marker": "radix_downsweep",
+      "phase": "Morton_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.028900103643536568
+    },
+    {
+      "iter": 200,
+      "marker": "radix_upsweep",
+      "phase": "Morton_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.022500054910779
+    },
+    {
+      "iter": 200,
+      "marker": "radix_scan",
+      "phase": "Morton_record",
+      "api": "_dispatch",
+      "host_ms": 0.015500001609325409
+    },
+    {
+      "iter": 200,
+      "marker": "radix_downsweep",
+      "phase": "Morton_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.02619996666908264
+    },
+    {
+      "iter": 200,
+      "marker": "radix_upsweep",
+      "phase": "Morton_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.02110004425048828
+    },
+    {
+      "iter": 200,
+      "marker": "radix_scan",
+      "phase": "Morton_record",
+      "api": "_dispatch",
+      "host_ms": 0.013699987903237343
+    },
+    {
+      "iter": 200,
+      "marker": "radix_downsweep",
+      "phase": "Morton_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.02529984340071678
+    },
+    {
+      "iter": 200,
+      "marker": "radix_upsweep",
+      "phase": "Morton_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.020799925550818443
+    },
+    {
+      "iter": 200,
+      "marker": "radix_scan",
+      "phase": "Morton_record",
+      "api": "_dispatch",
+      "host_ms": 0.013299984857439995
+    },
+    {
+      "iter": 200,
+      "marker": "radix_downsweep",
+      "phase": "Morton_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.02450007013976574
+    },
+    {
+      "iter": 200,
+      "marker": "radix_upsweep",
+      "phase": "Morton_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.021900050342082977
+    },
+    {
+      "iter": 200,
+      "marker": "radix_scan",
+      "phase": "Morton_record",
+      "api": "_dispatch",
+      "host_ms": 0.015700003132224083
+    },
+    {
+      "iter": 200,
+      "marker": "radix_downsweep",
+      "phase": "Morton_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.025200191885232925
+    },
+    {
+      "iter": 200,
+      "marker": "radix_upsweep",
+      "phase": "Morton_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.02159993164241314
+    },
+    {
+      "iter": 200,
+      "marker": "radix_scan",
+      "phase": "Morton_record",
+      "api": "_dispatch",
+      "host_ms": 0.013800105080008507
+    },
+    {
+      "iter": 200,
+      "marker": "radix_downsweep",
+      "phase": "Morton_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.02450007013976574
+    },
+    {
+      "iter": 200,
+      "marker": "radix_upsweep",
+      "phase": "Morton_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.02110004425048828
+    },
+    {
+      "iter": 200,
+      "marker": "radix_scan",
+      "phase": "Morton_record",
+      "api": "_dispatch",
+      "host_ms": 0.01300009898841381
+    },
+    {
+      "iter": 200,
+      "marker": "radix_downsweep",
+      "phase": "Morton_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.026799971237778664
+    },
+    {
+      "iter": 200,
+      "marker": "radix_upsweep",
+      "phase": "Morton_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.020399922505021095
+    },
+    {
+      "iter": 200,
+      "marker": "radix_scan",
+      "phase": "Morton_record",
+      "api": "_dispatch",
+      "host_ms": 0.012799864634871483
+    },
+    {
+      "iter": 200,
+      "marker": "radix_downsweep",
+      "phase": "Morton_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.026800204068422318
+    },
+    {
+      "iter": 200,
+      "marker": "morton_scatter_gaussian",
+      "phase": "Morton_record",
+      "api": "_dispatch",
+      "host_ms": 0.02450007013976574
+    },
+    {
+      "iter": 200,
+      "marker": "active_copy_prepare_args",
+      "phase": "Morton_record",
+      "api": "_dispatch",
+      "host_ms": 0.017200130969285965
+    },
+    {
+      "iter": 200,
+      "marker": "copy_active_records",
+      "phase": "Morton_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.01829979009926319
+    },
+    {
+      "iter": 200,
+      "marker": "morton_scatter_adam",
+      "phase": "Morton_record",
+      "api": "_dispatch",
+      "host_ms": 0.03360002301633358
+    },
+    {
+      "iter": 200,
+      "marker": "active_copy_prepare_args",
+      "phase": "Morton_record",
+      "api": "_dispatch",
+      "host_ms": 0.015400117263197899
+    },
+    {
+      "iter": 200,
+      "marker": "copy_active_records",
+      "phase": "Morton_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.01900014467537403
+    },
+    {
+      "iter": 200,
+      "marker": "morton_scatter_eta",
+      "phase": "Morton_record",
+      "api": "_dispatch",
+      "host_ms": 0.05859998054802418
+    },
+    {
+      "iter": 200,
+      "marker": "mip_filter_prepare_args",
+      "phase": "Mip_record",
+      "api": "_dispatch",
+      "host_ms": 0.6174999289214611
+    },
+    {
+      "iter": 200,
+      "marker": "mip_filter_clear",
+      "phase": "Mip_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.02750009298324585
+    },
+    {
+      "iter": 200,
+      "marker": "compute_3d_filter",
+      "phase": "Mip_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.029999995604157448
+    },
+    {
+      "iter": 500,
+      "marker": "grad_clear",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.0684000551700592
+    },
+    {
+      "iter": 500,
+      "marker": "grad_clear",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.01610000617802143
+    },
+    {
+      "iter": 500,
+      "marker": "grad_clear",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.009899958968162537
+    },
+    {
+      "iter": 500,
+      "marker": "grad_clear",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.008899951353669167
+    },
+    {
+      "iter": 500,
+      "marker": "grad_clear",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.008600065484642982
+    },
+    {
+      "iter": 500,
+      "marker": "grad_clear",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.01640012487769127
+    },
+    {
+      "iter": 500,
+      "marker": "clear_textures",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.04249997437000275
+    },
+    {
+      "iter": 500,
+      "marker": "clear_tile_ranges",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.021700048819184303
+    },
+    {
+      "iter": 500,
+      "marker": "build_cluster_aabb",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.029799994081258774
+    },
+    {
+      "iter": 500,
+      "marker": "cull_clusters_frustum",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.021999934688210487
+    },
+    {
+      "iter": 500,
+      "marker": "bin_count",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.04060007631778717
+    },
+    {
+      "iter": 500,
+      "marker": "bin_emit",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.036899931728839874
+    },
+    {
+      "iter": 500,
+      "marker": "radix_prepare_dispatch",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.020999927073717117
+    },
+    {
+      "iter": 500,
+      "marker": "radix_init_global_hist",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.012800097465515137
+    },
+    {
+      "iter": 500,
+      "marker": "radix_upsweep",
+      "phase": "train_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.04340009763836861
+    },
+    {
+      "iter": 500,
+      "marker": "radix_scan",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.018600141629576683
+    },
+    {
+      "iter": 500,
+      "marker": "radix_downsweep",
+      "phase": "train_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.037899939343333244
+    },
+    {
+      "iter": 500,
+      "marker": "radix_upsweep",
+      "phase": "train_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.01969980075955391
+    },
+    {
+      "iter": 500,
+      "marker": "radix_scan",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.011599855497479439
+    },
+    {
+      "iter": 500,
+      "marker": "radix_downsweep",
+      "phase": "train_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.02310005947947502
+    },
+    {
+      "iter": 500,
+      "marker": "radix_upsweep",
+      "phase": "train_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.023900065571069717
+    },
+    {
+      "iter": 500,
+      "marker": "radix_scan",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.01209997572004795
+    },
+    {
+      "iter": 500,
+      "marker": "radix_downsweep",
+      "phase": "train_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.02350006252527237
+    },
+    {
+      "iter": 500,
+      "marker": "radix_upsweep",
+      "phase": "train_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.01850002445280552
+    },
+    {
+      "iter": 500,
+      "marker": "radix_scan",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.011300202459096909
+    },
+    {
+      "iter": 500,
+      "marker": "radix_downsweep",
+      "phase": "train_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.03690016455948353
+    },
+    {
+      "iter": 500,
+      "marker": "radix_upsweep",
+      "phase": "train_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.020300038158893585
+    },
+    {
+      "iter": 500,
+      "marker": "radix_scan",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.01200009137392044
+    },
+    {
+      "iter": 500,
+      "marker": "radix_downsweep",
+      "phase": "train_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.025399960577487946
+    },
+    {
+      "iter": 500,
+      "marker": "radix_upsweep",
+      "phase": "train_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.018799910321831703
+    },
+    {
+      "iter": 500,
+      "marker": "radix_scan",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.011699972674250603
+    },
+    {
+      "iter": 500,
+      "marker": "radix_downsweep",
+      "phase": "train_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.02319994382560253
+    },
+    {
+      "iter": 500,
+      "marker": "radix_upsweep",
+      "phase": "train_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.018300022929906845
+    },
+    {
+      "iter": 500,
+      "marker": "radix_scan",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.015300000086426735
+    },
+    {
+      "iter": 500,
+      "marker": "radix_downsweep",
+      "phase": "train_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.022799940779805183
+    },
+    {
+      "iter": 500,
+      "marker": "radix_upsweep",
+      "phase": "train_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.017900019884109497
+    },
+    {
+      "iter": 500,
+      "marker": "radix_scan",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.015099998563528061
+    },
+    {
+      "iter": 500,
+      "marker": "radix_downsweep",
+      "phase": "train_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.02219993621110916
+    },
+    {
+      "iter": 500,
+      "marker": "identify_tile_ranges",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.02150004729628563
+    },
+    {
+      "iter": 500,
+      "marker": "bucket_count",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.019399914890527725
+    },
+    {
+      "iter": 500,
+      "marker": "forward",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.038499943912029266
+    },
+    {
+      "iter": 500,
+      "marker": "tile_max_processed",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.15309988521039486
+    },
+    {
+      "iter": 500,
+      "marker": "scatter_live_buckets",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.03900006413459778
+    },
+    {
+      "iter": 500,
+      "marker": "bucket_prepare_dispatch",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.018200138583779335
+    },
+    {
+      "iter": 500,
+      "marker": "backward_persbucket",
+      "phase": "train_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.11359993368387222
+    },
+    {
+      "iter": 500,
+      "marker": "projection_backward",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.10810000821948051
+    },
+    {
+      "iter": 500,
+      "marker": "score_structure_aware",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.060399994254112244
+    },
+    {
+      "iter": 500,
+      "marker": "accumulate_iter",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.031499890610575676
+    },
+    {
+      "iter": 500,
+      "marker": "clear_children_sum",
+      "phase": "SAD",
+      "api": "_dispatch",
+      "host_ms": 5.6594000197947025
+    },
+    {
+      "iter": 500,
+      "marker": "clear_selected_count",
+      "phase": "SAD",
+      "api": "_dispatch",
+      "host_ms": 0.06369990296661854
+    },
+    {
+      "iter": 500,
+      "marker": "densify_snapshot",
+      "phase": "SAD",
+      "api": "_dispatch",
+      "host_ms": 0.02759997732937336
+    },
+    {
+      "iter": 500,
+      "marker": "densify_prepare_args",
+      "phase": "SAD",
+      "api": "_dispatch",
+      "host_ms": 0.037400051951408386
+    },
+    {
+      "iter": 500,
+      "marker": "decide_actions_structure",
+      "phase": "SAD",
+      "api": "_dispatch_indirect",
+      "host_ms": 37.07850002683699
+    },
+    {
+      "iter": 500,
+      "marker": "structure_split_prepare_args",
+      "phase": "SAD",
+      "api": "_dispatch",
+      "host_ms": 8.114999858662486
+    },
+    {
+      "iter": 500,
+      "marker": "split_anisotropic",
+      "phase": "SAD",
+      "api": "_dispatch_indirect",
+      "host_ms": 41.60580015741289
+    },
+    {
+      "iter": 500,
+      "marker": "densify_snapshot",
+      "phase": "SAD",
+      "api": "_dispatch",
+      "host_ms": 0.039499951526522636
+    },
+    {
+      "iter": 500,
+      "marker": "build_prune_mask",
+      "phase": "SAD",
+      "api": "_dispatch",
+      "host_ms": 0.033999793231487274
+    },
+    {
+      "iter": 500,
+      "marker": "scatter_compact_gaussian",
+      "phase": "SAD",
+      "api": "_dispatch",
+      "host_ms": 0.022200169041752815
+    },
+    {
+      "iter": 500,
+      "marker": "active_copy_prepare_args",
+      "phase": "SAD",
+      "api": "_dispatch",
+      "host_ms": 0.0195999164134264
+    },
+    {
+      "iter": 500,
+      "marker": "copy_active_records",
+      "phase": "SAD",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.03060000017285347
+    },
+    {
+      "iter": 500,
+      "marker": "scatter_compact_adam",
+      "phase": "SAD",
+      "api": "_dispatch",
+      "host_ms": 0.022300053387880325
+    },
+    {
+      "iter": 500,
+      "marker": "active_copy_prepare_args",
+      "phase": "SAD",
+      "api": "_dispatch",
+      "host_ms": 0.015300000086426735
+    },
+    {
+      "iter": 500,
+      "marker": "copy_active_records",
+      "phase": "SAD",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.017200130969285965
+    },
+    {
+      "iter": 500,
+      "marker": "densify_snapshot",
+      "phase": "SAD",
+      "api": "_dispatch",
+      "host_ms": 0.012499978765845299
+    },
+    {
+      "iter": 500,
+      "marker": "opacity_cap",
+      "phase": "SAD",
+      "api": "_dispatch",
+      "host_ms": 22.736100014299154
+    },
+    {
+      "iter": 500,
+      "marker": "clear_tracking",
+      "phase": "mutations",
+      "api": "_dispatch",
+      "host_ms": 0.07520010694861412
+    },
+    {
+      "iter": 500,
+      "marker": "clear_structure_scores",
+      "phase": "mutations",
+      "api": "_dispatch",
+      "host_ms": 13.429200043901801
+    },
+    {
+      "iter": 500,
+      "marker": "morton_snapshot",
+      "phase": "Morton_record",
+      "api": "_dispatch",
+      "host_ms": 0.034400029107928276
+    },
+    {
+      "iter": 500,
+      "marker": "morton_encode",
+      "phase": "Morton_record",
+      "api": "_dispatch",
+      "host_ms": 0.04460010677576065
+    },
+    {
+      "iter": 500,
+      "marker": "radix_prepare_dispatch",
+      "phase": "Morton_record",
+      "api": "_dispatch",
+      "host_ms": 0.023700064048171043
+    },
+    {
+      "iter": 500,
+      "marker": "radix_init_global_hist",
+      "phase": "Morton_record",
+      "api": "_dispatch",
+      "host_ms": 0.02650008536875248
+    },
+    {
+      "iter": 500,
+      "marker": "radix_upsweep",
+      "phase": "Morton_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.057900091633200645
+    },
+    {
+      "iter": 500,
+      "marker": "radix_scan",
+      "phase": "Morton_record",
+      "api": "_dispatch",
+      "host_ms": 0.03050011582672596
+    },
+    {
+      "iter": 500,
+      "marker": "radix_downsweep",
+      "phase": "Morton_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.05279993638396263
+    },
+    {
+      "iter": 500,
+      "marker": "radix_upsweep",
+      "phase": "Morton_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.023700064048171043
+    },
+    {
+      "iter": 500,
+      "marker": "radix_scan",
+      "phase": "Morton_record",
+      "api": "_dispatch",
+      "host_ms": 0.013500219210982323
+    },
+    {
+      "iter": 500,
+      "marker": "radix_downsweep",
+      "phase": "Morton_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.02450007013976574
+    },
+    {
+      "iter": 500,
+      "marker": "radix_upsweep",
+      "phase": "Morton_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.018999911844730377
+    },
+    {
+      "iter": 500,
+      "marker": "radix_scan",
+      "phase": "Morton_record",
+      "api": "_dispatch",
+      "host_ms": 0.011599855497479439
+    },
+    {
+      "iter": 500,
+      "marker": "radix_downsweep",
+      "phase": "Morton_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.022900057956576347
+    },
+    {
+      "iter": 500,
+      "marker": "radix_upsweep",
+      "phase": "Morton_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.018800143152475357
+    },
+    {
+      "iter": 500,
+      "marker": "radix_scan",
+      "phase": "Morton_record",
+      "api": "_dispatch",
+      "host_ms": 0.016300007700920105
+    },
+    {
+      "iter": 500,
+      "marker": "radix_downsweep",
+      "phase": "Morton_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.02440018579363823
+    },
+    {
+      "iter": 500,
+      "marker": "radix_upsweep",
+      "phase": "Morton_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.01910002902150154
+    },
+    {
+      "iter": 500,
+      "marker": "radix_scan",
+      "phase": "Morton_record",
+      "api": "_dispatch",
+      "host_ms": 0.012400094419717789
+    },
+    {
+      "iter": 500,
+      "marker": "radix_downsweep",
+      "phase": "Morton_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.02359994687139988
+    },
+    {
+      "iter": 500,
+      "marker": "radix_upsweep",
+      "phase": "Morton_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.01919991336762905
+    },
+    {
+      "iter": 500,
+      "marker": "radix_scan",
+      "phase": "Morton_record",
+      "api": "_dispatch",
+      "host_ms": 0.011699972674250603
+    },
+    {
+      "iter": 500,
+      "marker": "radix_downsweep",
+      "phase": "Morton_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.022499822080135345
+    },
+    {
+      "iter": 500,
+      "marker": "radix_upsweep",
+      "phase": "Morton_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.018700025975704193
+    },
+    {
+      "iter": 500,
+      "marker": "radix_scan",
+      "phase": "Morton_record",
+      "api": "_dispatch",
+      "host_ms": 0.011500203981995583
+    },
+    {
+      "iter": 500,
+      "marker": "radix_downsweep",
+      "phase": "Morton_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.026300083845853806
+    },
+    {
+      "iter": 500,
+      "marker": "radix_upsweep",
+      "phase": "Morton_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.01950003206729889
+    },
+    {
+      "iter": 500,
+      "marker": "radix_scan",
+      "phase": "Morton_record",
+      "api": "_dispatch",
+      "host_ms": 0.011299969628453255
+    },
+    {
+      "iter": 500,
+      "marker": "radix_downsweep",
+      "phase": "Morton_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.022700056433677673
+    },
+    {
+      "iter": 500,
+      "marker": "morton_scatter_gaussian",
+      "phase": "Morton_record",
+      "api": "_dispatch",
+      "host_ms": 0.02410006709396839
+    },
+    {
+      "iter": 500,
+      "marker": "active_copy_prepare_args",
+      "phase": "Morton_record",
+      "api": "_dispatch",
+      "host_ms": 0.01859990879893303
+    },
+    {
+      "iter": 500,
+      "marker": "copy_active_records",
+      "phase": "Morton_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.02429983578622341
+    },
+    {
+      "iter": 500,
+      "marker": "morton_scatter_adam",
+      "phase": "Morton_record",
+      "api": "_dispatch",
+      "host_ms": 0.021999934688210487
+    },
+    {
+      "iter": 500,
+      "marker": "active_copy_prepare_args",
+      "phase": "Morton_record",
+      "api": "_dispatch",
+      "host_ms": 0.011299969628453255
+    },
+    {
+      "iter": 500,
+      "marker": "copy_active_records",
+      "phase": "Morton_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.015599885955452919
+    },
+    {
+      "iter": 500,
+      "marker": "mip_filter_prepare_args",
+      "phase": "Mip_record",
+      "api": "_dispatch",
+      "host_ms": 0.031200004741549492
+    },
+    {
+      "iter": 500,
+      "marker": "mip_filter_clear",
+      "phase": "Mip_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.02100015990436077
+    },
+    {
+      "iter": 500,
+      "marker": "compute_3d_filter",
+      "phase": "Mip_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.027099857106804848
+    },
+    {
+      "iter": 1000,
+      "marker": "grad_clear",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.07040007039904594
+    },
+    {
+      "iter": 1000,
+      "marker": "grad_clear",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.015900004655122757
+    },
+    {
+      "iter": 1000,
+      "marker": "grad_clear",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.009700190275907516
+    },
+    {
+      "iter": 1000,
+      "marker": "grad_clear",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.009100185707211494
+    },
+    {
+      "iter": 1000,
+      "marker": "grad_clear",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.008600065484642982
+    },
+    {
+      "iter": 1000,
+      "marker": "grad_clear",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.008299946784973145
+    },
+    {
+      "iter": 1000,
+      "marker": "clear_textures",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.04109996370971203
+    },
+    {
+      "iter": 1000,
+      "marker": "clear_tile_ranges",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.021999934688210487
+    },
+    {
+      "iter": 1000,
+      "marker": "build_cluster_aabb",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.031800009310245514
+    },
+    {
+      "iter": 1000,
+      "marker": "cull_clusters_frustum",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.02240017056465149
+    },
+    {
+      "iter": 1000,
+      "marker": "bin_count",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.04759989678859711
+    },
+    {
+      "iter": 1000,
+      "marker": "bin_emit",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.03660004585981369
+    },
+    {
+      "iter": 1000,
+      "marker": "radix_prepare_dispatch",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.021099811419844627
+    },
+    {
+      "iter": 1000,
+      "marker": "radix_init_global_hist",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.012899981811642647
+    },
+    {
+      "iter": 1000,
+      "marker": "radix_upsweep",
+      "phase": "train_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.04229997284710407
+    },
+    {
+      "iter": 1000,
+      "marker": "radix_scan",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.0195999164134264
+    },
+    {
+      "iter": 1000,
+      "marker": "radix_downsweep",
+      "phase": "train_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.037899939343333244
+    },
+    {
+      "iter": 1000,
+      "marker": "radix_upsweep",
+      "phase": "train_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.027799978852272034
+    },
+    {
+      "iter": 1000,
+      "marker": "radix_scan",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.022500054910779
+    },
+    {
+      "iter": 1000,
+      "marker": "radix_downsweep",
+      "phase": "train_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.049900030717253685
+    },
+    {
+      "iter": 1000,
+      "marker": "radix_upsweep",
+      "phase": "train_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.060399994254112244
+    },
+    {
+      "iter": 1000,
+      "marker": "radix_scan",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.025900080800056458
+    },
+    {
+      "iter": 1000,
+      "marker": "radix_downsweep",
+      "phase": "train_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.028099864721298218
+    },
+    {
+      "iter": 1000,
+      "marker": "radix_upsweep",
+      "phase": "train_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.020900042727589607
+    },
+    {
+      "iter": 1000,
+      "marker": "radix_scan",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.012899981811642647
+    },
+    {
+      "iter": 1000,
+      "marker": "radix_downsweep",
+      "phase": "train_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.02319994382560253
+    },
+    {
+      "iter": 1000,
+      "marker": "radix_upsweep",
+      "phase": "train_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.01859990879893303
+    },
+    {
+      "iter": 1000,
+      "marker": "radix_scan",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.012400094419717789
+    },
+    {
+      "iter": 1000,
+      "marker": "radix_downsweep",
+      "phase": "train_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.030499882996082306
+    },
+    {
+      "iter": 1000,
+      "marker": "radix_upsweep",
+      "phase": "train_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.019800150766968727
+    },
+    {
+      "iter": 1000,
+      "marker": "radix_scan",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.011899974197149277
+    },
+    {
+      "iter": 1000,
+      "marker": "radix_downsweep",
+      "phase": "train_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.022799940779805183
+    },
+    {
+      "iter": 1000,
+      "marker": "radix_upsweep",
+      "phase": "train_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.018300022929906845
+    },
+    {
+      "iter": 1000,
+      "marker": "radix_scan",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.01109996810555458
+    },
+    {
+      "iter": 1000,
+      "marker": "radix_downsweep",
+      "phase": "train_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.02750009298324585
+    },
+    {
+      "iter": 1000,
+      "marker": "radix_upsweep",
+      "phase": "train_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.04190020263195038
+    },
+    {
+      "iter": 1000,
+      "marker": "radix_scan",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.02840021625161171
+    },
+    {
+      "iter": 1000,
+      "marker": "radix_downsweep",
+      "phase": "train_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.030499882996082306
+    },
+    {
+      "iter": 1000,
+      "marker": "identify_tile_ranges",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.02240017056465149
+    },
+    {
+      "iter": 1000,
+      "marker": "bucket_count",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.020300038158893585
+    },
+    {
+      "iter": 1000,
+      "marker": "forward",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.04309997893869877
+    },
+    {
+      "iter": 1000,
+      "marker": "tile_max_processed",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.057900091633200645
+    },
+    {
+      "iter": 1000,
+      "marker": "scatter_live_buckets",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.03369990736246109
+    },
+    {
+      "iter": 1000,
+      "marker": "bucket_prepare_dispatch",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.02950010821223259
+    },
+    {
+      "iter": 1000,
+      "marker": "backward_persbucket",
+      "phase": "train_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.1501999795436859
+    },
+    {
+      "iter": 1000,
+      "marker": "projection_backward",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.12880004942417145
+    },
+    {
+      "iter": 1000,
+      "marker": "score_structure_aware",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.10660011321306229
+    },
+    {
+      "iter": 1000,
+      "marker": "accumulate_iter",
+      "phase": "train_record",
+      "api": "_dispatch",
+      "host_ms": 0.05060015246272087
+    },
+    {
+      "iter": 1000,
+      "marker": "clear_children_sum",
+      "phase": "SAD",
+      "api": "_dispatch",
+      "host_ms": 0.02950010821223259
+    },
+    {
+      "iter": 1000,
+      "marker": "clear_selected_count",
+      "phase": "SAD",
+      "api": "_dispatch",
+      "host_ms": 0.011600088328123093
+    },
+    {
+      "iter": 1000,
+      "marker": "densify_snapshot",
+      "phase": "SAD",
+      "api": "_dispatch",
+      "host_ms": 0.014699995517730713
+    },
+    {
+      "iter": 1000,
+      "marker": "densify_prepare_args",
+      "phase": "SAD",
+      "api": "_dispatch",
+      "host_ms": 0.011899974197149277
+    },
+    {
+      "iter": 1000,
+      "marker": "decide_actions_structure",
+      "phase": "SAD",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.07240008562803268
+    },
+    {
+      "iter": 1000,
+      "marker": "structure_split_prepare_args",
+      "phase": "SAD",
+      "api": "_dispatch",
+      "host_ms": 0.017700018361210823
+    },
+    {
+      "iter": 1000,
+      "marker": "split_anisotropic",
+      "phase": "SAD",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.03979983739554882
+    },
+    {
+      "iter": 1000,
+      "marker": "densify_snapshot",
+      "phase": "SAD",
+      "api": "_dispatch",
+      "host_ms": 0.010899966582655907
+    },
+    {
+      "iter": 1000,
+      "marker": "build_prune_mask",
+      "phase": "SAD",
+      "api": "_dispatch",
+      "host_ms": 0.02110004425048828
+    },
+    {
+      "iter": 1000,
+      "marker": "scatter_compact_gaussian",
+      "phase": "SAD",
+      "api": "_dispatch",
+      "host_ms": 0.02159993164241314
+    },
+    {
+      "iter": 1000,
+      "marker": "active_copy_prepare_args",
+      "phase": "SAD",
+      "api": "_dispatch",
+      "host_ms": 0.01850002445280552
+    },
+    {
+      "iter": 1000,
+      "marker": "copy_active_records",
+      "phase": "SAD",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.036400044336915016
+    },
+    {
+      "iter": 1000,
+      "marker": "scatter_compact_adam",
+      "phase": "SAD",
+      "api": "_dispatch",
+      "host_ms": 0.022900057956576347
+    },
+    {
+      "iter": 1000,
+      "marker": "active_copy_prepare_args",
+      "phase": "SAD",
+      "api": "_dispatch",
+      "host_ms": 0.011599855497479439
+    },
+    {
+      "iter": 1000,
+      "marker": "copy_active_records",
+      "phase": "SAD",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.015599885955452919
+    },
+    {
+      "iter": 1000,
+      "marker": "densify_snapshot",
+      "phase": "SAD",
+      "api": "_dispatch",
+      "host_ms": 0.010399846360087395
+    },
+    {
+      "iter": 1000,
+      "marker": "opacity_cap",
+      "phase": "SAD",
+      "api": "_dispatch",
+      "host_ms": 0.019700033590197563
+    },
+    {
+      "iter": 1000,
+      "marker": "clear_tracking",
+      "phase": "mutations",
+      "api": "_dispatch",
+      "host_ms": 0.08390005677938461
+    },
+    {
+      "iter": 1000,
+      "marker": "clear_structure_scores",
+      "phase": "mutations",
+      "api": "_dispatch",
+      "host_ms": 0.05050003528594971
+    },
+    {
+      "iter": 1000,
+      "marker": "morton_snapshot",
+      "phase": "Morton_record",
+      "api": "_dispatch",
+      "host_ms": 0.04369998350739479
+    },
+    {
+      "iter": 1000,
+      "marker": "morton_encode",
+      "phase": "Morton_record",
+      "api": "_dispatch",
+      "host_ms": 0.05150004290044308
+    },
+    {
+      "iter": 1000,
+      "marker": "radix_prepare_dispatch",
+      "phase": "Morton_record",
+      "api": "_dispatch",
+      "host_ms": 0.03809994086623192
+    },
+    {
+      "iter": 1000,
+      "marker": "radix_init_global_hist",
+      "phase": "Morton_record",
+      "api": "_dispatch",
+      "host_ms": 0.017700018361210823
+    },
+    {
+      "iter": 1000,
+      "marker": "radix_upsweep",
+      "phase": "Morton_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.05140015855431557
+    },
+    {
+      "iter": 1000,
+      "marker": "radix_scan",
+      "phase": "Morton_record",
+      "api": "_dispatch",
+      "host_ms": 0.039499951526522636
+    },
+    {
+      "iter": 1000,
+      "marker": "radix_downsweep",
+      "phase": "Morton_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.05789985880255699
+    },
+    {
+      "iter": 1000,
+      "marker": "radix_upsweep",
+      "phase": "Morton_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.02569984644651413
+    },
+    {
+      "iter": 1000,
+      "marker": "radix_scan",
+      "phase": "Morton_record",
+      "api": "_dispatch",
+      "host_ms": 0.013299984857439995
+    },
+    {
+      "iter": 1000,
+      "marker": "radix_downsweep",
+      "phase": "Morton_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.023800181224942207
+    },
+    {
+      "iter": 1000,
+      "marker": "radix_upsweep",
+      "phase": "Morton_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.01900014467537403
+    },
+    {
+      "iter": 1000,
+      "marker": "radix_scan",
+      "phase": "Morton_record",
+      "api": "_dispatch",
+      "host_ms": 0.01900014467537403
+    },
+    {
+      "iter": 1000,
+      "marker": "radix_downsweep",
+      "phase": "Morton_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.03300001844763756
+    },
+    {
+      "iter": 1000,
+      "marker": "radix_upsweep",
+      "phase": "Morton_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.020399922505021095
+    },
+    {
+      "iter": 1000,
+      "marker": "radix_scan",
+      "phase": "Morton_record",
+      "api": "_dispatch",
+      "host_ms": 0.011399853974580765
+    },
+    {
+      "iter": 1000,
+      "marker": "radix_downsweep",
+      "phase": "Morton_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.02300017513334751
+    },
+    {
+      "iter": 1000,
+      "marker": "radix_upsweep",
+      "phase": "Morton_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.018700025975704193
+    },
+    {
+      "iter": 1000,
+      "marker": "radix_scan",
+      "phase": "Morton_record",
+      "api": "_dispatch",
+      "host_ms": 0.018499791622161865
+    },
+    {
+      "iter": 1000,
+      "marker": "radix_downsweep",
+      "phase": "Morton_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.03190012648701668
+    },
+    {
+      "iter": 1000,
+      "marker": "radix_upsweep",
+      "phase": "Morton_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.01950003206729889
+    },
+    {
+      "iter": 1000,
+      "marker": "radix_scan",
+      "phase": "Morton_record",
+      "api": "_dispatch",
+      "host_ms": 0.014600111171603203
+    },
+    {
+      "iter": 1000,
+      "marker": "radix_downsweep",
+      "phase": "Morton_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.03190012648701668
+    },
+    {
+      "iter": 1000,
+      "marker": "radix_upsweep",
+      "phase": "Morton_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.026399968191981316
+    },
+    {
+      "iter": 1000,
+      "marker": "radix_scan",
+      "phase": "Morton_record",
+      "api": "_dispatch",
+      "host_ms": 0.011800089851021767
+    },
+    {
+      "iter": 1000,
+      "marker": "radix_downsweep",
+      "phase": "Morton_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.027200207114219666
+    },
+    {
+      "iter": 1000,
+      "marker": "radix_upsweep",
+      "phase": "Morton_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.019799917936325073
+    },
+    {
+      "iter": 1000,
+      "marker": "radix_scan",
+      "phase": "Morton_record",
+      "api": "_dispatch",
+      "host_ms": 0.011299969628453255
+    },
+    {
+      "iter": 1000,
+      "marker": "radix_downsweep",
+      "phase": "Morton_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.02219993621110916
+    },
+    {
+      "iter": 1000,
+      "marker": "morton_scatter_gaussian",
+      "phase": "Morton_record",
+      "api": "_dispatch",
+      "host_ms": 0.022799940779805183
+    },
+    {
+      "iter": 1000,
+      "marker": "active_copy_prepare_args",
+      "phase": "Morton_record",
+      "api": "_dispatch",
+      "host_ms": 0.018399907276034355
+    },
+    {
+      "iter": 1000,
+      "marker": "copy_active_records",
+      "phase": "Morton_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.02429983578622341
+    },
+    {
+      "iter": 1000,
+      "marker": "morton_scatter_adam",
+      "phase": "Morton_record",
+      "api": "_dispatch",
+      "host_ms": 0.02159993164241314
+    },
+    {
+      "iter": 1000,
+      "marker": "active_copy_prepare_args",
+      "phase": "Morton_record",
+      "api": "_dispatch",
+      "host_ms": 0.010800082236528397
+    },
+    {
+      "iter": 1000,
+      "marker": "copy_active_records",
+      "phase": "Morton_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.025200191885232925
+    },
+    {
+      "iter": 1000,
+      "marker": "mip_filter_prepare_args",
+      "phase": "Mip_record",
+      "api": "_dispatch",
+      "host_ms": 0.07269997149705887
+    },
+    {
+      "iter": 1000,
+      "marker": "mip_filter_clear",
+      "phase": "Mip_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.03400002606213093
+    },
+    {
+      "iter": 1000,
+      "marker": "compute_3d_filter",
+      "phase": "Mip_record",
+      "api": "_dispatch_indirect",
+      "host_ms": 0.032300129532814026
+    }
+  ],
+  "largest_host_iterations": [
+    {
+      "iter": 1,
+      "phase_ms": {
+        "context": 0.0887999776750803,
+        "prepare_queue": 0.006200047209858894,
+        "train_record": 820.0255001429468,
+        "snapshot": 0.00300002284348011,
+        "mutations": 0.012999866157770157,
+        "observations": 0.006500165909528732
+      },
+      "iteration_host_ms": 820.1430002227426
+    },
+    {
+      "iter": 1000,
+      "phase_ms": {
+        "context": 0.0879999715834856,
+        "prepare_queue": 46.71490006148815,
+        "train_record": 3.2091999892145395,
+        "snapshot": 0.002400018274784088,
+        "SAD": 343.3759999461472,
+        "Morton_record": 1.6597001813352108,
+        "Mip_record": 0.28629996813833714,
+        "mutations": 345.8964000456035,
+        "observations": 0.04929979331791401
+      },
+      "iteration_host_ms": 395.9601998794824
+    },
+    {
+      "iter": 901,
+      "phase_ms": {
+        "context": 0.0591999851167202,
+        "prepare_queue": 254.1592000052333,
+        "train_record": 2.2841000463813543,
+        "snapshot": 0.001500127837061882,
+        "mutations": 0.0068999361246824265,
+        "observations": 0.003500143066048622
+      },
+      "iteration_host_ms": 256.51440024375916
+    },
+    {
+      "iter": 601,
+      "phase_ms": {
+        "context": 0.08299993351101875,
+        "prepare_queue": 243.7114999629557,
+        "train_record": 2.400600118562579,
+        "snapshot": 0.001800013706088066,
+        "mutations": 0.006800051778554916,
+        "observations": 0.0038999132812023163
+      },
+      "iteration_host_ms": 246.20759999379516
+    },
+    {
+      "iter": 801,
+      "phase_ms": {
+        "context": 0.0567000824958086,
+        "prepare_queue": 229.22320012003183,
+        "train_record": 4.088700050488114,
+        "snapshot": 0.001600012183189392,
+        "mutations": 0.006800051778554916,
+        "observations": 0.0036999117583036423
+      },
+      "iteration_host_ms": 233.3807002287358
+    },
+    {
+      "iter": 701,
+      "phase_ms": {
+        "context": 0.06050011143088341,
+        "prepare_queue": 228.37529983371496,
+        "train_record": 2.7027998585253954,
+        "snapshot": 0.0016998965293169022,
+        "mutations": 0.007400056347250938,
+        "observations": 0.00400003045797348
+      },
+      "iteration_host_ms": 231.15169978700578
+    },
+    {
+      "iter": 100,
+      "phase_ms": {
+        "context": 0.06760004907846451,
+        "prepare_queue": 25.914300000295043,
+        "train_record": 2.7252999134361744,
+        "snapshot": 0.003200024366378784,
+        "filler": 101.51259996928275,
+        "Morton_record": 33.50179991684854,
+        "Mip_record": 62.750899931415915,
+        "mutations": 198.99150007404387,
+        "observations": 0.05110003985464573
+      },
+      "iteration_host_ms": 227.75300010107458
+    },
+    {
+      "iter": 500,
+      "phase_ms": {
+        "context": 0.08019991219043732,
+        "prepare_queue": 31.46179998293519,
+        "train_record": 2.9928998555988073,
+        "snapshot": 0.003800028935074806,
+        "SAD": 166.00019996985793,
+        "Morton_record": 1.2107000220566988,
+        "Mip_record": 0.17220014706254005,
+        "mutations": 187.97519989311695,
+        "observations": 0.05249981768429279
+      },
+      "iteration_host_ms": 222.56639949046075
+    },
+    {
+      "iter": 201,
+      "phase_ms": {
+        "context": 0.05730008706450462,
+        "prepare_queue": 120.97000004723668,
+        "train_record": 3.410100005567074,
+        "snapshot": 0.0014998950064182281,
+        "mutations": 0.0066999346017837524,
+        "observations": 0.003800028935074806
+      },
+      "iteration_host_ms": 124.44939999841154
+    },
+    {
+      "iter": 401,
+      "phase_ms": {
+        "context": 0.06539979949593544,
+        "prepare_queue": 114.407500019297,
+        "train_record": 2.9297000728547573,
+        "snapshot": 0.0016998965293169022,
+        "mutations": 0.0072999391704797745,
+        "observations": 0.0036999117583036423
+      },
+      "iteration_host_ms": 117.4152996391058
+    },
+    {
+      "iter": 301,
+      "phase_ms": {
+        "context": 0.06110011599957943,
+        "prepare_queue": 113.541399827227,
+        "train_record": 2.2105001844465733,
+        "snapshot": 0.0018998980522155762,
+        "mutations": 0.006499933078885078,
+        "observations": 0.003600027412176132
+      },
+      "iteration_host_ms": 115.82499998621643
+    },
+    {
+      "iter": 520,
+      "phase_ms": {
+        "context": 0.0738000962883234,
+        "prepare_queue": 104.81969988904893,
+        "train_record": 4.248100100085139,
+        "snapshot": 0.003800028935074806,
+        "mutations": 0.015199882909655571,
+        "observations": 0.06620003841817379
+      },
+      "iteration_host_ms": 109.2268000356853
+    },
+    {
+      "iter": 10,
+      "phase_ms": {
+        "context": 0.09330012835562229,
+        "prepare_queue": 20.574500085785985,
+        "train_record": 86.99860004708171,
+        "snapshot": 0.0075998250395059586,
+        "mutations": 0.011699972674250603,
+        "observations": 0.0787999015301466
+      },
+      "iteration_host_ms": 107.76449996046722
+    },
+    {
+      "iter": 763,
+      "phase_ms": {
+        "context": 0.08619995787739754,
+        "prepare_queue": 101.30170010961592,
+        "train_record": 3.301899880170822,
+        "snapshot": 0.0018998980522155762,
+        "mutations": 0.0068999361246824265,
+        "observations": 0.00400003045797348
+      },
+      "iteration_host_ms": 104.70259981229901
+    },
+    {
+      "iter": 660,
+      "phase_ms": {
+        "context": 0.07930002175271511,
+        "prepare_queue": 96.39339987188578,
+        "train_record": 4.84360009431839,
+        "snapshot": 0.003400025889277458,
+        "mutations": 0.008800067007541656,
+        "observations": 0.06070011295378208
+      },
+      "iteration_host_ms": 101.38920019380748
+    }
+  ],
+  "waits_near_boundaries": [
+    {
+      "iter": 94,
+      "phase": "prepare_queue",
+      "kind": "wait_for_submit",
+      "ms": 26.79820009507239
+    },
+    {
+      "iter": 95,
+      "phase": "prepare_queue",
+      "kind": "wait_for_submit",
+      "ms": 28.417699970304966
+    },
+    {
+      "iter": 96,
+      "phase": "prepare_queue",
+      "kind": "wait_for_submit",
+      "ms": 26.171700097620487
+    },
+    {
+      "iter": 97,
+      "phase": "prepare_queue",
+      "kind": "wait_for_submit",
+      "ms": 23.00899988040328
+    },
+    {
+      "iter": 98,
+      "phase": "prepare_queue",
+      "kind": "wait_for_submit",
+      "ms": 30.789999989792705
+    },
+    {
+      "iter": 99,
+      "phase": "prepare_queue",
+      "kind": "wait_for_submit",
+      "ms": 29.638800071552396
+    },
+    {
+      "iter": 100,
+      "phase": "prepare_queue",
+      "kind": "wait_for_submit",
+      "ms": 25.903700152412057
+    },
+    {
+      "iter": 101,
+      "phase": "prepare_queue",
+      "kind": "wait_for_submit",
+      "ms": 0.004500150680541992
+    },
+    {
+      "iter": 101,
+      "phase": "prepare_queue",
+      "kind": "wait_for_submit",
+      "ms": 0.0004998873919248581
+    },
+    {
+      "iter": 101,
+      "phase": "prepare_queue",
+      "kind": "wait_for_submit",
+      "ms": 0.000400003045797348
+    },
+    {
+      "iter": 101,
+      "phase": "prepare_queue",
+      "kind": "wait_for_submit",
+      "ms": 0.000400003045797348
+    },
+    {
+      "iter": 102,
+      "phase": "prepare_queue",
+      "kind": "wait_for_submit",
+      "ms": 0.002100132405757904
+    },
+    {
+      "iter": 103,
+      "phase": "prepare_queue",
+      "kind": "wait_for_submit",
+      "ms": 0.002100132405757904
+    },
+    {
+      "iter": 104,
+      "phase": "prepare_queue",
+      "kind": "wait_for_submit",
+      "ms": 0.00200001522898674
+    },
+    {
+      "iter": 105,
+      "phase": "prepare_queue",
+      "kind": "wait_for_submit",
+      "ms": 0.002300133928656578
+    },
+    {
+      "iter": 106,
+      "phase": "prepare_queue",
+      "kind": "wait_for_submit",
+      "ms": 10.109300026670098
+    },
+    {
+      "iter": 194,
+      "phase": "prepare_queue",
+      "kind": "wait_for_submit",
+      "ms": 27.697700075805187
+    },
+    {
+      "iter": 195,
+      "phase": "prepare_queue",
+      "kind": "wait_for_submit",
+      "ms": 19.821299938485026
+    },
+    {
+      "iter": 196,
+      "phase": "prepare_queue",
+      "kind": "wait_for_submit",
+      "ms": 26.62590006366372
+    },
+    {
+      "iter": 197,
+      "phase": "prepare_queue",
+      "kind": "wait_for_submit",
+      "ms": 26.23479999601841
+    },
+    {
+      "iter": 198,
+      "phase": "prepare_queue",
+      "kind": "wait_for_submit",
+      "ms": 23.51589989848435
+    },
+    {
+      "iter": 199,
+      "phase": "prepare_queue",
+      "kind": "wait_for_submit",
+      "ms": 27.23050001077354
+    },
+    {
+      "iter": 200,
+      "phase": "prepare_queue",
+      "kind": "wait_for_submit",
+      "ms": 25.566699914634228
+    },
+    {
+      "iter": 201,
+      "phase": "prepare_queue",
+      "kind": "wait_for_submit",
+      "ms": 29.5524001121521
+    },
+    {
+      "iter": 201,
+      "phase": "prepare_queue",
+      "kind": "wait_for_submit",
+      "ms": 27.115799952298403
+    },
+    {
+      "iter": 201,
+      "phase": "prepare_queue",
+      "kind": "wait_for_submit",
+      "ms": 31.81129996664822
+    },
+    {
+      "iter": 201,
+      "phase": "prepare_queue",
+      "kind": "wait_for_submit",
+      "ms": 32.4365000706166
+    },
+    {
+      "iter": 202,
+      "phase": "prepare_queue",
+      "kind": "wait_for_submit",
+      "ms": 22.258899873122573
+    },
+    {
+      "iter": 203,
+      "phase": "prepare_queue",
+      "kind": "wait_for_submit",
+      "ms": 0.004400033503770828
+    },
+    {
+      "iter": 204,
+      "phase": "prepare_queue",
+      "kind": "wait_for_submit",
+      "ms": 5.611700005829334
+    },
+    {
+      "iter": 205,
+      "phase": "prepare_queue",
+      "kind": "wait_for_submit",
+      "ms": 0.09779981337487698
+    },
+    {
+      "iter": 206,
+      "phase": "prepare_queue",
+      "kind": "wait_for_submit",
+      "ms": 22.67890004441142
+    },
+    {
+      "iter": 494,
+      "phase": "prepare_queue",
+      "kind": "wait_for_submit",
+      "ms": 46.729000052437186
+    },
+    {
+      "iter": 495,
+      "phase": "prepare_queue",
+      "kind": "wait_for_submit",
+      "ms": 47.57840000092983
+    },
+    {
+      "iter": 496,
+      "phase": "prepare_queue",
+      "kind": "wait_for_submit",
+      "ms": 48.13290014863014
+    },
+    {
+      "iter": 497,
+      "phase": "prepare_queue",
+      "kind": "wait_for_submit",
+      "ms": 44.859099900349975
+    },
+    {
+      "iter": 498,
+      "phase": "prepare_queue",
+      "kind": "wait_for_submit",
+      "ms": 43.84980001486838
+    },
+    {
+      "iter": 499,
+      "phase": "prepare_queue",
+      "kind": "wait_for_submit",
+      "ms": 44.74729998037219
+    },
+    {
+      "iter": 500,
+      "phase": "prepare_queue",
+      "kind": "wait_for_submit",
+      "ms": 31.449600122869015
+    },
+    {
+      "iter": 500,
+      "phase": "SAD",
+      "kind": "wait_for_submit",
+      "ms": 47.00260004028678
+    },
+    {
+      "iter": 501,
+      "phase": "prepare_queue",
+      "kind": "wait_for_submit",
+      "ms": 0.005899928510189056
+    },
+    {
+      "iter": 501,
+      "phase": "prepare_queue",
+      "kind": "wait_for_submit",
+      "ms": 0.0012998934835195541
+    },
+    {
+      "iter": 501,
+      "phase": "prepare_queue",
+      "kind": "wait_for_submit",
+      "ms": 0.000600004568696022
+    },
+    {
+      "iter": 501,
+      "phase": "prepare_queue",
+      "kind": "wait_for_submit",
+      "ms": 0.000600004568696022
+    },
+    {
+      "iter": 502,
+      "phase": "prepare_queue",
+      "kind": "wait_for_submit",
+      "ms": 0.0034999102354049683
+    },
+    {
+      "iter": 503,
+      "phase": "prepare_queue",
+      "kind": "wait_for_submit",
+      "ms": 0.002699904143810272
+    },
+    {
+      "iter": 504,
+      "phase": "prepare_queue",
+      "kind": "wait_for_submit",
+      "ms": 24.605399928987026
+    },
+    {
+      "iter": 505,
+      "phase": "prepare_queue",
+      "kind": "wait_for_submit",
+      "ms": 5.317300092428923
+    },
+    {
+      "iter": 506,
+      "phase": "prepare_queue",
+      "kind": "wait_for_submit",
+      "ms": 76.57789997756481
+    },
+    {
+      "iter": 994,
+      "phase": "prepare_queue",
+      "kind": "wait_for_submit",
+      "ms": 59.00739994831383
+    },
+    {
+      "iter": 995,
+      "phase": "prepare_queue",
+      "kind": "wait_for_submit",
+      "ms": 70.03420009277761
+    },
+    {
+      "iter": 996,
+      "phase": "prepare_queue",
+      "kind": "wait_for_submit",
+      "ms": 32.71730011329055
+    },
+    {
+      "iter": 997,
+      "phase": "prepare_queue",
+      "kind": "wait_for_submit",
+      "ms": 48.60850004479289
+    },
+    {
+      "iter": 998,
+      "phase": "prepare_queue",
+      "kind": "wait_for_submit",
+      "ms": 59.149199863895774
+    },
+    {
+      "iter": 999,
+      "phase": "prepare_queue",
+      "kind": "wait_for_submit",
+      "ms": 56.654399959370494
+    },
+    {
+      "iter": 1000,
+      "phase": "prepare_queue",
+      "kind": "wait_for_submit",
+      "ms": 46.701200073584914
+    },
+    {
+      "iter": 1000,
+      "phase": "SAD",
+      "kind": "wait_for_submit",
+      "ms": 340.64549999311566
+    },
+    {
+      "iter": 1001,
+      "phase": "prepare_queue",
+      "kind": "wait_for_submit",
+      "ms": 0.00409991480410099
+    },
+    {
+      "iter": 1001,
+      "phase": "prepare_queue",
+      "kind": "wait_for_submit",
+      "ms": 0.000500120222568512
+    },
+    {
+      "iter": 1001,
+      "phase": "prepare_queue",
+      "kind": "wait_for_submit",
+      "ms": 0.000400003045797348
+    },
+    {
+      "iter": 1001,
+      "phase": "prepare_queue",
+      "kind": "wait_for_submit",
+      "ms": 0.000400003045797348
+    },
+    {
+      "iter": 1002,
+      "phase": "prepare_queue",
+      "kind": "wait_for_submit",
+      "ms": 0.002200016751885414
+    },
+    {
+      "iter": 1003,
+      "phase": "prepare_queue",
+      "kind": "wait_for_submit",
+      "ms": 0.00209989957511425
+    },
+    {
+      "iter": 1004,
+      "phase": "prepare_queue",
+      "kind": "wait_for_submit",
+      "ms": 25.802799966186285
+    },
+    {
+      "iter": 1005,
+      "phase": "prepare_queue",
+      "kind": "wait_for_submit",
+      "ms": 1.1621001176536083
+    },
+    {
+      "iter": 1006,
+      "phase": "prepare_queue",
+      "kind": "wait_for_submit",
+      "ms": 29.662099899724126
+    }
+  ]
+}

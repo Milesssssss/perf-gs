@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 # Fresh timing + test-PSNR pass of the CURRENT state (blend_data forwardRasterize,
 # default CLI: warp OFF, flat backward on). Same flags as every other timing
 # batch. Run dirs: timing_<scene>_rerun. Idempotent on test_psnr.json.

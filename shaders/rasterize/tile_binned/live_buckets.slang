@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 // Live-bucket compaction for the flat (warp-per-bucket) backward.
 //
 // The per-tile backward (backwardRasterizePerSplat) launches one 256-thread

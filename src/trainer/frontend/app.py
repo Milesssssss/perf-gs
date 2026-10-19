@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Hierarchical orchestration for the v2 training application.
 
 The file is intentionally organized by level of abstraction:
@@ -34,6 +36,7 @@ from trainer.config.config import (
     RegularizationConfig,
     StbnConfig,
     StbnVariables,
+    AdaptiveStbnConfig,
 )
 from trainer.config.config_types import (
     DensificationMode,
@@ -260,6 +263,23 @@ def resolve_stbn_config(args: argparse.Namespace) -> StbnConfig:
         seed=int(getattr(args, "stbn_seed", 0)),
         independent=bool(getattr(args, "stbn_independent", False)),
         select_mode=str(getattr(args, "stbn_select_mode", "global")),
+    )
+
+
+def resolve_adaptive_config(args: argparse.Namespace) -> AdaptiveStbnConfig:
+    """The run's importance-guided sampling policy.
+
+    Off unless ``--stbn-adaptive`` is passed, in which case every pre-existing
+    regime is unaffected — the flag is the only thing that routes a step onto the
+    adaptive path.
+    """
+    return AdaptiveStbnConfig(
+        enabled=bool(getattr(args, "stbn_adaptive", False)),
+        alpha=float(getattr(args, "stbn_importance_alpha", 0.75)),
+        sigma=float(getattr(args, "stbn_importance_sigma", 8.0)),
+        downsample=int(getattr(args, "stbn_importance_downsample", 4)),
+        uniform=str(getattr(args, "stbn_adaptive_uniform", "blue_temporal")),
+        unbiased=not bool(getattr(args, "stbn_adaptive_biased", False)),
     )
 
 
@@ -1383,6 +1403,10 @@ class TrainingLoop:
         self.stbn_phase: dict[int, int] = {}
         self.stbn_independent = stbn_config.independent
         self._stbn_rng = np.random.default_rng(int(getattr(self.args, "stbn_seed", 0)))
+        # Separate stream for the adaptive path's per-visit IID field, so adding it
+        # cannot perturb the slice sequence any pre-existing regime walks.
+        self._stbn_sample_rng = np.random.default_rng(
+            int(getattr(self.args, "stbn_seed", 0)) + 0x5EED)
 
         self.training_step = 0
         self.gaussian_count = scene.initial_gaussian_count
@@ -1479,9 +1503,15 @@ class TrainingLoop:
             return None
         slices = max(self.stbn_slices, 1)
         pixels = stbn_module.pixels_per_tile(self.stbn_density.at(self.training_step), TILE_AREA)
+        # From its OWN stream, not from _stbn_rng. Drawing it there would insert an
+        # extra consumption into the slice sequence and silently change which
+        # slices every existing --stbn-independent run visits, invalidating the
+        # cached iid_white / indep_blue baselines this work is compared against.
+        sample_seed = int(self._stbn_sample_rng.integers(1 << 32))
         if self.stbn_independent:
             return StbnVariables(slice_index=int(self._stbn_rng.integers(slices)),
-                                 pixels_per_tile=pixels)
+                                 pixels_per_tile=pixels,
+                                 sample_seed=sample_seed)
         if camera_index not in self.stbn_phase:
             mixed = int(camera_index) * 2654435761 + int(self.args.stbn_seed) * 40503
             self.stbn_phase[camera_index] = mixed % slices
@@ -1490,6 +1520,7 @@ class TrainingLoop:
         return StbnVariables(
             slice_index=(visit + self.stbn_phase[camera_index]) % slices,
             pixels_per_tile=pixels,
+            sample_seed=sample_seed,
         )
 
     def _timed_stbn_variables(self, camera_index: int) -> "StbnVariables | None":
@@ -1570,6 +1601,16 @@ class TrainingLoop:
 
 
     def _apply_mutations(self, context: IterationContext) -> None:
+        events = context.events
+        kind = "structure" if events.structure else (
+            "filler" if events.densify else "periodic")
+        with self._stage_timing.mutations.measure(
+            context.step_number, self.runtime.pipeline, kind,
+            active=events.densify or events.morton or events.mip_periodic,
+        ):
+            self._execute_mutations(context)
+
+    def _execute_mutations(self, context: IterationContext) -> None:
         events = context.events
         pipeline = self.runtime.pipeline
 
@@ -2304,6 +2345,7 @@ def create_pipeline(*, args: argparse.Namespace, device: Any, gpu_lock: Any,
                 args.sh_band_interval, args.iters, args.sh_degree),
         ),
         stbn_config=resolve_stbn_config(args),
+        adaptive_config=resolve_adaptive_config(args),
         initial_state=initial_state,
     )
 

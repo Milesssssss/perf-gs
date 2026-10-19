@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 set -uo pipefail
 
 REPO=/mnt/c/Users/sscolari/Desktop/slang_3dgs_trainer

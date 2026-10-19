@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Debug visualization for binning / per-pixel splat overlap.
 
 Gated behind `--debug-bin-viz` in v2_train; produces, per rendered eval view:

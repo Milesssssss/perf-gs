@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """The anchor task family: adding a Gaussian field.
 
 Per the ESC design, *"median success-adjusted cost of adding a new optimizable

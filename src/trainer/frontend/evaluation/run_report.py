@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 from __future__ import annotations
 
 import hashlib
@@ -198,6 +200,28 @@ def stbn_asset_fingerprint(args: "argparse.Namespace") -> dict:
     except OSError as error:
         record["asset_error"] = f"{type(error).__name__}: {error}"
     return record
+
+
+def adaptive_sampling_record(pipeline: "TrainingPipeline") -> dict:
+    """What the importance-guided sampler actually did, or ``{"enabled": False}``.
+
+    Two halves, and the split is the point. ``config`` is what was ASKED for; the
+    rest is what was MEASURED on the device — the realized mean/min/max p, the
+    saturated fraction, and the actually-selected pixel count. The budget claim
+    ``(1/N) sum p_i = rho`` is therefore verified per run rather than asserted by
+    the solver, and ``budget_error_max`` is the worst single iteration.
+
+    Draining the per-iteration stats needs a device readback, so this runs once,
+    after the timed loop — never inside it.
+    """
+    sampler = getattr(pipeline, "adaptive_sampler", None)
+    if sampler is None:
+        return {"enabled": False}
+    try:
+        return {"enabled": True, "config": sampler.config_record(),
+                "measured": sampler.stats_summary()}
+    except Exception as error:                             # noqa: BLE001
+        return {"enabled": True, "error": f"{type(error).__name__}: {error}"}
 
 
 def process_environment() -> dict:
@@ -423,6 +447,7 @@ def build_report(
             "extent": float(scene_context.extent),
         },
         "stbn": stbn_asset_fingerprint(args),
+        "adaptive_stbn": adaptive_sampling_record(pipeline),
         "config": {
             "densify_mode": str(getattr(args, "densify_mode", "")),
             "mip_splatting": bool(args.mip_splatting),

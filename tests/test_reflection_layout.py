@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Reflection/layout freeze: the Python <-> shader struct contract (slice 5).
 
 buffers.py sizes every persistent NDBuffer from slangpy reflection of the shared

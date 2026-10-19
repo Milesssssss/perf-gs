@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Change-task and comprehension-task framework.
 
 A *change task* hands an agent a prompt, then verifies the result against hidden

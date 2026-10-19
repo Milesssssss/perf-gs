@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Sampled per-stage GPU timing across a whole training run.
 
 ``bench_iter.py`` answers "how fast is one frozen iteration"; this answers "where
@@ -34,6 +36,7 @@ from pathlib import Path
 from typing import Any
 
 from trainer.backend.compute.timing import StepTimer
+from trainer.frontend.profiling.mutation_timing import MutationTimingRecorder
 
 # Default marker -> paper stage grouping. Keys are the ``_marker_group`` labels in
 # trainer.backend.render.pipeline; a marker absent from a given run simply
@@ -48,6 +51,10 @@ STAGE_MAP: dict[str, tuple[str, ...]] = {
     "tile_binning_sort": ("scan_tile_offsets", "bin_emit", "radix_sort",
                           "identify_tile_ranges", "bucket_scan"),
     "forward_raster": ("rasterize",),
+    # Includes the importance-guided sampling passes when --stbn-adaptive is on:
+    # they are recorded INSIDE this group, so "loss" is the full image-space cost
+    # of a step in every regime and stays directly comparable across them. Their
+    # own share is reported separately as child markers — see CHILD_MARKERS.
     "loss": ("loss",),
     "backward_raster": ("rasterize_backward",),
     "backward_projection_sh": ("projection_backward", "sh_backward"),
@@ -64,8 +71,13 @@ PARENT_MARKERS = ("forward", "backward")
 # detail, excluded from stage sums — adding them would double count their
 # parent. ``live_bucket_compaction`` sits inside ``rasterize_backward``;
 # ``adam_main``/``adam_rest`` inside ``adam``; ``pass_N`` are the prefix-scan
-# sub-passes inside ``scan_tile_offsets`` / ``bucket_scan``.
-CHILD_MARKERS = ("live_bucket_compaction", "adam_main", "adam_rest")
+# sub-passes inside ``scan_tile_offsets`` / ``bucket_scan``;
+# ``adaptive_importance``/``adaptive_apply`` inside ``loss`` (the adaptive
+# sampler is recorded from within the loss pass, so its cost is already in the
+# loss stage — listing it here is what keeps it from being counted twice while
+# still reporting what the feature itself costs).
+CHILD_MARKERS = ("live_bucket_compaction", "adam_main", "adam_rest",
+                 "adaptive_importance", "adaptive_apply")
 
 
 def _is_child(marker: str) -> bool:
@@ -97,6 +109,7 @@ class StageTimingRecorder:
         self.every = int(every)
         self.enabled = self.every > 0
         self.total_iters = int(total_iters)
+        self.mutations = MutationTimingRecorder(enabled=self.enabled)
         # Paper-facing windows: early (pre-densify-heavy), middle, late.
         self.windows = windows or ((1, 1000), (1001, 2000), (2001, 3000))
         self._timer: StepTimer | None = None
@@ -151,6 +164,7 @@ class StageTimingRecorder:
                   flush=True)
             self.enabled = False
             self._sampling = False
+            self.mutations.enabled = False
 
     def after_step(self, step: int, pipeline: Any) -> None:
         """Drain the sampled submit and read its per-marker durations.
@@ -254,6 +268,7 @@ class StageTimingRecorder:
             "host_totals_ms": {k: round(v, 4)
                                for k, v in sorted(self.host_totals_ms.items())},
             "host_counts": dict(sorted(self.host_counts.items())),
+            "mutation_timings": self.mutations.summary(),
             "windows": windows,
             "whole_run": whole,
             "note": ("stages_ms are MEANS PER SAMPLED ITERATION in ms. Parent "
@@ -265,9 +280,10 @@ class StageTimingRecorder:
         }
 
     def write(self, run_dir: Path) -> None:
-        if not self.samples and not self.host_totals_ms:
+        if not self.samples and not self.host_totals_ms and not self.mutations.samples:
             return
         run_dir.mkdir(parents=True, exist_ok=True)
+        self.mutations.write(run_dir)
         with (run_dir / "stage_timing.jsonl").open("w") as handle:
             for sample in self.samples:
                 handle.write(json.dumps(sample) + "\n")

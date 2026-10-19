@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Plot the Mip-NeRF 360 SH0-vs-SH3 sweep: PSNR + training-time bar charts.
 
 Reads outputs/eval_sweep/results.json (written by eval_mipnerf_sweep.py) and

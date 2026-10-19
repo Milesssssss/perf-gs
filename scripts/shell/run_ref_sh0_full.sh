@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 # Full reference (SADGS) pipeline on bicycle @ our config (images_4, 3000 iters),
 # SH0 (REF_PIN_SH0=1: active_sh_degree pinned to 0 = DC-only color, tensors full-
 # sized so no zero-grid kernel crash). Runs THEIR OWN code end to end:

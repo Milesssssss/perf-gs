@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Finite-difference validation of the backward pass.
 
 For each gaussian-parameter component:

@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 // Thin scalar-parameter wrappers around the math utilities used by the
 // gaussian primitive, exposed so SlangPy's functional API can call them
 // from Python without us having to author a compute entry point.

@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Concept-entropy math: localisation, even scatter, single-module case."""
 
 from __future__ import annotations

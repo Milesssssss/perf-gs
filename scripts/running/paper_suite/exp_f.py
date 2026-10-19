@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Experiment F — orchestrate the gradient probes and aggregate their results.
 
 The measurement itself lives in ``scripts/running/paper_gradient_probe.py`` and

@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Expected Safe Changeability (ESC) evaluation harness.
 
 ESC scores a codebase by *how well it absorbs unseen change* rather than by how

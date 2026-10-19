@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Experiment F2 — orchestrate the gradient-fidelity study and aggregate it.
 
 The measurement lives in ``scripts/running/paper_gradient_study.py``, one process

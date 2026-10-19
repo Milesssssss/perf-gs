@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Concept entropy — how scattered a cross-cutting concept's implementation is.
 
 For a concept ``c`` spread over modules ``i`` with implementation-site fractions

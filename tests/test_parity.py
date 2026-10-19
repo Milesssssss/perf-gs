@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Cross-backend parity: the same deterministic scene should render to the
 same pixels on Vulkan and D3D12 within a small tolerance. Tolerance
 accounts for driver-level floating-point ordering differences.

@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """BACKWARD_PIXEL_STRIDE sweep: training time + test PSNR vs stride.
 
 Reads outputs/train/timing_<scene>_s<stride>/{log.jsonl,test_psnr.json} for

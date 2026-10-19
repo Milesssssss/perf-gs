@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """GPU runtime + command-batch abstraction.
 
 Extracts the queue/submission and command-recording machinery out of

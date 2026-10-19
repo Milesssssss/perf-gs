@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Characterization test: freeze the trainer's per-step schedules.
 
 Two inline schedules in v2_train.py drive per-iteration scalars:

@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Subscore reducers: correctness, edit efficiency, understandability, testability."""
 
 from __future__ import annotations

@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """SnugBox correctness test.
 
 Compare SnugBox's analytical tight-bbox vs a brute-force grid evaluation

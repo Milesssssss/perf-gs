@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 // L1 loss in linear color space with optional alpha supervision.
 //
 // Reads the rendered output (linear RGB + alpha in .a) and the ground-truth

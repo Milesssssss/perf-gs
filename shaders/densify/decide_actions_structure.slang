@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 #include "../common/types.slang"
 #include "../common/math.slang"
 
@@ -40,6 +42,8 @@ void decideActionsStructure(
     RWStructuredBuffer<uint> split_factor_y,
     RWStructuredBuffer<uint> split_factor_z,
     RWStructuredBuffer<uint> densify_children_sum,  // atomic: total requested tail growth (for overbudget log)
+    RWStructuredBuffer<uint> selected_parents,
+    RWStructuredBuffer<uint> selected_count,
     uniform float tau_split, uniform float tau_prune,
     uniform float grad_threshold_internal,
     uniform float split_power, uniform uint max_split_factor,
@@ -49,15 +53,7 @@ void decideActionsStructure(
     uint gaussian_idx = dtid.x;
     if (gaussian_idx >= max_splats) return;
 
-    // Tail slots (past the live count): pad KEEP with nk=1.
-    if (gaussian_idx >= num_gaussians_counter[0])
-    {
-        action[gaussian_idx] = ACTION_KEEP;
-        split_factor_x[gaussian_idx] = 1u;
-        split_factor_y[gaussian_idx] = 1u;
-        split_factor_z[gaussian_idx] = 1u;
-        return;
-    }
+    if (gaussian_idx >= num_gaussians_counter[0]) return;
 
     uint n_total_u = eta_n_total[gaussian_idx];
     bool seen = n_total_u > 0u;
@@ -110,8 +106,6 @@ void decideActionsStructure(
         else
         {
             out_action = ACTION_SPLIT;
-            //TODO: all splitting threads hammering one counter; fine at this cadence.
-            InterlockedAdd(densify_children_sum[0], prod - 1u);
         }
     }
 
@@ -119,4 +113,20 @@ void decideActionsStructure(
     split_factor_x[gaussian_idx] = nkx;
     split_factor_y[gaussian_idx] = nky;
     split_factor_z[gaussian_idx] = nkz;
+
+    // One reservation per wave; only these parents need split workgroups.
+    bool selected = out_action == ACTION_SPLIT || out_action == ACTION_CLONE;
+    uint wave_count = WaveActiveCountBits(selected);
+    uint offset = WavePrefixCountBits(selected);
+    uint base = 0u;
+    uint requested = out_action == ACTION_SPLIT ? nkx * nky * nkz - 1u
+                   : (out_action == ACTION_CLONE ? 1u : 0u);
+    uint wave_growth = WaveActiveSum(requested);
+    if (WaveIsFirstLane() && wave_count > 0u)
+    {
+        InterlockedAdd(selected_count[0], wave_count, base);
+        InterlockedAdd(densify_children_sum[0], wave_growth);
+    }
+    base = WaveReadLaneFirst(base);
+    if (selected) selected_parents[base + offset] = gaussian_idx;
 }

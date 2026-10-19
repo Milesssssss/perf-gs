@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 # BACKWARD_PIXEL_STRIDE sweep: 1 / 2 / 4 / 8 / 16, on all 9 Mip-NeRF 360 scenes.
 # Pure training-loop wall time (iter 0 -> 3000) + held-out test PSNR, identical
 # flags except the backward pixel-subsampling stride (a shader define). Uses the

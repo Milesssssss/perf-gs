@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 // Phase B of densification: produce children for SPLIT and CLONE actions.
 //
 // One thread per gaussian, operating over the PRE-densification range.

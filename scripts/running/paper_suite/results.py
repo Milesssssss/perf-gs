@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Load run artifacts and index them the way the experiments ask questions.
 
 The manifest holds one flat row per cell — enough for the headline tables. The

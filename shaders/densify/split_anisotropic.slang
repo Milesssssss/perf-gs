@@ -1,87 +1,86 @@
-// Structure-aware anisotropic splitting (SAD-GS, arXiv 2604.28016, Eq. 8-9).
-//
-// Unlike split_and_clone.slang (1 gaussian -> 2 children, uniform shrink),
-// this produces an n_x * n_y * n_z grid of children per selected gaussian,
-// where the per-axis factors n_k = ceil(sqrt(eta_k)) were computed by the CPU
-// decision and live in split_factor_{x,y,z}. Children are laid out on a regular
-// grid in the parent's local frame (Eq. 8-9), spaced by sqrt(12) * (s_k / n_k)
-// per axis so the equal-weight child mixture PRESERVES the parent's second
-// moment (see _grid_child for the derivation):
-//     mu_child  = mu_parent + R_parent * (coord (.) separation),
-//         separation_k = sqrt(12) * s_parent_k / n_k
-//     s_child_k = s_parent_k / n_k^ks_scale_power
-// where coord is a centered-INTEGER grid coordinate. Total children =
-// n_x*n_y*n_z; child index 0 overwrites the parent slot, the rest atomic-append
-// at the tail.
-//
-// ACTION semantics match the rest of the densify suite: only ACTION_SPLIT
-// gaussians grid-split here; CLONE still goes through split_and_clone; KEEP /
-// PRUNE are no-ops (PRUNE handled by scatter-compact via the valid mask).
+// Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
+// SAD-GS grid splitting: one workgroup per selected parent, lanes emit children
+// cooperatively. Child 0 replaces the parent; the rest share a tail reservation.
 
 #include "../common/types.slang"
 #include "../common/math.slang"
 #include "sh_carry.slang"
 
-static const uint ACTION_KEEP  = 0;
 static const uint ACTION_SPLIT = 1;
 static const uint ACTION_CLONE = 2;
-static const uint ACTION_PRUNE = 3;
+static const uint SPLIT_GROUP_SIZE = 32u;
+static const uint SPLIT_DISPATCH_WIDTH = 65535u;
 
-// Zero-initialized AdamState: fresh Adam moments for children. Uses the Slang
-// zero-init cast so it never enumerates AdamState's contract-generated fields.
-AdamState _zero_adam()
-{
-    return (AdamState)0;
-}
+groupshared Gaussian3D s_parent;
+groupshared uint3 s_factors;
+groupshared uint s_tail;
 
-// One child of the grid at integer coords (ix, iy, iz) within an
-// (nx, ny, nz) lattice. Children are laid out on a regular grid in the parent's
-// local frame, spaced so the equal-weight child mixture PRESERVES the parent's
-// second moment (SADGS gaussian_model.py, Eq. 8-9).
-Gaussian3D _grid_child(Gaussian3D parent, uint3 idx, uint3 n, float ks_scale_power)
+struct ChildGrid
 {
+    Gaussian3D child;
+    float3x3 rotation;
+    float3 separation;
+    uint3 factors;
+};
+
+ChildGrid prepareChildGrid(Gaussian3D parent, uint3 factors, float ks_scale_power)
+{
+    float3 nf = float3(factors);
+    ChildGrid grid;
     Gaussian3D child = parent;
-    float3 scale = exp(parent.log_scale);
-    float3x3 R = matrixFromQuaternion(parent.rot_quat);
-    float3 nf = float3(float(n.x), float(n.y), float(n.z));
-
-    // Centered INTEGER grid coordinate coord_k = idx_k - (n_k - 1)/2, spanning
-    // {-(n_k-1)/2 .. (n_k-1)/2}. For n_k == 1 this is 0 (no offset that axis).
-    float3 coord;
-    coord.x = (n.x > 1u) ? (float(idx.x) - 0.5 * float(n.x - 1u)) : 0.0;
-    coord.y = (n.y > 1u) ? (float(idx.y) - 0.5 * float(n.y - 1u)) : 0.0;
-    coord.z = (n.z > 1u) ? (float(idx.z) - 0.5 * float(n.z - 1u)) : 0.0;
-
-    // SADGS child spacing: the child std along axis k is sigma_k / n_k, and the
-    // grid separation is that std times sqrt(12):
-    //     separation_k = (sigma_k / n_k) * sqrt(12)
-    //     offset_k     = coord_k * separation_k
-    // (reference: stds_new = scales / ks; separations = stds_new * 12**0.5).
-    // The sqrt(12) is the factor that makes the equal-weight mixture of the n_k
-    // children reproduce the parent variance sigma_k^2 exactly (for ks_scale_power
-    // == 1): sigma_k^2/n_k^2 + Var_grid = sigma_k^2/n_k^2 * (1 + (n_k^2-1)) =
-    // sigma_k^2. Omitting it (the previous code, which used coord_k/n_k with no
-    // sqrt(12)) contracts the mixture to ~31% of the parent variance at n_k=2,
-    // making every split collapse the footprint the optimizer must then re-grow.
-    const float SQRT12 = 3.4641016151377544;   // sqrt(12)
-    float3 sep = (scale / nf) * SQRT12;
-    float3 local = coord * sep;
-    child.mean = parent.mean + mul(R, local);
-
-    // Child scale along axis k = sigma_k / n_k^ks_scale_power (SADGS
-    // scaling / ks**scale_power): log(sigma_k / n_k^p) = log_scale_k - p*log(n_k).
-    // ks_scale_power = 1.0 for Mip-NeRF 360 (the variance-preserving choice
-    // paired with the sqrt(12) spacing above); 1.2 for Tanks & Temples / Deep
-    // Blending. For n_k == 1 the term is p*log(1) = 0, so the axis is unchanged.
     child.log_scale = parent.log_scale
                     - ks_scale_power * float3(log(nf.x), log(nf.y), log(nf.z));
+    grid.child = child;
+    grid.rotation = matrixFromQuaternion(parent.rot_quat);
+    // sqrt(12) spacing preserves the parent's mixture covariance when p == 1.
+    grid.separation = (exp(parent.log_scale) / nf) * 3.4641016151377544;
+    grid.factors = factors;
+    return grid;
+}
+
+Gaussian3D gridChild(ChildGrid grid, uint ordinal)
+{
+    uint3 n = grid.factors;
+    uint3 idx = uint3(ordinal % n.x, (ordinal / n.x) % n.y, ordinal / (n.x * n.y));
+    float3 coord = float3(idx) - 0.5 * float3(n - uint3(1u));
+    Gaussian3D child = grid.child;
+    child.mean += mul(grid.rotation, coord * grid.separation);
     return child;
 }
 
+// Snapshot the parent BEFORE child 0 overwrites its slot; reserve only once.
+void prepareParent(uint i, uint lane, uint act,
+    RWStructuredBuffer<Gaussian3D> gaussians,
+    RWStructuredBuffer<uint> num_gaussians_counter,
+    StructuredBuffer<uint> split_factor_x,
+    StructuredBuffer<uint> split_factor_y,
+    StructuredBuffer<uint> split_factor_z)
+{
+    if (lane == 0u)
+    {
+        s_parent = gaussians[i];
+        s_factors = act == ACTION_CLONE ? uint3(1u) : uint3(
+            max(split_factor_x[i], 1u), max(split_factor_y[i], 1u), max(split_factor_z[i], 1u));
+        uint growth = act == ACTION_CLONE ? 1u
+                   : s_factors.x * s_factors.y * s_factors.z - 1u;
+        s_tail = 0u;
+        if (growth > 0u) InterlockedAdd(num_gaussians_counter[0], growth, s_tail);
+    }
+    GroupMemoryBarrierWithGroupSync();
+}
+
+uint survivingChildren(uint total, uint max_splats)
+{
+    uint headroom = s_tail < max_splats ? max_splats - s_tail : 0u;
+    return 1u + min(total - 1u, headroom);
+}
+
 [shader("compute")]
-[numthreads(256, 1, 1)]
+[numthreads(32, 1, 1)]
 void splitAnisotropic(
-    uint3 dtid: SV_DispatchThreadID,
+    uint3 group_id: SV_GroupID,
+    uint3 gtid: SV_GroupThreadID,
     RWStructuredBuffer<Gaussian3D> gaussians,
     RWStructuredBuffer<AdamState> adam_state,
     RWStructuredBuffer<uint> num_gaussians_counter,
@@ -90,82 +89,48 @@ void splitAnisotropic(
     StructuredBuffer<uint> split_factor_y,
     StructuredBuffer<uint> split_factor_z,
     StructuredBuffer<uint> pre_count_buf,
+    StructuredBuffer<uint> selected_parents,
+    StructuredBuffer<uint> selected_count,
     uniform float ks_scale_power,
     uniform uint max_splats)
 {
-    uint i = dtid.x;
-    uint pre_count = pre_count_buf[0];
-    if (i >= pre_count) return;
+    uint selected = group_id.x + group_id.y * SPLIT_DISPATCH_WIDTH;
+    if (selected >= selected_count[0]) return;
+    uint i = selected_parents[selected];
+    if (i >= min(pre_count_buf[0], max_splats)) return;
+    uint lane = gtid.x;
     uint act = action[i];
-    if (act != ACTION_SPLIT && act != ACTION_CLONE) return;  // KEEP/PRUNE: no-op
-
-    Gaussian3D parent = gaussians[i];
-
-    // CLONE (small under-resolved gaussians): append one EXACT duplicate at the
-    // tail with zeroed Adam state; parent slot untouched. Matches SADGS
-    // densify_and_clone_structgs and the reference-3DGS clone (opacity copied
-    // unchanged; fresh optimizer state so parent/child diverge under gradient).
+    if (act != ACTION_SPLIT && act != ACTION_CLONE) return;
+    prepareParent(i, lane, act, gaussians, num_gaussians_counter,
+                  split_factor_x, split_factor_y, split_factor_z);
     if (act == ACTION_CLONE)
     {
-        uint tail;
-        InterlockedAdd(num_gaussians_counter[0], 1u, tail);
-        if (tail < max_splats)
+        if (lane == 0u && s_tail < max_splats)
         {
-            gaussians[tail] = parent;
-            adam_state[tail] = _zero_adam();
+            gaussians[s_tail] = s_parent;
+            adam_state[s_tail] = (AdamState)0;
         }
         return;
     }
-
-    // SPLIT (large under-resolved gaussians): anisotropic grid subdivision.
-    uint3 n = uint3(max(split_factor_x[i], 1u),
-                    max(split_factor_y[i], 1u),
-                    max(split_factor_z[i], 1u));
-    uint total = n.x * n.y * n.z;
-    if (total <= 1u) return;   // decision produced no actual subdivision
-
-    // Child 0 overwrites the parent slot; children 1..total-1 append at the
-    // tail. Reserve the (total-1) tail slots with a single atomic add so the
-    // block is contiguous and we never interleave with another gaussian's
-    // children.
-    uint tail_base = 0u;
-    if (total > 1u)
-        InterlockedAdd(num_gaussians_counter[0], total - 1u, tail_base);
-
-    uint child_ordinal = 0u;
-    for (uint iz = 0u; iz < n.z; ++iz)
-    for (uint iy = 0u; iy < n.y; ++iy)
-    for (uint ix = 0u; ix < n.x; ++ix)
+    uint total = s_factors.x * s_factors.y * s_factors.z;
+    if (total <= 1u) return;
+    uint count = survivingChildren(total, max_splats);
+    if (lane >= count) return;
+    ChildGrid grid = prepareChildGrid(s_parent, s_factors, ks_scale_power);
+    for (uint ordinal = lane; ordinal < count; ordinal += SPLIT_GROUP_SIZE)
     {
-        Gaussian3D c = _grid_child(parent, uint3(ix, iy, iz), n, ks_scale_power);
-        uint dst;
-        if (child_ordinal == 0u)
-        {
-            dst = i;   // overwrite parent slot
-        }
-        else
-        {
-            dst = tail_base + (child_ordinal - 1u);
-            if (dst >= max_splats)  // capacity clamp — drop overflow children
-            {
-                child_ordinal++;
-                continue;
-            }
-        }
-        gaussians[dst] = c;
-        adam_state[dst] = _zero_adam();
-        child_ordinal++;
+        uint dst = ordinal == 0u ? i : s_tail + ordinal - 1u;
+        gaussians[dst] = gridChild(grid, ordinal);
+        adam_state[dst] = (AdamState)0;
     }
 }
 
-// SH variant of splitAnisotropic: identical grid split/clone behavior PLUS
-// carrying the optional features_rest coefficients (children inherit the
-// parent's, fresh rest-Adam). Dispatched INSTEAD of splitAnisotropic on the SH
-// path (it owns the same atomic append).
+// Same grid/clone behavior, with inherited SH coefficients and fresh moments.
 [shader("compute")]
-[numthreads(256, 1, 1)]
+[numthreads(32, 1, 1)]
 void splitAnisotropicSH(
-    uint3 dtid: SV_DispatchThreadID,
+    uint3 group_id: SV_GroupID,
+    uint3 gtid: SV_GroupThreadID,
     RWStructuredBuffer<Gaussian3D> gaussians,
     RWStructuredBuffer<AdamState> adam_state,
     RWStructuredBuffer<uint> num_gaussians_counter,
@@ -174,69 +139,47 @@ void splitAnisotropicSH(
     StructuredBuffer<uint> split_factor_y,
     StructuredBuffer<uint> split_factor_z,
     StructuredBuffer<uint> pre_count_buf,
+    StructuredBuffer<uint> selected_parents,
+    StructuredBuffer<uint> selected_count,
     RWStructuredBuffer<uint> features_rest,
     RWStructuredBuffer<uint> adam_rest,
     uniform float ks_scale_power,
     uniform uint rest_floats,
     uniform uint max_splats)
 {
-    uint i = dtid.x;
-    uint pre_count = pre_count_buf[0];
-    if (i >= pre_count) return;
+    uint selected = group_id.x + group_id.y * SPLIT_DISPATCH_WIDTH;
+    if (selected >= selected_count[0]) return;
+    uint i = selected_parents[selected];
+    if (i >= min(pre_count_buf[0], max_splats)) return;
+    uint lane = gtid.x;
     uint act = action[i];
     if (act != ACTION_SPLIT && act != ACTION_CLONE) return;
-
-    Gaussian3D parent = gaussians[i];
+    prepareParent(i, lane, act, gaussians, num_gaussians_counter,
+                  split_factor_x, split_factor_y, split_factor_z);
 
     if (act == ACTION_CLONE)
     {
-        uint tail;
-        InterlockedAdd(num_gaussians_counter[0], 1u, tail);
-        if (tail < max_splats)
+        if (lane == 0u && s_tail < max_splats)
         {
-            gaussians[tail] = parent;
-            adam_state[tail] = _zero_adam();
-            shInheritRest(tail, i, rest_floats, max_splats, features_rest, adam_rest);
+            gaussians[s_tail] = s_parent;
+            adam_state[s_tail] = (AdamState)0;
+            shInheritRest(s_tail, i, rest_floats, max_splats, features_rest, adam_rest);
         }
         return;
     }
-
-    uint3 n = uint3(max(split_factor_x[i], 1u),
-                    max(split_factor_y[i], 1u),
-                    max(split_factor_z[i], 1u));
-    uint total = n.x * n.y * n.z;
+    uint total = s_factors.x * s_factors.y * s_factors.z;
     if (total <= 1u) return;
-
-    uint tail_base = 0u;
-    if (total > 1u)
-        InterlockedAdd(num_gaussians_counter[0], total - 1u, tail_base);
-
-    uint child_ordinal = 0u;
-    for (uint iz = 0u; iz < n.z; ++iz)
-    for (uint iy = 0u; iy < n.y; ++iy)
-    for (uint ix = 0u; ix < n.x; ++ix)
+    uint count = survivingChildren(total, max_splats);
+    if (lane >= count) return;
+    ChildGrid grid = prepareChildGrid(s_parent, s_factors, ks_scale_power);
+    for (uint ordinal = lane; ordinal < count; ordinal += SPLIT_GROUP_SIZE)
     {
-        Gaussian3D c = _grid_child(parent, uint3(ix, iy, iz), n, ks_scale_power);
-        uint dst;
-        if (child_ordinal == 0u)
-        {
-            dst = i;   // child-0 overwrites parent slot: keep features_rest, fresh Adam.
-            gaussians[dst] = c;
-            adam_state[dst] = _zero_adam();
+        uint dst = ordinal == 0u ? i : s_tail + ordinal - 1u;
+        gaussians[dst] = gridChild(grid, ordinal);
+        adam_state[dst] = (AdamState)0;
+        if (ordinal == 0u)
             shZeroRestAdam(dst, rest_floats, max_splats, adam_rest);
-        }
         else
-        {
-            dst = tail_base + (child_ordinal - 1u);
-            if (dst >= max_splats)
-            {
-                child_ordinal++;
-                continue;
-            }
-            gaussians[dst] = c;
-            adam_state[dst] = _zero_adam();
             shInheritRest(dst, i, rest_floats, max_splats, features_rest, adam_rest);
-        }
-        child_ordinal++;
     }
 }

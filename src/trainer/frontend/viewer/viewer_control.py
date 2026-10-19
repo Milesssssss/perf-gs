@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Lifecycle wrapper for the optional in-process live viewer.
 
 Live viewing is IN-PROCESS: a background-thread :class:`~trainer.viewer.Viewer`

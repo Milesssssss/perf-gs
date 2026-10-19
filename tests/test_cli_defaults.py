@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Characterization test: freeze the v2 trainer CLI surface + effective defaults.
 
 The refactor brief lists "CLI flag names or acceptance surface" and "effective
@@ -127,6 +129,12 @@ EXPECTED_DEFAULTS = {
     "stbn_select_mode": "global",
     "stbn_seed": 0,
     "stbn_independent": False,
+    "stbn_adaptive": False,
+    "stbn_importance_alpha": 0.75,
+    "stbn_importance_sigma": 8.0,
+    "stbn_importance_downsample": 4,
+    "stbn_adaptive_uniform": "blue_temporal",
+    "stbn_adaptive_biased": False,
     "extinction_hardness": 1.0,
     "extinction_hardness_warmup": 500,
     "final_test_psnr": False,

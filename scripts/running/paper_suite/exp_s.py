@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Experiment S — does forcing exactly k pixels per 8x8 execution tile matter?
 
 The sparse mask can be built two ways, and they are not the same sampling

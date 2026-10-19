@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Compare forwardRasterize BEFORE vs AFTER the blend_data change.
 
 Same-hardware, same-everything A/B of the thread-per-pixel forward rasterizer:

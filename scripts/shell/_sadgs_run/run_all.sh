@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 # SADGS reference (SH0) on ALL Mip-NeRF 360 scenes (7 v2 + flowers/treehill),
 # same config/resolution as run_flowers.sh, --eval (llffhold=8) so PSNR is on
 # the same held-out test split the Slang trainer reports. Idempotent: skips any

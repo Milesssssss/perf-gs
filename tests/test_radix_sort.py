@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Radix sort correctness test.
 
 Sorts random (key64, value) pairs with the ported DeviceRadixSort

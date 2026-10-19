@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Simple/structure-aware densification, Morton sorting, and opacity reset.
 
 These operate ON a :class:`~trainer.pipeline.Pipeline`: they dispatch its
@@ -68,6 +70,7 @@ class StructureConfig:
     # args.dense * scene_extent. A triggered gaussian with max world-space scale
     # <= this is CLONED (exact duplicate); larger ones are anisotropically split.
     dense_scale: float = 0.0         # dense * extent, in world units; set by the caller
+    detailed_diagnostics: bool = False  # full eta readback only when explicitly requested
 
 
 def densify_simple(pipeline: TrainingPipeline, cfg: DensifyConfig,
@@ -214,6 +217,9 @@ def densify_structure_aware(pipeline: TrainingPipeline, cfg: StructureConfig) ->
         t_opacity=cfg.t_opacity,
         dense_scale=cfg.dense_scale,
         max_splats=pipeline.max_splats,
+        # Prune/scan scratch is unused until splitting finishes.
+        selected_parents=b.valid_mask_buffer.storage,
+        selected_count=b.scan_total.storage,
     )
 
     with pipeline.recording("densify_structure") as recording, \
@@ -225,27 +231,28 @@ def densify_structure_aware(pipeline: TrainingPipeline, cfg: StructureConfig) ->
             buffer=b.densify_children_sum.storage,
             count=1,
         )
+        pipeline.dispatch(pipeline.k_clear_uint_buffer, "clear_selected_count",
+            thread_count=[1, 1, 1], buffer=b.scan_total.storage, count=1)
+        pipeline.dispatch(pipeline.k_densify_snapshot, "densify_snapshot",
+            thread_count=[1, 1, 1], src=b.num_gaussians_counter.storage,
+            dst=b.densify_pre_count.storage)
+        pipeline.dispatch(pipeline.k_densify_prepare_args, "densify_prepare_args",
+            thread_count=[1, 1, 1], count_buf=b.densify_pre_count.storage,
+            dispatch_args=b.densify_dispatch_args.storage, max_splats=pipeline.max_splats)
 
         # P1: single-pass structure decide -> action + split_factor_{x,y,z}
         # (+ atomic children_sum). No capacity demotion: overbudget splits are
         # dropped at the tail by split_anisotropic and surfaced by the host.
-        pipeline.dispatch(pipeline.k_decide_actions_structure, "decide_actions_structure",
-            thread_count=[pipeline.max_splats, 1, 1],
+        pipeline.dispatch_indirect(pipeline.k_decide_actions_structure, "decide_actions_structure",
+            b.densify_dispatch_args,
             densify_children_sum=b.densify_children_sum.storage,
             **decide_inputs,
         )
 
-        # P2: snapshot pre_count (bound for the split_anisotropic indirect dispatch).
-        pipeline.dispatch(pipeline.k_densify_snapshot, "densify_snapshot",
+        # One cooperative workgroup per selected parent.
+        pipeline.dispatch(pipeline.k_structure_split_prepare_args, "structure_split_prepare_args",
             thread_count=[1, 1, 1],
-            src=b.num_gaussians_counter.storage,
-            dst=b.densify_pre_count.storage,
-        )
-
-        # P5: indirect-dispatch args for split_anisotropic (groups = ceil(pre_count/256)).
-        pipeline.dispatch(pipeline.k_densify_prepare_args, "densify_prepare_args",
-            thread_count=[1, 1, 1],
-            count_buf=b.densify_pre_count.storage,
+            count_buf=b.scan_total.storage,
             dispatch_args=b.densify_dispatch_args.storage,
             max_splats=pipeline.max_splats,
         )
@@ -262,6 +269,8 @@ def densify_structure_aware(pipeline: TrainingPipeline, cfg: StructureConfig) ->
             split_factor_y=b.split_factor_y.storage,
             split_factor_z=b.split_factor_z.storage,
             pre_count_buf=b.densify_pre_count.storage,
+            selected_parents=b.valid_mask_buffer.storage,
+            selected_count=b.scan_total.storage,
             ks_scale_power=float(cfg.ks_scale_power),
             max_splats=pipeline.max_splats,
         )
@@ -283,7 +292,8 @@ def densify_structure_aware(pipeline: TrainingPipeline, cfg: StructureConfig) ->
             dst=b.densify_post_count.storage,
         )
 
-        # P8: build prune mask + scan + scatter-compact.
+        # P8: retire selected-parent scratch. RHI resource tracking inserts the
+        # SRV->UAV dependency before these buffers become the prune mask/count.
         pipeline.dispatch(pipeline.k_build_prune_mask, "build_prune_mask",
             thread_count=[pipeline.max_splats, 1, 1],
             action=b.action_buffer.storage,
@@ -305,7 +315,8 @@ def densify_structure_aware(pipeline: TrainingPipeline, cfg: StructureConfig) ->
             gaussians_out=arena.storage,
             max_splats=pipeline.max_splats,
         )
-        pipeline.copy_arena_back(arena, b.gaussians, b.gaussians.storage.size)
+        pipeline.copy_arena_back(arena, b.gaussians, b.gaussians.storage.size,
+                                 count_buf=b.scan_total)
         pipeline.dispatch(pipeline.k_scatter_compact_adam, "scatter_compact_adam",
             thread_count=[pipeline.max_splats, 1, 1],
             adam_state_in=b.adam_state.storage,
@@ -314,7 +325,8 @@ def densify_structure_aware(pipeline: TrainingPipeline, cfg: StructureConfig) ->
             adam_state_out=arena.storage,
             max_splats=pipeline.max_splats,
         )
-        pipeline.copy_arena_back(arena, b.adam_state, b.adam_state.storage.size)
+        pipeline.copy_arena_back(arena, b.adam_state, b.adam_state.storage.size,
+                                 count_buf=b.scan_total)
         # SH: carry features_rest + its Adam moments through the SAME compaction.
         if b.sh_enabled:
             pipeline.dispatch(pipeline.k_scatter_compact_features, "scatter_compact_features",
@@ -326,7 +338,8 @@ def densify_structure_aware(pipeline: TrainingPipeline, cfg: StructureConfig) ->
                 rest_floats=b.sh.rest_floats,
                 max_splats=pipeline.max_splats,
             )
-            pipeline.copy_arena_back(arena, b.features_rest, b.features_rest.storage.size)
+            pipeline.copy_arena_back(arena, b.features_rest, b.features_rest.storage.size,
+                                     count_buf=b.scan_total)
             pipeline.dispatch(pipeline.k_scatter_compact_adam_rest, "scatter_compact_adam_rest",
                 thread_count=[pipeline.max_splats, 1, 1],
                 adam_rest_in=b.adam_rest_state.storage,
@@ -336,7 +349,8 @@ def densify_structure_aware(pipeline: TrainingPipeline, cfg: StructureConfig) ->
                 rest_floats=b.sh.rest_floats,
                 max_splats=pipeline.max_splats,
             )
-            pipeline.copy_arena_back(arena, b.adam_rest_state, b.adam_rest_state.storage.size)
+            pipeline.copy_arena_back(arena, b.adam_rest_state, b.adam_rest_state.storage.size,
+                                     count_buf=b.scan_total, soa=True)
         # P9: final count = scan_total (GPU copy — no readback).
         pipeline.dispatch(pipeline.k_densify_snapshot, "densify_snapshot",
             thread_count=[1, 1, 1],
@@ -359,20 +373,12 @@ def densify_structure_aware(pipeline: TrainingPipeline, cfg: StructureConfig) ->
                 mode=0,   # CLAMP: min(logit, logit(0.8)) == inverse_sigmoid(min(a,0.8))
             )
 
-    # Overbudget telemetry. The structure decision fires only every
-    # sad_structure_every (~500) iters and is already a heavy multi-dispatch, so
-    # ONE uint readback here is negligible (unlike the per-step loop). We surface
-    # when the window's requested splits exceed the buffer headroom — the
-    # overflow children are then DROPPED at the tail by split_anisotropic's
-    # capacity bounds-check (arbitrary GPU-thread order, NOT demoted). A splat
-    # explosion you want to SEE and respond to, not silently absorb.
-    # Reflection-free readback (.storage.to_numpy) so a mid-run shader hot-reload
-    # can't invalidate it.
-    pipeline.runtime.wait_for_idle()
-    children_sum = int(np.frombuffer(
-        b.densify_children_sum.storage.to_numpy().tobytes(), dtype=np.uint32)[0])
-    pre_count = int(np.frombuffer(
-        b.densify_pre_count.storage.to_numpy().tobytes(), dtype=np.uint32)[0])
+    # Keep the overflow warning with two scalar, reflection-free readbacks.
+    # Wait for this submit, not queue-wide idle (the viewer shares the device).
+    # Large eta readbacks and percentile reconstruction are opt-in below.
+    pipeline.runtime.wait_for_submit(pipeline.last_submit_id)
+    children_sum = int(b.densify_children_sum.storage.to_numpy().view(np.uint32)[0])
+    pre_count = int(b.densify_pre_count.storage.to_numpy().view(np.uint32)[0])
     headroom = max(pipeline.max_splats - pre_count, 0)
     overbudget = children_sum > headroom
     split_frac = (children_sum / pre_count) if pre_count > 0 else 0.0
@@ -384,10 +390,10 @@ def densify_structure_aware(pipeline: TrainingPipeline, cfg: StructureConfig) ->
               f"A single tick asking for this many splits usually means the split "
               f"gate is too loose — tune --sad-tau-split / --sad-max-split-factor "
               f"/ --max-splats.")
-        # Only when overbudget: read back the eta-gate buffers and reconstruct
-        # the shader's split gate on CPU to show WHICH term is saturating
-        # (eta too big? multiview gate meaningless on tiny n_total? grad gate
-        # not gating?). Heavy readback, but gated on the rare overbudget tick.
+    if overbudget and cfg.detailed_diagnostics:
+        # Full-capacity eta readbacks can move hundreds of MB over PCIe, then
+        # allocate more CPU arrays for percentiles. Never do this implicitly in
+        # a production densification tick; --densify-diag opts in explicitly.
         def _u32(buf):
             return np.frombuffer(buf.storage.to_numpy().tobytes(), dtype=np.uint32)[:pre_count]
         def _i64(buf):
@@ -418,8 +424,7 @@ def densify_structure_aware(pipeline: TrainingPipeline, cfg: StructureConfig) ->
                   f"(low n_total => multiview gate meaningless; high eta_max => "
                   f"splats too big / structure field too hot.)")
 
-    # Wait-free otherwise: return None counts. The caller reads
-    # num_gaussians_counter on its own cadence (log-every ticks).
+    # Population counts remain GPU-resident; only overflow telemetry was read.
     return {
         "pre_count": None,
         "post_split_count": None,
@@ -498,7 +503,8 @@ def morton_sort(pipeline: TrainingPipeline, world_min: np.ndarray,
             gaussians_out=arena.storage,
             max_splats=pipeline.max_splats,
         )
-        pipeline.copy_arena_back(arena, b.gaussians, b.gaussians.storage.size)
+        pipeline.copy_arena_back(arena, b.gaussians, b.gaussians.storage.size,
+                                 count_buf=b.scan_total)
 
         pipeline.dispatch(pipeline.k_morton_scatter_adam, "morton_scatter_adam",
             thread_count=[pipeline.max_splats, 1, 1],
@@ -508,7 +514,8 @@ def morton_sort(pipeline: TrainingPipeline, world_min: np.ndarray,
             adam_state_out=arena.storage,
             max_splats=pipeline.max_splats,
         )
-        pipeline.copy_arena_back(arena, b.adam_state, b.adam_state.storage.size)
+        pipeline.copy_arena_back(arena, b.adam_state, b.adam_state.storage.size,
+                                 count_buf=b.scan_total)
 
         if b.sh_enabled:
             pipeline.dispatch(pipeline.k_morton_scatter_features, "morton_scatter_features",
@@ -520,7 +527,8 @@ def morton_sort(pipeline: TrainingPipeline, world_min: np.ndarray,
                 rest_floats=b.sh.rest_floats,
                 max_splats=pipeline.max_splats,
             )
-            pipeline.copy_arena_back(arena, b.features_rest, b.features_rest.storage.size)
+            pipeline.copy_arena_back(arena, b.features_rest, b.features_rest.storage.size,
+                                     count_buf=b.scan_total)
 
             pipeline.dispatch(pipeline.k_morton_scatter_adam_rest, "morton_scatter_adam_rest",
                 thread_count=[pipeline.max_splats, 1, 1],
@@ -531,7 +539,8 @@ def morton_sort(pipeline: TrainingPipeline, world_min: np.ndarray,
                 rest_floats=b.sh.rest_floats,
                 max_splats=pipeline.max_splats,
             )
-            pipeline.copy_arena_back(arena, b.adam_rest_state, b.adam_rest_state.storage.size)
+            pipeline.copy_arena_back(arena, b.adam_rest_state, b.adam_rest_state.storage.size,
+                                     count_buf=b.scan_total, soa=True)
 
         # Eta keeps its dedicated scratch + pointer swap (small, 0.22 GB @10M).
         if carry_eta:

@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Tile-stratified spatiotemporal blue-noise (STBN) pixel-sampling masks.
 
 Builds the sampling mask for the opt-in sparse-supervision mode: each backward
@@ -404,6 +406,19 @@ def _scalar_volume(spec: StbnMaskSpec) -> np.ndarray:
         return rng.random((spec.slices, spec.height, spec.width))
     array = np.asarray(load_scalar_volume(spec), dtype=np.float64)
     return array[:spec.slices, :spec.height, :spec.width]
+
+
+def scalar_field(spec: StbnMaskSpec) -> np.ndarray:
+    """Public view of the scalar field a spec ranks — see :func:`_scalar_volume`.
+
+    Exists for the adaptive sampler, which needs the volume as a UNIFORM variable
+    rather than as a selected set: it thresholds the field against a per-pixel
+    probability instead of a global density, so it cannot go through
+    :func:`global_selected_mask`. Same volume, same crop, same white-noise
+    stream — sharing this function is what guarantees the two paths threshold the
+    identical field.
+    """
+    return _scalar_volume(spec)
 
 
 def global_selected_mask(spec: StbnMaskSpec) -> np.ndarray:

@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Experiment F — gradient-quality diagnostic on a REAL trained scene state.
 
 Asks one question: how close is the gradient a sparse mask produces to the one

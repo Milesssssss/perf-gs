@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Recompute held-out LPIPS from SAVED renders, without retraining anything.
 
 Why this exists: LPIPS was first computed with the AlexNet backbone, while 3DGS,

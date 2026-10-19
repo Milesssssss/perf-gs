@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Change locality ``L`` — does touching A force edits in B, C, D, and E?
 
 ``L`` blends two views of the same property:

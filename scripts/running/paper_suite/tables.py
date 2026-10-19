@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """CSV and Eurographics/booktabs LaTeX emission.
 
 Two rules run through this module.

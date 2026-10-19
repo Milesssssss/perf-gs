@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 // AccuTile (Speedy-Splat §4.1.2): exact tile intersection with the 2D
 // Gaussian ellipse. Refines SnugBox by iterating along the shorter side
 // of the snug bbox's tile-extent rectangle and emitting only the tiles

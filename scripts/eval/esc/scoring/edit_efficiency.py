@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Edit efficiency ``E`` — how cheaply successful changes are made.
 
     E = exp( -median_t [ w_tokens r_tokens + w_time r_time

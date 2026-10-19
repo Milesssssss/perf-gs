@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 // Per-frame clear kernels. Each resets one of the scratch/output
 // resources used by the tile-binned forward pipeline.
 

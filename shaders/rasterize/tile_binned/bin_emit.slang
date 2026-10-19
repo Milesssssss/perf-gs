@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 // Phase 2 of the uncapped binning pipeline: emit (key, value) pairs.
 //
 // For each live gaussian, re-run AccuTile and for every tile it touches

@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Turn setup/reconstruction output into a DETERMINATE progress fraction.
 
 Both operations are long (minutes to tens of minutes) and both are a fixed

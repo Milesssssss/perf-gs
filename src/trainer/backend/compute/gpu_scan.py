@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Reusable GPU exclusive-scan service.
 
 Owns scan kernels + scan scratch and records into the caller's active

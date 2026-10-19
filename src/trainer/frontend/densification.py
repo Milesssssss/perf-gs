@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Densification subsystem controller for the training loop.
 
 The v2 loop's ``if do_densify:`` block was ~200 lines of tightly-ordered GPU work
@@ -122,10 +124,10 @@ class DensificationController:
             )
         if pipeline.last_submit_id:
             queue_limiter.record(pipeline.last_submit_id)
-        pipeline.clear_tracking()
-
-        if mode == DensificationMode.STRUCTURE_AWARE and not sad_carry_eta:
-            pipeline.clear_structure_scores()
+        with pipeline.recording("densify_tracking"), pipeline.marker_group("densify_tracking"):
+            pipeline.clear_tracking()
+            if mode == DensificationMode.STRUCTURE_AWARE and not sad_carry_eta:
+                pipeline.clear_structure_scores()
 
         # Morton re-sort after every densify.
         pipeline.morton_sort(morton_world_min, morton_world_max,
@@ -135,6 +137,8 @@ class DensificationController:
 
         if ev.mip_after_densify:
             pipeline.compute_3d_filter()
+            if pipeline.last_submit_id:
+                queue_limiter.record(pipeline.last_submit_id)
 
         if stats.get("final_count") is not None:
             cur_n_gaussians = stats["final_count"]

@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Optional images -> COLMAP reconstruction, driven by the colmap/glomap binaries.
 
 Produces a ``sparse/0`` + ``images`` dataset that the existing loader

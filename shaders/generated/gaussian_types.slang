@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 // DO NOT EDIT. Generated from src/trainer/contracts.py.
 // Regenerate with:  python -m trainer.contracts
 // Validated not-stale by tests/test_contracts.py.

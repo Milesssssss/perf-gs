@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Code generation and host adapters for the host<->shader contract.
 
 The dependency-free semantic source of truth is :mod:`trainer.contract_schema`.
@@ -86,6 +88,8 @@ GENERATED_DISK_SLANG_PATH = "shaders/generated/disk_types.slang"
 GENERATED_SH_SLANG_PATH = "shaders/generated/sh_types.slang"
 
 _SLANG_BANNER = (
+    "// Copyright (c) 2026 Electronic Arts Inc. All rights reserved.\n"
+    "\n"
     "// DO NOT EDIT. Generated from src/trainer/contracts.py.\n"
     "// Regenerate with:  python -m trainer.contracts\n"
     "// Validated not-stale by tests/test_contracts.py.\n"

@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """The Adam parameter-update step, extracted from the render pipeline.
 
 ``adamStep`` (shaders/optimizers/adam.slang) consumes the gradient buffers the

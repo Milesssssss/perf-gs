@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """End-to-end test of the structure-aware densification path (SAD-GS).
 
 Two levels:
@@ -22,12 +24,16 @@ from trainer.backend.compute.device import create_device
 BACKENDS = ["vulkan", "d3d12"]
 
 
-def _setup(backend: str, max_splats: int = 256) -> TestPipeline:
+def _setup(backend: str, max_splats: int = 256, sh_degree: int = 0) -> TestPipeline:
+    from trainer.config.config import AppearanceConfig
+
     try:
         device = create_device(backend=backend)
     except Exception as exc:
         pytest.skip(f"backend {backend!r} unavailable: {exc}")
-    return TestPipeline(device=device, width=64, height=64, max_splats=max_splats)
+    return TestPipeline(device=device, width=64, height=64, max_splats=max_splats,
+                        max_sort_pairs=max(1024, max_splats * 16),
+                        appearance_config=AppearanceConfig(sh_degree=sh_degree))
 
 
 def _count(p: TestPipeline) -> int:
@@ -203,6 +209,137 @@ def test_split_factor_capped(backend: str) -> None:
     p.densify_structure_aware(cfg)
     # x: min(ceil(sqrt(100))=10, cap 3) = 3; y,z = 1 -> 3 children.
     assert _count(p) == 3
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+@pytest.mark.parametrize("sh_degree", [0, 3])
+def test_full_grid_parallel_children_and_fresh_moments(backend, sh_degree) -> None:
+    """512 children span several cooperative-lane iterations; all inherit SH."""
+    from trainer.backend.memory import buffer_io
+
+    p = _setup(backend, max_splats=600, sh_degree=sh_degree)
+    _one_gaussian(p, scale=0.3, opacity=0.7)
+    _set_eta(p, 0, n_total=10, n_high=10, eta_max=(64, 64, 64))
+    if sh_degree:
+        rest = np.arange(p.buffers.sh.rest_floats, dtype=np.float32)[None, :] * 0.01
+        p.set_features_rest(rest)
+        p.buffers.adam_rest_state.copy_from_numpy(
+            np.full(p.max_splats * p.buffers.sh.rest_floats * 2, 0x3F800000, np.uint32))
+    cfg = StructureConfig(ks_scale_power=1.2, opacity_cap=0)
+    stats = p.densify_structure_aware(cfg)
+    assert _count(p) == 512 and not stats["overbudget"]
+    g = _read_gaussians(p, 512)
+    expected_scale = np.log(0.3) - 1.2 * np.log(8)
+    np.testing.assert_allclose(g[:, 3:6], expected_scale, atol=1e-6)
+    assert np.unique(g[:, :3], axis=0).shape[0] == 512
+    np.testing.assert_allclose(g[:, :3].mean(axis=0), [0, 0, 3], atol=1e-6)
+    adam = p.buffers.adam_state.to_numpy().view(np.float32).reshape(p.max_splats, -1)
+    assert np.all(adam[:512] == 0)
+    if sh_degree:
+        packed = p.buffers.features_rest.to_numpy().view(np.uint32)
+        features = buffer_io.unpack_features_rest(
+            packed[:512 * p.buffers.sh.feat_uints], 512, p.buffers.sh.rest_floats)
+        np.testing.assert_array_equal(features, np.repeat(features[:1], 512, axis=0))
+        moments = p.buffers.adam_rest_state.to_numpy().view(np.uint32).reshape(-1, p.max_splats)
+        assert np.all(moments[:, :512] == 0)
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+@pytest.mark.parametrize("sh_degree", [0, 3])
+def test_overbudget_drops_children_without_implicit_percentiles(
+    backend, sh_degree, monkeypatch, capsys,
+) -> None:
+    p = _setup(backend, max_splats=7, sh_degree=sh_degree)
+    _one_gaussian(p, opacity=0.7)
+    _set_eta(p, 0, n_total=10, n_high=10, eta_max=(64, 64, 64))
+    monkeypatch.setattr(np, "percentile", lambda *a, **k: pytest.fail(
+        "production overflow must not run CPU percentile diagnostics"))
+    stats = p.densify_structure_aware(StructureConfig())
+    assert _count(p) == 7 and stats["overbudget"]
+    assert np.all(np.isfinite(_read_gaussians(p, 7)))
+    assert "overflow children DROPPED" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_clones_count_toward_requested_tail_growth(backend, capsys) -> None:
+    p = _setup(backend, max_splats=1)
+    _one_gaussian(p)
+    _set_eta(p, 0, n_total=10, n_high=10, eta_max=(4, 2, 0.05))
+    stats = p.densify_structure_aware(StructureConfig(dense_scale=0.2))
+    assert _count(p) == 1 and stats["overbudget"]
+    assert int(p.buffers.densify_children_sum.to_numpy()[0]) == 1
+    assert "requested 1 new children" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_candidate_compaction_partial_wave_and_reuse(backend) -> None:
+    """Repeated ticks consume a 257-parent list, including a partial final wave."""
+    n = 257
+    p = _setup(backend, max_splats=600)
+    p.set_primitive_from_numpy(
+        means=np.column_stack([np.arange(n) * 0.01, np.zeros(n), np.full(n, 3)]).astype(np.float32),
+        log_scales=np.log(np.full((n, 3), 0.1, np.float32)),
+        rot_quats=np.tile(np.array([1, 0, 0, 0], np.float32), (n, 1)),
+        opacities=np.full(n, 0.7, np.float32), color_logits=np.zeros((n, 3), np.float32))
+    b = p.buffers
+    total = np.zeros(p.max_splats, np.uint32)
+    total[:n] = 10
+    b.eta_n_total.copy_from_numpy(total)
+    b.eta_buffers["n_high"].copy_from_numpy(total)
+    b.eta_buffers["n_low"].copy_from_numpy(np.zeros_like(total))
+    for axis in ("max_x", "max_y", "max_z"):
+        b.eta_buffers[axis].copy_from_numpy(total * 65536)
+    b.visibility_count_accum.copy_from_numpy((total > 0).astype(np.uint32))
+    b.grad_mean_2d_mag_accum.copy_from_numpy((total > 0).astype(np.int64) * 65536)
+    p.densify_structure_aware(StructureConfig(dense_scale=0.2))
+    assert _count(p) == 514
+    assert int(b.densify_children_sum.to_numpy()[0]) == n
+    p.clear_structure_scores()
+    p.densify_structure_aware(StructureConfig(dense_scale=0.2))
+    assert _count(p) == 514
+    assert int(b.densify_children_sum.to_numpy()[0]) == 0
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_full_controller_tick_includes_mip_timing_and_queue(backend) -> None:
+    """Exercise scratch reuse -> Morton -> Mip on a real production tick."""
+    from types import SimpleNamespace
+
+    from trainer.config.config import IterationEvents
+    from trainer.config.config_types import DensificationMode
+    from trainer.frontend.densification import DensificationController
+    from trainer.frontend.profiling.mutation_timing import MutationTimingRecorder
+    from trainer.frontend.queue_limiter import QueueLimiter
+    from trainer.frontend.schedule import ExtinctionHardnessSchedule
+
+    p = _setup(backend, max_splats=600, sh_degree=3)
+    _one_gaussian(p, scale=0.3, opacity=0.7)
+    _set_eta(p, 0, n_total=10, n_high=10, eta_max=(64, 64, 64))
+    camera = simple_camera(width=64, height=64, eye=(0, 0, 0), target=(0, 0, 3))
+    p.set_mipsplatting_cameras([camera] * 3)
+    queue = QueueLimiter(p.runtime, max_depth=5)
+    controller = DensificationController(
+        pipeline=p, args=SimpleNamespace(reset_every=1200),
+        densify_mode=DensificationMode.STRUCTURE_AWARE, densify_cfg=DensifyConfig(),
+        structure_cfg=StructureConfig(opacity_cap=0), extent=1,
+        image_width=64, image_height=64,
+        morton_world_min=np.array([-2, -2, 0], np.float32),
+        morton_world_max=np.array([2, 2, 6], np.float32),
+        extinction_hardness_schedule=ExtinctionHardnessSchedule(1, 0), queue_limiter=queue)
+    events = IterationEvents(
+        iteration=500, densify=True, structure=True, opacity_reset=False,
+        preview=False, render_all=False, log=False, eval=False, psnr_curve=False,
+        morton=False, mip_after_densify=True, mip_periodic=False)
+    timing = MutationTimingRecorder(enabled=True)
+    with timing.measure(500, p, "structure"):
+        outcome = controller.run(500, events, 1)
+    assert outcome.kind == "structure" and _count(p) == 512
+    assert queue.depth == 3  # densification, Morton, and the expensive Mip submit.
+    filters = p.buffers.filter_3D.to_numpy()
+    assert np.all(filters[:512] > 0) and np.all(filters[512:] == 0)
+    markers = timing.samples[0]["markers_ms"]
+    assert {"densify_structure", "densify_tracking", "morton_sort", "mip_filter"} <= markers.keys()
+    assert p._step_timer is None
 
 
 def _quat_to_matrix(q: np.ndarray) -> np.ndarray:

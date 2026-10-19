@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 // Gaussian conformance to the core IBlendablePrimitive contract.
 //
 // The compact per-pixel blend record — screen-space mean, packed 2D covariance,

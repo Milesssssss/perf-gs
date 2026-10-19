@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Dependency-free semantic schema for host<->shader contracts.
 
 This module is the authoritative model. It deliberately imports no NumPy,

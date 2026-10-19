@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """GPU submit-queue backpressure.
 
 Bounds how far the CPU runs ahead of the GPU: keep a rolling window of the last

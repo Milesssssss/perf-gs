@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 # Timing + test-PSNR of the RESTORED flat-CSV runtime state (fat forwardRasterize,
 # commit 68a5d7f, blend/warp WIP stashed). Default CLI = flat backward on, warp
 # off — matches the `flat` column of timing_flat_vs_baseline.csv. Run dirs:

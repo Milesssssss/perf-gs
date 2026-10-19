@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Shared repository scanning.
 
 A tiny, dependency-free file enumerator used by the static-quality and locality

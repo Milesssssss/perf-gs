@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Figure helpers: one consistent style, PDF for the paper and PNG for review.
 
 Every figure is saved twice — vector PDF (what goes in the paper) and a

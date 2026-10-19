@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """The coding-agent boundary.
 
 Everything the harness needs from an agent is expressed here as small request/

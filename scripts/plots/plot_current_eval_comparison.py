@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Plot the current nine-scene timing and PSNR regression evaluation.
 
 Reads ``outputs/current_eval_20260723_vs_baseline.csv`` and writes the matching

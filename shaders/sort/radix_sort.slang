@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 // Block-local stable radix sort on 64-bit keys with paired uint32 values.
 // Keys split into (keys_lo, keys_hi) to avoid relying on native uint64
 // (Slang lacks portable uint64 atomics / arithmetic).

@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 // Backward rasterizer — tile-cooperative reduction + single projection backward.
 //
 // Per gaussian per tile: all 256 threads compute the cheap eval backward

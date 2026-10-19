@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 #ifndef TRAINER_DISK_PARAMETERS_SLANG
 #define TRAINER_DISK_PARAMETERS_SLANG
 

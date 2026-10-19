@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Contract test: TrainingSchedule reproduces the frozen inline loop logic.
 
 Slice 3 extracts the v2 loop's inline per-iteration timing into

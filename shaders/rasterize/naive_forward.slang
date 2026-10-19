@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 // Naive one-thread-per-pixel forward rasterizer used for M1 + M2.
 //
 // For each pixel: loop over every active gaussian, project it, evaluate its

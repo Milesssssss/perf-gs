@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """The application's state machine — what the UI is a view OF.
 
 The panel used to read one ``phase`` string plus a handful of loose booleans, so

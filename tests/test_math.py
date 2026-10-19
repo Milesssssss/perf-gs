@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Unit tests for Slang math utilities via SlangPy's functional API.
 
 These lock in correctness of ``sigmoid``, ``matrixFromQuaternion``,

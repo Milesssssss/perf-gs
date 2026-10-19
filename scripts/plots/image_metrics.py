@@ -1,3 +1,9 @@
+# EA-authored evaluation and reporting wrappers only:
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+# Vendored metric functions: Copyright (C) 2023, Inria / GRAPHDECO.
+# SSIM origin identified by INRIA: Copyright Evan Su, 2017 (MIT).
+# Third-party portions retain their own terms; see NOTICE.md and licenses/.
+
 """Image quality metrics (PSNR, SSIM) + a run evaluator.
 
 The `psnr` and `ssim` functions below are VENDORED VERBATIM from the INRIA

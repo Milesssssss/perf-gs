@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """STBN sparse-supervision PAPER SUITE: train the grid, then produce every table,
 figure and number the study needs, resumably and unattended.
 

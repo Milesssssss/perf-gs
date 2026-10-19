@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 // Phase C of densification: build a valid-mask over the POST-split gaussian
 // range (i.e. including children appended in Phase B).
 //

@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Download the Tanks & Temples and Deep Blending COLMAP datasets into datasets/.
 
 Source: the pre-processed COLMAP datasets hosted by the INRIA 3D Gaussian

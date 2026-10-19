@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """The training knobs the CLI and the hub panel BOTH expose - declared once.
 
 A :class:`Setting` is one knob, stated in full exactly once: how argparse should

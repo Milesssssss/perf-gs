@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 // Minimal per-element function used by the platform smoke test.
 // Dispatched via SlangPy's functional API, which vectorizes across the
 // shape of the tensor passed from Python. Proves: device + module load +

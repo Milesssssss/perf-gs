@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """``--evaluation`` / the panel's "eval + final metrics": one veto, three passes.
 
 The expensive thing a run does besides training is render the WHOLE camera set —

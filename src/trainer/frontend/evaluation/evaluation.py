@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Evaluation renders and metrics for the training frontend.
 
 Groups the "measure the model" responsibility into one place: full-scene camera

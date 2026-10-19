@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Experiment E — what the three masks actually are, measured without training.
 
 This characterizes the sampling patterns themselves at rho = 0.25, so the training

@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Characterization test: freeze the training-loop event schedule + split.
 
 The v2 loop decides per-iteration events (densify / opacity-reset / structure /

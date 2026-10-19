@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 // Per-iter densification tracking fold (int64 fixed-point).
 
 #include "../common/types.slang"

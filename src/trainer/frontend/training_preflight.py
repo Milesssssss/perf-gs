@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Setup-phase (pre-training) derivations for the training frontend.
 
 Pure, GPU-free helpers lifted out of ``app.main()`` so the setup reads as a
@@ -103,6 +105,7 @@ def build_densify_configs(
         opacity_cap=args.sad_opacity_cap,
         # clone (small) vs split (large) threshold = SADGS args.dense * extent.
         dense_scale=args.grow_scale3d * extent,
+        detailed_diagnostics=bool(getattr(args, "densify_diag", False)),
     )
     return cfg, structure_cfg
 

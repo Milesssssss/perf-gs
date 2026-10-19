@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 #ifndef TRAINER_GAUSSIAN_CHANNELS_SLANG
 #define TRAINER_GAUSSIAN_CHANNELS_SLANG
 

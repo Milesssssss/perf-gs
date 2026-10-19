@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Headless Graphics Capture that AUTO-SAVES an .ngfx-capture to disk.
 
 Why this exists (vs. capture_gpu_trace.py)

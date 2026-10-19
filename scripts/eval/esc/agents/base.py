@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Agent request/result value objects and the :class:`AgentRunner` protocol."""
 
 from __future__ import annotations

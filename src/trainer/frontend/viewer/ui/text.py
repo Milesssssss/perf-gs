@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Text metrics for the panel font: measure, wrap, elide.
 
 ``slangpy.ui.Text`` renders with ``ImGui::TextUnformatted`` and sgl exposes

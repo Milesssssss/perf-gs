@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Experiment B — the pixel-budget sweep.
 
 Seed 42, rho in {0.10, 0.25, 0.50}, the three sparse regimes, all 13 scenes. The

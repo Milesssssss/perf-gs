@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Densification diagnostics for the SAD-GS path.
 
 A single entry point, :func:`capture_densify_tick`, reads back the GPU state

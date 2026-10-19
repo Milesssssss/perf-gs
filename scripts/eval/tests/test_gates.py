@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Hard behavioural gates."""
 
 from __future__ import annotations

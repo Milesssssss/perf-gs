@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """CPU unit test for ``Pipeline._recording`` exception safety.
 
 The recording scope must clear the active command batch in a ``finally`` so a

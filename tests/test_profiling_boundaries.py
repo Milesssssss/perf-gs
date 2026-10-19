@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Profiling frame boundaries must align with completed GPU iterations."""
 
 from __future__ import annotations

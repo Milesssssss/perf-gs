@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Finite-difference validation + behavioral check of the HARDENED extinction
 compositor.
 

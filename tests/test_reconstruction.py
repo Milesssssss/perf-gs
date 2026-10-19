@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """The reconstruction subsystem: tool resolution, install safety, the pipeline.
 
 Nothing here downloads anything or needs colmap installed — the binaries are

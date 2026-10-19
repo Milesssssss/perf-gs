@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Train every Mip-NeRF 360 scene at SH degree 0 and 3, collect PSNR + wall time.
 
 Runs the standard eval config (quarter res, 3000 iters, structure-aware densify,

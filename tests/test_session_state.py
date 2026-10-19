@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """The application state machine: three lifecycles, one derived UI contract.
 
 These are the spec's acceptance tests expressed against state rather than pixels —

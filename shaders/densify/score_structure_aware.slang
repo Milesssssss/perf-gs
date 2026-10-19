@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 #include "../common/types.slang"
 #include "../common/math.slang"
 #include "../primitives/gaussian/project.slang"

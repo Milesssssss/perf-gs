@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """``python -m trainer.contracts`` entry point.
 
 The contract codegen lives in :mod:`trainer.contracts.codegen`; this keeps the

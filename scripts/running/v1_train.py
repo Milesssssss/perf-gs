@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """v1.1 training entry.
 
 Overfit all 20 Suzanne views at half-res. No densification, no pruning,

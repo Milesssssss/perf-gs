@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 // Shared type definitions for the v0 forward-only pipeline.
 // Kept intentionally minimal: no Adam state, no gradients, no SH.
 

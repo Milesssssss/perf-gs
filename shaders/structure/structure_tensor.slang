@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 static const float ST_EPS = 1e-8;   // structure_analysis.EPS
 
 [shader("compute")]

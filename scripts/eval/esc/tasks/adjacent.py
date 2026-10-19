@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Adjacent change families that stress different extension points.
 
 The anchor family covers the field/optimizer seam; these widen the probe so a

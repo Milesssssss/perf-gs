@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 // Differentiable math utilities shared by the gaussian primitive.
 // Kept lean in v0: only what the forward pass actually calls.
 

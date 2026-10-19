@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Testability and regression safety ``T``.
 
 Combines regression-detecting power (mutation score, seeded-fault detection)

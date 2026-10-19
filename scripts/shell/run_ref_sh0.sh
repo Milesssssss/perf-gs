@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 # Launch the ACTUAL SADGS reference trainer on bicycle at OUR config
 # (images_4 / downsample-4, 3000 iters) with a faithful SH0 color model.
 # Produces the missing it3000 test PSNR + full per-densification-event

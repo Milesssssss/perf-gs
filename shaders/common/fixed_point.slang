@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 #ifndef TRAINER_FIXED_POINT_SLANG
 #define TRAINER_FIXED_POINT_SLANG
 

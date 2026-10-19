@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """GPU-timestamp per-marker timing for one recorded train_step.
 
 A :class:`StepTimer` owns a Vulkan/D3D12 timestamp query pool and turns the

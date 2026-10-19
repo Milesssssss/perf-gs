@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Executable architecture boundaries introduced by the refactor."""
 
 from __future__ import annotations

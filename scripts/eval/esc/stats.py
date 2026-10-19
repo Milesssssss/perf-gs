@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Paired statistics for the champion/candidate decision.
 
 The loop must decide whether a candidate is *meaningfully* better than the

@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Viewer UI logic: docking/resize math, text fitting, log tail, state policy.
 
 Everything here is deliberately DEVICE-FREE — the parts of the UI that used to be

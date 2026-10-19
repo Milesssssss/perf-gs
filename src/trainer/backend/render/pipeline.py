@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 from __future__ import annotations
 
 import contextlib
@@ -18,6 +20,7 @@ from trainer.backend.memory.buffers import (
 )
 from trainer.config.config import (
     AdamLRs,
+    AdaptiveStbnConfig,
     AppearanceConfig,
     CompositorConfig,
     LossConfig,
@@ -35,6 +38,8 @@ from trainer.backend.compute.device import SHADERS_DIR
 from trainer.backend.compute.gpu import CommandBatch, GpuRuntime
 from trainer.backend.compute.gpu_scan import GpuScan, ScanKernels
 from trainer.backend.render import stbn as _stbn
+from trainer.backend.render import adaptive_stbn as _adaptive
+from trainer.backend.render.adaptive_sampler import AdaptiveSampler
 from trainer.backend.render.kernels import load_kernels
 from trainer.backend.render.losses import ImageLoss
 from trainer.backend.optimize.adam import AdamOptimizer
@@ -101,6 +106,7 @@ class TrainingPipeline:
         regularization_config: RegularizationConfig | None = None,
         appearance_config: AppearanceConfig | None = None,
         stbn_config: StbnConfig | None = None,
+        adaptive_config: AdaptiveStbnConfig | None = None,
         viewer_only: bool = False,
         initial_state: dict | None = None,
         use_persplat_backward: bool = True,
@@ -138,6 +144,10 @@ class TrainingPipeline:
         # the kernels declare the parameter unconditionally.
         self.stbn_config = stbn_config or StbnConfig()
         self._stbn = self._create_stbn_mask()
+        # Importance-guided sampling replaces the static table with one rebuilt
+        # every iteration; constructed after the kernels below (it needs them).
+        self.adaptive_config = adaptive_config or AdaptiveStbnConfig()
+        self._adaptive: AdaptiveSampler | None = None
 
         load_kernels(device, self, viewer_only=viewer_only)
 
@@ -265,6 +275,7 @@ class TrainingPipeline:
         self._mip_filter_coef: float = 0.0
 
         self._step_timer = None
+        self._adaptive = self._create_adaptive_sampler()
 
         if initial_state is not None:
             self._load_snapshot(**initial_state)
@@ -311,10 +322,50 @@ class TrainingPipeline:
               f"{' (compacted backward)' if config.backward_compacted else ''}")
         return mask
 
+    def _create_adaptive_sampler(self) -> "AdaptiveSampler | None":
+        """The per-iteration adaptive mask builder, or None for every other run.
+
+        Requires the compacted backward: with ``backward_compacted`` off the
+        backward walks all TILE_AREA pixels and never reads the table, which is
+        fine for the uniform path (the loss already zeroed the rest) and fine for
+        the adaptive path's CORRECTNESS too — but the hub cannot inject the define,
+        so refusing here rather than silently is what keeps "adaptive" from
+        meaning two different things.
+        """
+        config = self.adaptive_config
+        if self.viewer_only or not config.enabled:
+            return None
+        if not self.stbn_config.enabled:
+            raise ValueError(
+                "adaptive sampling needs a sparse budget: --stbn-pixel-fraction "
+                "< 1.")
+        spec = _adaptive.AdaptiveSpec(
+            fraction=float(self.stbn_config.pixel_fraction),
+            alpha=float(config.alpha), sigma=float(config.sigma),
+            downsample=int(config.downsample), uniform=str(config.uniform),
+            unbiased=bool(config.unbiased),
+            source=self.stbn_config.source, file_path=self.stbn_config.file_path,
+            seed=int(self.stbn_config.seed))
+        return AdaptiveSampler(
+            device=self.device, width=self.width, height=self.height, spec=spec,
+            kernels=self, cache_dir=_stbn.default_cache_dir() / "cache")
+
+    @property
+    def adaptive_sampler(self) -> "AdaptiveSampler | None":
+        """The adaptive sampler, for diagnostics and the run report."""
+        return self._adaptive
+
     @property
     def stbn_slices(self) -> int:
         """Temporal period of the mask — the frontend wraps its per-camera visit
-        counters against this."""
+        counters against this.
+
+        The adaptive path answers with its U VOLUME's period, not with 1: its
+        per-iteration table has a single slice, but the temporal axis the visit
+        counter is supposed to walk lives in the uniform field, exactly as before.
+        """
+        if self._adaptive is not None:
+            return self._adaptive.slices
         return self._stbn.slices
 
     def _stbn_kwargs(self, contextual: IterationContextualVariables) -> dict:
@@ -327,11 +378,16 @@ class TrainingPipeline:
         variables = contextual.contextual_stbn if contextual is not None else None
         if variables is None or variables.pixels_per_tile <= 0:
             return self._stbn.shader_kwargs(0, TILE_AREA)
+        budget = min(int(variables.pixels_per_tile), TILE_AREA)
+        if self._adaptive is not None:
+            # Point the backward at THIS iteration's screen-sized table. Same four
+            # parameters, same packed layout, same per-tile-count-from-the-table
+            # contract the global threshold already needed — so the backward is
+            # unaware the marginal became nonuniform.
+            return self._adaptive.shader_kwargs(budget)
         # The shaders stage a full tile and clamp to it, so any budget in
         # [1, TILE_AREA] is representable; nothing here can overrun the staging.
-        return self._stbn.shader_kwargs(
-            variables.slice_index,
-            min(int(variables.pixels_per_tile), TILE_AREA))
+        return self._stbn.shader_kwargs(variables.slice_index, budget)
 
     def on_hot_reload(self) -> None:
         """Refresh reflection-dependent objects after device.reload_all_programs().
@@ -388,14 +444,33 @@ class TrainingPipeline:
             transient.dispatch_indirect(kernel, marker, args_buf, offset, **kwargs)
             self.last_submit_id = self.runtime.submit(transient).submit_id
 
-    def copy_arena_back(self, arena, dst: spy.NDBuffer, nbytes: int) -> None:
-        """Record an arena->live buffer byte copy into the active batch (commits
-        one resource's compaction/re-sort; see ScratchArena.copy_back). Must be
-        called with a batch active (inside a recording), which the densify /
-        morton paths always are; sgl auto-synchronizes the preceding scatter
-        write and the subsequent arena reuse."""
+    def copy_arena_back(self, arena, dst: spy.NDBuffer, nbytes: int, *,
+                        count_buf: spy.NDBuffer | None = None,
+                        soa: bool = False) -> None:
+        """Commit an arena scatter in the active batch.
+
+        With a GPU count, copy only live records, preserving the capacity stride
+        for SoA resources. Without one, retain the explicit byte-copy contract.
+        Neither path needs a host count or an additional scratch allocation.
+        """
         assert self._batch is not None, "copy_arena_back requires an active batch"
-        arena.copy_back(self._batch.encoder, dst, nbytes)
+        if count_buf is None:
+            arena.copy_back(self._batch.encoder, dst, nbytes)
+            return
+        assert nbytes <= arena.capacity_bytes, "scratch arena too small"
+        record_bytes, remainder = divmod(nbytes, self.max_splats)
+        if remainder or record_bytes % 4:
+            raise ValueError("active copy requires whole uint-sized records")
+        with self.marker_group("arena_copy_back"):
+            self.dispatch(self.k_active_copy_prepare_args, "active_copy_prepare_args",
+                thread_count=[1, 1, 1], count_buf=count_buf.storage,
+                dispatch_args=arena.copy_dispatch_args.storage,
+                record_words=record_bytes // 4, max_splats=self.max_splats)
+            self.dispatch_indirect(self.k_copy_active_records, "copy_active_records",
+                arena.copy_dispatch_args, source=arena.storage,
+                destination=dst.storage, count_buf=count_buf.storage,
+                record_words=record_bytes // 4, soa=int(soa),
+                max_splats=self.max_splats)
 
     @contextlib.contextmanager
     def _marker_group(self, label: str):
@@ -934,6 +1009,35 @@ class TrainingPipeline:
             )
 
     def _run_loss(self, contextual: IterationContextualVariables) -> None:
+        variables = (contextual.contextual_stbn
+                     if contextual is not None else None)
+        if self._adaptive is not None and variables is not None \
+                and variables.pixels_per_tile > 0:
+            # ADAPTIVE PATH. The loss runs DENSE — the mask parameters resolve to
+            # the full budget, which is the pre-existing unmasked code path byte
+            # for byte — so dL_dC comes out holding h_i for every pixel. That is
+            # what makes the exact screen-space gradient available to the
+            # importance map before the expensive Gaussian backward is dispatched,
+            # and it is why no error-magnitude fallback is needed.
+            #
+            # The extra cost is real and reported: the image-space pass now
+            # evaluates the photometric gradient for all N pixels instead of rho N
+            # of them. It is image-space work, not rasterizer work, which is why
+            # the primary performance metric stays the backward raster time.
+            self.image_loss.record(
+                self._batch,
+                rendered=self.buffers.output_image,
+                target=self._active_target,
+                stbn_kwargs=self._stbn.shader_kwargs(0, TILE_AREA),
+            )
+            self._adaptive.record(
+                self,
+                image_gradient=self.buffers.dL_dC_texture,
+                slice_index=int(variables.slice_index),
+                sample_seed=int(variables.sample_seed),
+                iteration=int(self.iteration),
+            )
+            return
         self.image_loss.record(
             self._batch,
             rendered=self.buffers.output_image,
@@ -1253,21 +1357,26 @@ class TrainingPipeline:
             raise RuntimeError(
                 "compute_3d_filter() requires set_mipsplatting_cameras(...) to be called first")
         b = self.buffers
-        # One threadgroup of 32 threads per gaussian (must match
-        # THREADS_PER_SPLAT in shaders/mip/compute_3d_filter.slang). slangpy
-        # divides the total thread_count by the shader's numthreads, so
-        # max_splats*32 total threads => max_splats groups (one per gaussian).
-        MIP_THREADS_PER_SPLAT = 32
-        self._dispatch(self.k_compute_3d_filter, "compute_3d_filter",
-            thread_count=[self.max_splats * MIP_THREADS_PER_SPLAT, 1, 1],
-            gaussians=b.gaussians.storage,
-            num_gaussians_counter=b.num_gaussians_counter.storage,
-            cameras=self._mip_cameras_buffer,
-            filter_3D=b.filter_3D.storage,
-            num_cameras=self._mip_num_cameras,
-            filter_coef=self._mip_filter_coef,
-            max_splats=self.max_splats,
-        )
+        with self.recording("mip_filter"), self.marker_group("mip_filter"):
+            self.dispatch(self.k_mip_filter_prepare_args, "mip_filter_prepare_args",
+                thread_count=[1, 1, 1],
+                num_gaussians_counter=b.num_gaussians_counter.storage,
+                dispatch_args=b.mip_filter_dispatch_args.storage,
+                previous_count=b.mip_filter_previous_count.storage,
+                max_splats=self.max_splats)
+            self.dispatch_indirect(self.k_mip_filter_clear_tail, "mip_filter_clear",
+                b.mip_filter_dispatch_args, offset=3 * 4,
+                previous_count=b.mip_filter_previous_count.storage,
+                filter_3D=b.filter_3D.storage)
+            self.dispatch_indirect(self.k_compute_3d_filter, "compute_3d_filter",
+                b.mip_filter_dispatch_args,
+                gaussians=b.gaussians.storage,
+                num_gaussians_counter=b.num_gaussians_counter.storage,
+                cameras=self._mip_cameras_buffer,
+                filter_3D=b.filter_3D.storage,
+                num_cameras=self._mip_num_cameras,
+                filter_coef=self._mip_filter_coef,
+                max_splats=self.max_splats)
         # No wait_for_idle: filter_3D is a GPU buffer consumed by the next forward
         # (bin_count / project); nothing reads it back to CPU here. Draining the
         # whole queue on every call cost ~650ms in-loop (kernel itself is ~59ms) —

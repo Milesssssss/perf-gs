@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Experiment C — convergence: quality against ITERATIONS and against TIME.
 
 The seed-42 rho=0.25 cells are evaluated on the held-out split at 250, 500, 750,

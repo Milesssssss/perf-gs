@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 // Complete second-primitive proof: shared forward blend, autodiff backward,
 // and generic Adam update. Deliberately imports no Gaussian file or type.
 

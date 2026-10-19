@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Pytest path setup for the ESC harness self-tests.
 
 Adds ``scripts/eval`` to ``sys.path`` so ``import esc`` resolves. Kept separate

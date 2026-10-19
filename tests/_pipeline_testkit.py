@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Test-only Pipeline subclass.
 
 These helpers exist purely to drive tests/probes — they split the fused

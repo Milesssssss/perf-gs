@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Deterministic per-phase (fwd/bwd/adam) GPU-ms benchmark at a pinned iter.
 
 Reproduces the "Nsight GPU Trace capture @ iter 1560" launch config's workload

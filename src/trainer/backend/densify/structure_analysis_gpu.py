@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """GPU port of the multi-scale structure-tensor field (structure_analysis.py).
 
 The CPU reference (:func:`trainer.structure_analysis.compute_structure_tensor_field`)

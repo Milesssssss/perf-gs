@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Diagnostic dashboard rendering.
 
 ESC is one scalar, but the design insists the subscore dashboard is never

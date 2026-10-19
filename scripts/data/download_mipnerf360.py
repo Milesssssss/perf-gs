@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Download the Mip-NeRF 360 dataset into the repo's ``datasets/`` folder.
 
 Source: https://jonbarron.info/mipnerf360/ (Barron et al., Mip-NeRF 360). The

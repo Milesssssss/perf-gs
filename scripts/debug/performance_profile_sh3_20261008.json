@@ -1,0 +1,350 @@
+{
+  "scenario": "SH3",
+  "capacity": 3000000,
+  "live": 1644309,
+  "resolution": [
+    1237,
+    822
+  ],
+  "cameras": 194,
+  "pixel_fraction": 0.1,
+  "step": 1560,
+  "sample_camera": 66,
+  "setup_s": 6.307988200103864,
+  "advance_s": 11.662992000114173,
+  "tracing": false,
+  "before_gpu": {
+    "devices": [
+      {
+        "memory.total": "16376",
+        "memory.used": "6910",
+        "utilization.gpu": "2",
+        "clocks.current.graphics": "210",
+        "clocks.current.memory": "405"
+      }
+    ]
+  },
+  "loaded_gpu": {
+    "devices": [
+      {
+        "memory.total": "16376",
+        "memory.used": "12852",
+        "utilization.gpu": "90",
+        "clocks.current.graphics": "2760",
+        "clocks.current.memory": "11201"
+      }
+    ]
+  },
+  "host_record_median_ms": 2.850449993275106,
+  "host_complete_median_ms": 10.756999952718616,
+  "markers_median_ms": {
+    "forward": 3.361344337463379,
+    "adam": 1.8442869186401367,
+    "backward": 1.5463829040527344,
+    "adam_rest": 1.2379884719848633,
+    "radix_sort": 1.149892807006836,
+    "rasterize_backward": 0.9326934814453125,
+    "loss": 0.7536411285400391,
+    "rasterize": 0.7138252258300781,
+    "kernel_forward": 0.7116794586181641,
+    "sh_forward": 0.6088018417358398,
+    "kernel_sh_forward": 0.6072521209716797,
+    "adam_main": 0.5970001220703125,
+    "kernel_ssim_maps": 0.43511390686035156,
+    "sh_backward": 0.38504600524902344,
+    "kernel_sh_backward": 0.3829002380371094,
+    "bin_emit": 0.3496408462524414,
+    "kernel_bin_emit": 0.34558773040771484,
+    "kernel_ssim_grad": 0.3154277801513672,
+    "cluster_cull": 0.2079010009765625,
+    "clear_grads": 0.20122528076171875,
+    "kernel_build_cluster_aabb": 0.1995563507080078,
+    "kernel_grad_clear": 0.19550323486328125,
+    "projection_backward": 0.17404556274414062,
+    "kernel_projection_backward": 0.17213821411132812,
+    "pass_0": 0.15687942504882812,
+    "pass_4": 0.14853477478027344,
+    "pass_2": 0.14328956604003906,
+    "pass_1": 0.14328956604003906,
+    "pass_7": 0.13935565948486328,
+    "pass_5": 0.13494491577148438,
+    "pass_3": 0.13363361358642578,
+    "structure_accum": 0.1291036605834961,
+    "kernel_score_structure_aware": 0.1270771026611328,
+    "pass_6": 0.1270771026611328,
+    "scan_tile_offsets": 0.125885009765625,
+    "kernel_scan_block": 0.09942054748535156,
+    "kernel_radix_scan": 0.09870529174804688,
+    "bin_count": 0.09417533874511719,
+    "accumulate_iter": 0.09322166442871094,
+    "kernel_bin_count": 0.09202957153320312,
+    "kernel_accumulate_iter": 0.09107589721679688,
+    "live_bucket_compaction": 0.04601478576660156,
+    "identify_tile_ranges": 0.036716461181640625,
+    "kernel_identify_tile_ranges": 0.034809112548828125,
+    "clear": 0.033855438232421875,
+    "kernel_add_block_offsets": 0.03266334533691406,
+    "bucket_scan": 0.026702880859375,
+    "kernel_clear_textures": 0.026464462280273438,
+    "kernel_scan_block_sums": 0.015616416931152344,
+    "kernel_tile_max_processed": 0.01239776611328125,
+    "kernel_scatter_live_buckets": 0.007152557373046875,
+    "kernel_cull_clusters_frustum": 0.0059604644775390625,
+    "kernel_bucket_count": 0.0050067901611328125,
+    "kernel_clear_tile_ranges": 0.0050067901611328125,
+    "kernel_radix_init_global_hist": 0.0040531158447265625,
+    "kernel_radix_prepare_dispatch": 0.0040531158447265625,
+    "kernel_bucket_prepare_dispatch": 0.0040531158447265625,
+    "kernel_adam_prepare_args": 0.0040531158447265625,
+    "regularization": 0.00095367431640625
+  },
+  "profile_steps": 64,
+  "cpu_profile": [
+    {
+      "file": "gpu.py",
+      "line": 133,
+      "function": "wait_for_submit",
+      "calls": 16,
+      "self_ms_per_step": 5.8648453125,
+      "cum_ms_per_step": 5.864976562500001
+    },
+    {
+      "file": "pipeline.py",
+      "line": 1274,
+      "function": "train_step",
+      "calls": 64,
+      "self_ms_per_step": 0.020635937500000003,
+      "cum_ms_per_step": 2.8696765625000005
+    },
+    {
+      "file": "pipeline.py",
+      "line": 806,
+      "function": "_run_forward",
+      "calls": 64,
+      "self_ms_per_step": 0.0608203125,
+      "cum_ms_per_step": 1.5459296875
+    },
+    {
+      "file": "gpu.py",
+      "line": 61,
+      "function": "dispatch",
+      "calls": 3008,
+      "self_ms_per_step": 0.9510375,
+      "cum_ms_per_step": 0.9510375
+    },
+    {
+      "file": "pipeline.py",
+      "line": 420,
+      "function": "_dispatch",
+      "calls": 2176,
+      "self_ms_per_step": 0.054660937500000006,
+      "cum_ms_per_step": 0.7897296875
+    },
+    {
+      "file": "pipeline.py",
+      "line": 729,
+      "function": "_radix_sort_pairs",
+      "calls": 64,
+      "self_ms_per_step": 0.0857984375,
+      "cum_ms_per_step": 0.7889015625000001
+    },
+    {
+      "file": "pipeline.py",
+      "line": 431,
+      "function": "_dispatch_indirect",
+      "calls": 1216,
+      "self_ms_per_step": 0.04384375000000001,
+      "cum_ms_per_step": 0.6417171875
+    },
+    {
+      "file": "gpu.py",
+      "line": 66,
+      "function": "dispatch_indirect",
+      "calls": 1216,
+      "self_ms_per_step": 0.5978734375000001,
+      "cum_ms_per_step": 0.5978734375000001
+    },
+    {
+      "file": "~",
+      "line": 0,
+      "function": "<built-in method builtins.next>",
+      "calls": 8576,
+      "self_ms_per_step": 0.048765625,
+      "cum_ms_per_step": 0.5569890625
+    },
+    {
+      "file": "pipeline.py",
+      "line": 1046,
+      "function": "_run_backward",
+      "calls": 64,
+      "self_ms_per_step": 0.059065625000000004,
+      "cum_ms_per_step": 0.5452656250000001
+    },
+    {
+      "file": "contextlib.py",
+      "line": 141,
+      "function": "__exit__",
+      "calls": 4288,
+      "self_ms_per_step": 0.0504078125,
+      "cum_ms_per_step": 0.39523906250000007
+    },
+    {
+      "file": "pipeline.py",
+      "line": 530,
+      "function": "_recording",
+      "calls": 128,
+      "self_ms_per_step": 0.006271875,
+      "cum_ms_per_step": 0.2944890625
+    },
+    {
+      "file": "gpu.py",
+      "line": 118,
+      "function": "submit",
+      "calls": 64,
+      "self_ms_per_step": 0.0464984375,
+      "cum_ms_per_step": 0.274165625
+    },
+    {
+      "file": "pipeline.py",
+      "line": 473,
+      "function": "_marker_group",
+      "calls": 4096,
+      "self_ms_per_step": 0.05505,
+      "cum_ms_per_step": 0.2297984375
+    },
+    {
+      "file": "gpu.py",
+      "line": 93,
+      "function": "finish",
+      "calls": 64,
+      "self_ms_per_step": 0.2262484375,
+      "cum_ms_per_step": 0.2262484375
+    },
+    {
+      "file": "pipeline.py",
+      "line": 1398,
+      "function": "_scan",
+      "calls": 192,
+      "self_ms_per_step": 0.0032953125,
+      "cum_ms_per_step": 0.208253125
+    },
+    {
+      "file": "gpu_scan.py",
+      "line": 49,
+      "function": "scan",
+      "calls": 192,
+      "self_ms_per_step": 0.0241796875,
+      "cum_ms_per_step": 0.2049578125
+    },
+    {
+      "file": "contextlib.py",
+      "line": 132,
+      "function": "__enter__",
+      "calls": 4288,
+      "self_ms_per_step": 0.028543750000000003,
+      "cum_ms_per_step": 0.2021140625
+    },
+    {
+      "file": "gpu_scan.py",
+      "line": 40,
+      "function": "_dispatch",
+      "calls": 704,
+      "self_ms_per_step": 0.017845312500000002,
+      "cum_ms_per_step": 0.179075
+    },
+    {
+      "file": "adam.py",
+      "line": 55,
+      "function": "step",
+      "calls": 64,
+      "self_ms_per_step": 0.0241375,
+      "cum_ms_per_step": 0.17196093750000002
+    },
+    {
+      "file": "pipeline.py",
+      "line": 716,
+      "function": "_upload_camera",
+      "calls": 64,
+      "self_ms_per_step": 0.14096250000000002,
+      "cum_ms_per_step": 0.1552640625
+    },
+    {
+      "file": "contextlib.py",
+      "line": 299,
+      "function": "helper",
+      "calls": 4288,
+      "self_ms_per_step": 0.0385421875,
+      "cum_ms_per_step": 0.11305000000000001
+    },
+    {
+      "file": "pipeline.py",
+      "line": 1000,
+      "function": "_clear_2d_grad_seeds",
+      "calls": 64,
+      "self_ms_per_step": 0.01246875,
+      "cum_ms_per_step": 0.11278750000000001
+    },
+    {
+      "file": "pipeline.py",
+      "line": 1009,
+      "function": "_run_loss",
+      "calls": 64,
+      "self_ms_per_step": 0.003196875,
+      "cum_ms_per_step": 0.0935765625
+    },
+    {
+      "file": "losses.py",
+      "line": 57,
+      "function": "record",
+      "calls": 64,
+      "self_ms_per_step": 0.0119734375,
+      "cum_ms_per_step": 0.08529375000000002
+    },
+    {
+      "file": "contextlib.py",
+      "line": 104,
+      "function": "__init__",
+      "calls": 4288,
+      "self_ms_per_step": 0.064140625,
+      "cum_ms_per_step": 0.0745078125
+    },
+    {
+      "file": "gpu.py",
+      "line": 85,
+      "function": "marker_group",
+      "calls": 4352,
+      "self_ms_per_step": 0.07370156250000001,
+      "cum_ms_per_step": 0.07370156250000001
+    },
+    {
+      "file": "densify.py",
+      "line": 118,
+      "function": "accumulate_structure_scores",
+      "calls": 64,
+      "self_ms_per_step": 0.0088796875,
+      "cum_ms_per_step": 0.06721093750000001
+    },
+    {
+      "file": "losses.py",
+      "line": 49,
+      "function": "_emit",
+      "calls": 128,
+      "self_ms_per_step": 0.0035796875000000004,
+      "cum_ms_per_step": 0.060493750000000006
+    },
+    {
+      "file": "pipeline.py",
+      "line": 499,
+      "function": "dispatch",
+      "calls": 64,
+      "self_ms_per_step": 0.0021328125,
+      "cum_ms_per_step": 0.05095
+    }
+  ],
+  "pairs_after_sample": 3384962,
+  "bucket_count": 113536,
+  "live_bucket_count": 101916,
+  "visible_clusters": 4703,
+  "live_clusters": 12847,
+  "tile_pair_gaussians": 516534
+}

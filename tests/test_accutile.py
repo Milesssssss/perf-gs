@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """AccuTile correctness test.
 
 AccuTile's contract: for a horizontal row [y_bot, y_top] and a gaussian

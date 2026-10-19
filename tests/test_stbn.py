@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Properties of the STBN pixel-sampling mask (CPU only, no GPU).
 
 Two jobs here.

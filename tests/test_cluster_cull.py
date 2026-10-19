@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """GPU cluster-frustum cull.
 
 Verifies that the buildClusterAABB + cullClustersFrustum + bin_count

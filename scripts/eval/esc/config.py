@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Tunable configuration for the ESC harness.
 
 Everything a reviewer might want to argue about — subscore weights, cost

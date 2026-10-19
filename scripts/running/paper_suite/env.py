@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Provenance the suite records once, plus the device-memory poller.
 
 Two kinds of fact live here.

@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """The manifest: what ran, under what code, and whether it may be reused.
 
 ``manifest.json`` is the suite's memory. It answers three questions:

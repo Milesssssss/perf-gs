@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 # Full SADGS reference pipeline on FLOWERS @ our config (images_4, 3000 iters, SH0),
 # mirroring scripts/run_ref_sh0_full.sh (verified on bicycle). --eval uses llffhold=8,
 # the SAME every-8th-camera holdout the Slang trainer reports on, so the PSNR is

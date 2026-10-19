@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 // View-dependent spherical-harmonics color (optional; classic 3DGS).
 //
 // The band-0 DC term is Gaussian3D.sh0 (the always-present SH0 color). These

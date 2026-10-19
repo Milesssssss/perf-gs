@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Interactive in-process viewer sharing the trainer's GPU device and queue."""
 from __future__ import annotations
 

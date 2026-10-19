@@ -336,3 +336,14 @@ arrangement is most of the point.
   10%, foliage 30%) at a fixed average — combining TurboGS-style error-guided
   effort with STBN's coverage. A lower flat `rho` is not one of the levers: the
   sweep shows it buys no time.
+
+## Follow-up: variable-density STBN
+
+The last lever above is now implemented and measured — as a smooth per-PIXEL
+marginal rather than a per-tile budget, since a per-tile allocation would be a
+different sampling process for the same reasons `tile_rank` is. See
+[Importance-guided STBN sparse backward sampling](adaptive_stbn_importance_sampling.md)
+for the construction, the flags and the results, including the negative ones. It is
+strictly additive: every regime described on this page behaves exactly as it did
+before, and at `alpha = 0` the adaptive path reproduces this page's mask and
+gradient bit for bit.

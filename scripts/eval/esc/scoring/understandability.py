@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Understandability ``U`` — can a fresh agent build the right mental model?
 
 Graded from read-only comprehension tasks (no edits allowed). Each run

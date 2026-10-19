@@ -1,0 +1,148 @@
+{
+  "protocol_verified": true,
+  "protocol": {
+    "reference_revision": "1a9045655b9efb0691d24cf71b55ece8a2e6eab6",
+    "scene": "bicycle",
+    "backend": "vulkan",
+    "iters": 3000,
+    "seed": 0,
+    "sh_degree": 0,
+    "capacity": 2000000,
+    "resolution": [
+      618,
+      411
+    ],
+    "camera_count": 194,
+    "stbn_pixel_fraction": 0.1,
+    "stbn_source": "nvidia",
+    "stbn_adaptive": false,
+    "settings": {
+      "downsample": 8,
+      "sample_mode": "sadgs",
+      "densify_mode": "structure_aware",
+      "densify_from": 0,
+      "densify_to": 1900,
+      "densify_every": 100,
+      "sad_structure_every": 500,
+      "sad_accum_every": 10,
+      "sad_tau_split": 0.8,
+      "sad_tau_prune": 0.8,
+      "sad_grad_threshold": 1e-05,
+      "sad_split_power": 0.5,
+      "sad_max_split_factor": 8,
+      "sad_ks_scale_power": 1.0,
+      "sad_structure_min_opacity": 0.1,
+      "sad_opacity_cap": 0.8,
+      "sad_relative_reset": true,
+      "sad_reset_decay": 0.1,
+      "grad_thresh": 0.0005,
+      "grow_scale3d": 0.001,
+      "reset_every": 1200,
+      "mip_splatting": true,
+      "mip_kernel_size": 0.1,
+      "morton_every": 0,
+      "cluster_cull": true,
+      "flat_bucket_backward": true,
+      "backward_pixel_stride": 1,
+      "stbn_select_mode": "global",
+      "stbn_independent": false,
+      "stbn_warmup_iters": 0,
+      "eval_holdout": 1,
+      "eval_holdout_stride": 8,
+      "stage_timing_every": 0,
+      "profile_run": false,
+      "log_every": 0,
+      "preview_every": 0,
+      "eval_every": 0,
+      "no_viewer": true
+    }
+  },
+  "order": [
+    "reference",
+    "optimized",
+    "optimized",
+    "reference"
+  ],
+  "variants": {
+    "reference": {
+      "runs": 2,
+      "wall_seconds": [
+        13.194166421890259,
+        12.725494384765625
+      ],
+      "active_seconds": [
+        13.13735872041434,
+        12.672363181598485
+      ],
+      "mean_wall_seconds": 12.959830403327942,
+      "mean_seconds": 12.904860951006413,
+      "median_seconds": 12.904860951006413,
+      "min_seconds": 12.672363181598485,
+      "max_seconds": 13.13735872041434,
+      "cpu_observation_seconds": [
+        0.05680770147591829,
+        0.053131203167140484
+      ],
+      "final_populations": [
+        1998860,
+        1998958
+      ],
+      "sample_psnr_srgb": [
+        24.25819955305501,
+        24.25286756515959
+      ],
+      "mean_sample_psnr_srgb": 24.2555335591073,
+      "overbudget_ticks": [
+        2,
+        2
+      ],
+      "host_densify_seconds": [
+        1.2652851999737322,
+        1.1733132000081241
+      ]
+    },
+    "optimized": {
+      "runs": 2,
+      "wall_seconds": [
+        12.176458597183228,
+        12.148850440979004
+      ],
+      "active_seconds": [
+        12.118578887544572,
+        12.0930390432477
+      ],
+      "mean_wall_seconds": 12.162654519081116,
+      "mean_seconds": 12.105808965396136,
+      "median_seconds": 12.105808965396136,
+      "min_seconds": 12.0930390432477,
+      "max_seconds": 12.118578887544572,
+      "cpu_observation_seconds": [
+        0.057879709638655186,
+        0.05581139773130417
+      ],
+      "final_populations": [
+        1998871,
+        1998859
+      ],
+      "sample_psnr_srgb": [
+        24.16145134840752,
+        24.385163847064646
+      ],
+      "mean_sample_psnr_srgb": 24.273307597736085,
+      "overbudget_ticks": [
+        2,
+        2
+      ],
+      "host_densify_seconds": [
+        0.4274256993085146,
+        0.4805457000620663
+      ]
+    }
+  },
+  "speedup": 1.066005666196644,
+  "seconds_saved": 0.7990519856102765,
+  "time_reduction_percent": 6.1918682320088125,
+  "throughput_increase_percent": 6.600566619664394,
+  "sample_psnr_delta_db": 0.01777403862878657,
+  "note": "End-to-end ACTIVE training-loop wall time including densification, Morton and Mip. Measured CPU observation/reporting overhead is subtracted; raw loop wall time is also reported. Setup/evaluation/export excluded. Quality is a fixed-view sample, not full held-out PSNR. Host densification time excludes asynchronous GPU completion and is not additive as a complete densification GPU cost. Two repetitions per variant do not establish statistical significance; consult run spread and GPU snapshots."
+}

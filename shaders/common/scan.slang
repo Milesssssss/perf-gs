@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 // Parallel exclusive prefix scan on a uint[] buffer.
 //
 // Three-kernel Blelloch scan. These SHADERS are level-agnostic: each

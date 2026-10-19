@@ -14,6 +14,84 @@ Everything else is GPU plumbing (wait-free = no CPU readback mid-densify), not t
 
 ---
 
+## Performance and diagnosing slow densification ticks
+
+A training densification tick is **decision/split/prune + tracking clears + Morton
+sort + Mip-filter recomputation**, not just the SAD split shader. Structure fields
+are already GPU-resident; they are not uploaded again at each scoring view.
+
+The implementation avoids three sources of unnecessary work:
+
+- **Capacity-wide copy-back:** the shared scratch arena now commits only live
+  records, using a GPU count. SH Adam state remains coefficient-major SoA, so each
+  component's live prefix is copied at its original capacity stride. At SH3 and
+  10M capacity, the former four copy-backs moved 6.2 GB per compaction or Morton
+  pass, regardless of how few splats were live. No extra full-size scratch is used.
+- **Serial child grids:** the decision compacts SPLIT/CLONE parents using wave
+  reservations. One cooperative workgroup emits each selected parent's grid;
+  invariant geometry is hoisted and capacity-overflow children are not computed.
+  Child geometry, split thresholds, SH inheritance, and fresh optimizer moments
+  are unchanged. Tail order is still intentionally unspecified.
+- **Capacity-wide Mip workgroups:** the Mip pass dispatches only the GPU's live
+  count, uses wave reductions, and clears only newly dead filter slots after its
+  initial tail initialization. It still tests all training cameras, preserving
+  the original filter calculation exactly.
+
+Overbudget warnings still report requested growth, now including clones. The
+seven full-capacity eta/gradient readbacks and CPU percentile analysis only run
+when `--densify-diag` is explicitly enabled; they can transfer 320 MB at 10M
+capacity and should not be used for ordinary performance measurements.
+
+Enable `--stage-timing-every 25` for sampled training-step timings **and** separate
+timings of every mutation event. The run writes `mutation_timing.jsonl`, and the
+stage-timing summary includes `mutation_timings`. Each event reports GPU markers
+for SAD/filler densification, tracking, Morton, and Mip; `host_complete_ms` includes
+queue backlog and readbacks. Nested markers must not be added to their parents.
+Instrumentation completion waits are opt-in and reported separately; normal
+training adds no timing queries or extra completion waits.
+
+Dataset-free probes are in `scripts/debug/bench_structure_densify.py` and
+`scripts/debug/bench_mip_filter.py`. `--compare-reference` interleaves optimized
+and committed-reference shaders on the **same** resources. The former compares
+child geometry after ignoring unordered tail reservations; the latter checks
+bit-exact filter outputs. Use realistic live/capacity ratios and camera counts.
+GPU residency, backend, and background load can strongly affect wall time; an
+isolated small-population result does not establish the duration of a full tick.
+
+### Full-training A/B result (2026-10-08)
+
+The full-loop launcher `scripts/debug/bench_training_densify.py` restores only the
+old densification paths from source snapshots at commit `1a904565`. Both variants
+use the current renderer, optimizer, sampling code, and identical allocations;
+no working-tree files are reverted. `summarize_training_densify.py` checks the
+recorded settings and source fingerprints before computing the comparison.
+
+Completed four full **3,000-iteration** bicycle runs in before/after/after/before
+order: Vulkan, seed 0, SADGS camera sampling, SH0, Mip enabled, NVIDIA global STBN
+at fraction 0.1, **618×411 resolution and 2M capacity**. Setup and final three-view
+quality checks were outside the timed loop; no GPU timing/profiling queries ran.
+
+| Training-loop time | Before (two runs) | After (two runs) |
+|---|---:|---:|
+| Active seconds, mean | 12.9049 | 12.1058 |
+| Active seconds, range | 12.6724–13.1374 | 12.0930–12.1186 |
+| Raw wall seconds, mean | 12.9598 | 12.1627 |
+
+Measured saving: **0.7991 s / 6.19% less active training time**, or **1.066×**
+throughput. Raw wall time improves by 6.15%; the small difference is measured CPU
+reporting/event-check overhead (about 0.055 s/run), not image evaluation. Final
+populations differ by about 44 splats on average out of 2M. The fixed three-view
+PSNR sample differs by +0.018 dB on average; this is not a full quality evaluation
+or a bit-parity claim. Two samples per variant do not establish significance.
+
+**This is not a measured result for the default 10M-capacity configuration.** That
+attempt was stopped because roughly 13 GB of the 16 GB GPU was occupied before
+launch, making even ordinary early iterations take about 0.6 s. Other GPU work
+was left untouched. The reduced configuration completes without that severe
+memory contention; do not extrapolate its percentage to the default workload.
+
+---
+
 ## The per-Gaussian score variables (`score_structure_aware.slang`)
 
 Computed per scoring view, one thread per Gaussian. All `float` unless noted.
@@ -121,7 +199,7 @@ Outputs:
 ### Single dispatch (no capacity demotion)
 | Buffer | Type | Contents |
 |---|---|---|
-| `densify_children_sum` | `uint[1]` | atomic sum of `prod-1` over all splits = total requested tail growth |
+| `densify_children_sum` | `uint[1]` | wave-summed `prod-1` per split and `1` per clone = requested tail growth |
 
 `decideActionsStructure` is one kernel: it decides KEEP/SPLIT/CLONE/PRUNE per Gaussian and atomically
 sums `densify_children_sum`. There is **no** capacity clamp / demotion. If a window's requested splits

@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """What the viewer copies out of the trainer, and what it tells its rasterizer.
 
 The snapshot is the trainer's only per-iteration cost for having a viewer open, so

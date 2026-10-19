@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 // Phase E of densification: scatter live gaussians + Adam state into
 // scratch buffers using the prefix-scan-derived destination indices.
 //

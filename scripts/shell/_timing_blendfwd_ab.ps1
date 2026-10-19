@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 # Timing for the NEW blend_data forwardRasterize (thread-per-pixel, warp OFF),
 # across all 9 Mip-NeRF 360 scenes. Run dirs: timing_<scene>_blendfwd.
 # Compare against timing_<scene>_threadfwd (the SAME kernel BEFORE the change,

@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 // Optional view-dependent SH forward (per-gaussian; runs only when sh_degree>0).
 //
 // bin_count already packed each visible gaussian's BlendData with its SH0 DC

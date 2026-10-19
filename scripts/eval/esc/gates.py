@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Hard behavioural gates — the constraints that precede any scoring.
 
 A candidate refactor is *invalid* (and receives no ESC) if it breaks existing

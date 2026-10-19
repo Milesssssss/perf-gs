@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Display (HiDPI) scale of the panel font.
 
 WHY THIS EXISTS: sgl builds the ImGui font atlas at the monitor's content scale,

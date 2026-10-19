@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Pin ``metrics.ssim``'s separable window to the literal 11x11 correlation.
 
 ``ssim`` applies the Gaussian window as two 1D passes because SSIM at ~1 MP is

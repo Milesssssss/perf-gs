@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Nsight Graphics profiling for the v2 trainer.
 
 Isolated from the training path: a ``Profiler`` is constructed ONLY on a profile

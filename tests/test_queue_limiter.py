@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """The GPU submit-queue depth cap.
 
 Depth is a THROUGHPUT knob, not just a safety valve: at depth 1 an iteration

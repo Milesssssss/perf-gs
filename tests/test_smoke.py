@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Platform smoke test.
 
 For each supported backend (Vulkan primary, D3D12 cross-check), verify that:

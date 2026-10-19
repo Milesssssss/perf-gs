@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """The weighted geometric mean at the heart of ESC.
 
     ESC = 100 * C^wC * E^wE * U^wU * L^wL * T^wT * S^wS

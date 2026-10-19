@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """STBN sparse pixel supervision, on the GPU.
 
 The design rests on one claim: the backward may SKIP the pixels this slice does

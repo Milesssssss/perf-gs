@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Bar chart of Slang trainer per-scene training time (0->3k iters).
 
 Reads outputs/train/timing_<scene>/log.jsonl (the train_complete event's

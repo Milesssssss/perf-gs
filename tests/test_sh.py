@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """GPU tests for the optional view-dependent spherical-harmonics color path.
 
 The default (SH-off) trainer never dispatches these kernels; enabling SH via

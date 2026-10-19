@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """CPU tests for trainer.config_types.validate_training_config + the schedule
 zero-interval guard.
 

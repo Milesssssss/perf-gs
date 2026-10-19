@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """GPU-vs-CPU parity for the multi-scale structure-tensor field.
 
 ``structure_analysis_gpu.StructureTensorGPU`` ports the scipy reference

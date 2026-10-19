@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 // Forward-pass transmittance/color checkpoints for the transposed
 // (per-splat) backward.
 

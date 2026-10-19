@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Edge-docking geometry for the viewer panel — including the resize fix.
 
 THE BUG this replaces: the old ``layout()`` re-asserted BOTH position and size

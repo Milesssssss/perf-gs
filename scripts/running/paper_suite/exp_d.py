@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Experiment D — where the time actually goes, per stage and per training phase.
 
 Built from the dedicated stage-timing cells (four representative scenes, one per

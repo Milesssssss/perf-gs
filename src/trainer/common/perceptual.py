@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """LPIPS (Zhang et al. 2018) for held-out evaluation, as an OPTIONAL capability.
 
 PSNR and SSIM are numpy-only and always available; LPIPS needs torch plus the

@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """P0 SPIKE (throwaway): validate the generic-primitive mechanism the refactor
 depends on.
 

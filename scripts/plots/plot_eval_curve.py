@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Plot convergence curves from an eval_curve.jsonl produced by v2_train.py.
 
 Reads a run's eval_curve.jsonl (one JSON line per --eval-every sweep) and writes

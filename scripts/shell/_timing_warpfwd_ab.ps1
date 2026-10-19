@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 # A/B timing: baseline thread-per-pixel forward vs warp-per-pixel forward, on
 # all 9 Mip-NeRF 360 scenes. Pure training-loop wall time (iter 0 -> 3000),
 # preview/eval off, identical flags + identical backward (flat, the default),

@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Turn a folder of images into a COLMAP dataset ``load_colmap`` can open.
 
 Four colmap commands, in the trainer's own process — the same sequence every 3DGS

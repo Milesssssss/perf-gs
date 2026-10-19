@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Focused contracts for local training-application configuration objects."""
 
 from __future__ import annotations

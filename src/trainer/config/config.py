@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Responsibility-specific immutable configuration objects."""
 
 from __future__ import annotations
@@ -91,6 +93,46 @@ class StbnConfig:
     def enabled(self) -> bool:
         return self.pixel_fraction < 1.0
 
+
+@dataclass(frozen=True)
+class AdaptiveStbnConfig:
+    """Importance-guided sparse sampling policy (OFF by default).
+
+    Strictly additive: with ``enabled=False`` nothing in this feature runs and
+    every pre-existing regime (``full``, ``iid_white``, ``indep_blue``, ``stbn``)
+    behaves exactly as before — the uniform STBN path remains the reference
+    baseline. When it IS on, the run's density comes from a per-pixel probability
+    map instead of a fixed rho, the loss runs DENSE and a separate pass applies
+    the mask, and the backward reads a screen-sized table built each iteration.
+
+    ``rho`` is not stored here: the budget is the sibling
+    :class:`StbnConfig.pixel_fraction`, so an adaptive run and its uniform
+    control are guaranteed to be density-matched by construction.
+
+    See :mod:`trainer.backend.render.adaptive_stbn` for the math.
+    """
+
+    enabled: bool = False
+    # Mixture weight between uniform exploration and gradient importance.
+    # 0 = exactly uniform (and provably reduces to the existing mask), ->1 =
+    # strongly importance-driven. Must stay < 1: alpha=1 admits p_i=0 pixels,
+    # whose inverse-probability weight is undefined.
+    alpha: float = 0.75
+    # Smoothing scale of the importance field, in OUTPUT-IMAGE pixels. Not tied
+    # to the 8x8 rasterizer tile or to the 128x128 STBN texture.
+    sigma: float = 8.0
+    # Resolution divisor the field is evaluated at (cost only; the Gaussian sigma
+    # is compensated so the effective smoothing stays `sigma` full-res pixels).
+    downsample: int = 4
+    # Which uniform sequence the per-pixel threshold is compared against:
+    # "iid" | "blue_independent" | "blue_temporal". See adaptive_stbn.UNIFORM_*.
+    uniform: str = "blue_temporal"
+    # False = the labelled DIAGNOSTIC control (adaptive_stbn_biased): sample from
+    # p_i but omit the 1/p_i weight, i.e. deliberately optimize an error-weighted
+    # objective. Never the proposed method.
+    unbiased: bool = True
+
+
 @dataclass(frozen=True)
 class IterationEvents:
     iteration: int
@@ -123,6 +165,12 @@ class StbnVariables:
     """
     slice_index: int = 0
     pixels_per_tile: int = 0    # 0 => resolved to TILE_AREA (disabled) downstream
+    # Per-step entropy for the adaptive path's ``iid`` uniform mode, which needs a
+    # FRESH independent field each visit rather than a slice of a fixed volume.
+    # Drawn from the same --stbn-seed stream as slice_index, so the mask stays
+    # reproducible and is still decoupled from the camera draw order. Ignored by
+    # every other mode, including all four pre-existing regimes.
+    sample_seed: int = 0
 
 
 @dataclass(frozen=True)

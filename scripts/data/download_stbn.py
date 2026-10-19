@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Fetch NVIDIA's pregenerated spatiotemporal blue noise into the local cache.
 
 Source: https://github.com/NVIDIA-RTX/STBN (the SpatiotemporalBlueNoiseSDK that

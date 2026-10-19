@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Every interactive widget in the panel must have a UNIQUE ImGui id.
 
 ImGui identifies a widget by its LABEL (``window->GetID(label)``) and tracks

@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """A deterministic, offline agent runner.
 
 The scripted runner replays pre-programmed behaviour keyed by task name. Because

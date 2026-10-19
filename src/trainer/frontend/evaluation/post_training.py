@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Post-training analysis: final per-camera metrics, summary + PLY export.
 
 This is the ``#TODO: make stuff under here into a cleaner post-training analysis

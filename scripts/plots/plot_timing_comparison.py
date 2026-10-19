@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Grouped bar chart comparing per-scene training time: Slang trainer vs SADGS.
 
 Both series are PURE training-loop wall time (iter 0 -> 3000), excluding data

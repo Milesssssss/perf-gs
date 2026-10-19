@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """GPU Morton-order sort of the gaussian + adam-state buffers.
 
 Verifies that after one ``pipeline.morton_sort(world_min, world_max)``:

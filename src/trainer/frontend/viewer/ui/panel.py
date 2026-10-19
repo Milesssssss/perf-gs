@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """The viewer's docked panel: declarative composition + state BINDINGS.
 
 The old panel could only be updated by pushing strings into it from the render

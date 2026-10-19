@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Experiment G — qualitative material, chosen by measurement rather than by eye.
 
 Produces, for every held-out view of every scene at the primary seed and rho:

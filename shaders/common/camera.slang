@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 #ifndef TRAINER_CAMERA_SLANG
 #define TRAINER_CAMERA_SLANG
 

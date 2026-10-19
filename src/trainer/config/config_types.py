@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -168,6 +170,72 @@ def validate_training_config(args, *, n_cams: int, n_train: int,
         source = str(getattr(args, "stbn_source", "nvidia"))
         if source == "file" and not str(getattr(args, "stbn_file", "")):
             raise ConfigError("--stbn-source file requires --stbn-file <path.npy>.")
+
+    # Importance-guided (adaptive) sparse sampling.
+    if bool(getattr(args, "stbn_adaptive", False)):
+        if stbn_fraction >= 1.0:
+            raise ConfigError(
+                "--stbn-adaptive needs a sparse budget: pass "
+                "--stbn-pixel-fraction < 1. At 1.0 every pixel is supervised, so "
+                "there is no allocation to make.")
+        alpha = float(getattr(args, "stbn_importance_alpha", 0.75))
+        if not 0.0 <= alpha < 1.0:
+            raise ConfigError(
+                f"--stbn-importance-alpha must be in [0, 1), got {alpha}. "
+                f"alpha=1 admits p_i=0 pixels, whose 1/p_i weight is undefined.")
+        if float(getattr(args, "stbn_importance_sigma", 8.0)) < 0.0:
+            raise ConfigError(
+                f"--stbn-importance-sigma must be >= 0, got "
+                f"{args.stbn_importance_sigma}.")
+        if int(getattr(args, "stbn_importance_downsample", 4)) < 1:
+            raise ConfigError(
+                f"--stbn-importance-downsample must be >= 1, got "
+                f"{args.stbn_importance_downsample}.")
+        if int(getattr(args, "stbn_warmup_iters", 0)) > 0:
+            # The adaptive path rebuilds its table every iteration from a runtime
+            # rho, so a ramp is representable — but the budget the solver enforces
+            # would then differ from the one the comparison is matched on, and no
+            # experiment here needs it. Rejected rather than left as a silent
+            # confound.
+            raise ConfigError(
+                "--stbn-adaptive is incompatible with --stbn-warmup-iters > 0: "
+                "the density comparison against the uniform regimes is matched on "
+                "a FLAT rho, and a ramp would make the two arms' realized budgets "
+                "differ. Use --stbn-warmup-iters 0.")
+        uniform = str(getattr(args, "stbn_adaptive_uniform", "blue_temporal"))
+        if uniform != "iid" and str(getattr(args, "stbn_source", "nvidia")) == "white":
+            raise ConfigError(
+                f"--stbn-adaptive-uniform {uniform} draws its uniform from a "
+                f"blue-noise volume, but --stbn-source white would hand it white "
+                f"noise. Use --stbn-adaptive-uniform iid for the independent "
+                f"control, or --stbn-source nvidia/file for the blue ones.")
+        # The slice traversal is driven by --stbn-independent (shared with the
+        # uniform regimes), so the two knobs have to agree or the run would claim
+        # one temporal semantics and walk the other.
+        independent = bool(getattr(args, "stbn_independent", False))
+        if uniform == "blue_independent" and not independent:
+            raise ConfigError(
+                "--stbn-adaptive-uniform blue_independent needs "
+                "--stbn-independent (a fresh slice per step); without it the "
+                "slice would walk each camera's visit counter, which is the "
+                "blue_temporal semantics.")
+        if uniform == "blue_temporal" and independent:
+            raise ConfigError(
+                "--stbn-adaptive-uniform blue_temporal walks each camera's visit "
+                "counter, which --stbn-independent overrides. Drop "
+                "--stbn-independent, or ask for blue_independent.")
+        if float(getattr(args, "stbn_max_fraction", 0.0) or 0.0) > 0.0:
+            # STBN_MAX_TILE_PIXELS caps the backward's compacted visit list. A
+            # nonuniform marginal lets a hot tile select far more than the nominal
+            # k, so a shrunken cap would silently TRUNCATE those tiles — dropping
+            # gradient the loss had already weighted in, i.e. a biased estimator
+            # with no error anywhere.
+            raise ConfigError(
+                "--stbn-adaptive is incompatible with --stbn-max-fraction: the "
+                "adaptive marginal lets a tile's selected count exceed the "
+                "nominal budget, and a shrunken STBN_MAX_TILE_PIXELS would "
+                "truncate the backward's visit list for exactly the tiles the "
+                "importance map targeted.")
 
     # The camera split must leave something to train on (and, when the holdout
     # protocol is on, something to evaluate).

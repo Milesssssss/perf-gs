@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Contract tests for the host<->shader ABI (trainer.contracts).
 
 Pins that the executable schema (a) derives the shipped Gaussian layout +

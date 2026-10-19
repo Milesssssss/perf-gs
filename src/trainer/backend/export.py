@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Output helpers: write rendered images to PNG, save gaussians as .ply."""
 
 from __future__ import annotations

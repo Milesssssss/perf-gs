@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Tests for the gradient-study metric math and the temporal-only construction.
 
 The study's three statistics are derived analytically from three accumulated

@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 // L1 (+ optional L2) photometric loss in sRGB color space, with optional
 // alpha supervision. (Formerly l2_linear.slang, which — despite its name —
 // only computed L1; renamed to reflect that it now handles both.)

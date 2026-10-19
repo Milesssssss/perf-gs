@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """A subprocess-backed agent runner — the seam for a real coding agent CLI.
 
 The runner invokes a configured command inside the sandbox, then reads the

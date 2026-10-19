@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Task registry — assembles the change/comprehension families to evaluate."""
 
 from __future__ import annotations

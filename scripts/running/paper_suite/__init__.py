@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Paper-experiment suite for the STBN sparse-supervision study.
 
 Driven by ``scripts/running/eval_stbn_ablation.py``; see that script's docstring

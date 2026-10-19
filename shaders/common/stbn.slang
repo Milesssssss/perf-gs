@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 // Tile-stratified spatiotemporal blue-noise (STBN) pixel selection.
 
 #ifndef TRAINER_COMMON_STBN_SLANG

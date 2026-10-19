@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """v2 tracking-accumulator tests.
 
 Verify that the backward pass + accumulate_iter populate the per-gaussian

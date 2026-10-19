@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Per-run output-file lifecycle for the training frontend.
 
 Every training run writes a fixed set of JSONL/text streams (plus the optional

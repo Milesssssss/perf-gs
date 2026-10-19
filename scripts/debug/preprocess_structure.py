@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Precompute and cache the multi-scale structure-tensor fields for a scene.
 
 Structure-aware densification (``v2_train.py --densify-mode structure_aware``) needs a

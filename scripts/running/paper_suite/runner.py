@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Execute one cell in a fresh subprocess and fold its outputs into the manifest.
 
 Every cell is its own process, as the original ablation script did, and for the

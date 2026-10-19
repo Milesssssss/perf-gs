@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 // Generic tile-enumeration walks over an IScreenFootprint, shared by the two
 // binning kernels so they stay in structural lock-step:
 //   * bin_count calls countTiles() to SUM the touched tiles (sizes the scan).

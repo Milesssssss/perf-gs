@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Device creation for the trainer.
 
 Thin wrapper around ``slangpy.create_device`` that fixes the shader include

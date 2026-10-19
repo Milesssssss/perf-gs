@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Compare baseline thread-per-pixel forward vs warp-per-pixel forward training time.
 
 Same-hardware A/B: for each scene we ran the pure 0->3000 training loop twice

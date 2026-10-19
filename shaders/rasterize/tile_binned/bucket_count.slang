@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 // Per-tile bucket count for the ragged (CSR) checkpoint buffer.
 //
 // bucket_count[t] = ceil( (tile_end[t] - tile_start[t]) / RASTER_BUCKET_SIZE )

@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Static-quality primitives: curves, percentiles, complexity, cycles."""
 
 from __future__ import annotations

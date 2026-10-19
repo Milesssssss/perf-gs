@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 // Utility kernels for int64 gradient-accumulator buffers + Adam moment state.
 #include "../common/types.slang"
 

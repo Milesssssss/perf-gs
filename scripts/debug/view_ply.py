@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Load a .ply file and display it in the interactive viewer.
 
 Usage:

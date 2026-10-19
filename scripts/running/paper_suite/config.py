@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """The experiment plan: what cells exist, and exactly how each is invoked.
 
 This module is the single source of truth for the suite. Everything downstream —

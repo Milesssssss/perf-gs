@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Second-primitive architectural proof: disk forward/backward/generic Adam.
 
 The disk uses the production ``blendForward<IPrimitiveSource>`` loop,

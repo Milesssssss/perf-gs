@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """FlyCamera mouse-look must be screen-relative at ANY roll.
 
 The bug: rotate() fed the mouse delta into world-referenced yaw/pitch with a

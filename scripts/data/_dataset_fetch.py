@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Dependency-free download/extract machinery shared by the dataset fetchers.
 
 ``download_mipnerf360.py`` and ``download_tandt_db.py`` both stream a large

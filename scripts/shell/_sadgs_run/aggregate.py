@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Aggregate SADGS reference PSNR across scenes and compare to the Slang trainer.
 
 Reads:

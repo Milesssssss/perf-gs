@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Smoke test for Pipeline.train_step after the GpuRuntime/CommandBatch extraction.
 
 The GPU parity subset drives the forward/backward via TestPipeline.forward_and_loss

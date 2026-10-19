@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Training-run inspector & comparer — a GUI for eyeballing and comparing the
 artifacts written by ``scripts/v2_train.py`` into ``outputs/train/<run>/``.
 

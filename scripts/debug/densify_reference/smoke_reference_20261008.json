@@ -1,0 +1,104 @@
+{
+  "variant": "reference",
+  "reference_revision": "1a9045655b9efb0691d24cf71b55ece8a2e6eab6",
+  "scene": "bicycle",
+  "backend": "vulkan",
+  "iters": 600,
+  "seed": 0,
+  "sh_degree": 0,
+  "capacity": 200000,
+  "resolution": [
+    618,
+    411
+  ],
+  "camera_count": 194,
+  "stbn_pixel_fraction": 0.1,
+  "stbn_source": "nvidia",
+  "stbn_adaptive": false,
+  "train_wall_s": 2.8207550048828125,
+  "train_active_s": 2.809834305429831,
+  "completed_loop_wall_s": 2.823952700011432,
+  "setup_s_excluded": 5.2849202998913825,
+  "quality_outside_timing": {
+    "n_gaussians": 200000,
+    "views": []
+  },
+  "densification_ticks": [
+    {
+      "iter": 100,
+      "kind": "absgs",
+      "host_ms": 161.83650004677474,
+      "overbudget": false
+    },
+    {
+      "iter": 200,
+      "kind": "absgs",
+      "host_ms": 2.02669994905591,
+      "overbudget": false
+    },
+    {
+      "iter": 300,
+      "kind": "absgs",
+      "host_ms": 1.415400067344308,
+      "overbudget": false
+    },
+    {
+      "iter": 400,
+      "kind": "absgs",
+      "host_ms": 1.4910001773387194,
+      "overbudget": false
+    },
+    {
+      "iter": 500,
+      "kind": "structure",
+      "host_ms": 272.6136001292616,
+      "overbudget": true
+    },
+    {
+      "iter": 600,
+      "kind": "absgs",
+      "host_ms": 1.5720000956207514,
+      "overbudget": false
+    }
+  ],
+  "source_fingerprint": {
+    "src/trainer/backend/render/pipeline.py": "756b7beded1106eec24f3e3db9977fc6eb7019fbe71c02ffb63e8cbaa21b8d4c",
+    "src/trainer/backend/render/kernels.py": "275977fee2d0a584834eec36613c7d939cd43b2f966c2dc62e45371cc0040c5e",
+    "src/trainer/backend/render/stbn.py": "b3fa0c9bde4cbee364c45bc3bf91e70badd53a3f61d946f6befd94eaed800329",
+    "src/trainer/frontend/app.py": "12c7a8e109e019d8ed7d823974d0367d5f599e18b937004bcf68855c5d4ce9ca",
+    "src/trainer/frontend/densification.py": "9ac8519e2ffca8de6384cb37c69819e9c426a6cbe91eb8129fe1671a2f1064a3",
+    "src/trainer/frontend/settings.py": "def2c1f839105df0e0347546bc13ad948cbccece82c5e5ec08a32845d93e7318",
+    "src/trainer/frontend/cli.py": "0bad791ba9f0e91c31cb6e9e05b4876d50e9b5ec157bfdbc25bf7be182fbd102",
+    "src/trainer/backend/densify/densify.py": "73b5d8e9daf950b0f0f310dcd3048b19601aba8156498b47b69bf3fcdb3d7ac1",
+    "src/trainer/backend/densify/simple_densifier.py": "9ab0221d6c9e3a6f2858101cef2c4c25d55e303a0841efcab9fc446d1032b81e",
+    "src/trainer/backend/memory/buffers.py": "12681f81669d8cc130512e97a3cb4f35bfa16f19b485c31de9417df9439da92c",
+    "shaders/rasterize/tile_binned/backward_persplat.slang": "282d6451bad69feae0210d870dbc712fafda3b752f53810c5aaf7e508018c0e3",
+    "shaders/densify/decide_actions_structure.slang": "49dc30868d22cddb7aa1e9a32f2ba4e00faa6518cacfea6d791ba0dd5915814f",
+    "shaders/densify/split_anisotropic.slang": "0c55c6cbf41eb68443dcea02e68e0ec34ccef11627379886ea85bf883a2aacb5",
+    "shaders/densify/copy_active.slang": "a009d7a6b489faf62fc6930ca2fe3dd4575345b6dcb8986c10e8daaee2719cef",
+    "shaders/mip/compute_3d_filter.slang": "d0e07f9fda9c865e8db929acb824148e750359d42fc4643142a59cf1edf478f2"
+  },
+  "gpu_before_setup": {
+    "devices": [
+      {
+        "memory.total": "16376",
+        "memory.used": "13409",
+        "utilization.gpu": "37",
+        "clocks.current.graphics": "2595",
+        "clocks.current.memory": "11201"
+      }
+    ]
+  },
+  "gpu_after_training": {
+    "devices": [
+      {
+        "memory.total": "16376",
+        "memory.used": "14705",
+        "utilization.gpu": "33",
+        "clocks.current.graphics": "2760",
+        "clocks.current.memory": "11201"
+      }
+    ]
+  },
+  "timing_note": "Complete training loop including scheduled densification, Morton and Mip; setup, final quality and exports excluded. Host tick times include only recording and existing waits, not extra GPU timing synchronization."
+}

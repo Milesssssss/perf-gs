@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Cross-validate the transposed per-splat backward against the proven
 per-pixel backward.
 

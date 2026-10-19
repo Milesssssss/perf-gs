@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 // Per-gaussian projection backward (split out of the blend backward).
 //
 // The blend backward (backward_persplat.slang) parallelizes over splats-in-

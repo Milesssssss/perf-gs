@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Experiment A — the primary 25% ablation.
 
 13 scenes x 4 regimes x 3 seeds at rho = 0.25, 3000 iterations. Produces the

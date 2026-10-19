@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Validation of the multi-scale structure-tensor field (structure_analysis.py).
 
 The oracle is analytic: for a sinusoidal grating sin(2*pi*omega*x), the image

@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Ephemeral sandboxes for candidate evaluation.
 
 Every change-task run gets a fresh, isolated copy of the champion codebase so an

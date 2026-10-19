@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Image-quality metrics (PSNR / SSIM), numpy-only.
 
 The paper metric (3DGS / SAD-GS) is the MEAN of per-image PSNR/SSIM over the

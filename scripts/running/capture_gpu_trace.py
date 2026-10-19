@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Headless GPU Trace capture that AUTO-SAVES the .ngfx-gputrace to disk.
 
 Why this exists

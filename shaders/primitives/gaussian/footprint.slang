@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 // The Gaussian's screen FOOTPRINT: its SnugBox AABB + AccuTile ellipse-tile
 // crossing, packaged as an IScreenFootprint so the binning kernels
 // (rasterize/tile_binned/tile_walk.slang) enumerate touched tiles generically.

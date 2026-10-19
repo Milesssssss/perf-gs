@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Characterization (golden) test for the Adam optimizer step (adam.slang).
 
 No other test gates the Adam PARAMETER UPDATE — test_gradients checks the grad

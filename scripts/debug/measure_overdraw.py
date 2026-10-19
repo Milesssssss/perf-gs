@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Measure per-tile binning pressure and per-pixel overlap on a DENSIFIED
 geometry, to see the alpha-skip's effect where it matters (late training),
 not at init.

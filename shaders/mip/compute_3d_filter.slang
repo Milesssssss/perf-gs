@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 #include "../common/types.slang"
 #include "../primitives/gaussian/project.slang"
 
@@ -8,6 +10,43 @@
 // splat latency is cut ~THREADS_PER_SPLAT-fold when the grid under-occupies the
 // device (few live gaussians).
 static const uint THREADS_PER_SPLAT = 32;
+static const uint MIP_DISPATCH_WIDTH = 65535u;
+
+[shader("compute")]
+[numthreads(1, 1, 1)]
+void prepareMipFilterArgs(
+    StructuredBuffer<uint> num_gaussians_counter,
+    RWStructuredBuffer<uint> dispatch_args,
+    RWStructuredBuffer<uint> previous_count,
+    uniform uint max_splats)
+{
+    uint count = min(num_gaussians_counter[0], max_splats);
+    uint old_count = previous_count[0];
+    previous_count[0] = count;
+    previous_count[1] = max(old_count, count);
+    uint groups = max(count, 1u);
+    dispatch_args[0] = min(groups, MIP_DISPATCH_WIDTH);
+    dispatch_args[1] = (groups + MIP_DISPATCH_WIDTH - 1u) / MIP_DISPATCH_WIDTH;
+    dispatch_args[2] = 1u;
+    uint clear_count = old_count > count ? old_count - count : 0u;
+    uint clear_groups = max((clear_count + 255u) / 256u, 1u);
+    dispatch_args[3] = min(clear_groups, MIP_DISPATCH_WIDTH);
+    dispatch_args[4] = (clear_groups + MIP_DISPATCH_WIDTH - 1u) / MIP_DISPATCH_WIDTH;
+    dispatch_args[5] = 1u;
+}
+
+[shader("compute")]
+[numthreads(256, 1, 1)]
+void clearMipFilterTail(
+    uint3 group_id: SV_GroupID,
+    uint3 thread_id: SV_GroupThreadID,
+    StructuredBuffer<uint> previous_count,
+    RWStructuredBuffer<float> filter_3D)
+{
+    uint i = previous_count[0] + (group_id.x + group_id.y * MIP_DISPATCH_WIDTH)
+             * 256u + thread_id.x;
+    if (i < previous_count[1]) filter_3D[i] = 0.0;
+}
 
 groupshared float s_min_z[THREADS_PER_SPLAT];
 groupshared uint  s_any[THREADS_PER_SPLAT];   // bool as uint for the OR reduction
@@ -25,18 +64,14 @@ void computeMip3DFilter(
     uniform float filter_coef,               // sqrt(0.2) / max_focal
     uniform uint max_splats)
 {
-    uint gid = group_id.x;            // one group == one gaussian
+    uint gid = group_id.x + group_id.y * MIP_DISPATCH_WIDTH;
     uint lane = gtid.x;               // 0 .. THREADS_PER_SPLAT-1
     if (gid >= max_splats) return;
 
     // Uniform across the group (gid is per-group), so these early-outs never
-    // split the group ahead of a barrier.
-    if (gid >= num_gaussians_counter[0])
-    {
-        if (lane == 0)
-            filter_3D[gid] = 0.0;     // culled / unseen slot: no smoothing
-        return;
-    }
+    // split the group ahead of a barrier. A separate clear maintains the dead
+    // tail, so unused capacity needs no per-splat workgroups.
+    if (gid >= num_gaussians_counter[0]) return;
 
     float3 mean = gaussians[gid].mean;
 
@@ -70,24 +105,30 @@ void computeMip3DFilter(
         any_valid = true;
     }
 
-    // Groupshared tree reduction
-    s_min_z[lane] = min_z;
-    s_any[lane] = any_valid ? 1u : 0u;
-    GroupMemoryBarrierWithGroupSync();
-
-    for (uint stride = THREADS_PER_SPLAT / 2; stride > 0; stride >>= 1)
+    // Usually the entire group fits in one wave: no shared-memory round trip
+    // or six group barriers per gaussian. Narrow-wave devices merge the
+    // per-wave results after one group barrier instead.
+    float group_min = WaveActiveMin(min_z);
+    bool group_any = WaveActiveAnyTrue(any_valid);
+    uint wave_size = WaveGetLaneCount();
+    if (wave_size < THREADS_PER_SPLAT)
     {
-        if (lane < stride)
-        {
-            s_min_z[lane] = min(s_min_z[lane], s_min_z[lane + stride]);
-            s_any[lane]   = s_any[lane] | s_any[lane + stride];
-        }
+        s_min_z[lane] = group_min;
+        s_any[lane] = group_any ? 1u : 0u;
         GroupMemoryBarrierWithGroupSync();
+        if (lane == 0u)
+        {
+            for (uint other = wave_size; other < THREADS_PER_SPLAT; other += wave_size)
+            {
+                group_min = min(group_min, s_min_z[other]);
+                group_any = group_any || (s_any[other] != 0u);
+            }
+        }
     }
 
     if (lane == 0)
     {
         // a gaussian seen by no view needs no low-pass (and is a prune candidate)
-        filter_3D[gid] = (s_any[0] != 0u) ? (s_min_z[0] * filter_coef) : 0.0;
+        filter_3D[gid] = group_any ? (group_min * filter_coef) : 0.0;
     }
 }

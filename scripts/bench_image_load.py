@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Benchmark: PIL (old) vs OpenCV (new) target-image loading.
 
 Compares the previous ``load_colmap_image`` implementation against the current

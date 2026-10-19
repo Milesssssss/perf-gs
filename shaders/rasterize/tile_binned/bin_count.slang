@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 // Phase 1 of the uncapped binning pipeline: per-gaussian tile-touch count.
 //
 // For each live gaussian:

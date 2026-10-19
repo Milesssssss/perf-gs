@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Paired statistics for the ablation, deliberately conservative.
 
 Three choices here decide whether the paper's claims are defensible.

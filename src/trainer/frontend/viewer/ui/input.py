@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Keyboard bindings for the viewer: hold keys and press keys.
 
 ``hold(key, tag)`` keeps ``tag`` in :attr:`InputMap.held` while the key is down

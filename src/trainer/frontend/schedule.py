@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Pure per-iteration training schedule.
 
 Extracts the v2 loop's inline modulo timing into one tested, side-effect-free

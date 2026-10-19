@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Static structural quality ``S`` — conventional metrics as supporting evidence.
 
 Weighted only 5%: these are local code metrics (cyclomatic/cognitive complexity,

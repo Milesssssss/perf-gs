@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Reference 3DGS simple densification as an explicit GPU service.
 
 The service receives narrow capability resources, typed kernels, scan, and a
@@ -186,7 +188,8 @@ class SimpleDensifier:
                 gaussians_out=arena.storage,
                 max_splats=self.max_primitives,
             )
-            commands.copy_arena_back(arena, primitive.values, primitive.values.storage.size)
+            commands.copy_arena_back(arena, primitive.values, primitive.values.storage.size,
+                                     count_buf=self.scan.resources.total)
             commands.dispatch(
                 kernels.scatter_compact_adam, "scatter_compact_adam",
                 thread_count=[self.max_primitives, 1, 1],
@@ -196,7 +199,8 @@ class SimpleDensifier:
                 adam_state_out=arena.storage,
                 max_splats=self.max_primitives,
             )
-            commands.copy_arena_back(arena, adam.state, adam.state.storage.size)
+            commands.copy_arena_back(arena, adam.state, adam.state.storage.size,
+                                     count_buf=self.scan.resources.total)
 
             if carry_eta:
                 commands.dispatch(
@@ -222,7 +226,8 @@ class SimpleDensifier:
                     rest_floats=self.sh.rest_floats,
                     max_splats=self.max_primitives,
                 )
-                commands.copy_arena_back(arena, self.sh.features_rest, self.sh.features_rest.storage.size)
+                commands.copy_arena_back(arena, self.sh.features_rest, self.sh.features_rest.storage.size,
+                                         count_buf=self.scan.resources.total)
                 commands.dispatch(
                     kernels.scatter_compact_adam_rest, "scatter_compact_adam_rest",
                     thread_count=[self.max_primitives, 1, 1],
@@ -233,7 +238,8 @@ class SimpleDensifier:
                     rest_floats=self.sh.rest_floats,
                     max_splats=self.max_primitives,
                 )
-                commands.copy_arena_back(arena, self.sh.adam_rest, self.sh.adam_rest.storage.size)
+                commands.copy_arena_back(arena, self.sh.adam_rest, self.sh.adam_rest.storage.size,
+                                         count_buf=self.scan.resources.total, soa=True)
 
             commands.dispatch(
                 kernels.snapshot_count, "densify_snapshot",

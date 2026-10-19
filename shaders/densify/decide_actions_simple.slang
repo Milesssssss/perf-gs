@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 // Simple threshold-based densification (reference 3DGS strategy).
 //
 // If avg_grad > grad_thresh → densify (split if big, clone if small).

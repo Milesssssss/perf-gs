@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Get the two binaries reconstruction needs: ``colmap`` and (optionally) ``glomap``.
 
 Both ship prebuilt Windows x64 zips on their GitHub releases, in a CUDA and a

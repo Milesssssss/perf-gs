@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """End-to-end pipeline on a toy fixture.
 
 A scripted agent applies a real edit inside the sandbox; verification runs actual

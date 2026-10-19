@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 // The compositing / extinction operator for the tile blend loop.
 //
 // Orthogonal to the primitive: IBlendable (core/interfaces.slang) says what a

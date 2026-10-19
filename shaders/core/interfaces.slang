@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 // Core contracts for the generic differentiable blendable-primitive rasterizer.
 //
 // A "blend record" is the compact, per-pixel-evaluable form a primitive takes

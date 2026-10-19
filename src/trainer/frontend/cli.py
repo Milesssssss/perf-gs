@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """CLI parser for the v2 trainer.
 
 Owns all ``argparse`` work — the single boundary that produces the untyped
@@ -375,6 +377,71 @@ def build_parser() -> argparse.ArgumentParser:
                          "slice RNG is seeded from --stbn-seed, kept separate "
                          "from the camera draw so it can't shift the sampling "
                          "order. Only used when --stbn-pixel-fraction < 1.")
+    parser.add_argument("--stbn-adaptive",
+                    action=argparse.BooleanOptionalAction, default=False,
+                    help="IMPORTANCE-GUIDED sparse sampling. Spend the same "
+                         "expected pixel budget (--stbn-pixel-fraction) "
+                         "preferentially where the screen-space loss gradient is "
+                         "large, instead of uniformly. The dense objective is "
+                         "PRESERVED: each selected pixel's gradient is weighted "
+                         "by 1/p_i, so the Gaussian gradient stays an unbiased "
+                         "estimate of the dense one. The blue-noise field is "
+                         "untouched — the importance map only moves the "
+                         "per-pixel threshold it is compared against. Requires "
+                         "--stbn-pixel-fraction < 1. Leaves the uniform regimes "
+                         "(plain --stbn-source/--stbn-independent) unchanged.")
+    parser.add_argument("--stbn-importance-alpha", type=float, default=0.75,
+                    help="Mixture weight between uniform exploration and "
+                         "gradient importance: a_i = (1-alpha) + alpha * "
+                         "s~_i/mean(s~). 0 is exactly uniform sampling and "
+                         "reproduces the non-adaptive mask bit for bit; ->1 is "
+                         "strongly importance-driven. Must be < 1 (alpha=1 admits "
+                         "p_i=0 pixels, for which the 1/p_i weight is undefined).")
+    parser.add_argument("--stbn-importance-sigma", type=float, default=8.0,
+                    help="Gaussian smoothing scale of the importance field, in "
+                         "OUTPUT-IMAGE pixels. A single pixel's loss gradient is "
+                         "a very noisy stand-in for the Gaussian gradient it "
+                         "seeds (L1's is sign-valued), so the field is smoothed "
+                         "to the scale a splat actually covers. Deliberately "
+                         "unrelated to the 8x8 rasterizer tile and to the "
+                         "128x128 STBN texture. 0 disables smoothing (the "
+                         "raw per-pixel field), which is the sigma=0 arm of the "
+                         "robustness sweep.")
+    parser.add_argument("--stbn-importance-downsample", type=int, default=4,
+                    help="Resolution divisor the importance field is evaluated "
+                         "at before bilinear reconstruction. A COST knob only: "
+                         "the coarse-grid Gaussian sigma is compensated for the "
+                         "box-downsample and the reconstruction, so the effective "
+                         "smoothing stays --stbn-importance-sigma output pixels "
+                         "(measured within 2%% at the default). Capped at "
+                         "floor(sigma).")
+    parser.add_argument("--stbn-adaptive-uniform", type=str,
+                    default="blue_temporal",
+                    choices=["iid", "blue_independent", "blue_temporal"],
+                    help="Which uniform sequence the per-pixel threshold is "
+                         "compared against — the ONLY difference between the "
+                         "three adaptive regimes, since they share the identical "
+                         "probability map. 'iid': a fresh independent uniform per "
+                         "pixel per visit. 'blue_independent': a spatially "
+                         "blue-noise field per visit with the slice drawn "
+                         "independently each step (the existing indep_blue "
+                         "semantics). 'blue_temporal' (default): the same volume "
+                         "walked by each camera's own visit counter (the existing "
+                         "stbn semantics). The ladder iid -> blue_independent -> "
+                         "blue_temporal asks whether blue-noise correlations "
+                         "still help once the sampling DENSITY has been optimized.")
+    parser.add_argument("--stbn-adaptive-biased",
+                    action=argparse.BooleanOptionalAction, default=False,
+                    help="DIAGNOSTIC CONTROL, not the method. Sample from the "
+                         "adaptive probabilities but omit the 1/p_i weighting, "
+                         "i.e. deliberately change the training objective toward "
+                         "high-error regions. Kept only to answer whether that "
+                         "reweighting happens to help reconstruction; the "
+                         "proposed method is the unbiased estimator. The gradient "
+                         "is still rescaled by the GLOBAL 1/rho so its magnitude "
+                         "matches the unbiased arm — otherwise this would also "
+                         "change the effective learning rate and the meaning of "
+                         "the densifier's absolute --grad-thresh.")
     _shared(parser, "extinction_hardness")
     _shared(parser, "extinction_hardness_warmup")
     parser.add_argument("--final-test-psnr", action="store_true", default=False,

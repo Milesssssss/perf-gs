@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Phase-1 validation for the transposed-backward forward checkpoints.
 
 The forward pass records, once per RASTER_BUCKET_SIZE splats, each pixel's

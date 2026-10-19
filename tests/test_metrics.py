@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Sanity checks for trainer.metrics (the shared PSNR/SSIM primitives).
 
 Pure numpy/scipy — no GPU backend needed, so these run fast and lock the

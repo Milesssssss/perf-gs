@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 // Periodic Morton-order (Z-curve) sort of the gaussian buffer.
 //
 // Reorders the [0, num_gaussians) prefix of buffers.gaussians and

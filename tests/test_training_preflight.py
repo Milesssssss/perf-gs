@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
 """Characterization + contract tests for trainer.frontend.training_preflight.
 
 Pins the pure setup-phase derivations extracted from app.main() — the held-out
