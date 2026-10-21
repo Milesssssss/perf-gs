@@ -54,7 +54,7 @@ def test_train_step_records_one_batch_and_updates(backend: str) -> None:
                         target=(0.0, 0.0, 1.0), up=(0.0, 1.0, 0.0),
                         fovy_degrees=60.0)
     # Seed the "scalar grads are zero at start-of-iter" invariant train_step assumes.
-    p._clear_grads()
+    p.clear_gradients()
     p.device.wait_for_idle()
 
     before = p.buffers.gaussians.to_numpy().copy()
@@ -127,7 +127,7 @@ def test_two_train_steps_advance_submit(backend: str) -> None:
     cam = simple_camera(width=16, height=16, eye=(0.0, 0.0, 0.0),
                         target=(0.0, 0.0, 1.0), up=(0.0, 1.0, 0.0),
                         fovy_degrees=60.0)
-    p._clear_grads()
+    p.clear_gradients()
     p.train_step(cam, lrs=AdamLRs())
     first = p.last_submit_id
     p.train_step(cam, lrs=AdamLRs())

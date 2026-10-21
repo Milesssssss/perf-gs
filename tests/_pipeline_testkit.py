@@ -15,23 +15,11 @@ import numpy as np
 
 from trainer.backend.memory.buffers import GRAD_SCALAR_COMPONENTS
 from trainer.config.config import (
-    AdamLRs,
-    DensificationProperties,
-    IterationContext,
-    IterationContextualVariables,
-    StbnVariables,
+    AdamLRs, DensificationProperties, IterationContextualVariables, StbnVariables,
 )
 from trainer.data.dataset import Camera
+from trainer.config.config_types import DensificationMode
 from trainer.backend.render.pipeline import TrainingPipeline
-
-
-class _CameraEntry:
-    """Minimal stand-in for ColmapImageEntry: _run_forward only reads
-    ``.camera`` off the context's camera_entry."""
-    __test__ = False
-
-    def __init__(self, camera: Camera) -> None:
-        self.camera = camera
 
 
 class TestPipeline(TrainingPipeline):
@@ -41,39 +29,21 @@ class TestPipeline(TrainingPipeline):
     # subclass. Tells pytest's collector to skip it (avoids a collection warning).
     __test__ = False
 
-    def train_step(self, camera: Camera, lrs: "AdamLRs | None" = None,
-                   active_sh_degree: int | None = None,
-                   hardness_value: float = 1.0,
-                   structure_tensor=None,
-                   structure_kwargs: dict | None = None,
-                   stbn: "StbnVariables | None" = None) -> None:
-        """Test convenience: drive one ``Pipeline.train_step`` from a bare
-        (camera, lrs) pair by assembling the IterationContext the production
-        signature now requires. Production builds this context in the training
-        loop; tests only care about the camera + LRs (+ optional SH degree /
-        structure inputs), so this shim fills the rest with inert defaults.
+    def __init__(self, *args, **kwargs):
+        # Numerical tests exercise both densifiers on the same small pipeline.
+        kwargs.setdefault("densify_mode", DensificationMode.STRUCTURE_AWARE)
+        super().__init__(*args, **kwargs)
 
-        ``active_sh_degree=None`` keeps the pipeline's current applied degree
-        (set via ``set_active_sh_degree``), matching how tests stage SH state
-        before stepping."""
+    def train_step(self, camera: Camera, lrs: AdamLRs | None = None,
+                   active_sh_degree: int | None = None, hardness_value: float = 1.0,
+                   structure_tensor=None, structure_kwargs: dict | None = None,
+                   stbn: StbnVariables | None = None) -> None:
         degree = self._active_sh_degree if active_sh_degree is None else int(active_sh_degree)
-        context = IterationContext(
-            step_number=self.iteration + 1,
-            camera_index=0,
-            camera_entry=_CameraEntry(camera),
-            learning_rates=lrs if lrs is not None else AdamLRs(),
-            events=None,
-            iteration_contextual_variables=IterationContextualVariables(
-                hardness_value=hardness_value,
-                sh_degree=degree,
-                densification_variables=DensificationProperties(
-                    structure_tensor_texture=structure_tensor,
-                    structure_kwargs=structure_kwargs,
-                ),
-                contextual_stbn=stbn,
-            ),
-        )
-        super().train_step(context)
+        super().train_step(camera, lrs=lrs if lrs is not None else AdamLRs(),
+            contextual=IterationContextualVariables(
+                hardness_value=hardness_value, sh_degree=degree,
+                densification_variables=DensificationProperties(structure_tensor, structure_kwargs),
+                contextual_stbn=stbn))
 
     def set_primitive_from_numpy(self, **snapshot) -> None:
         """Re-load a primitive snapshot into an already-built pipeline (resets
@@ -100,77 +70,31 @@ class TestPipeline(TrainingPipeline):
         """
         with self.recording("forward_and_loss"):
             self.rasterize(camera)
-            self._run_loss(IterationContextualVariables(
+            self.record_loss(IterationContextualVariables(
                 hardness_value=self._extinction_hardness,
                 sh_degree=self._active_sh_degree,
                 contextual_stbn=stbn,
             ))
 
-    def step_split_for_active_band_test(self, camera: Camera, lrs: "AdamLRs",
-                                         adam_degree: int) -> None:
-        """One full train step where the FORWARD/BACKWARD run at the pipeline's
-        applied ``_active_sh_degree`` but the Adam-rest width is driven by a
-        SEPARATE ``adam_degree``. Production ties all three to one sh_degree;
-        this split lets the active-band-Adam test verify that iterating the full
-        rest width vs only the active head is bit-identical when the inactive
-        bands have exactly-zero gradient. Test-only — no production caller."""
-        forward_ctx = IterationContextualVariables(
-            hardness_value=self._extinction_hardness,
-            sh_degree=self._active_sh_degree,
-        )
-        adam_ctx = IterationContext(
-            step_number=self.iteration + 1,
-            camera_index=0,
-            camera_entry=_CameraEntry(camera),
-            learning_rates=lrs,
-            events=None,
-            iteration_contextual_variables=IterationContextualVariables(
-                hardness_value=self._extinction_hardness,
-                sh_degree=int(adam_degree),
-            ),
-        )
-        backward_ctx = IterationContext(
-            step_number=self.iteration + 1,
-            camera_index=0,
-            camera_entry=_CameraEntry(camera),
-            learning_rates=lrs,
-            events=None,
-            iteration_contextual_variables=forward_ctx,
-        )
+    def step_split_for_active_band_test(self, camera: Camera, lrs: AdamLRs,
+                                        adam_degree: int) -> None:
+        """Compare active-band Adam without changing the forward/backward degree."""
+        contextual = IterationContextualVariables(
+            hardness_value=self._extinction_hardness, sh_degree=self._active_sh_degree)
         with self.recording("train_step"):
             self._clear_2d_grad_seeds()
-            self._run_forward(camera, forward_ctx)
-            self._run_loss(forward_ctx)
-            self._run_backward(backward_ctx)
+            self.record_forward(camera, contextual)
+            self.record_loss(contextual)
+            self.record_backward(contextual)
             self._run_regularization()
-            self._adam.step(adam_ctx)
+            self._adam.step(lrs, adam_degree)
 
     def backward(self, structure_tensor=None, structure_kwargs: dict | None = None,
-                 stbn: "StbnVariables | None" = None) -> None:
-        """Run the backward rasterizer. Assumes forward + loss have run.
-
-        Builds the minimal IterationContext ``_run_backward`` reads (SH degree
-        + hardness from the pipeline's applied render state, plus optional
-        structure-accumulation inputs). ``stbn`` MUST match what
-        :meth:`forward_and_loss` was given — the loss defines the mask and the
-        backward only skips what the loss zeroed."""
-        context = IterationContext(
-            step_number=self.iteration + 1,
-            camera_index=0,
-            camera_entry=None,
-            learning_rates=AdamLRs(),
-            events=None,
-            iteration_contextual_variables=IterationContextualVariables(
-                hardness_value=self._extinction_hardness,
-                sh_degree=self._active_sh_degree,
-                densification_variables=DensificationProperties(
-                    structure_tensor_texture=structure_tensor,
-                    structure_kwargs=structure_kwargs,
-                ),
-                contextual_stbn=stbn,
-            ),
-        )
-        self._run_backward(context)
+                 stbn: StbnVariables | None = None) -> None:
+        self.record_backward(IterationContextualVariables(
+            hardness_value=self._extinction_hardness, sh_degree=self._active_sh_degree,
+            densification_variables=DensificationProperties(structure_tensor, structure_kwargs),
+            contextual_stbn=stbn))
 
     def regularize(self) -> None:
         """Run ONLY the opacity/scale regularization pass (adds its gradient

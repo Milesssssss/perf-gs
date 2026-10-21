@@ -10,6 +10,8 @@ import numpy as np
 
 from trainer.frontend.profiling.profiler import Profiler
 from trainer.backend.compute.gpu import SubmitHandle
+from trainer.config.config import AdamLRs, IterationContextualVariables
+from trainer.frontend.schedule import IterationContext
 
 
 class _FakeEncoder:
@@ -94,7 +96,10 @@ class _FakePipeline:
         self.last_submit_id = 0
         self.train_calls = 0
 
-    def train_step(self, camera, lrs):
+    def train_step(self, camera, *, lrs, contextual):
+        assert camera == "camera"
+        assert lrs == AdamLRs(mean=0, scale=0, rot=0, opacity=0, color=0, sh_rest=0)
+        assert contextual.sh_degree == 2
         self.train_calls += 1
         self.last_submit_id = self.train_calls
 
@@ -144,9 +149,12 @@ def test_capture_loop_presents_each_completed_frozen_submit(monkeypatch) -> None
 
     captured = profiler.run_capture_if_due(
         pipeline=pipeline,
-        it=5,
-        entry=SimpleNamespace(camera="camera"),
-        cam_idx=3,
+        context=IterationContext(
+            step_number=5, camera_index=3,
+            camera_entry=SimpleNamespace(camera="camera"),
+            learning_rates=AdamLRs(), events=None,
+            iteration_contextual_variables=IterationContextualVariables(
+                hardness_value=1.5, sh_degree=2)),
         queue_limiter=queue_limiter,
     )
 

@@ -65,8 +65,7 @@ for _sub in ("running", "debug", "plots"):
         sys.path.append(_p)
 
 from trainer.backend.render import stbn as stbn_module
-from trainer.config.config import (DensificationProperties, IterationContext,
-                                   IterationContextualVariables, StbnVariables)
+from trainer.config.config import (DensificationProperties, IterationContextualVariables, StbnVariables)
 from trainer.contracts.codegen import TILE_AREA
 from trainer.frontend.app import TrainingApplication
 from trainer.frontend.cli import build_parser
@@ -374,17 +373,13 @@ def slice_sequence(traversal: str, *, slices: int, length: int, rng,
 # Frozen-state forward + backward
 # ---------------------------------------------------------------------------
 
-def _context(pipeline, sh_degree: int, hardness: float,
-             stbn: StbnVariables | None) -> IterationContext:
-    contextual = IterationContextualVariables(
+def _context(sh_degree: int, hardness: float,
+             stbn: StbnVariables | None) -> IterationContextualVariables:
+    return IterationContextualVariables(
         hardness_value=hardness, sh_degree=sh_degree, contextual_stbn=stbn,
         densification_variables=DensificationProperties(
             structure_tensor_texture=None, structure_kwargs={}),
     )
-    return IterationContext(
-        step_number=pipeline.iteration + 1, camera_index=0, camera_entry=None,
-        learning_rates=None, events=None,
-        iteration_contextual_variables=contextual)
 
 
 def loss_and_backward(pipeline, camera, *, sh_degree: int, hardness: float,
@@ -413,14 +408,13 @@ def loss_and_backward(pipeline, camera, *, sh_degree: int, hardness: float,
     including it would add an identical constant to every method and inflate every
     cosine toward 1. (Both reg weights are 0 by default in any case.)
     """
-    context = _context(pipeline, sh_degree, hardness, stbn)
-    contextual = context.iteration_contextual_variables
+    contextual = _context(sh_degree, hardness, stbn)
     with pipeline.recording("grad_study_backward"):
         if clear:
-            pipeline._clear_grads()
-        pipeline._run_forward(camera, contextual)
-        pipeline._run_loss(contextual)
-        pipeline._run_backward(context)
+            pipeline.clear_gradients()
+        pipeline.record_forward(camera, contextual)
+        pipeline.record_loss(contextual)
+        pipeline.record_backward(contextual)
 
 
 def state_fingerprint(pipeline) -> dict:

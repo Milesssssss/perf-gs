@@ -20,11 +20,8 @@ import time
 
 import numpy as np
 
-from trainer.config.config import (
-    AdamLRs,
-    DensificationProperties,
-    IterationContext,
-)
+from trainer.config.config import (AdamLRs, DensificationProperties)
+from trainer.frontend.schedule import IterationContext
 
 
 def apply_profile_session_overrides(args) -> bool:
@@ -198,7 +195,8 @@ class Profiler:
         for _ in range(8):
             if self.window is not None:
                 self.window.process_events()
-            pipeline.train_step(frozen_ctx)
+            pipeline.train_step(frozen_ctx.camera_entry.camera, lrs=frozen_ctx.learning_rates,
+                                contextual=frozen_ctx.iteration_contextual_variables)
             if self.window is not None:
                 self.present_frame(pipeline.last_submit_id)
         pipeline.runtime.wait_for_idle()
@@ -214,7 +212,8 @@ class Profiler:
                 if self.window.should_close():
                     break
                 self.window.process_events()
-            pipeline.train_step(frozen_ctx)
+            pipeline.train_step(frozen_ctx.camera_entry.camera, lrs=frozen_ctx.learning_rates,
+                                contextual=frozen_ctx.iteration_contextual_variables)
             if self.window is not None:
                 self.present_frame(pipeline.last_submit_id)
             else:

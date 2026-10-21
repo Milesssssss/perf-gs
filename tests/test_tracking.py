@@ -26,7 +26,7 @@ from trainer.backend.compute.device import create_device
 BACKENDS = ["vulkan", "d3d12"]
 
 
-def _setup(backend: str, w: int, h: int, max_splats: int) -> Pipeline:
+def _setup(backend: str, w: int, h: int, max_splats: int) -> TestPipeline:
     try:
         device = create_device(backend=backend)
     except Exception as exc:
@@ -80,7 +80,7 @@ def test_tracking_populates_and_clears(backend: str) -> None:
 
     # Clear + run forward/loss/backward.
     pipeline.clear_tracking()
-    pipeline._clear_grads()
+    pipeline.clear_gradients()
     pipeline.forward_and_loss(camera)
     pipeline.backward()
 
@@ -131,14 +131,14 @@ def test_tracking_accumulates_across_iters(backend: str) -> None:
     )
 
     pipeline.clear_tracking()
-    pipeline._clear_grads()
+    pipeline.clear_gradients()
     pipeline.forward_and_loss(camera)
     pipeline.backward()
     t1 = pipeline.read_tracking()
     vis1 = int(t1["visibility_count"][0])
 
     # Second pass WITHOUT clearing tracking.
-    pipeline._clear_grads()
+    pipeline.clear_gradients()
     pipeline.forward_and_loss(camera)
     pipeline.backward()
     t2 = pipeline.read_tracking()

@@ -77,7 +77,7 @@ def test_hardened_gradients_finite_difference(backend: str) -> None:
 
     pipeline.set_primitive_from_numpy(**scene)
     pipeline.forward_and_loss(camera)
-    pipeline._clear_grads()
+    pipeline.clear_gradients()
     pipeline.backward()
     analytic = pipeline.read_gradients()
 

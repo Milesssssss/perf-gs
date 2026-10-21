@@ -21,12 +21,24 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from trainer.config.config_types import DensificationMode, ScheduleConfig
-from trainer.config.config import AppearanceConfig
-
 import numpy as np
 
-from trainer.config.config import IterationEvents
+from trainer.config.config import (
+    AdamLRs, AppearanceConfig, IterationContextualVariables, IterationEvents,
+)
+from trainer.config.config_types import DensificationMode, ScheduleConfig
+from trainer.data.colmap import ColmapImageEntry
+
+
+@dataclass(frozen=True)
+class IterationContext:
+    step_number: int
+    camera_index: int
+    camera_entry: ColmapImageEntry
+    learning_rates: AdamLRs
+    events: IterationEvents
+    iteration_contextual_variables: IterationContextualVariables
+
 
 class TrainingSchedule:
 

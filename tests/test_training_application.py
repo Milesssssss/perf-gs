@@ -12,7 +12,6 @@ from PIL import Image
 
 from trainer.config.config import (
     AppearanceConfig,
-    CompositorConfig,
     LossConfig,
     RasterConfig,
     RegularizationConfig,
@@ -21,6 +20,9 @@ from _colmap_testkit import write_colmap_scene
 
 from trainer.frontend.evaluation.evaluation import render_all_cameras
 from trainer.frontend import app as app_module
+from trainer.frontend import hub as hub_module
+from trainer.frontend.hub import TrainingHub
+from trainer.config.config_types import DensificationMode
 from trainer.frontend.viewer.session import (
     MODE_HUB,
     DatasetState,
@@ -117,20 +119,14 @@ def test_pipeline_factory_separates_configuration_ownership(monkeypatch) -> None
         captured.update(kwargs)
         return sentinel
 
-    monkeypatch.setattr("trainer.frontend.app.Pipeline", fake_pipeline)
-    args = Namespace(
-        max_splats=123,
-        z_near_cull=0.25,
-        cluster_cull=False,
-        mip_splatting=True,
-        mip_kernel_size=0.1,
-        sh_degree=0,
-        sh_band_interval=1000,
-        extinction_hardness=2.0,
-        w_alpha=0.4,
-        opacity_reg=0.03,
-        scale_reg=0.07,
-    )
+    monkeypatch.setattr("trainer.frontend.app.TrainingPipeline", fake_pipeline)
+    args = app_module.build_parser().parse_args([
+        "--scene", "unused", "--max-splats", "123", "--z-near-cull", "0.25",
+        "--no-cluster-cull", "--mip-splatting", "--mip-kernel-size", "0.1",
+        "--sh-degree", "0", "--sh-band-interval", "1000", "--extinction-hardness", "2",
+        "--w-alpha", "0.4", "--opacity-reg", "0.03", "--scale-reg", "0.07",
+        "--densify-mode", "structure_aware",
+    ])
     scene = Namespace(width=64, height=32)
 
     result = create_pipeline(
@@ -149,8 +145,7 @@ def test_pipeline_factory_separates_configuration_ownership(monkeypatch) -> None
         mip_enabled=True,
         kernel_size=0.1,
     )
-    assert captured["compositor_config"] == CompositorConfig(
-        extinction_hardness=2.0)
+    assert captured["densify_mode"] == DensificationMode.STRUCTURE_AWARE
     assert captured["loss_config"] == LossConfig(
         alpha_weight=0.4, ssim_weight=0.2, l2_weight=1.5)
     assert captured["regularization_config"] == RegularizationConfig(
@@ -272,11 +267,11 @@ class _FakeHubViewer:
         self.snapped = snap
 
 
-def _hub_app(viewer: _FakeHubViewer) -> TrainingApplication:
+def _hub_app(viewer: _FakeHubViewer) -> TrainingHub:
     app = object.__new__(TrainingApplication)
     app.viewer = viewer
     app.args = Namespace(width=None, height=None, downsample=1, init_opacity=0.1)
-    return app
+    return TrainingHub(app)
 
 
 def test_dropping_a_colmap_dataset_previews_its_point_cloud(tmp_path) -> None:
@@ -315,14 +310,14 @@ def test_the_sparse_model_is_parsed_with_rendering_suspended(
     """
     write_colmap_scene(tmp_path / "recon")
     viewer = _FakeHubViewer()
-    real_load = app_module.load_colmap
+    real_load = hub_module.load_colmap
     depth_during_load: list[int] = []
 
     def spy(*args, **kwargs):
         depth_during_load.append(viewer.suspend_depth)
         return real_load(*args, **kwargs)
 
-    monkeypatch.setattr(app_module, "load_colmap", spy)
+    monkeypatch.setattr(hub_module, "load_colmap", spy)
 
     _hub_app(viewer)._hub_preview_scene(str(tmp_path / "recon"))
 
@@ -363,6 +358,7 @@ def _stbn_loop(target_fraction=0.1, warmup=0, slices=64, seed=0, independent=Fal
     loop.stbn_phase = {}
     loop.stbn_independent = independent
     loop._stbn_rng = np.random.default_rng(seed)
+    loop._stbn_sample_rng = np.random.default_rng(seed + 0x5EED)
     loop.training_step = 1
     return loop
 

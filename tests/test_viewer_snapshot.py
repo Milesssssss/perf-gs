@@ -114,7 +114,7 @@ def _buffers(*, count: int, capacity: int = CAPACITY, sh: bool = False):
 
 
 def _snapshot(*, live: int, viewer_capacity: int = CAPACITY, sh: bool = False,
-              mip: bool = False, active_sh_degree: int = 0):
+              mip: bool = False, active_sh_degree: int = 0, hardness: float = 1.0):
     """Run the real ``update_gaussians`` against fakes; return (encoder, viewer)."""
     encoder = _Encoder()
     view_buffers = _buffers(count=0, capacity=viewer_capacity, sh=sh)
@@ -127,6 +127,7 @@ def _snapshot(*, live: int, viewer_capacity: int = CAPACITY, sh: bool = False,
             buffers=view_buffers,
             raster_config=SimpleNamespace(mip_enabled=mip),
             set_active_sh_degree=lambda degree: None,
+            set_extinction_hardness=lambda value: setattr(viewer._pipeline, "hardness", value),
         ),
         live_splat_count=lambda pipeline: Viewer.live_splat_count(viewer, pipeline),
         # While training and parked on a test camera the render loop re-rasterizes
@@ -136,7 +137,7 @@ def _snapshot(*, live: int, viewer_capacity: int = CAPACITY, sh: bool = False,
         invalidations=invalidations,
     )
     train = SimpleNamespace(buffers=_buffers(count=live, sh=sh),
-                            _active_sh_degree=active_sh_degree)
+                            _active_sh_degree=active_sh_degree, _extinction_hardness=hardness)
     Viewer.update_gaussians(viewer, train)
     return encoder, viewer, view_buffers
 
@@ -189,3 +190,8 @@ def test_a_snapshot_invalidates_the_rendered_scene() -> None:
     would freeze the picture for the whole run."""
     _, viewer, _ = _snapshot(live=1_000)
     assert viewer.invalidations == [1]
+
+
+def test_snapshot_carries_nondefault_extinction_hardness() -> None:
+    _, viewer, _ = _snapshot(live=1_000, hardness=2.5)
+    assert viewer._pipeline.hardness == 2.5

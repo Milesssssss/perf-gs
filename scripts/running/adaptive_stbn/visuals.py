@@ -153,10 +153,7 @@ def render(paths: dict, *, scene: str = "bicycle", state: int = DEFAULT_STATE,
     from trainer.backend.render import adaptive_stbn as ad
     from trainer.backend.render import stbn as stbn_module
     from trainer.backend.render.adaptive_sampler import AdaptiveSampler
-    from trainer.config.config import (DensificationProperties,
-                                       IterationContext,
-                                       IterationContextualVariables,
-                                       StbnVariables)
+    from trainer.config.config import (DensificationProperties, IterationContextualVariables, StbnVariables)
     from trainer.contracts.codegen import TILE_AREA
     from trainer.frontend.app import TrainingApplication
     from trainer.frontend.cli import build_parser
@@ -217,21 +214,16 @@ def render(paths: dict, *, scene: str = "bicycle", state: int = DEFAULT_STATE,
         pipeline._adaptive = (samplers[adaptive_uniform]
                              if adaptive_uniform is not None else None)
         pipeline._stbn = uniform_table
-        step_context = IterationContext(
-            step_number=pipeline.iteration + 1, camera_index=0,
-            camera_entry=None, learning_rates=None, events=None,
-            iteration_contextual_variables=IterationContextualVariables(
-                hardness_value=contextual.hardness_value,
-                sh_degree=contextual.sh_degree,
-                contextual_stbn=variables,
-                densification_variables=DensificationProperties(
-                    structure_tensor_texture=None, structure_kwargs={})))
-        inner = step_context.iteration_contextual_variables
+        inner = IterationContextualVariables(
+            hardness_value=contextual.hardness_value,
+            sh_degree=contextual.sh_degree,
+            contextual_stbn=variables,
+            densification_variables=DensificationProperties(
+                structure_tensor_texture=None, structure_kwargs={}))
         with pipeline.recording("adaptive_visuals"):
-            pipeline._run_forward(camera, inner)
-            pipeline._run_loss(inner)
+            pipeline.record_forward(camera, inner)
+            pipeline.record_loss(inner)
         pipeline.runtime.wait_for_idle()
-        return step_context
 
     train_indices = list(scene_context.train_indices)
     step = max(1, len(train_indices) // max(cameras, 1))

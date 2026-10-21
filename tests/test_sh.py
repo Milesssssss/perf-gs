@@ -189,7 +189,7 @@ def test_sh_rest_gradient_finite_difference(backend: str) -> None:
     _upload_rest(p, rest0)
     p.set_active_sh_degree(3)
     p.forward_and_loss(cam)
-    p._clear_grads()
+    p.clear_gradients()
     p.backward()
     analytic = _read_features_grad(p, 1)[0].astype(np.float64)
 
@@ -238,7 +238,7 @@ def test_sh_mean_gradient_includes_view_term(backend: str) -> None:
 
     place(mean0)
     p.forward_and_loss(cam)
-    p._clear_grads()
+    p.clear_gradients()
     p.backward()
     grads = p.read_gradients()
     analytic = np.array([grads["mean_x"][0], grads["mean_y"][0], grads["mean_z"][0]])

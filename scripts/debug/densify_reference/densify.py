@@ -3,7 +3,7 @@
 """Simple/structure-aware densification, Morton sorting, and opacity reset.
 
 These operate ON a :class:`~trainer.pipeline.Pipeline`: they dispatch its
-kernels, read/write its buffer bag, and use its ``_scan`` / ``_run_forward`` /
+kernels, read/write its buffer bag, and use its ``_scan`` / ``record_forward`` /
 encoder infrastructure. Kept as free functions taking the pipeline as the first
 argument — mirroring how :mod:`trainer.buffer_io` takes a ``GaussianBuffers`` —
 so the Pipeline class stays lean; the Pipeline exposes them as thin delegating

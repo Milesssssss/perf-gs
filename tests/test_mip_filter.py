@@ -139,7 +139,7 @@ def test_mip_on_gradients_finite_difference(backend: str) -> None:
 
     # Analytic gradients (mip on, fixed filter, default per-splat backward).
     pipeline.forward_and_loss(camera)
-    pipeline._clear_grads()
+    pipeline.clear_gradients()
     pipeline.backward()
     analytic = pipeline.read_gradients()
 

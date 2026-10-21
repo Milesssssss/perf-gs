@@ -96,7 +96,8 @@ class StageTimingRecorder:
     Lifecycle per iteration, driven by ``TrainingLoop``:
 
         recorder.before_step(step)          # installs the timer if sampling
-        ...pipeline.train_step(context)...
+        ...pipeline.train_step(context.camera_entry.camera, lrs=context.learning_rates,
+                                contextual=context.iteration_contextual_variables)...
         recorder.after_step(step, pipeline) # drains + reads if sampled
         recorder.add_host(step, "densify", ms)
 

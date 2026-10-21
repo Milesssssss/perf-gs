@@ -22,6 +22,7 @@ from trainer.backend.compute.timing import StepTimer
 from trainer.backend.memory.buffers import ScratchArena
 from trainer.backend.memory.reorder import reorder_soa_planes
 from trainer.backend.render.pipeline import TrainingPipeline
+from trainer.config.config_types import DensificationMode
 from trainer.config.config import AppearanceConfig
 
 
@@ -35,7 +36,7 @@ def _reference_arena(pipeline):
 
 def run(args):
     device = create_device(backend=args.backend)
-    pipeline = TrainingPipeline(
+    pipeline = TrainingPipeline(densify_mode=DensificationMode.STRUCTURE_AWARE,
         device=device, width=16, height=16, max_splats=args.capacity,
         max_sort_pairs=args.capacity,
         appearance_config=AppearanceConfig(sh_degree=3))

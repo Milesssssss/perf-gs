@@ -62,8 +62,7 @@ for _sub in ("running", "debug", "plots"):
         sys.path.append(_p)
 
 from trainer.backend.render import stbn as stbn_module
-from trainer.config.config import (DensificationProperties, IterationContext,
-                                   IterationContextualVariables, StbnVariables)
+from trainer.config.config import (DensificationProperties, IterationContextualVariables, StbnVariables)
 from trainer.contracts.codegen import TILE_AREA
 from trainer.frontend.app import TrainingApplication
 from trainer.frontend.cli import build_parser
@@ -130,7 +129,7 @@ def one_backward(pipeline, camera, *, sh_degree: int, hardness: float,
                  stbn: StbnVariables | None) -> dict[str, np.ndarray]:
     """Forward + loss + backward for ONE mask, then read the gradients.
 
-    A full ``_clear_grads`` precedes it, because the training loop only clears
+    A full ``clear_gradients`` precedes it, because the training loop only clears
     the 2D seeds per iteration and relies on the Adam step to consume the scalar
     gradients — and this probe deliberately never runs Adam. Without the explicit
     clear every reading would be a running sum of all previous masks.
@@ -140,16 +139,11 @@ def one_backward(pipeline, camera, *, sh_degree: int, hardness: float,
         densification_variables=DensificationProperties(
             structure_tensor_texture=None, structure_kwargs={}),
     )
-    context = IterationContext(
-        step_number=pipeline.iteration + 1, camera_index=0, camera_entry=None,
-        learning_rates=None, events=None,
-        iteration_contextual_variables=contextual,
-    )
     with pipeline.recording("grad_probe"):
-        pipeline._clear_grads()
-        pipeline._run_forward(camera, contextual)
-        pipeline._run_loss(contextual)
-        pipeline._run_backward(context)
+        pipeline.clear_gradients()
+        pipeline.record_forward(camera, contextual)
+        pipeline.record_loss(contextual)
+        pipeline.record_backward(contextual)
     return read_gradients(pipeline)
 
 

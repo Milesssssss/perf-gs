@@ -7,8 +7,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from trainer.data.colmap import ColmapImageEntry
-
 
 @dataclass(frozen=True)
 class RasterConfig:
@@ -180,14 +178,6 @@ class IterationContextualVariables:
     densification_variables: DensificationProperties | None = None
     contextual_stbn: StbnVariables | None = None
 
-@dataclass(frozen=True)
-class IterationContext:
-    step_number: int
-    camera_index: int
-    camera_entry: ColmapImageEntry
-    learning_rates: AdamLRs
-    events: IterationEvents
-    iteration_contextual_variables: IterationContextualVariables
 
 @dataclass
 class AdamLRs:

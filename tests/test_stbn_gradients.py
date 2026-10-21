@@ -139,7 +139,7 @@ def _gradients(pipeline: TestPipeline, scene, camera,
     pipeline.set_primitive_from_numpy(**scene)
     pipeline.set_target_image(_target())
     pipeline.forward_and_loss(camera, stbn=variables)
-    pipeline._clear_grads()
+    pipeline.clear_gradients()
     pipeline.backward(stbn=variables)
     pipeline.device.wait_for_idle()
     return pipeline.read_gradients()

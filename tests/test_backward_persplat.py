@@ -61,7 +61,7 @@ def _grads_with(pipeline: TestPipeline, scene, camera, use_persplat: bool,
     pipeline.use_flat_bucket_backward = use_flat
     pipeline.use_warp_per_pixel_forward = use_warp_forward
     pipeline.forward_and_loss(camera)
-    pipeline._clear_grads()
+    pipeline.clear_gradients()
     pipeline.backward()
     pipeline.device.wait_for_idle()
     return pipeline.read_gradients()

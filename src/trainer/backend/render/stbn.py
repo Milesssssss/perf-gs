@@ -115,8 +115,9 @@ _COUNT_MASK = 0xFF
 
 
 def default_cache_dir() -> Path:
-    """``<repo>/.stbn`` — the gitignored STBN cache the downloader writes to."""
-    return Path(__file__).resolve().parents[4] / ".stbn"
+    """Keep downloads in the checkout or working directory, outside installed code."""
+    root = Path(__file__).resolve().parents[4]
+    return (root if (root / "pyproject.toml").is_file() else Path.cwd()) / ".stbn"
 
 
 def nvidia_volume_path(cache_dir: Path | str | None = None) -> Path:

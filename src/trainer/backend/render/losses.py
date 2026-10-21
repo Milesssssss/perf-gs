@@ -2,7 +2,7 @@
 
 """Image-space loss recording, decoupled from the primitive rasterizer.
 
-Extracts ``Pipeline._run_loss``'s SSIM / L1+L2 logic so the loss can be recorded
+Extracts ``Pipeline.record_loss``'s SSIM / L1+L2 logic so the loss can be recorded
 independently of HOW the pixels were produced (a future learned render head or a
 different primitive reuses it unchanged). ``ImageLoss.record`` emits into a
 caller batch or creates one runtime-owned transient batch for the complete

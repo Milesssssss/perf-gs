@@ -49,7 +49,7 @@ from trainer.backend.densify.simple_densifier import (
     SimpleDensifyKernels,
 )
 
-from trainer.config.config import IterationContext, IterationContextualVariables
+from trainer.config.config import IterationContextualVariables
 
 _RADIX_SCAN_DIM = 128
 
@@ -111,7 +111,7 @@ class TrainingPipeline:
         initial_state: dict | None = None,
         use_persplat_backward: bool = True,
         use_flat_bucket_backward: bool = True,
-        densify_mode: DensificationMode | None = None,
+        densify_mode: DensificationMode = DensificationMode.SIMPLE,
     ) -> None:
         self.device = device
         self.gpu_lock = gpu_lock if gpu_lock is not None else contextlib.nullcontext()
@@ -153,12 +153,18 @@ class TrainingPipeline:
 
         allocate_fn = buffers.allocate_viewer if viewer_only else buffers.allocate
 
-        self.buffers = allocate_fn(
-            device=device, shared_data_module=self.shared_data_module,
+        allocation_sizes = dict(
             max_splats=max_splats, width=width, height=height,
-            max_sort_pairs=max_sort_pairs,
-            sh_rest_floats=self._sh_rest_floats,
-        )
+            max_sort_pairs=max_sort_pairs, sh_rest_floats=self._sh_rest_floats)
+        if not viewer_only:
+            allocation_sizes["structure_aware"] = densify_mode == DensificationMode.STRUCTURE_AWARE
+        planned_bytes = buffers.estimate_allocation_bytes(
+            self.shared_data_module, viewer_only=viewer_only, **allocation_sizes)
+        role = "viewer" if viewer_only else "trainer"
+        print(f"[memory] {role} base GPU resources: {planned_bytes / 1024**3:.2f} GiB "
+              "(sampler resources and driver overhead excluded)")
+        self.buffers = allocate_fn(
+            device=device, shared_data_module=self.shared_data_module, **allocation_sizes)
 
         self.image_loss = None if viewer_only else ImageLoss(
             ssim_maps_kernel=self.k_ssim_maps,
@@ -279,10 +285,10 @@ class TrainingPipeline:
 
         if initial_state is not None:
             self._load_snapshot(**initial_state)
-            self._clear_grads()
+            self.clear_gradients()
             self.clear_tracking()
-            if densify_mode == DensificationMode.STRUCTURE_AWARE:
-                self.clear_structure_scores()
+        if self.buffers.eta is not None:
+            self.clear_structure_scores()
 
     def _create_stbn_mask(self) -> "_stbn.StbnMask":
         """Resolve the run's STBN table (or the disabled placeholder).
@@ -529,7 +535,7 @@ class TrainingPipeline:
                 hardness_value=self._extinction_hardness,
                 sh_degree=self._active_sh_degree,
             )
-        self._run_forward(camera, contextual)
+        self.record_forward(camera, contextual)
 
     def radix_sort_pairs(self) -> tuple[spy.NDBuffer, spy.NDBuffer, spy.NDBuffer]:
         """Record the shared 64-bit-key radix sort service."""
@@ -811,7 +817,8 @@ class TrainingPipeline:
             src_v, dst_v = dst_v, src_v
         return src_lo, src_hi, src_v
 
-    def _run_forward(self, camera: Camera, contextual: IterationContextualVariables) -> None:
+    def record_forward(self, camera: Camera, contextual: IterationContextualVariables) -> None:
+        """Record rasterization and the intermediates needed by one backward pass."""
         # TODO: we should use a const buffer but cest la vie
         self._upload_camera(camera)
         hardness_value = contextual.hardness_value
@@ -984,11 +991,10 @@ class TrainingPipeline:
     # Training
     # ------------------------------------------------------------------
 
-    def _clear_grads(self) -> None:
+    def clear_gradients(self) -> None:
         """Zero the 14 scalar param grads + 5 2D grad seeds. Full clear.
 
-        Used by tests that need a clean grad state before an isolated
-        backward() (see tests/test_gradients.py, tests/test_backward_persplat.py).
+        Use before isolated forward/loss/backward probes that do not run Adam.
         Also used at pipeline setup via the training loop before iter 1
         (see :meth:`_clear_2d_grad_seeds` for the per-iter hot path)."""
         b = self.buffers
@@ -1014,7 +1020,8 @@ class TrainingPipeline:
                 max_splats=self.max_splats,
             )
 
-    def _run_loss(self, contextual: IterationContextualVariables) -> None:
+    def record_loss(self, contextual: IterationContextualVariables) -> None:
+        """Record image-loss derivatives against the currently bound target."""
         variables = (contextual.contextual_stbn
                      if contextual is not None else None)
         if self._adaptive is not None and variables is not None \
@@ -1051,8 +1058,8 @@ class TrainingPipeline:
             stbn_kwargs=self._stbn_kwargs(contextual),
         )
 
-    def _run_backward(self, iterationContext) -> None:
-        iteration_contextual_variables: IterationContextualVariables = iterationContext.iteration_contextual_variables
+    def record_backward(self, iteration_contextual_variables: IterationContextualVariables) -> None:
+        """Record gradients after forward/loss, using the same per-step parameters."""
         b = self.buffers
         gb = b.grad_buffers
         sorted_values = self._sorted_values
@@ -1279,16 +1286,14 @@ class TrainingPipeline:
         }
 
 
-    def train_step(self, iterationContext: IterationContext) -> None:
-
-        if iterationContext.learning_rates is None:
-            raise RuntimeError("train_step requires learning_rates to be set in iterationContext")
-
-        contextual = iterationContext.iteration_contextual_variables
-        # Apply this iteration's scheduled values to the pipeline's render state so renders outside the step (eval/export/viewer/bench) inherit them.
-        # This is code smell, that we need to have the pipeline state be set from the iterationContext
-        # but at the same time we may need to run run_forward from outside the train step, and the train step depends on the iterationContext
-        # i may need to think more about how to fix ts
+    def train_step(self, camera: Camera, *, lrs: AdamLRs,
+                   contextual: IterationContextualVariables | None = None) -> None:
+        """Optimize one camera without dataset or frontend schedule dependencies."""
+        if contextual is None:
+            contextual = IterationContextualVariables(
+                hardness_value=self._extinction_hardness,
+                sh_degree=self._active_sh_degree)
+        # Evaluation and viewer snapshots inherit the last applied render state.
         self.set_extinction_hardness(contextual.hardness_value)
         self.set_active_sh_degree(contextual.sh_degree)
 
@@ -1297,15 +1302,15 @@ class TrainingPipeline:
                 # TODO this should not be here by itself
                 self._clear_2d_grad_seeds()
             with self._marker_group("forward"):
-                self._run_forward(iterationContext.camera_entry.camera, contextual)
+                self.record_forward(camera, contextual)
             with self._marker_group("loss"):
-                self._run_loss(contextual)
+                self.record_loss(contextual)
             with self._marker_group("backward"):
-                self._run_backward(iterationContext)
+                self.record_backward(contextual)
             with self._marker_group("regularization"):
                 self._run_regularization()
             with self._marker_group("adam"):
-                self._adam.step(iterationContext)
+                self._adam.step(lrs, contextual.sh_degree)
 
     def densify_simple(self, cfg, grad_thresh=0.0002, scale_thresh=None,
                        prune_big_scale=None, allow_scale_prune=True,

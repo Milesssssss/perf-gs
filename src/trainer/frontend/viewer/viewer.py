@@ -552,6 +552,7 @@ class Viewer:
         encoder.upload_buffer_data(dst.num_gaussians_counter.storage, 0,np.array([count], dtype=np.uint32))
         self.runtime.submit(batch)
         self._pipeline.set_active_sh_degree(train_pipeline._active_sh_degree)
+        self._pipeline.set_extinction_hardness(train_pipeline._extinction_hardness)
         self._has_data = count > 0
         self.invalidate_scene()
 

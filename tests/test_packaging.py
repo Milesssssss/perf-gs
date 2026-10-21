@@ -1,0 +1,54 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
+"""The installed wheel must locate shaders without a source checkout."""
+import shutil
+import subprocess
+import sys
+import tarfile
+import zipfile
+from pathlib import Path
+
+
+def test_wheel_and_sdist_include_shader_resources(tmp_path):
+    root = Path(__file__).resolve().parents[1]
+    source = tmp_path / "source"
+    source.mkdir()
+    for name in ("pyproject.toml", "setup.py", "LICENSE", "NOTICE.md", "README.md"):
+        shutil.copy2(root / name, source / name)
+    for name in ("src/trainer", "shaders", "licenses"):
+        shutil.copytree(root / name, source / name,
+                        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+    result = subprocess.run(
+        [sys.executable, "-c",
+         "from setuptools.build_meta import build_wheel, build_sdist; "
+         "build_wheel('dist'); build_sdist('dist')"],
+        cwd=source, capture_output=True, text=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+    expected = {p.relative_to(root / "shaders").as_posix()
+                for p in (root / "shaders").rglob("*.slang")}
+    site = tmp_path / "installed"
+    with zipfile.ZipFile(next((source / "dist").glob("*.whl"))) as wheel:
+        assert {"trainer/shaders/" + name for name in expected} <= set(wheel.namelist())
+        wheel.extractall(site)
+    with tarfile.open(next((source / "dist").glob("*.tar.gz"))) as archive:
+        contents = {name.split("/", 1)[1] for name in archive.getnames() if "/" in name}
+        assert {"shaders/" + name for name in expected} <= contents
+
+    check = """
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+import trainer
+from trainer.backend.compute.device import SHADERS_DIR
+from trainer.backend.render.stbn import default_cache_dir
+from trainer.contracts.codegen import stale_generated_slang
+assert Path(trainer.__file__).is_relative_to(sys.argv[1])
+assert SHADERS_DIR == Path(sys.argv[1]) / 'trainer' / 'shaders'
+assert (SHADERS_DIR / 'rasterize/tile_binned/forward.slang').is_file()
+assert stale_generated_slang() == ()
+assert default_cache_dir() == Path.cwd() / '.stbn'
+"""
+    result = subprocess.run([sys.executable, "-I", "-c", check, str(site)],
+                            cwd=tmp_path, capture_output=True, text=True)
+    assert result.returncode == 0, result.stdout + result.stderr

@@ -13,6 +13,7 @@ from trainer.backend.densify.densify import DensifyConfig, StructureConfig
 from trainer.backend.memory import buffer_io, buffers
 from trainer.backend.memory.reorder import reorder_soa_planes
 from trainer.backend.render.pipeline import TrainingPipeline
+from trainer.config.config_types import DensificationMode
 from trainer.config.config import AppearanceConfig
 from trainer.contracts.schema import ADAM_STATE_FLOAT_COUNT, GAUSSIAN_FLOAT_COUNT, sh_rest_coeffs
 
@@ -117,7 +118,7 @@ def sh_pipeline(request):
         device = create_device(backend=backend)
     except Exception as error:
         pytest.skip(f"backend unavailable: {error}")
-    pipeline = TrainingPipeline(device=device, width=16, height=16,
+    pipeline = TrainingPipeline(densify_mode=DensificationMode.STRUCTURE_AWARE, device=device, width=16, height=16,
                                 max_splats=73, max_sort_pairs=1024,
                                 appearance_config=AppearanceConfig(sh_degree=degree))
     yield pipeline

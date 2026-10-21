@@ -384,7 +384,7 @@ class GaussianBuffers:
     # --- Cluster-Cull-Compact (Laine-2011 pattern, applied to 3DGS) ---
     # Gaussians are Morton-sorted every ~1000 iters (see morton_sort), so
     # contiguous [128k, 128k+128) slots are spatially adjacent. Every
-    # train_step _run_forward rebuilds a per-cluster world-space AABB
+    # train_step record_forward rebuilds a per-cluster world-space AABB
     # (mean +/- 3-sigma * |R| * exp(log_scale)) and tests it against the
     # camera frustum; the resulting cluster_visible[] flag is read by
     # bin_count to skip whole clusters at zero cost (they emit no tile
@@ -606,6 +606,8 @@ def allocate(
     height: int,
     max_sort_pairs: int = DEFAULT_MAX_SORT_PAIRS,
     sh_rest_floats: int = 0,
+    structure_aware: bool = False,
+    _allocator=None,
 ) -> GaussianBuffers:
     """Allocate all GPU resources needed by forward + backward + Adam.
 
@@ -618,7 +620,7 @@ def allocate(
     'rest' coefficient storage (bands 1..sh_degree); 0 (default) allocates none.
     """
     types = _reflect_types(shared_data_module)
-    allocator = _Alloc(device, width, height)
+    allocator = _allocator if _allocator is not None else _Alloc(device, width, height)
 
     num_tiles_x = _ceil_div(width, TILE_WIDTH)
     num_tiles_y = _ceil_div(height, TILE_HEIGHT)
@@ -749,18 +751,18 @@ def allocate(
         np.array([max_splats, max_splats], dtype=np.uint32))
 
     # --- structure-aware densification (SAD-GS) ---
-    buffers.eta = EtaResources(
-        components={name: allocator.uint_buffer(f"eta.components[{name}]", max_splats) for name in ETA_ACCUM_COMPONENTS},
-        n_total=allocator.uint_buffer("eta.n_total", max_splats),
-        scratch_components={
-            name: allocator.uint_buffer(f"eta.scratch_components[{name}]", max_splats) for name in ETA_ACCUM_COMPONENTS},
-        scratch_n_total=allocator.uint_buffer("eta.scratch_n_total", max_splats),
-    )
-    buffers.split_factor_x = allocator.uint_buffer("split_factor_x", max_splats)
-    buffers.split_factor_y = allocator.uint_buffer("split_factor_y", max_splats)
-    buffers.split_factor_z = allocator.uint_buffer("split_factor_z", max_splats)
-    # Requested-tail-growth counter for the structure densify overbudget warning.
-    buffers.densify_children_sum = allocator.uint_buffer("densify_children_sum", 1)
+    if structure_aware:
+        buffers.eta = EtaResources(
+            components={name: allocator.uint_buffer(f"eta.components[{name}]", max_splats) for name in ETA_ACCUM_COMPONENTS},
+            n_total=allocator.uint_buffer("eta.n_total", max_splats),
+            scratch_components={
+                name: allocator.uint_buffer(f"eta.scratch_components[{name}]", max_splats) for name in ETA_ACCUM_COMPONENTS},
+            scratch_n_total=allocator.uint_buffer("eta.scratch_n_total", max_splats),
+        )
+        buffers.split_factor_x = allocator.uint_buffer("split_factor_x", max_splats)
+        buffers.split_factor_y = allocator.uint_buffer("split_factor_y", max_splats)
+        buffers.split_factor_z = allocator.uint_buffer("split_factor_z", max_splats)
+        buffers.densify_children_sum = allocator.uint_buffer("densify_children_sum", 1)
 
     # --- optional view-dependent SH rest coefficients ---
     # Allocated only when sh_degree > 0. Features + gradients use fp16 pairs;
@@ -806,8 +808,9 @@ def allocate_viewer(
     height: int,
     max_sort_pairs: int = DEFAULT_MAX_SORT_PAIRS,
     sh_rest_floats: int = 0,
+    _allocator=None,
 ) -> GaussianBuffers:
-    """Allocate ONLY the resources the viewer's ``_run_forward`` touches.
+    """Allocate ONLY the resources the viewer's ``record_forward`` touches.
 
     Skips every training-only buffer (grads/Adam/densify scratch/loss textures/
     SSIM maps/importance state/eta accumulators/split factors/fanout scratch).
@@ -816,11 +819,11 @@ def allocate_viewer(
     The unfilled resource fields on the returned :class:`GaussianBuffers`
     dataclass are left unset — do NOT read them; ``ViewerPipeline`` only
     touches the subset enumerated below. Kept as one dataclass (rather than a
-    separate viewer type) so the shared render path in ``pipeline._run_forward``
+    separate viewer type) so the shared render path in ``pipeline.record_forward``
     can stay untouched.
     """
     types = _reflect_types(shared_data_module)
-    allocator = _Alloc(device, width, height)
+    allocator = _allocator if _allocator is not None else _Alloc(device, width, height)
 
     num_tiles_x = _ceil_div(width, TILE_WIDTH)
     num_tiles_y = _ceil_div(height, TILE_HEIGHT)
@@ -842,7 +845,7 @@ def allocate_viewer(
     # Gaussian state (blit target from trainer).
     primitive_values = allocator.typed_buffer("primitive.values", types.gaussian, max_splats)
     active_count = allocator.uint_buffer("primitive.active_count", 1)
-    # bin_count binds filter_3D unconditionally (see pipeline._run_forward). The
+    # bin_count binds filter_3D unconditionally (see pipeline.record_forward). The
     # viewer never computes the mip 3D filter and renders with mip_enabled=0, so
     # the shader ignores the contents — but the buffer must still exist for the
     # bind. Allocate it (zero cost vs. the sort/scan buffers) so the shared
@@ -921,3 +924,46 @@ def allocate_viewer(
     buffers.num_gaussians_counter.copy_from_numpy(np.zeros(1, dtype=np.uint32))
 
     return buffers
+
+
+class _AllocationCounter:
+    """Run the real allocation recipe without creating GPU resources."""
+
+    def __init__(self, width: int, height: int) -> None:
+        self.pixels = width * height
+        self.total = 0
+
+    def typed_buffer(self, label, dtype, *shape):
+        from types import SimpleNamespace
+        stride = ({"uint": 4, "float": 4, "int64_t": 8, "uint2": 8, "float4": 16}[dtype]
+                  if isinstance(dtype, str)
+                  else int(dtype.buffer_layout.reflection.stride))
+        size = int(np.prod(shape)) * stride
+        self.total += size
+        return SimpleNamespace(storage=SimpleNamespace(size=size),
+                               copy_from_numpy=lambda _data: None)
+
+    def uint_buffer(self, label, *shape):
+        return self.typed_buffer(label, "uint", *shape)
+
+    def i64_buffer(self, label, *shape):
+        return self.typed_buffer(label, "int64_t", *shape)
+
+    def indirect_buffer(self, label, records=1):
+        return self.uint_buffer(label, 3 * records)
+
+    def tex(self, fmt, label, usage=None):
+        self.total += self.pixels * {
+            spy.Format.rgba32_float: 16,
+            spy.Format.rgba8_unorm: 4,
+            spy.Format.r32_uint: 4,
+        }[fmt]
+
+
+def estimate_allocation_bytes(shared_data_module, *, viewer_only=False, **sizes) -> int:
+    """Base buffer/texture bytes; excludes sampler resources and driver overhead."""
+    counter = _AllocationCounter(sizes["width"], sizes["height"])
+    allocator = allocate_viewer if viewer_only else allocate
+    allocator(device=None, shared_data_module=shared_data_module,
+              _allocator=counter, **sizes)
+    return counter.total

@@ -30,13 +30,11 @@ generate-contracts = "trainer.contracts.codegen:main"
 dev = [
     "pytest",
     "ruff",
+    "setuptools>=61",
 ]
 
 [tool.setuptools]
 license-files = ["LICENSE", "NOTICE.md", "licenses/*.txt", "licenses/*.md"]
-
-[tool.setuptools.packages.find]
-where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

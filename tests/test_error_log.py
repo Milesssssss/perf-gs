@@ -16,6 +16,7 @@ import slangpy as spy
 
 from trainer.frontend import app as app_module
 from trainer.frontend.app import RunPaths, TrainingApplication
+from trainer.frontend.hub import TrainingHub
 from trainer.frontend.reporting.error_log import ErrorLog, report_exception
 from trainer.frontend.viewer.session import MODE_HUB, Session, TrainingState
 from trainer.frontend.viewer.viewer import Viewer
@@ -157,7 +158,7 @@ def test_main_installs_capture_before_device_setup_and_keeps_failure_exit_code(
         os.write(2, b"native GPU setup failed\n")
         raise RuntimeError("VK_ERROR_INITIALIZATION_FAILED")
 
-    app.run_hub = fail_during_setup
+    monkeypatch.setattr(TrainingHub, "run", lambda self: fail_during_setup())
     app.start_training = fail_during_setup
     monkeypatch.setattr(app_module.TrainingApplication, "from_cli", lambda: app)
     with pytest.raises(SystemExit) as result:
@@ -176,7 +177,7 @@ def test_hub_failure_reports_to_existing_diagnostics_panel(tmp_path, capfd):
         try:
             raise RuntimeError("VK_ERROR_DEVICE_LOST")
         except RuntimeError as error:
-            app._hub_run_failed("building the run", error)
+            TrainingHub(app)._hub_run_failed("building the run", error)
         log.flush()
     snap = app.viewer.state.snapshot()
     assert snap.training_state == TrainingState.FAILED

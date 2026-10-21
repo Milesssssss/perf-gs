@@ -14,7 +14,6 @@ from __future__ import annotations
 import contextlib
 from typing import TYPE_CHECKING
 
-from trainer.config.config import IterationContext
 from trainer.contracts.schema import sh_rest_coeffs
 
 if TYPE_CHECKING:
@@ -54,7 +53,7 @@ class AdamOptimizer:
     def reset(self) -> None:
         self.step_count = 0
 
-    def step(self, iterationContext: IterationContext) -> None:
+    def step(self, lrs: AdamLRs, sh_degree: int) -> None:
 
         self.step_count += 1
         step = float(self.step_count)
@@ -78,11 +77,11 @@ class AdamOptimizer:
                 **b.grad_kwargs(),
                 cluster_visible=b.cluster_visible.storage,
                 cfg={
-                    "lr_mean": iterationContext.learning_rates.mean,
-                    "lr_scale": iterationContext.learning_rates.scale,
-                    "lr_rot": iterationContext.learning_rates.rot,
-                    "lr_opacity": iterationContext.learning_rates.opacity,
-                    "lr_color": iterationContext.learning_rates.color,
+                    "lr_mean": lrs.mean,
+                    "lr_scale": lrs.scale,
+                    "lr_rot": lrs.rot,
+                    "lr_opacity": lrs.opacity,
+                    "lr_color": lrs.color,
                     "bias_correction1": bc1,
                     "bias_correction2": bc2,
                 },
@@ -93,11 +92,11 @@ class AdamOptimizer:
             #rest floats will just be the max given the target sh degree for training, but we can also use the active rest floats to only update the active rest floats
             rest_floats = b.sh.rest_floats
             
-            if not iterationContext.iteration_contextual_variables.sh_degree:
+            if not sh_degree:
                 active_rest_floats = 0
             else:
                 RGB_CHANNELS = 3
-                active_rest_floats = sh_rest_coeffs(iterationContext.iteration_contextual_variables.sh_degree) * RGB_CHANNELS
+                active_rest_floats = sh_rest_coeffs(sh_degree) * RGB_CHANNELS
 
             active_rest = (rest_floats if active_rest_floats is None else max(0, min(int(active_rest_floats), rest_floats)))
 
@@ -108,7 +107,7 @@ class AdamOptimizer:
                     adam_rest=b.adam_rest_state.storage,
                     num_gaussians_counter=b.num_gaussians_counter.storage,
                     cluster_visible=b.cluster_visible.storage,
-                    lr_rest=iterationContext.learning_rates.sh_rest,
+                    lr_rest=lrs.sh_rest,
                     bias_correction1=bc1,
                     bias_correction2=bc2,
                     pixels_per_step=float(self._width * self._height),

@@ -704,7 +704,7 @@ def test_gpu_compacted_backward_agrees_with_the_full_pixel_reference(
     for compacted in (False, True):
         pipeline = _pipeline(backend, alpha=0.75, compacted=compacted)
         _run_loss(pipeline, variables)
-        pipeline._clear_grads()
+        pipeline.clear_gradients()
         pipeline.backward(stbn=variables)
         pipeline.device.wait_for_idle()
         results[compacted] = pipeline.read_gradients()

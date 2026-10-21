@@ -56,9 +56,7 @@ from paper_gradient_study import (SCALAR_GROUPS, StagedGradReader,  # noqa: E402
                                  state_fingerprint)
 
 from trainer.backend.render import stbn as stbn_module            # noqa: E402
-from trainer.config.config import (DensificationProperties,       # noqa: E402
-                                   IterationContext,
-                                   IterationContextualVariables, StbnVariables)
+from trainer.config.config import (DensificationProperties, IterationContextualVariables, StbnVariables)
 from trainer.contracts.codegen import (TILE_AREA, TILE_HEIGHT,    # noqa: E402
                                        TILE_WIDTH)
 from trainer.frontend.app import TrainingApplication              # noqa: E402
@@ -199,14 +197,11 @@ def upload_block_masks(device, spec, blocks, height, width) -> list:
 # Frozen-state passes
 # ---------------------------------------------------------------------------
 
-def _context(pipeline, sh_degree, hardness, variables):
-    contextual = IterationContextualVariables(
+def _context(sh_degree, hardness, variables):
+    return IterationContextualVariables(
         hardness_value=hardness, sh_degree=sh_degree, contextual_stbn=variables,
         densification_variables=DensificationProperties(
             structure_tensor_texture=None, structure_kwargs={}))
-    return IterationContext(step_number=pipeline.iteration + 1, camera_index=0,
-                            camera_entry=None, learning_rates=None, events=None,
-                            iteration_contextual_variables=contextual)
 
 
 def loss_and_backward(pipeline, camera, *, sh_degree, hardness, variables):
@@ -216,13 +211,12 @@ def loss_and_backward(pipeline, camera, *, sh_degree, hardness, variables):
     the forward's raster checkpoints reusable, so only the first backward after a
     forward is valid (documented at length in paper_gradient_study).
     """
-    context = _context(pipeline, sh_degree, hardness, variables)
-    inner = context.iteration_contextual_variables
+    inner = _context(sh_degree, hardness, variables)
     with pipeline.recording("proxy_probe"):
-        pipeline._clear_grads()
-        pipeline._run_forward(camera, inner)
-        pipeline._run_loss(inner)
-        pipeline._run_backward(context)
+        pipeline.clear_gradients()
+        pipeline.record_forward(camera, inner)
+        pipeline.record_loss(inner)
+        pipeline.record_backward(inner)
 
 
 def group_norms(grads: dict[str, np.ndarray]) -> dict[str, float]:

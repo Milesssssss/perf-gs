@@ -123,7 +123,7 @@ def _analytic_grads(backend: str) -> tuple[np.ndarray, dict[str, np.ndarray], fl
     )
 
     pipeline.forward_and_loss(camera)
-    pipeline._clear_grads()
+    pipeline.clear_gradients()
     pipeline.backward()
     ref_loss = pipeline.read_loss()
 
@@ -156,7 +156,7 @@ def test_gradients_finite_difference(backend: str) -> None:
     # Analytic grads from backward.
     pipeline.set_primitive_from_numpy(**scene)
     pipeline.forward_and_loss(camera)
-    pipeline._clear_grads()
+    pipeline.clear_gradients()
     pipeline.backward()
     analytic = pipeline.read_gradients()
 

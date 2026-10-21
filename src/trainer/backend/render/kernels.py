@@ -123,8 +123,8 @@ KERNEL_SPECS: tuple[tuple[str, str, str], ...] = (
 )
 
 
-# Subset of kernel attrs the viewer's ``_run_forward`` (see pipeline.py
-# ``Pipeline._run_forward`` + ``_radix_sort_pairs`` + ``_scan``) actually
+# Subset of kernel attrs the viewer's ``record_forward`` (see pipeline.py
+# ``Pipeline.record_forward`` + ``_radix_sort_pairs`` + ``_scan``) actually
 # dispatches. Skipping the rest saves a chunk of shader compile time and
 # the associated program memory on ViewerPipeline construction — the viewer
 # never runs backward, loss, densify, or Adam kernels.

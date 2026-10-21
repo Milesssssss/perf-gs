@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+from importlib.resources import files
 from typing import Sequence
 
 import numpy as np
@@ -204,7 +205,10 @@ def generated_artifacts() -> dict[str, str]:
 
 
 def _repo_root() -> Path:
-    return Path(__file__).resolve().parents[3]
+    source_root = Path(__file__).resolve().parents[3]
+    if (source_root / "pyproject.toml").is_file():
+        return source_root
+    return Path(str(files("trainer")))
 
 
 def write_generated_slang(repo: Path | None = None) -> list[str]:

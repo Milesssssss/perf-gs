@@ -95,7 +95,26 @@ The loop keeps the GPU queue shallow with fence-based backpressure instead of dr
 
 ## Architecture
 
+`TrainingHub` handles interactive commands and reconstruction. It delegates each
+run to `TrainingApplication`, whose loop owns camera sampling, schedules,
+evaluation, and reporting. The backend consumes cameras, learning rates, and
+per-step render parameters; it does not depend on COLMAP entries or UI events.
 
+`TrainingPipeline.train_step(camera, lrs=..., contextual=...)` records a complete
+optimizer step. Experiments can instead call `record_forward`, `record_loss`,
+and `record_backward` inside `pipeline.recording(...)` to inspect intermediate
+results without applying Adam. Forward and backward must use the same per-step
+parameters; call `clear_gradients()` before each independent gradient sample.
+
+`GpuRuntime` owns command submission and queue waits. The viewer shares that
+device while keeping its own rendering buffers; snapshots carry primitive data,
+active SH degree, and extinction hardness. Generated contracts keep Python
+storage layouts and Slang structures aligned.
+
+Structure-aware buffers are allocated only for that densification mode and
+initialized before use. Only training-camera targets and structure fields are
+resident on the GPU. Startup reports planned base GPU allocations and training
+texture storage; sampler resources and driver overhead are additional.
 
 ## Backends and portability
 
@@ -120,6 +139,12 @@ source .venv/bin/activate
 
 pip install -e ".[dev]"
 ```
+
+For a regular installation, use `pip install .` or install a built wheel, then
+run `python -m trainer.frontend.app`. Wheels and source distributions include
+the Slang shaders. Installed runs resolve shaders from package resources and
+keep their STBN cache in the working directory; editable checkouts retain the
+repository's `.stbn` cache.
 
 Scenes use the Mip-NeRF 360 layout (a COLMAP `sparse/` folder plus `images/`). Point `--scene` at any such folder.
 

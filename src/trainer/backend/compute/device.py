@@ -3,13 +3,14 @@
 """Device creation for the trainer.
 
 Thin wrapper around ``slangpy.create_device`` that fixes the shader include
-path to the repo's ``shaders/`` directory and restricts backend selection to
+path to the packaged or source ``shaders/`` directory and restricts backend selection to
 the two we care about in v0: Vulkan (primary) and D3D12 (cross-check).
 """
 
 from __future__ import annotations
 
 from pathlib import Path
+from importlib.resources import files
 from typing import Literal
 
 import slangpy as spy
@@ -17,7 +18,9 @@ import slangpy as spy
 Backend = Literal["vulkan", "d3d12"]
 
 _REPO_ROOT = Path(__file__).resolve().parents[4]
-SHADERS_DIR = _REPO_ROOT / "shaders"
+SHADERS_DIR = Path(str(files("trainer").joinpath("shaders")))
+if not SHADERS_DIR.is_dir():
+    SHADERS_DIR = _REPO_ROOT / "shaders"  # editable/source checkout
 
 _BACKEND_MAP: dict[Backend, spy.DeviceType] = {
     "vulkan": spy.DeviceType.vulkan,
