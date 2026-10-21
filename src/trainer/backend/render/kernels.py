@@ -87,7 +87,7 @@ KERNEL_SPECS: tuple[tuple[str, str, str], ...] = (
     ("scatter_compact_gaussian", "densify/scatter_compact.slang",              "scatterCompactGaussian"),
     ("scatter_compact_adam",     "densify/scatter_compact.slang",              "scatterCompactAdam"),
     ("scatter_compact_features", "densify/scatter_compact.slang",              "scatterCompactFeatures"),
-    ("scatter_compact_adam_rest", "densify/scatter_compact.slang",             "scatterCompactAdamRest"),
+    ("scatter_compact_adam_rest", "densify/scatter_compact.slang",             "scatterCompactAdamRestPlanes"),
     ("scatter_compact_eta_only", "densify/scatter_compact.slang",              "scatterCompactEtaOnly"),
     ("active_copy_prepare_args", "densify/copy_active.slang",                  "prepareActiveCopyArgs"),
     ("copy_active_records",      "densify/copy_active.slang",                  "copyActiveRecords"),
@@ -109,7 +109,7 @@ KERNEL_SPECS: tuple[tuple[str, str, str], ...] = (
     ("morton_scatter_gaussian", "densify/morton_sort.slang",                   "mortonScatterGaussian"),
     ("morton_scatter_adam",     "densify/morton_sort.slang",                   "mortonScatterAdam"),
     ("morton_scatter_features", "densify/morton_sort.slang",                   "mortonScatterFeatures"),
-    ("morton_scatter_adam_rest", "densify/morton_sort.slang",                  "mortonScatterAdamRest"),
+    ("morton_scatter_adam_rest", "densify/morton_sort.slang",                  "mortonScatterAdamRestPlanes"),
     # single-pass structure-densify decision
     ("decide_actions_structure",           "densify/decide_actions_structure.slang", "decideActionsStructure"),
     # common

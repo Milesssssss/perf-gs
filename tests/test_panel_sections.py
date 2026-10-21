@@ -280,6 +280,54 @@ def test_a_paused_run_offers_resume_instead_of_pause() -> None:
     assert recorder.names == ["resume"]
 
 
+def test_finalizing_offers_enabled_pause_and_stop_controls() -> None:
+    session = _session()
+    panel, view, recorder = build(session, "training")
+    ready(session)
+    session.training_initializing(3000)
+    session.training_running()
+    session.publish_training(step=3000, total=3000)
+    session.training_finalizing("Final metrics")
+    view.sample()
+    assert "[ FINALIZING ]" in panel.screen()
+    assert panel.visible_buttons() == ["Pause", "Stop"]
+    for label in ("Pause", "Stop"):
+        button = panel.find(label)
+        assert button.enabled
+        button.click()
+    assert recorder.names == ["pause", "stop"]
+
+
+def test_paused_final_metrics_keep_their_readout_and_resume_finalizing() -> None:
+    session = _session()
+    panel, view, recorder = build(session, "training")
+    ready(session)
+    session.training_initializing(3000)
+    session.training_running()
+    session.publish_training(step=3000, total=3000)
+    session.training_finalizing("Final metrics")
+    session.set_progress("Final metrics", 0.5, detail="camera 40/194")
+    session.training_paused()
+    view.sample()
+    screen = panel.screen()
+    assert "[ PAUSED ]" in screen
+    assert "Final metrics" in screen and "camera 40/194" in screen
+    assert _visible_progress(panel) == [0.5]
+    assert panel.visible_buttons() == ["Resume", "Stop"]
+    assert panel.find("Resume").enabled and panel.find("Stop").enabled
+    panel.find("Resume").click()
+    assert recorder.names == ["resume"]
+
+    session.training_resumed()
+    view.sample()
+    screen = panel.screen()
+    assert "[ FINALIZING ]" in screen and "[ RUNNING ]" not in screen
+    assert "Final metrics" in screen and "camera 40/194" in screen
+    assert _visible_progress(panel) == [0.5]
+    assert panel.visible_buttons() == ["Pause", "Stop"]
+    assert panel.find("Pause").enabled and panel.find("Stop").enabled
+
+
 def test_the_eval_detail_is_shown_under_the_run_status() -> None:
     """The bar is pinned at N/N during the final sweep, so the detail says why."""
     session = _session()

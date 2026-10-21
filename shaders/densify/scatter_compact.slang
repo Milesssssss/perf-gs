@@ -199,8 +199,8 @@ void scatterCompactEtaOnly(
 // Additive SH-carry for compaction: move the optional features_rest coeffs +
 // their Adam moments through the SAME valid_mask / scan the gaussian compaction
 // used, so they land on the compacted slot. Dispatched only when SH is enabled,
-// after scatterCompact / scatterCompactEta. All SH buffers are fp16-packed
-// uint32 (features: (rest_floats+1)/2 uints/gaussian; adam: rest_floats uints).
+// after scatterCompact / scatterCompactEta. Features are fp16-packed uint32;
+// Adam uses 2*rest_floats FP32/uint planes with max_splats stride.
 [shader("compute")]
 [numthreads(256, 1, 1)]
 void scatterCompactSH(
@@ -270,4 +270,28 @@ void scatterCompactAdamRest(
     uint au = rest_floats * 2u;
     for (uint c = 0u; c < au; ++c)
         adam_rest_out[c * max_splats + dst] = adam_rest_in[c * max_splats + i];
+}
+
+// Bound scratch by scattering a subset of independent moment planes. Output
+// planes start at zero in the arena; copy-back restores their live prefixes to
+// first_plane in the original buffer before the arena is reused.
+[shader("compute")]
+[numthreads(256, 1, 1)]
+void scatterCompactAdamRestPlanes(
+    uint3 dtid: SV_DispatchThreadID,
+    StructuredBuffer<uint> adam_rest_in,
+    StructuredBuffer<uint> valid_mask,
+    StructuredBuffer<uint> scan,
+    RWStructuredBuffer<uint> adam_rest_out,
+    uniform uint first_plane,
+    uniform uint plane_count,
+    uniform uint max_splats)
+{
+    uint i = dtid.x;
+    if (i >= max_splats) return;
+    if (valid_mask[i] == 0u) return;
+    uint dst = scan[i];
+    for (uint plane = 0u; plane < plane_count; ++plane)
+        adam_rest_out[plane * max_splats + dst] =
+            adam_rest_in[(first_plane + plane) * max_splats + i];
 }

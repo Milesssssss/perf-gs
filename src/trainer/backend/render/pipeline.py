@@ -446,16 +446,21 @@ class TrainingPipeline:
 
     def copy_arena_back(self, arena, dst: spy.NDBuffer, nbytes: int, *,
                         count_buf: spy.NDBuffer | None = None,
-                        soa: bool = False) -> None:
+                        soa: bool = False, dst_offset_bytes: int = 0) -> None:
         """Commit an arena scatter in the active batch.
 
         With a GPU count, copy only live records, preserving the capacity stride
-        for SoA resources. Without one, retain the explicit byte-copy contract.
+        for SoA resources. A destination offset commits a plane batch without
+        touching neighboring planes. Without a count, copy the explicit span.
         Neither path needs a host count or an additional scratch allocation.
         """
         assert self._batch is not None, "copy_arena_back requires an active batch"
+        if (dst_offset_bytes < 0 or dst_offset_bytes % 4
+                or dst_offset_bytes + nbytes > dst.storage.size):
+            raise ValueError("arena copy must fit an aligned destination span")
         if count_buf is None:
-            arena.copy_back(self._batch.encoder, dst, nbytes)
+            arena.copy_back(self._batch.encoder, dst, nbytes,
+                            dst_offset_bytes=dst_offset_bytes)
             return
         assert nbytes <= arena.capacity_bytes, "scratch arena too small"
         record_bytes, remainder = divmod(nbytes, self.max_splats)
@@ -470,6 +475,7 @@ class TrainingPipeline:
                 arena.copy_dispatch_args, source=arena.storage,
                 destination=dst.storage, count_buf=count_buf.storage,
                 record_words=record_bytes // 4, soa=int(soa),
+                destination_word_offset=dst_offset_bytes // 4,
                 max_splats=self.max_splats)
 
     @contextlib.contextmanager

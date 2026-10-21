@@ -37,6 +37,7 @@ import threading
 import time
 from typing import TYPE_CHECKING
 
+from trainer.frontend.run_control import RunStopped
 from trainer.frontend.viewer.session import MODE_HUB, MODE_TRAIN, OK, Session
 
 if TYPE_CHECKING:
@@ -222,11 +223,11 @@ class ViewerSession:
         print("[wait-for-viewer] starting training.")
 
     def set_training_active(self, active: bool = True) -> None:
-        """Flag that the trainer is inside its loop.
+        """Flag optimizer stepping so the viewport can ration its GPU work.
 
-        The viewer needs it for the Pause button; the session needs the RUNNING
-        transition either way, so with no viewer attached it is published here and
-        the state stays truthful under ``--no-viewer``."""
+        Pause/Stop availability follows the session phase, not this flag: camera
+        sweeps remain controllable after optimizer stepping ends. With no viewer
+        attached the RUNNING transition is still published here."""
         if self._viewer is not None:
             self._viewer.set_training_active(active)
         elif active:
@@ -256,7 +257,7 @@ class ViewerSession:
         return self._viewer is not None and self._viewer.is_paused()
 
     def stop_requested(self) -> bool:
-        """Whether the user asked to end the run early (the Stop button)."""
+        """Whether the user pressed Stop or closed the viewer."""
         return self._viewer is not None and self._viewer.stop_requested()
 
     def clear_stop_request(self) -> None:
@@ -265,10 +266,18 @@ class ViewerSession:
             self._viewer.clear_stop_request()
 
     def wait_while_paused(self) -> None:
-        """Block the trainer while the viewer's Pause button is engaged (no-op
+        """Block run work while the viewer's Pause button is engaged (no-op
         when live viewing is disabled)."""
         if self._viewer is not None:
             self._viewer.wait_while_paused()
+
+    def checkpoint(self) -> None:
+        """Pause or stop at a safe work boundary, also after waking from Pause."""
+        if self.stop_requested():
+            raise RunStopped()
+        self.wait_while_paused()
+        if self.stop_requested():
+            raise RunStopped()
 
     def push_snapshot(self, pipeline: TrainingPipeline) -> None:
         """Push a gaussian snapshot to the viewer (GPU->GPU copy of the ACTIVE

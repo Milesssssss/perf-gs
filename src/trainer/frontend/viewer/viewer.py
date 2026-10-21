@@ -17,7 +17,8 @@ from trainer.backend.compute.gpu import GpuRuntime
 from trainer.backend.render.pipeline import TrainingPipeline
 from trainer.config.config import AppearanceConfig, RasterConfig
 from trainer.data.dataset import Camera
-from trainer.frontend.viewer.session import MODE_HUB, Session
+from trainer.frontend.reporting.error_log import report_exception
+from trainer.frontend.viewer.session import ERROR, MODE_HUB, Session
 from trainer.frontend.viewer.ui import InputMap, Panel
 from trainer.frontend.viewer.ui.sections import (
     Actions,
@@ -429,7 +430,7 @@ class _ShaderWatcher:
                 self._pipeline.on_hot_reload()
                 print("[Viewer] shaders reloaded")
             except Exception as e:
-                print(f"[Viewer] on_hot_reload failed: {e}")
+                report_exception("[Viewer] on_hot_reload failed", e)
 
 
 class Viewer:
@@ -630,29 +631,33 @@ class Viewer:
         return self._pause_event.is_set()
 
     def pause_training(self) -> None:
-        if self._training_active and not self._pause_event.is_set():
+        # Optimizer activity only controls render throttling; the run stays
+        # pausable through its camera sweeps and post-training analysis.
+        if self.state.snapshot().can_pause and not self._pause_event.is_set():
             self._pause_event.set()
-            self.state.begin_activity("Pausing")
 
     def resume_training(self) -> None:
         if self._pause_event.is_set():
             self._pause_event.clear()
-            self.state.begin_activity("Resuming")
 
     def toggle_pause(self) -> None:
         (self.resume_training if self._pause_event.is_set()
          else self.pause_training)()
 
     def request_stop_training(self) -> None:
+        if not self.state.training_stopping():
+            return
+        # Publish STOPPING before waking a paused worker; its completion must
+        # not be overwritten by this request after it has already returned.
         self._stop_training.set()
         self._pause_event.clear()
-        self.state.training_stopping()
 
     def stop_requested(self) -> bool:
-        return self._stop_training.is_set()
+        return self._stop_training.is_set() or self._stop_event.is_set()
 
     def clear_stop_request(self) -> None:
         self._stop_training.clear()
+        self._pause_event.clear()
 
     def wait_while_paused(self, poll: float = 0.05) -> None:
         if not self._pause_event.is_set():
@@ -662,8 +667,8 @@ class Viewer:
             if self._stop_event.is_set() or (self._thread and not self._thread.is_alive()):
                 break
             time.sleep(poll)
-        if not self._stop_training.is_set():
-            self.state.training_running()
+        if not self.stop_requested():
+            self.state.training_resumed()
 
     def start(self):
         self._stop_event.clear()
@@ -679,7 +684,18 @@ class Viewer:
         try:
             self._run_inner()
         except Exception as e:
-            print(f"[Viewer] crashed: {e}")
+            self._report_error("crashed", e)
+        finally:
+            self._stop_event.set()
+            self._pause_event.clear()
+
+    def _report_error(self, context: str, error: Exception) -> None:
+        signature = (context, type(error), str(error))
+        if signature == getattr(self, "_last_error", None):
+            return
+        self._last_error = signature
+        self.state.notify(f"Viewer {context} - see diagnostics", ERROR)
+        report_exception(f"[Viewer] {context}", error, self.state)
 
     def _set_up_ref(self) -> None:
         self._rig.cam.set_ref_up_to_current()
@@ -699,7 +715,7 @@ class Viewer:
             Image.fromarray(png, mode="RGB").save(path)
             print(f"[Viewer] saved frame for {name} -> {path}")
         except Exception as e:  # noqa: BLE001 - a failed grab must not stop the loop
-            print(f"[Viewer] frame grab failed: {e}")
+            self._report_error("frame grab failed", e)
 
     def _build_input(self, mouse: dict) -> InputMap:
         keys = InputMap().hold_many([
@@ -873,9 +889,7 @@ class Viewer:
                 _reconfigure(w, h)
                 render_frame()
             except Exception as e:
-                if not getattr(self, "_err_printed", False):
-                    print(f"[Viewer] on_resize render failed: {e}")
-                    self._err_printed = True
+                self._report_error("resize failed", e)
 
         window.on_keyboard_event = on_key
         window.on_mouse_event = on_mouse
@@ -906,13 +920,12 @@ class Viewer:
 
             try:
                 render_frame()
+                self._last_error = None
             except Exception as e:
-                if not getattr(self, "_err_printed", False):
-                    print(f"[Viewer] frame error: {e}")
-                    self._err_printed = True
+                self._report_error("frame error", e)
                 time.sleep(0.016)
 
         try:
             window.close()
-        except Exception:
-            pass
+        except Exception as error:
+            self._report_error("closing the window failed", error)

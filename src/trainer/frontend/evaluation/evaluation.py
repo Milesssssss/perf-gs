@@ -25,6 +25,7 @@ from PIL import Image
 
 from trainer.common.color import srgb_to_linear
 from trainer.common.metrics import psnr as psnr_image, ssim as ssim_image
+from trainer.frontend.run_control import Checkpoint, uninterrupted
 
 if TYPE_CHECKING:
     from trainer.backend.render.pipeline import TrainingPipeline
@@ -60,8 +61,10 @@ class CameraSampler:
 
 
 def render_all_cameras(pipeline: "TrainingPipeline", scene, iter_idx: int,
-                       cams_dir: Path) -> None:
+                       cams_dir: Path, *,
+                       checkpoint: Checkpoint = uninterrupted) -> None:
     for cam_i, entry in enumerate(scene.images):
+        checkpoint()
         pipeline.render(entry.camera)
         img = np.clip(pipeline.read_output_image()[..., :3], 0.0, 1.0)
         out_dir = cams_dir / f"cam_{cam_i:02d}"
@@ -70,18 +73,23 @@ def render_all_cameras(pipeline: "TrainingPipeline", scene, iter_idx: int,
         rgba = np.concatenate([img, np.ones_like(img[..., :1])], axis=-1)
         png = (rgba * 255.0 + 0.5).astype(np.uint8)
         Image.fromarray(png, mode="RGBA").save(out_path)
+    checkpoint()
 
 
 def eval_test_psnr_srgb(pipeline: "TrainingPipeline", scene,
                         test_indices: Sequence[int],
-                        targets_srgb: Sequence[np.ndarray]) -> tuple[float, int]:
+                        targets_srgb: Sequence[np.ndarray], *,
+                        checkpoint: Checkpoint = uninterrupted) -> tuple[float, int]:
+    checkpoint()
     pipeline.runtime.wait_for_idle()
     n_g = int(pipeline.buffers.num_gaussians_counter.to_numpy().view(np.uint32)[0])
     frames = []
     for cam_i in test_indices:
+        checkpoint()
         pipeline.render(scene.images[cam_i].camera)
         r = np.clip(pipeline.read_output_image()[..., :3], 0.0, 1.0)
         frames.append(psnr_image(r, targets_srgb[cam_i][..., :3]))
+    checkpoint()
     return (float(np.mean(frames)) if frames else 0.0), n_g
 
 
@@ -100,8 +108,10 @@ def run_eval_sweep(
     eval_holdout: bool,
     with_lpips: bool = False,
     progress: Callable[[int, int], None] = lambda _done, _total: None,
+    checkpoint: Checkpoint = uninterrupted,
 ) -> float:
 
+    checkpoint()
     eval_t0 = time.time()
 
     pipeline.runtime.wait_for_idle()
@@ -120,6 +130,7 @@ def run_eval_sweep(
 
     for done, cam_i in enumerate(test_indices, start=1):
         progress(done, len(test_indices))
+        checkpoint()
         entry = scene.images[cam_i]
         pipeline.render(entry.camera)
 
@@ -137,6 +148,8 @@ def run_eval_sweep(
             value = perceptual.lpips(r_srgb, t_srgb)
             if value is not None:
                 lpips_frames.append(value)
+
+    checkpoint()
 
     def _mean(values: list[float]) -> float:
         return float(np.mean(values)) if values else 0.0

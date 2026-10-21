@@ -253,6 +253,87 @@ def test_finalizing_is_not_a_finished_run() -> None:
     assert snap.activity.label == "Final metrics"
 
 
+def test_paused_final_metrics_resume_finalizing_with_their_activity() -> None:
+    session = hub()
+    ready_dataset(session)
+    session.training_initializing(3000)
+    session.training_running()
+    session.publish_training(step=3000, total=3000)
+    session.training_finalizing("Final metrics")
+    session.set_progress("Final metrics", 0.5, detail="camera 40/194")
+    activity = session.snapshot().activity
+    assert session.snapshot().can_pause and session.snapshot().can_stop
+
+    session.training_paused()
+    snap = session.snapshot()
+    assert snap.training_state == TrainingState.PAUSED
+    assert snap.can_resume and snap.can_stop and not snap.can_pause
+    assert snap.activity == activity
+
+    session.training_finalizing("Late final metrics")
+    snap = session.snapshot()
+    assert snap.training_state == TrainingState.PAUSED
+    assert snap.activity == activity
+
+    session.training_resumed()
+    snap = session.snapshot()
+    assert snap.training_state == TrainingState.FINALIZING
+    assert snap.activity == activity
+    assert snap.can_pause and snap.can_stop and not snap.can_resume
+
+
+def test_paused_in_loop_evaluation_resumes_running_with_its_activity() -> None:
+    session = hub()
+    ready_dataset(session)
+    session.training_initializing(3000)
+    session.training_running()
+    session.publish_training(step=1500, total=3000)
+    session.begin_activity("Evaluating every camera", 0.25)
+    session.set_detail("camera 48/194")
+    activity = session.snapshot().activity
+
+    session.training_paused()
+    snap = session.snapshot()
+    assert snap.training_state == TrainingState.PAUSED
+    assert snap.activity == activity
+
+    session.training_resumed()
+    snap = session.snapshot()
+    assert snap.training_state == TrainingState.RUNNING
+    assert snap.activity == activity
+    assert snap.can_pause and snap.can_stop and not snap.can_resume
+
+
+def test_stopping_paused_finalization_ignores_late_resume_and_progress() -> None:
+    session = hub()
+    ready_dataset(session)
+    session.training_initializing(3000)
+    session.training_running()
+    session.publish_training(step=3000, total=3000)
+    session.training_finalizing("Final metrics")
+    session.training_paused()
+    session.training_stopping()
+    stopping = session.snapshot()
+    assert stopping.training_state == TrainingState.STOPPING
+    assert stopping.activity.label == "Stopping training"
+    assert not any((stopping.can_pause, stopping.can_resume, stopping.can_stop))
+
+    session.training_resumed()
+    assert session.snapshot() == stopping
+    session.training_finalizing("Late final metrics")
+    assert session.snapshot() == stopping
+
+    result = ResultInfo(iterations=3000, target_iterations=3000,
+                        splats=5_000_000, wall_s=30.0)
+    session.training_completed(result)
+    snap = session.snapshot()
+    assert snap.training_state == TrainingState.COMPLETED
+    assert snap.result_state == ResultState.TRAINED and snap.result == result
+    assert snap.has_result and snap.can_export
+    assert not snap.activity.active
+    assert not any((snap.can_pause, snap.can_resume, snap.can_stop))
+
+
 def test_a_failed_run_says_so_where_training_lives() -> None:
     session = hub()
     ready_dataset(session)
@@ -444,6 +525,30 @@ def test_resetting_for_a_new_run_keeps_the_dataset() -> None:
     assert snap.result_state == ResultState.NONE      # the old result is gone
     assert snap.training_state == TrainingState.IDLE
     assert snap.stats.step == 0
+
+
+@pytest.mark.parametrize("transition,args,expected_state", [
+    ("training_initializing", (3000,), TrainingState.INITIALIZING),
+    ("reset_for_new_run", (), TrainingState.IDLE),
+    ("clear_session", (), TrainingState.IDLE),
+    ("training_completed", (ResultInfo(iterations=3000),), TrainingState.COMPLETED),
+], ids=["initialize", "reset", "clear", "complete"])
+def test_lifecycle_changes_do_not_resume_a_previous_finalization(
+        transition, args, expected_state) -> None:
+    session = hub()
+    ready_dataset(session)
+    session.training_initializing(3000)
+    session.training_running()
+    session.training_finalizing("Final metrics")
+    session.set_progress("Final metrics", 0.5, detail="camera 40/194")
+    session.training_paused()
+
+    getattr(session, transition)(*args)
+    snap = session.snapshot()
+    assert snap.training_state == expected_state
+    assert not snap.can_resume
+    session.training_resumed()
+    assert session.snapshot() == snap
 
 
 def test_a_pending_click_cannot_act_on_a_cleared_session() -> None:

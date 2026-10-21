@@ -162,7 +162,7 @@ SETTINGS: tuple[Setting, ...] = (
             help="opacity-reset interval. Big-scale prune is disabled until after "
                  "the first reset.",
             minimum=0, maximum=200_000, speed=25, note="0 = never reset"),
-    Setting("max_splats", "splat capacity", "densify", int, default=10_000_000,
+    Setting("max_splats", "splat capacity", "densify", int, default=7_000_000,
             minimum=100_000, maximum=100_000_000, speed=50_000),
     # ---- LOSS.
     Setting("lambda_ssim", "SSIM weight", "loss", float, default=0.2,
@@ -232,7 +232,7 @@ SETTINGS: tuple[Setting, ...] = (
                  "cost. Injected as a compile-time define.",
             launch_only=True,
             note="compile-time: set it with --backward-pixel-stride"),
-    Setting("stbn_pixel_fraction", "STBN pixel fraction", "perf", float, default=.1,
+    Setting("stbn_pixel_fraction", "STBN pixel fraction", "perf", float, default=1.0,
             help="Fraction rho of pixels each backward supervises, chosen by a "
                  "spatiotemporal blue-noise mask (NVIDIA STBN, re-ranked per "
                  "tile so EXACTLY rho*64 of every 8x8 tile is sampled). 1.0 "

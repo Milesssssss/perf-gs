@@ -2,9 +2,10 @@
 
 """Full-training A/B of the densification optimization, without reverting files.
 
-The reference uses the current renderer, optimizer, sampling, data, allocations,
-and frontend. Only the pre-optimization densify/controller/split/Mip/copy paths
-are restored from the isolated source snapshots. Setup, quality checks, and
+The reference uses the current renderer, optimizer, sampling, data, and frontend.
+Its pre-optimization densify/controller/split/Mip/copy paths are restored from
+isolated snapshots; SH uses the full-sized arena those old scatters require.
+Setup, quality checks, and
 exports are outside the timing. Run variants in separate processes, in ABBA
 order, with the same scene, seed, and settings.
 """
@@ -21,6 +22,7 @@ import time
 from pathlib import Path
 
 import numpy as np
+import slangpy as spy
 
 _SCRIPTS = Path(__file__).resolve().parents[1]
 for _sub in ("running", "debug", "plots"):
@@ -29,6 +31,7 @@ for _sub in ("running", "debug", "plots"):
 from densify_reference import densify as reference_densify
 from densify_reference.controller import DensificationController as ReferenceController
 from trainer.backend.compute.device import SHADERS_DIR
+from trainer.backend.memory.buffers import ScratchArena
 from trainer.backend.render.pipeline import TrainingPipeline
 from trainer.common.metrics import psnr
 from trainer.frontend import app as training_app
@@ -62,12 +65,29 @@ class ReferencePipeline(TrainingPipeline):
             program = self.device.link_program([module], [module.entry_point(entry)])
             setattr(self, f"k_{attr}", self.device.create_compute_kernel(program))
 
+        if self.buffers.sh_enabled:
+            # Snapshot code scatters every moment plane at once. Keep that
+            # reference isolated: production uses bounded plane batches.
+            resources = self.buffers._require_densification()
+            arena = resources.scratch_arena
+            nbytes = max(arena.capacity_bytes, self.buffers.adam_rest_state.storage.size)
+            resources.scratch_arena = ScratchArena(
+                buffer=spy.NDBuffer(device=self.device, dtype="uint", shape=(nbytes // 4,)),
+                capacity_bytes=nbytes, copy_dispatch_args=arena.copy_dispatch_args)
+            for attr, path, entry in (
+                ("scatter_compact_adam_rest", "scatter_compact.slang", "scatterCompactAdamRest"),
+                ("morton_scatter_adam_rest", "morton_sort.slang", "mortonScatterAdamRest"),
+            ):
+                program = self.device.load_program(str(SHADERS_DIR / "densify" / path), [entry])
+                setattr(self, f"k_{attr}", self.device.create_compute_kernel(program))
+
     def copy_arena_back(self, arena, dst, nbytes: int, *, count_buf=None,
-                        soa: bool = False) -> None:
+                        soa: bool = False, dst_offset_bytes: int = 0) -> None:
         # Both SAD and the current filler service commit through this contract.
         # Ignoring the added count restores the old full-capacity byte copy.
         assert self._batch is not None
-        arena.copy_back(self._batch.encoder, dst, nbytes)
+        arena.copy_back(self._batch.encoder, dst, nbytes,
+                dst_offset_bytes=dst_offset_bytes)
 
     def densify_structure_aware(self, cfg) -> dict:
         return reference_densify.densify_structure_aware(self, cfg)
@@ -150,6 +170,8 @@ def source_fingerprint() -> dict:
         "src/trainer/frontend/densification.py", "src/trainer/frontend/settings.py",
         "src/trainer/frontend/cli.py", "src/trainer/backend/densify/densify.py",
         "src/trainer/backend/densify/simple_densifier.py", "src/trainer/backend/memory/buffers.py",
+        "src/trainer/backend/memory/reorder.py", "shaders/densify/scatter_compact.slang",
+        "shaders/densify/morton_sort.slang",
         "shaders/rasterize/tile_binned/backward_persplat.slang",
         "shaders/densify/decide_actions_structure.slang", "shaders/densify/split_anisotropic.slang",
         "shaders/densify/copy_active.slang", "shaders/mip/compute_3d_filter.slang",

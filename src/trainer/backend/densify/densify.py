@@ -18,6 +18,8 @@ from typing import TYPE_CHECKING
 import numpy as np
 import slangpy as spy
 
+from trainer.backend.memory.reorder import reorder_soa_planes
+
 if TYPE_CHECKING:
     from trainer.backend.render.pipeline import TrainingPipeline
 
@@ -340,17 +342,15 @@ def densify_structure_aware(pipeline: TrainingPipeline, cfg: StructureConfig) ->
             )
             pipeline.copy_arena_back(arena, b.features_rest, b.features_rest.storage.size,
                                      count_buf=b.scan_total)
-            pipeline.dispatch(pipeline.k_scatter_compact_adam_rest, "scatter_compact_adam_rest",
-                thread_count=[pipeline.max_splats, 1, 1],
-                adam_rest_in=b.adam_rest_state.storage,
+            reorder_soa_planes(
+                commands=pipeline, arena=arena, buffer=b.adam_rest_state,
+                kernel=pipeline.k_scatter_compact_adam_rest,
+                marker="scatter_compact_adam_rest",
+                plane_count=b.sh.rest_floats * 2, capacity=pipeline.max_splats,
+                live_count=b.scan_total,
                 valid_mask=b.valid_mask_buffer.storage,
                 scan=b.scan_buffer.storage,
-                adam_rest_out=arena.storage,
-                rest_floats=b.sh.rest_floats,
-                max_splats=pipeline.max_splats,
             )
-            pipeline.copy_arena_back(arena, b.adam_rest_state, b.adam_rest_state.storage.size,
-                                     count_buf=b.scan_total, soa=True)
         # P9: final count = scan_total (GPU copy — no readback).
         pipeline.dispatch(pipeline.k_densify_snapshot, "densify_snapshot",
             thread_count=[1, 1, 1],
@@ -530,17 +530,15 @@ def morton_sort(pipeline: TrainingPipeline, world_min: np.ndarray,
             pipeline.copy_arena_back(arena, b.features_rest, b.features_rest.storage.size,
                                      count_buf=b.scan_total)
 
-            pipeline.dispatch(pipeline.k_morton_scatter_adam_rest, "morton_scatter_adam_rest",
-                thread_count=[pipeline.max_splats, 1, 1],
-                adam_rest_in=b.adam_rest_state.storage,
+            reorder_soa_planes(
+                commands=pipeline, arena=arena, buffer=b.adam_rest_state,
+                kernel=pipeline.k_morton_scatter_adam_rest,
+                marker="morton_scatter_adam_rest",
+                plane_count=b.sh.rest_floats * 2, capacity=pipeline.max_splats,
+                live_count=b.scan_total,
                 sorted_values=b.sort_values_a.storage,
                 count_buf=b.scan_total.storage,
-                adam_rest_out=arena.storage,
-                rest_floats=b.sh.rest_floats,
-                max_splats=pipeline.max_splats,
             )
-            pipeline.copy_arena_back(arena, b.adam_rest_state, b.adam_rest_state.storage.size,
-                                     count_buf=b.scan_total, soa=True)
 
         # Eta keeps its dedicated scratch + pointer swap (small, 0.22 GB @10M).
         if carry_eta:

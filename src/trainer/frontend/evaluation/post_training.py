@@ -28,6 +28,7 @@ from trainer.common.color import srgb_to_linear as _srgb_to_linear
 from trainer.backend.export import save_ply
 from trainer.common.metrics import psnr as _psnr_image, ssim as _ssim_image
 from trainer.frontend.evaluation.evaluation import render_all_cameras
+from trainer.frontend.run_control import Checkpoint, uninterrupted
 
 if TYPE_CHECKING:
     import argparse
@@ -52,8 +53,10 @@ def run_post_training(
     t_start: float,
     psnr_curve: list[dict] | None = None,
     progress: Callable[[str, float], None] = lambda _label, _fraction: None,
+    checkpoint: Checkpoint = uninterrupted,
 ) -> None:
 
+    checkpoint()
     if args.profile_run:
         print("[profile-run] finished; skipping final metrics / PLY export.")
         return
@@ -76,6 +79,7 @@ def run_post_training(
 
     if args.mip_splatting and metrics:
         progress("refreshing the 3D filter", 0.2)
+        checkpoint()
         pipeline.compute_3d_filter()
         #_log_filter3d("final")
 
@@ -89,7 +93,8 @@ def run_post_training(
     #render all cameras in the scene and store them as PNGs in the run_dir/cams/cam_XX/ folder, and compute PSNR/MSE metrics
     if metrics:
         progress("rendering every camera", 0.25)
-        render_all_cameras(pipeline, scene, args.iters, cams_dir)
+        render_all_cameras(pipeline, scene, args.iters, cams_dir,
+                           checkpoint=checkpoint)
 
         total = max(1, len(scene.images))
         for cam_i, entry in enumerate(scene.images):
@@ -97,6 +102,7 @@ def run_post_training(
             # only part long enough to be worth interpolating.
             progress(f"final metrics, camera {cam_i + 1}/{total}",
                      0.35 + 0.55 * (cam_i / total))
+            checkpoint()
             pipeline.render(entry.camera)
             # Render is sRGB now (INRIA/gsplat/SADGS convention). The sRGB PSNR
             # (this is the paper-reported metric) is a direct compare vs t_srgb;
@@ -132,6 +138,7 @@ def run_post_training(
                                     if mask.sum() > 0 else 0.0),
             })
 
+            checkpoint()
         test_set = set(test_indices)
         test_cams = [c for c in per_cam if c["cam_idx"] in test_set]
         train_cams = [c for c in per_cam if c["cam_idx"] not in test_set]
@@ -176,6 +183,7 @@ def run_post_training(
 
         ply_path = run_dir / "output.ply"
         progress("writing the .ply", 0.92)
+        checkpoint()
         save_ply(pipeline, ply_path)
 
         print(f"done in {time.time() - t_start:.1f}s")

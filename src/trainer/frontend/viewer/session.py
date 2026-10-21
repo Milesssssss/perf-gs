@@ -523,7 +523,8 @@ class Snapshot:
 
     @property
     def can_pause(self) -> bool:
-        return self.training_state == TrainingState.RUNNING
+        return self.training_state in (TrainingState.RUNNING,
+                                        TrainingState.FINALIZING)
 
     @property
     def can_resume(self) -> bool:
@@ -532,7 +533,8 @@ class Snapshot:
     @property
     def can_stop(self) -> bool:
         """Stopping keeps what has been optimized so far — it is not a cancel."""
-        return self.training_state in (TrainingState.RUNNING, TrainingState.PAUSED)
+        return self.training_state in (TrainingState.RUNNING, TrainingState.PAUSED,
+                                        TrainingState.FINALIZING)
 
     @property
     def can_export(self) -> bool:
@@ -626,6 +628,7 @@ class Session:
         self._dropped: str | None = None
         self._command: str | None = None
         self._snap = Snapshot(mode=mode)
+        self._paused_run: tuple[TrainingState, Activity] | None = None
         # Editable parameters: user INPUT, not published state, hence its own store
         # (see trainer.frontend.settings).
         self.setup = setup if setup is not None else TrainingSetup()
@@ -854,6 +857,7 @@ class Session:
         """Acknowledge Start/Restart immediately: the scene load and pipeline build
         come BEFORE the first iteration and are the longest part of a short run."""
         with self._lock:
+            self._paused_run = None
             stats = TrainingStats(total=int(target_iterations))
             self._snap = replace(self._snap,
                                  training_state=TrainingState.INITIALIZING,
@@ -862,21 +866,41 @@ class Session:
 
     def training_running(self) -> None:
         with self._lock:
+            self._paused_run = None
             self._snap = replace(self._snap, training_state=TrainingState.RUNNING,
                                  activity=Activity())
 
     def training_paused(self) -> None:
         with self._lock:
-            self._snap = replace(self._snap, training_state=TrainingState.PAUSED,
-                                 activity=Activity())
+            if not self._snap.can_pause:
+                return
+            self._paused_run = (self._snap.training_state, self._snap.activity)
+            self._snap = replace(self._snap, training_state=TrainingState.PAUSED)
 
-    def training_stopping(self) -> None:
+    def training_resumed(self) -> None:
+        """Resume the operation that was paused, including finalization progress."""
         with self._lock:
+            if self._snap.training_state != TrainingState.PAUSED:
+                return
+            assert self._paused_run is not None
+            state, activity = self._paused_run
+            self._paused_run = None
+            self._snap = replace(self._snap, training_state=state, activity=activity)
+
+    def training_stopping(self) -> bool:
+        with self._lock:
+            if not self._snap.can_stop:
+                return False
+            self._paused_run = None
             self._snap = replace(self._snap, training_state=TrainingState.STOPPING,
                                  activity=Activity(label="Stopping training"))
+            return True
 
     def training_finalizing(self, label: str = "Finalizing run") -> None:
         with self._lock:
+            if self._snap.training_state in (TrainingState.PAUSED,
+                                             TrainingState.STOPPING):
+                return
             self._snap = replace(self._snap,
                                  training_state=TrainingState.FINALIZING,
                                  activity=Activity(label=label, fraction=0.0))
@@ -884,6 +908,7 @@ class Session:
     def training_completed(self, result: ResultInfo) -> None:
         """The run is over and its output is now the session's important object."""
         with self._lock:
+            self._paused_run = None
             self._snap = replace(self._snap,
                                  training_state=TrainingState.COMPLETED,
                                  result_state=ResultState.TRAINED, result=result,
@@ -891,6 +916,7 @@ class Session:
 
     def training_failed(self, reason: str) -> None:
         with self._lock:
+            self._paused_run = None
             self._snap = replace(self._snap, training_state=TrainingState.FAILED,
                                  training_error=str(reason), activity=Activity())
 
@@ -954,6 +980,7 @@ class Session:
         with self._lock:
             self._dropped = None
             self._command = None
+            self._paused_run = None
             self._snap = replace(
                 self._snap, dataset_state=DatasetState.EMPTY,
                 dataset=DatasetInfo(), dataset_error="",
@@ -966,6 +993,7 @@ class Session:
         """Between runs on the SAME dataset: the previous run's numbers and result
         go, the dataset stays (it does not need re-reading)."""
         with self._lock:
+            self._paused_run = None
             self._snap = replace(
                 self._snap, training_state=TrainingState.IDLE, training_error="",
                 stats=TrainingStats(), loss_history=(),

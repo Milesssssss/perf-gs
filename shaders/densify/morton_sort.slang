@@ -224,8 +224,8 @@ void mortonScatterEta(
 // sorted_values permutation mortonScatter applies to the gaussians, so the
 // coefficients survive a Morton re-sort. Additive: dispatched only when SH is
 // enabled, reading the identical sorted_values slot for a consistent permute.
-// All SH buffers are fp16-packed uint32 (features: (rest_floats+1)/2 uints per
-// gaussian; adam: rest_floats uints); this raw-copies uints, no unpack.
+// Features are fp16-packed; moments are FP32 SoA planes. Both raw-copy uints
+// without unpacking or changing their numerical representation.
 [shader("compute")]
 [numthreads(256, 1, 1)]
 void mortonScatterSH(
@@ -295,4 +295,25 @@ void mortonScatterAdamRest(
     uint au = rest_floats * 2u;
     for (uint c = 0u; c < au; ++c)
         adam_rest_out[c * max_splats + i] = adam_rest_in[c * max_splats + src];
+}
+
+[shader("compute")]
+[numthreads(256, 1, 1)]
+void mortonScatterAdamRestPlanes(
+    uint3 dtid: SV_DispatchThreadID,
+    StructuredBuffer<uint> adam_rest_in,
+    StructuredBuffer<uint> sorted_values,
+    StructuredBuffer<uint> count_buf,
+    RWStructuredBuffer<uint> adam_rest_out,
+    uniform uint first_plane,
+    uniform uint plane_count,
+    uniform uint max_splats)
+{
+    uint i = dtid.x;
+    if (i >= max_splats) return;
+    if (i >= count_buf[0]) return;
+    uint src = sorted_values[i];
+    for (uint plane = 0u; plane < plane_count; ++plane)
+        adam_rest_out[plane * max_splats + i] =
+            adam_rest_in[(first_plane + plane) * max_splats + src];
 }

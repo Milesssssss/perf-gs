@@ -125,13 +125,15 @@ class ScratchArena:
     """One raw scratch buffer shared across all compaction / Morton re-sort
     destinations (gaussians, adam_state, features_rest, adam_rest).
 
-    Sized (bytes) to the LARGEST single resource routed through it. The scatter
-    kernels are single-output, so only ONE resource occupies the arena at a
-    time: scatter resource -> arena, copy arena -> live buffer, reuse. ``buffer``
+    Sized to the largest whole-resource scatter (gaussians, main Adam, or SH
+    features). SH Adam's independent SoA planes are scattered in batches that
+    fit this size instead of growing the arena to the whole moment buffer.
+    Only ONE resource/batch occupies it at a time: scatter -> arena -> live
+    buffer, then reuse. ``buffer``
     is a uint NDBuffer; ``storage`` re-types cleanly to any element type at bind
     (a raw VkBuffer carries no element type — the shader param supplies it),
     verified for Gaussian3D / AdamState / uint. ``capacity_bytes`` is the usable
-    byte span (>= every routed resource's byte size). Active-count commits use
+    byte span (>= each routed resource or plane batch). Active-count commits use
     GPU indirect copies, including each live SoA component prefix; ``copy_back``
     retains the explicit byte-copy path for callers without a GPU count."""
     buffer: spy.NDBuffer
@@ -143,14 +145,15 @@ class ScratchArena:
         """Bind target for a scatter kernel's ``*_out`` parameter."""
         return self.buffer.storage
 
-    def copy_back(self, encoder, dst: spy.NDBuffer, nbytes: int) -> None:
+    def copy_back(self, encoder, dst: spy.NDBuffer, nbytes: int, *,
+                  dst_offset_bytes: int = 0) -> None:
         """Copy the just-scattered ``nbytes`` from the arena into the live
         buffer ``dst`` (byte-for-byte; commits the compaction/re-sort for that
         resource). sgl auto-inserts the scatter->copy dependency barrier, and
         the following scatter->arena reuse is likewise auto-synchronized."""
         assert nbytes <= self.capacity_bytes, (
             f"scratch arena too small: need {nbytes}, have {self.capacity_bytes}")
-        encoder.copy_buffer(dst.storage, 0, self.buffer.storage, 0, nbytes)
+        encoder.copy_buffer(dst.storage, dst_offset_bytes, self.buffer.storage, 0, nbytes)
 
 
 @dataclass
@@ -166,14 +169,9 @@ class DensificationResources:
     grad_mean_2d_mag: spy.NDBuffer
     visibility_count: spy.NDBuffer
     # Shared scratch arena for compaction / Morton re-sort. One raw buffer sized
-    # (bytes) to the LARGEST single resource that routes through it (adam_rest at
-    # sh_degree>0, else adam_state), re-typed per resource at bind time (see
-    # ScratchArena / _make_labeled_ndbuffer). Replaces the former dedicated
-    # primitive_scratch/adam_scratch/features_rest_scratch/adam_rest_scratch:
-    # the scatter kernels are split into single-output variants that scatter one
-    # resource into this arena, after which the caller copies the arena back into
-    # the live buffer, then reuses the arena for the next resource. Saves ~2.4 GB
-    # at max_splats=10M, sh_degree=3 (was 2x each of those four buffers).
+    # for the largest whole-resource scatter (normally main Adam). SH-rest Adam
+    # uses bounded plane batches, so it does not enlarge the arena. Re-typed per
+    # resource at bind time; scatter -> copy back -> reuse, without pointer swaps.
     scratch_arena: "ScratchArena"
     actions: spy.NDBuffer
     valid_mask: spy.NDBuffer
@@ -208,10 +206,10 @@ class SphericalHarmonicsResources:
     """Optional view-dependent SH 'rest' coefficients (bands 1..sh_degree).
 
     Stored SEPARATELY from Gaussian3D so the default SH0 path allocates nothing.
-    Primary + scratch mirror the Eta swap idiom so the coefficients and their
-    Adam moments survive a Morton re-sort and a densify compaction. Flat layout
-    ``features_rest[gid * rest_floats + c]``, where ``rest_floats == 3 *`` the
-    per-channel rest-coefficient count at the configured max degree.
+    Features are fp16 pairs in ``features_rest[gid * feat_uints + word]``.
+    Adam moments remain FP32 SoA: plane ``2*s`` is m and ``2*s+1`` is v for
+    coefficient s, each with max_splats stride. Compaction and Morton re-sort
+    carry all planes through bounded batches of the shared scratch arena.
     """
 
     rest_floats: int
@@ -573,13 +571,11 @@ class _Alloc:
 
 def scratch_resource_bytes(types: "_ShaderTypes", max_splats: int,
                            sh_rest_floats: int) -> int:
-    """Max byte size across every resource that routes through the shared
-    ScratchArena: gaussians, adam_state, and (SH on) features_rest, adam_rest.
+    """Largest whole-resource scatter: gaussians, main Adam, and SH features.
 
     Element strides come from reflection so this can never drift from the shader
-    struct layouts. Byte formulas mirror the live-buffer allocations:
-      features_rest : max_splats * ((sh_rest_floats+1)//2) uints * 4
-      adam_rest     : max_splats * sh_rest_floats * 2 uints  * 4
+    struct layouts. SH moments are independent SoA planes, copied in batches
+    that fit this arena rather than allocating a second full moment buffer.
     """
     g_stride = int(types.gaussian.buffer_layout.reflection.stride)
     a_stride = int(types.adam.buffer_layout.reflection.stride)
@@ -587,7 +583,6 @@ def scratch_resource_bytes(types: "_ShaderTypes", max_splats: int,
     if sh_rest_floats > 0:
         feat_uints = (sh_rest_floats + 1) // 2
         candidates.append(max_splats * feat_uints * 4)
-        candidates.append(max_splats * sh_rest_floats * 2 * 4)
     return max(candidates)
 
 
@@ -717,9 +712,8 @@ def allocate(
 
     # --- v2 densification scratch + pipeline state ---
     # Shared scratch arena: sized to the largest single resource that routes
-    # through it. Candidates (bytes): gaussians, adam_state, and (SH on)
-    # features_rest, adam_rest. adam_rest dominates at sh_degree>0. See
-    # ScratchArena. Replaces the four former dedicated *_scratch buffers.
+    # through it as a whole: gaussians, main Adam, and SH features. SH moments
+    # use plane batches, so SH3 needs 112 B/slot here rather than 360 B/slot.
     scratch_arena = _make_scratch_arena(
         allocator, types, max_splats, sh_rest_floats)
     actions = allocator.uint_buffer("densification.actions", max_splats)
@@ -769,10 +763,9 @@ def allocate(
     buffers.densify_children_sum = allocator.uint_buffer("densify_children_sum", 1)
 
     # --- optional view-dependent SH rest coefficients ---
-    # Allocated only when sh_degree > 0. All SH buffers are fp16-packed into
-    # uint32 (2 coeffs/uint for features + grad; one (m, v) pair/uint for adam),
-    # halving the footprint vs float32. features_rest for the initial set is
-    # uploaded by buffer_io; adam_rest is zeroed by the clear kernel.
+    # Allocated only when sh_degree > 0. Features + gradients use fp16 pairs;
+    # Adam m/v remain separate FP32 SoA planes. Initial features are uploaded
+    # by buffer_io; adam_rest is zeroed by the clear kernel.
     if sh_rest_floats > 0:
         feat_uints = (sh_rest_floats + 1) // 2
         buffers.sh = SphericalHarmonicsResources(
@@ -782,8 +775,8 @@ def allocate(
             features_rest_grad=allocator.uint_buffer("sh.features_rest_grad", max_splats * feat_uints),
             # Adam moments FLOAT32 (2 uints/coeff: m, v). fp16 underflowed the tiny
             # SH-rest v=g^2(~1e-12) to 0, crushing the step ~1000x. Stride is
-            # 2*sh_rest_floats. Compacted/re-sorted via the shared ScratchArena
-            # (no dedicated scratch — this was the ~3.3GB duplicate at 10M).
+            # 2*sh_rest_floats. Compacted/re-sorted in bounded plane batches;
+            # this live buffer's size and numerical representation are unchanged.
             adam_rest=allocator.uint_buffer("sh.adam_rest", max_splats * sh_rest_floats * 2),
         )
 

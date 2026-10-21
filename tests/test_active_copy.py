@@ -53,7 +53,8 @@ def test_copy_live_records_bit_exact(copy_gpu, soa, record_words, count) -> None
                    record_words=record_words, max_splats=capacity)
     batch.dispatch_indirect(copy, "copy", args, source=src.storage,
                             destination=dst.storage, count_buf=count_buf.storage,
-                            record_words=record_words, soa=int(soa), max_splats=capacity)
+                            record_words=record_words, soa=int(soa),
+                            destination_word_offset=0, max_splats=capacity)
     runtime.wait_for_submit(runtime.submit(batch))
     expected = untouched.copy()
     live = min(count, capacity)
@@ -79,3 +80,30 @@ def test_copy_dispatch_exceeds_one_dimension(copy_gpu) -> None:
     groups = (count * words + 255) // 256
     np.testing.assert_array_equal(args.to_numpy(),
                                   np.array([65535, (groups + 65534) // 65535, 1], np.uint32))
+
+
+@pytest.mark.parametrize("first_plane,planes", [(0, 28), (28, 28), (56, 28), (84, 6)])
+@pytest.mark.parametrize("count", [0, 1, 17, 73, 99])
+def test_copy_soa_batch_at_destination_offset(copy_gpu, first_plane, planes, count) -> None:
+    device, runtime, prepare, copy = copy_gpu
+    capacity, total_planes = 73, 90
+    source = np.random.default_rng(7).integers(
+        0, 2**32, capacity * planes, dtype=np.uint32)
+    original = np.full(capacity * total_planes, 0xDEADBEEF, np.uint32)
+    src, dst = _uint_buffer(device, source), _uint_buffer(device, original)
+    count_buf = _uint_buffer(device, np.array([count], np.uint32))
+    args = _uint_buffer(device, np.zeros(3, np.uint32), indirect=True)
+    batch = runtime.command_batch("test_offset_copy")
+    batch.dispatch(prepare, "prepare", thread_count=[1, 1, 1],
+                   count_buf=count_buf.storage, dispatch_args=args.storage,
+                   record_words=planes, max_splats=capacity)
+    batch.dispatch_indirect(copy, "copy", args, source=src.storage,
+                            destination=dst.storage, count_buf=count_buf.storage,
+                            record_words=planes, soa=1,
+                            destination_word_offset=first_plane * capacity,
+                            max_splats=capacity)
+    runtime.wait_for_submit(runtime.submit(batch))
+    expected = original.reshape(total_planes, capacity).copy()
+    live = min(count, capacity)
+    expected[first_plane:first_plane + planes, :live] = source.reshape(planes, capacity)[:, :live]
+    np.testing.assert_array_equal(dst.to_numpy().view(np.uint32), expected.ravel())

@@ -21,6 +21,7 @@ from trainer.backend.memory.buffers import (
     SphericalHarmonicsResources,
 )
 from trainer.backend.compute.gpu_scan import GpuScan
+from trainer.backend.memory.reorder import reorder_soa_planes
 
 
 @dataclass(frozen=True)
@@ -228,18 +229,15 @@ class SimpleDensifier:
                 )
                 commands.copy_arena_back(arena, self.sh.features_rest, self.sh.features_rest.storage.size,
                                          count_buf=self.scan.resources.total)
-                commands.dispatch(
-                    kernels.scatter_compact_adam_rest, "scatter_compact_adam_rest",
-                    thread_count=[self.max_primitives, 1, 1],
-                    adam_rest_in=self.sh.adam_rest.storage,
+                reorder_soa_planes(
+                    commands=commands, arena=arena, buffer=self.sh.adam_rest,
+                    kernel=kernels.scatter_compact_adam_rest,
+                    marker="scatter_compact_adam_rest",
+                    plane_count=self.sh.rest_floats * 2, capacity=self.max_primitives,
+                    live_count=self.scan.resources.total,
                     valid_mask=resources.valid_mask.storage,
                     scan=self.scan.resources.work.storage,
-                    adam_rest_out=arena.storage,
-                    rest_floats=self.sh.rest_floats,
-                    max_splats=self.max_primitives,
                 )
-                commands.copy_arena_back(arena, self.sh.adam_rest, self.sh.adam_rest.storage.size,
-                                         count_buf=self.scan.resources.total, soa=True)
 
             commands.dispatch(
                 kernels.snapshot_count, "densify_snapshot",

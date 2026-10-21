@@ -63,10 +63,12 @@ from trainer.frontend.schedule import (
     TrainingSchedule
 )
 from trainer.frontend.reporting.outputs import RunArtifacts
+from trainer.frontend.reporting.error_log import ErrorLog, report_exception
 from trainer.frontend.evaluation.post_training import run_post_training
 from trainer.frontend.evaluation import run_report as run_report_module
 from trainer.frontend.profiling.stage_timing import StageTimingRecorder
 from trainer.frontend.queue_limiter import QueueLimiter
+from trainer.frontend.run_control import RunStopped
 from trainer.frontend.training_preflight import (
     build_densify_configs,
     compute_morton_bounds,
@@ -318,6 +320,7 @@ class TrainingApplication:
         self.gpu_lock: Any = None
         self.pipeline: TrainingPipeline | None = None
         self.viewer: ViewerSession | None = None
+        self.error_log: ErrorLog | None = None
         self.target_textures: list[Any] = []
         self.structure_textures: list[Any] = []
         self.mean_lr: MeanLearningRateSchedule | None = None
@@ -411,6 +414,8 @@ class TrainingApplication:
             mip_kernel_size=(self.args.mip_kernel_size if self.args.mip_splatting else 0.3),
             setup=setup,
         )
+        if self.error_log is not None:
+            self.error_log.attach(self.viewer.state)
         self.viewer.start()
 
         state = self._viewer.state
@@ -632,14 +637,10 @@ class TrainingApplication:
 
     def _hub_run_failed(self, what: str, error: Exception) -> None:
         """Report a failed hub run and leave the session usable."""
-        import traceback
-
-        traceback.print_exc()
         state = self._viewer.state
         state.training_failed(f"{what}: {error}")
         state.notify(f"Training failed while {what}", ERROR)
-        state.log(f"{what} failed: {error}")
-        print(f"[hub] {what} failed: {error}")
+        report_exception(f"[hub] {what} failed", error, state)
 
     def _begin_repeat_run(self) -> None:
         """Make room for ANOTHER run in the same hub session.
@@ -688,7 +689,8 @@ class TrainingApplication:
             try:
                 self.pipeline.runtime.wait_for_idle()
             except Exception as error:                 # noqa: BLE001
-                print(f"[hub] draining the queue before release failed: {error}")
+                report_exception("[hub] draining the queue before release failed",
+                                 error, self._viewer.state)
         self.runtime = None
         self.pipeline = None
         self.targets = None
@@ -727,7 +729,7 @@ class TrainingApplication:
         except Exception as error:                     # noqa: BLE001
             state.result_failed(f"Could not write {path}: {error}")
             state.notify("Export failed", ERROR)
-            print(f"[hub] export failed: {error}")
+            report_exception("[hub] export failed", error, state)
             return
         finally:
             self.viewer.resume_rendering()
@@ -754,6 +756,7 @@ class TrainingApplication:
         except (AttributeError, OSError) as error:
             state.result_failed(f"Could not open {folder}: {error}")
             state.notify("Could not open the folder", ERROR)
+            report_exception("[hub] opening the export folder failed", error, state)
 
     def _hub_clear_session(self, *, notify: bool = True) -> None:
         """Forget the dataset and the finished run so the hub can start over.
@@ -874,8 +877,7 @@ class TrainingApplication:
         except Exception as error:                    # noqa: BLE001
             state.dataset_failed(str(error))
             state.notify("Could not load dataset", ERROR)
-            state.log(f"cannot preview this dataset: {error}")
-            print(f"[hub] preview failed for {scene_dir}: {error}")
+            report_exception(f"[hub] cannot preview this dataset: {scene_dir}", error, state)
             return
         finally:
             self.viewer.resume_rendering()
@@ -924,42 +926,53 @@ class TrainingApplication:
         # ---- launch training loop --------------------
         result = self.build_training_loop().launch_training_loop()
 
-        # -----Post-training----------------------------------------
-        # Its own phase, with its own progress: everything below renders cameras
-        # and writes files, so it is minutes of work that used to show up as a
-        # finished run stuck at "iter N/N" (see TrainingState.FINALIZING).
-        self._publish_finalize("held-out test PSNR", 0.05)
-        self._write_final_test_psnr(result)
-
-        if self._training_runtime.profiler is not None:
-            self._training_runtime.profiler.close()
-
         viewer = self._training_runtime.viewer
         pipeline = self._training_runtime.pipeline
-        if hold_viewer:
-            viewer.hold_after_training(pipeline)
-        else:
-            viewer.finish_training(pipeline)
-        self._training_runtime.artifacts.close_all()
+        viewer.finish_training(pipeline)
+        try:
+            with viewer.unthrottled():
+                viewer.checkpoint()
+                self._publish_finalize("held-out test PSNR", 0.05)
+                self._write_final_test_psnr(result)
 
-        self._publish_finalize("final metrics", 0.15)
-        run_post_training(
-            progress=self._publish_finalize,
-            pipeline=self._training_runtime.pipeline,
-            scene=self._sceneContext.colmapScene,
-            args=self.args,
-            run_dir=self.paths.root,
-            cams_dir=self.paths.cameras,
-            targets_srgb=self._targets.srgb,
-            targets_linear=self._targets.linear,
-            test_indices=self._sceneContext.test_indices,
-            stride=self._sceneContext.holdout_stride,
-            n_cams=self._sceneContext.camera_count,
-            train_wall_s=result.wall_time_seconds,
-            completed_iters=result.iterations,
-            t_start=result.started_at,
-            psnr_curve=result.psnr_curve
-        )
+                viewer.checkpoint()
+                self._publish_finalize("final metrics", 0.15)
+                run_post_training(
+                    progress=self._publish_finalize,
+                    checkpoint=viewer.checkpoint,
+                    pipeline=pipeline,
+                    scene=self._sceneContext.colmapScene,
+                    args=self.args,
+                    run_dir=self.paths.root,
+                    cams_dir=self.paths.cameras,
+                    targets_srgb=self._targets.srgb,
+                    targets_linear=self._targets.linear,
+                    test_indices=self._sceneContext.test_indices,
+                    stride=self._sceneContext.holdout_stride,
+                    n_cams=self._sceneContext.camera_count,
+                    train_wall_s=result.wall_time_seconds,
+                    completed_iters=result.iterations,
+                    t_start=result.started_at,
+                    psnr_curve=result.psnr_curve,
+                )
+        except RunStopped:
+            viewer.state.log("Run stopped; remaining evaluation and exports skipped. "
+                             "The trained model is still available.")
+            print("[post-training] stopped; retaining the trained model.")
+        finally:
+            if self._training_runtime.profiler is not None:
+                self._training_runtime.profiler.close()
+            self._training_runtime.artifacts.close_all()
+
+        if hold_viewer:
+            stats = viewer.state.snapshot().stats
+            viewer.state.training_completed(ResultInfo(
+                iterations=result.iterations, target_iterations=self.args.iters,
+                wall_s=result.wall_time_seconds, splats=stats.gaussians,
+                run_dir=str(self.paths.root)))
+            # Metrics must finish (or be stopped) BEFORE the CLI waits for the
+            # window to close. The hub returns to its command loop instead.
+            viewer.hold_after_training(pipeline)
         # The COMPLETED transition (and the result record) is published by the hub
         # once this returns — see ``_hub_train_scene``.
 
@@ -972,7 +985,10 @@ class TrainingApplication:
         if self.viewer is None:
             return
         state = self._viewer.state
-        if state.snapshot().training_state != TrainingState.FINALIZING:
+        phase = state.snapshot().training_state
+        if phase in (TrainingState.PAUSED, TrainingState.STOPPING):
+            return
+        if phase != TrainingState.FINALIZING:
             state.training_finalizing(label)
         state.set_progress(label, fraction)
 
@@ -1065,6 +1081,8 @@ class TrainingApplication:
         else:
             self.viewer = ViewerSession(None)
 
+        if self.error_log is not None:
+            self.error_log.attach(self.viewer.state)
         self.viewer.start()
 
     def _start_profiler(self):
@@ -1230,6 +1248,7 @@ class TrainingApplication:
                 with_lpips=bool(getattr(self.args, "eval_lpips", False)),
                 progress=lambda done, total: self._publish_finalize(
                     f"held-out view {done}/{total}", 0.05 + 0.5 * done / max(total, 1)),
+                checkpoint=self._training_runtime.viewer.checkpoint,
             )
             psnr = quality.get("psnr_srgb") or 0.0
             count = int(self._pipeline.buffers.num_gaussians_counter
@@ -1237,8 +1256,10 @@ class TrainingApplication:
         else:
             psnr, count = eval_test_psnr_srgb(
                 self._pipeline, sceneContext.colmapScene,
-                sceneContext.test_indices, self._targets.srgb)
+                sceneContext.test_indices, self._targets.srgb,
+                checkpoint=self._training_runtime.viewer.checkpoint)
 
+        self._training_runtime.viewer.checkpoint()
         active_s = max(0.0, result.wall_time_seconds - result.observation_seconds)
 
         if self.args.final_test_psnr:
@@ -1262,9 +1283,11 @@ class TrainingApplication:
             frames = int(getattr(self.args, "render_fps_frames", 0) or 0)
             render = (run_report_module.measure_render_fps(
                           self._pipeline, sceneContext.colmapScene,
-                          sceneContext.test_indices[0], frames)
+                          sceneContext.test_indices[0], frames,
+                          checkpoint=self._training_runtime.viewer.checkpoint)
                       if frames > 0 and sceneContext.test_indices
                       else {"frames": 0, "fps": None, "ms_per_frame": None})
+            self._training_runtime.viewer.checkpoint()
             report = run_report_module.build_report(
                 pipeline=self._pipeline,
                 scene_context=sceneContext,
@@ -1425,31 +1448,34 @@ class TrainingLoop:
     def launch_training_loop(self) -> TrainingResult:
         self._begin_training_loop()
 
-        while self._should_continue():
-            self.runtime.viewer.wait_while_paused()  # honor the viewer Pause button
-            it_context = self._next_iteration()
-            self._prepare_iteration(it_context)
-            self._capture_if_requested(it_context)
+        try:
+            while self._should_continue():
+                self.runtime.viewer.checkpoint()
+                it_context = self._next_iteration()
+                self._prepare_iteration(it_context)
+                self._capture_if_requested(it_context)
 
-            self._execute_training_step(it_context)
+                self._execute_training_step(it_context)
 
-            # we need to record the actual final step timing here or it will be skewed by the post-iteration evals and renders
-            if it_context.step_number == self.args.iters:
-                self._record_current_timing()
+                # Freeze training time before the final iteration's observations.
+                if it_context.step_number == self.args.iters:
+                    self._record_current_timing()
 
-            self._apply_mutations(it_context)
-            # Timed as one block: everything in here MEASURES the run rather
-            # than advancing it, and train_active_s is train_wall_s minus this.
-            observed_at = time.perf_counter()
-            should_continue = self._produce_observations(it_context)
-            spent = time.perf_counter() - observed_at
-            self.observation_seconds += spent
-            if it_context.step_number != self.args.iters:
-                self.observation_in_wall_seconds += spent
-            self._present_profile_frame_if_enabled()
+                self._apply_mutations(it_context)
+                observed_at = time.perf_counter()
+                try:
+                    should_continue = self._produce_observations(it_context)
+                finally:
+                    spent = time.perf_counter() - observed_at
+                    self.observation_seconds += spent
+                    if it_context.step_number != self.args.iters:
+                        self.observation_in_wall_seconds += spent
+                self._present_profile_frame_if_enabled()
 
-            if not should_continue:
-                break
+                if not should_continue:
+                    break
+        except RunStopped:
+            pass
 
         return self._complete_training_loop()
 
@@ -1469,6 +1495,7 @@ class TrainingLoop:
         """
         self._begin_training_loop()
         while self._should_continue():
+            self.runtime.viewer.checkpoint()
             context = self._next_iteration()
             self._prepare_iteration(context)
             if context.step_number >= capture_step:
@@ -1645,6 +1672,7 @@ class TrainingLoop:
             pipeline.compute_3d_filter()
 
     def _produce_observations(self, context: IterationContext) -> bool:
+        self.runtime.viewer.checkpoint()
         self.runtime.reporter.report_throughput(context)
 
         if context.step_number > 1 and (context.events.log or context.events.preview):
@@ -1667,6 +1695,7 @@ class TrainingLoop:
                         self.scene.colmapScene,
                         context.step_number,
                         self.paths.cameras,
+                        checkpoint=self.runtime.viewer.checkpoint,
                     )
                 finally:
                     state.end_activity()
@@ -1701,6 +1730,7 @@ class TrainingLoop:
             self.scene.colmapScene,
             self.scene.test_indices,
             self.targets.srgb,
+            checkpoint=self.runtime.viewer.checkpoint,
         )
         record = {
             "iter": context.step_number,
@@ -1744,6 +1774,7 @@ class TrainingLoop:
                         "Evaluating every camera",
                         (done / total) if total else None,
                         detail=f"camera {done}/{total}"),
+                    checkpoint=self.runtime.viewer.checkpoint,
                 )
             finally:
                 state.end_activity()
@@ -1754,6 +1785,8 @@ class TrainingLoop:
         # held-out PSNR pass (which renders every test camera) has also run.
         self.runtime.viewer.set_training_active(False)
         self.runtime.pipeline.runtime.wait_for_idle()
+        if not self.post_iteration_clean_timing:
+            self.post_iteration_clean_timing = time.time() - self.started_at
         if self.extinction_hardness_schedule is not None:
             self.runtime.pipeline.set_extinction_hardness(self.extinction_hardness_schedule.target)
         self.runtime.reporter.report_complete(self.training_step, self.post_iteration_clean_timing)
@@ -1995,6 +2028,7 @@ class StructureTextureProvider:
                   "on GPU...", flush=True)
             return gpu_backend
         except Exception as error:
+            report_exception("[SAD] GPU structure-tensor setup failed; using CPU", error)
             print(f"[SAD] GPU structure-tensor unavailable ({error}); computing "
                   f"{self._scene.camera_count} fields on CPU (slow)...", flush=True)
             return None
@@ -2220,6 +2254,7 @@ class PsNRPlotWriter:
             print(f"[psnr-curve] wrote {paths.root / 'psnr_curve.json'} + "
                   f"psnr_curve.png ({len(curve['iters'])} points)")
         except Exception as error:  # noqa: BLE001 - plotting is best-effort
+            report_exception("[psnr-curve] PNG creation failed", error)
             print(f"[psnr-curve] wrote psnr_curve.json but the PNG failed "
                   f"({error}); `.venv/Scripts/python.exe -m pip install "
                   "matplotlib` to enable it.")
@@ -2352,10 +2387,17 @@ def create_pipeline(*, args: argparse.Namespace, device: Any, gpu_lock: Any,
 
 def main() -> None:
     app = TrainingApplication.from_cli()
-    if app.args.hub:
-        app.run_hub()          # interactive: pick dataset + reconstruct/train from the UI
-    else:
-        app.start_training()   # CLI: train --scene directly (unchanged)
+    with ErrorLog(app.paths.root / "errors.log") as errors:
+        app.error_log = errors
+        try:
+            if app.args.hub:
+                app.run_hub()
+            else:
+                app.start_training()
+        except Exception as error:
+            state = app.viewer.state if app.viewer is not None else None
+            report_exception("Application failed", error, state)
+            raise SystemExit(1) from None
 
 
 if __name__ == "__main__":

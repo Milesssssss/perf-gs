@@ -32,6 +32,7 @@ void copyActiveRecords(
     StructuredBuffer<uint> count_buf,
     uniform uint record_words,
     uniform uint soa,
+    uniform uint destination_word_offset,
     uniform uint max_splats)
 {
     uint word = (group_id.x + group_id.y * COPY_DISPATCH_WIDTH)
@@ -41,5 +42,5 @@ void copyActiveRecords(
     uint offset = word;
     if (soa != 0u)
         offset = (word / count) * max_splats + word % count;
-    destination[offset] = source[offset];
+    destination[destination_word_offset + offset] = source[offset];
 }

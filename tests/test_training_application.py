@@ -163,7 +163,12 @@ def test_training_loop_presents_after_full_iteration() -> None:
     events = []
     loop = object.__new__(TrainingLoop)
     states = iter((True, False))
-    context = object()
+    context = SimpleNamespace(step_number=1)
+    loop.args = Namespace(iters=3)
+    from trainer.frontend.viewer.viewer_control import ViewerSession
+    loop.runtime = SimpleNamespace(viewer=ViewerSession(None))
+    loop.observation_seconds = 0.0
+    loop.observation_in_wall_seconds = 0.0
 
     loop._begin_training_loop = lambda: events.append("begin")
     loop._should_continue = lambda: next(states)

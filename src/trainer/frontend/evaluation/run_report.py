@@ -14,6 +14,7 @@ import numpy as np
 from PIL import Image
 
 from trainer.common.metrics import psnr as psnr_image, ssim as ssim_image
+from trainer.frontend.run_control import Checkpoint, uninterrupted
 
 if TYPE_CHECKING:
     import argparse
@@ -255,6 +256,7 @@ def evaluate_test_views(
     render_dir: Path | None,
     with_lpips: bool = False,
     progress: Callable[[int, int], None] = lambda _d, _t: None,
+    checkpoint: Checkpoint = uninterrupted,
 ) -> tuple[list[dict], dict]:
     """Per-view PSNR/SSIM over the held-out split, optionally dumping renders.
 
@@ -263,6 +265,7 @@ def evaluate_test_views(
     a reported dB. The PNG is written for downstream perceptual metrics and
     qualitative figures, which are 8-bit metrics anyway.
     """
+    checkpoint()
     pipeline.runtime.wait_for_idle()
     if render_dir is not None:
         render_dir.mkdir(parents=True, exist_ok=True)
@@ -276,6 +279,7 @@ def evaluate_test_views(
     total = max(1, len(test_indices))
     for done, cam_i in enumerate(test_indices, start=1):
         progress(done, total)
+        checkpoint()
         entry = scene.images[cam_i]
         pipeline.render(entry.camera)
         rendered = np.clip(pipeline.read_output_image()[..., :3], 0.0, 1.0)
@@ -299,6 +303,8 @@ def evaluate_test_views(
                             mode="RGB").save(render_dir / name)
             record["render_png"] = name
         per_view.append(record)
+
+    checkpoint()
 
     def _mean(key: str) -> float | None:
         values = [r[key] for r in per_view if r.get(key) is not None]
@@ -331,7 +337,8 @@ def evaluate_test_views(
 
 
 def measure_render_fps(pipeline: "TrainingPipeline", scene,
-                       cam_idx: int, frames: int) -> dict:
+                       cam_idx: int, frames: int, *,
+                       checkpoint: Checkpoint = uninterrupted) -> dict:
     """Steady-state render throughput for ONE held-out camera.
 
     Serialized on purpose: each frame waits for the GPU, so this is per-frame
@@ -344,14 +351,18 @@ def measure_render_fps(pipeline: "TrainingPipeline", scene,
         return {"frames": 0, "fps": None, "ms_per_frame": None}
     camera = scene.images[cam_idx].camera
     for _ in range(FPS_WARMUP_FRAMES):
+        checkpoint()
         pipeline.render(camera)
     pipeline.runtime.wait_for_idle()
 
-    started = time.perf_counter()
+    elapsed = 0.0
     for _ in range(frames):
+        checkpoint()
+        started = time.perf_counter()
         pipeline.render(camera)
         pipeline.runtime.wait_for_idle()
-    elapsed = time.perf_counter() - started
+        elapsed += time.perf_counter() - started
+    checkpoint()
 
     per_frame = elapsed / frames
     return {
