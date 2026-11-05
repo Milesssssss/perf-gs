@@ -1,7 +1,4 @@
-# EA-authored modifications only:
-# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
-# The original INRIA evaluator retains its copyright and license below.
-# See NOTICE.md and licenses/INRIA-Gaussian-Splatting-LICENSE.md.
+# Modfications to the software are Copyright (c) 2026 Electronic Arts Inc, provided under the original license, see NOTICE.md for details.
 
 #
 # Copyright (C) 2023, Inria

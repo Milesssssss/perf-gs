@@ -1,151 +1,128 @@
-# Third-party notices
+Datasets and dependencies that can be utilized by this project under copyright
+of their respective owners and governed by their respective licenses. This
+project also utilizes portions of the following software:
 
-SCATTO-GS uses the third-party code, packages, tools, and research datasets
-identified below. This notice distinguishes material included in the source
-tree from material installed or downloaded separately. It is not an additional
-license grant. The [EA license](LICENSE) applies to EA-owned portions only;
-third-party portions retain their respective copyrights and terms.
+## For use of GPUSorting
 
-## Third-party code included in the repository
+Copyright (c) 2024 Thomas Smith
 
-### INRIA / GRAPHDECO 3D Gaussian Splatting evaluation code
+Available at https://github.com/b0nes164/GPUSorting under the MIT License:
 
-- Copyright (C) 2023, Inria. GRAPHDECO research group. All rights reserved.
-- Project: [3D Gaussian Splatting](https://github.com/graphdeco-inria/gaussian-splatting).
-- Included evaluator: [src/trainer/frontend/evaluation/metrics.py](src/trainer/frontend/evaluation/metrics.py).
-  The original INRIA copyright and license header is retained. Local changes
-  include ordering evaluation methods by their iteration suffix.
-- Included metric functions: [scripts/plots/image_metrics.py](scripts/plots/image_metrics.py).
-  Its source identifies `psnr`, `gaussian`, `create_window`, `ssim`, and `_ssim`
-  as verbatim copies of INRIA utility functions obtained through SAD-GS. The
-  surrounding run-loading, selection, reporting, and command-line code is local.
-- Upstream sources: [evaluator](https://github.com/graphdeco-inria/gaussian-splatting/blob/main/metrics.py),
-  [image utilities](https://github.com/graphdeco-inria/gaussian-splatting/blob/main/utils/image_utils.py),
-  and [loss utilities](https://github.com/graphdeco-inria/gaussian-splatting/blob/main/utils/loss_utils.py).
-- License text: [Gaussian-Splatting License](licenses/INRIA-Gaussian-Splatting-LICENSE.md),
-  reproduced from upstream license revision
-  [d9fad7b3450bf4bd29316315032d57157e23a515](https://github.com/graphdeco-inria/gaussian-splatting/blob/d9fad7b3450bf4bd29316315032d57157e23a515/LICENSE.md).
-  It contains research/non-commercial restrictions and redistribution conditions.
-  A notice or an EA copyright header does not remove those restrictions.
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
 
-Section 6 of the reproduced upstream license separately identifies the
-MIT-licensed origin of `utils/loss_utils.py`: **pytorch-ssim, Copyright Evan Su,
-2017** ([project](https://github.com/Po-Hsun-Su/pytorch-ssim),
-[license](https://github.com/Po-Hsun-Su/pytorch-ssim/blob/master/LICENSE.txt)).
-That exception must not be generalized to the whole evaluator or to unrelated
-metric functions. The exact imported source revisions, intermediary SAD-GS
-provenance, and applicable function-level terms require confirmation before
-release; the reproduced license is a reviewed upstream snapshot, not evidence
-of the original import revision.
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
 
-### Thomas Smith's GPUSorting
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 
-- Copyright (c) 2024 Thomas Smith.
-- Project: [GPUSorting](https://github.com/b0nes164/GPUSorting).
-- Included port: [shaders/sort/device_radix_sort.slang](shaders/sort/device_radix_sort.slang).
-- Upstream implementation: [DeviceRadixSort.hlsl](https://github.com/b0nes164/GPUSorting/blob/main/GPUSortingD3D12/Shaders/DeviceRadixSort.hlsl)
-  and [SortCommon.hlsl](https://github.com/b0nes164/GPUSorting/blob/main/GPUSortingD3D12/Shaders/SortCommon.hlsl),
-  both identified upstream as MIT-licensed.
-- Local changes: Slang port of the reduce-then-scan WGE16 ascending path;
-  64-bit keys stored as two 32-bit words with a Gaussian-index payload;
-  eight radix passes; trainer buffer/dispatch contracts and GPU-resident counts.
-- License: [full Thomas Smith MIT notice](licenses/GPUSorting-MIT.txt),
-  reproduced from the GPUSorting section of upstream license revision
-  [6f946265e7a392a12a8422bd8a74f4a629ba94f4](https://github.com/b0nes164/GPUSorting/blob/6f946265e7a392a12a8422bd8a74f4a629ba94f4/LICENSE).
-  The original implementation revision used for the port is not recorded.
+## For use of INIRA/GRAPHDECO 3D
 
-The upstream repository also contains notices for other implementations and
-benchmarks. Their presence in that repository does not establish that those
-components are included in this port.
+Copyright (C) 2023, Inria. GRAPHDECO research group. All rights reserved.
 
-## Packages installed separately
+Available at https://github.com/graphdeco-inria/gaussian-splatting under the
+Gaussian-Splatting License:
 
-The package manifest is [pyproject.toml](pyproject.toml). These packages are
-installed by the user's package manager; their source distributions and binaries
-are not vendored here. Each installed version and its bundled dependencies are
-subject to their own accompanying licenses. This list does not claim to be a
-version-resolved inventory of transitive dependencies.
+Inria and the Max Planck Institut for Informatik (MPII) hold all the ownership
+rights on the Software named gaussian-splatting. The Software is in the
+process of being registered with the Agence pour la Protection des Programmes
+(APP).
 
-| Use | Package / source |
-| --- | --- |
-| GPU runtime and shader dispatch | [SlangPy](https://pypi.org/project/slangpy/) / [shader-slang/slangpy](https://github.com/shader-slang/slangpy) |
-| Numerical arrays | [NumPy](https://pypi.org/project/numpy/) |
-| Image decoding and resizing | [opencv-python-headless](https://pypi.org/project/opencv-python-headless/) |
-| Image input/output | [Pillow](https://pypi.org/project/Pillow/) |
-| PLY input/output | [plyfile](https://pypi.org/project/plyfile/) |
-| Scientific utilities | [SciPy](https://pypi.org/project/scipy/) |
-| Build backend | [setuptools](https://pypi.org/project/setuptools/) |
-| Development and tests | [pytest](https://pypi.org/project/pytest/), [Ruff](https://pypi.org/project/ruff/) |
-| Optional evaluation and perceptual metrics | [PyTorch](https://pytorch.org/), [torchvision](https://pypi.org/project/torchvision/), [LPIPS](https://github.com/richzhang/PerceptualSimilarity), [lpipsPyTorch](https://github.com/S-aiueo32/lpips-pytorch), [tqdm](https://pypi.org/project/tqdm/) |
-| Optional plots | [Matplotlib](https://matplotlib.org/) |
-| Optional download certificate bundle | [certifi](https://pypi.org/project/certifi/) |
+The Software is still being developed by the Licensor.
 
-SlangPy supplies the Slang / slang-rhi toolchain used by the trainer. Its package
-and bundled native components retain their own notices; the
-[Slang project](https://shader-slang.org/) is not EA-authored material.
+Licensor's goal is to allow the research community to use, test and evaluate
+the Software.
 
-## Optional tools, textures, and model weights obtained separately
+### 1. Definitions
 
-- **COLMAP and GLOMAP.** Reconstruction setup can download Windows release
-  archives from [COLMAP](https://github.com/colmap/colmap/releases) and
-  [GLOMAP](https://github.com/colmap/glomap/releases), or use user-installed
-  executables. See [src/trainer/frontend/reconstruction/tools.py](src/trainer/frontend/reconstruction/tools.py).
-  The default local tool cache is excluded from version control. Consult
-  [COLMAP's license](https://colmap.github.io/license.html),
-  [GLOMAP's license](https://github.com/colmap/glomap/blob/main/LICENSE), and the
-  notices accompanying each binary's separately licensed dependencies.
-- **NVIDIA spatiotemporal blue-noise textures.**
-  [scripts/data/download_stbn.py](scripts/data/download_stbn.py) is an opt-in
-  downloader for the pregenerated scalar texture set in
-  [NVIDIA-RTX/STBN](https://github.com/NVIDIA-RTX/STBN). It caches a repackaged
-  scalar volume with the downloaded license and a provenance notice outside
-  version control; the texture assets and SDK source are not vendored here.
-  Citation: Wolfe, Morrical, Akenine-Moller, and Ramamoorthi,
-  *Scalar Spatiotemporal Blue Noise Masks*, EGSR 2022,
-  [arXiv:2112.09629](https://arxiv.org/abs/2112.09629).
-  The current upstream [license document](https://github.com/NVIDIA-RTX/STBN/blob/main/License.txt)
-  contains both non-commercial and commercial-use sections. The applicable
-  terms must be established for the particular assets and intended use; do not
-  treat the downloader's conservative non-commercial warning as a complete
-  interpretation of every upstream licensing option. Its download follows
-  `main`, not an immutable asset revision.
-- **LPIPS and pretrained backbones.** Optional perceptual evaluation in
-  [src/trainer/common/perceptual.py](src/trainer/common/perceptual.py) loads
-  LPIPS with a pretrained VGG backbone by default; AlexNet is also selectable.
-  The supporting library may download backbone weights on first use.
-  No pretrained model weights are included in this source tree. Package-source
-  licensing does not by itself establish the terms for pretrained weights or
-  their training data.
+Licensee means any person or entity that uses the Software and distributes
+its Work.
 
-## Research datasets downloaded separately
+Licensor means the owners of the Software, i.e Inria and MPII
 
-The dataset download helpers are invoked explicitly by the user. They do not
-make the datasets EA-owned or place them under the EA source-code license.
-No raw datasets are tracked in the current source tree. Users must review the
-terms accompanying the specific dataset archives they obtain; public download
-availability is not a statement of unrestricted use or redistribution rights.
+Software means the original work of authorship made available under this
+License ie gaussian-splatting.
 
-| Dataset | Attribution and project | Scenes / download helper |
-| --- | --- | --- |
-| Mip-NeRF 360 | Barron, Mildenhall, Verbin, Srinivasan, and Hedman, *Mip-NeRF 360: Unbounded Anti-Aliased Neural Radiance Fields*, CVPR 2022. [Project and dataset links](https://jonbarron.info/mipnerf360/) | bicycle, bonsai, counter, garden, kitchen, room, stump; optional flowers and treehill. [scripts/data/download_mipnerf360.py](scripts/data/download_mipnerf360.py) |
-| Tanks & Temples | Knapitsch, Park, Zhou, and Koltun, *Tanks and Temples: Benchmarking Large-Scale Scene Reconstruction*, ACM TOG 2017. [Project](https://www.tanksandtemples.org/), [published terms](https://www.tanksandtemples.org/license/) | train, truck, from the INRIA-hosted COLMAP archive. [scripts/data/download_tandt_db.py](scripts/data/download_tandt_db.py) |
-| Deep Blending | Hedman, Philip, Price, Frahm, Drettakis, and Brostow, *Deep Blending for Free-Viewpoint Image-Based Rendering*, ACM TOG 2018. [Project](https://visual.cs.ucl.ac.uk/pubs/deepblending/) | drjohnson, playroom, from the same INRIA-hosted COLMAP archive. [scripts/data/download_tandt_db.py](scripts/data/download_tandt_db.py) |
+Work means the Software and any additions to or derivative works of the
+Software that are made available under this License.
 
-The helpers obtain Mip-NeRF 360 archives from the Google Research links on its
-project page, and the Tanks & Temples / Deep Blending archive from the
-[INRIA 3DGS dataset host](https://repo-sam.inria.fr/fungraph/3d-gaussian-splatting/datasets/input/tandt_db.zip).
-The Mip-NeRF helper warns about redistribution of the extra scenes. The current
-Tanks & Temples terms page contains both CC BY 4.0 language and a restrictive
-research-only license grant; the applicable terms for the downloaded archive
-require clarification rather than selecting one statement by assumption.
-Deep Blending archive terms also require confirmation before redistribution.
+### 2. Purpose
 
-### Dataset-derived examples
+This license is intended to define the rights granted to the Licensee by
+Licensors under the Software.
 
-[assets/teaser.jpg](assets/teaser.jpg) and
-[assets/examples_strip.jpg](assets/examples_strip.jpg) are renders of a
-Mip-NeRF 360 bicycle reconstruction, as documented in the README. The tracked
-convergence, PSNR, and timing plots report dataset-based experiments. These
-examples are separate from the raw datasets; excluding raw downloads does not
-by itself establish permission to redistribute every image, reconstruction, or
-other derived artifact.
+### 3. Rights granted
+
+For the above reasons Licensors have decided to distribute the Software.
+Licensors grant non-exclusive rights to use the Software for research purposes
+to research users (both academic and industrial), free of charge, without right
+to sublicense. The Software may be used "non-commercially", i.e., for research
+and/or evaluation purposes only.
+
+Subject to the terms and conditions of this License, you are granted a
+non-exclusive, royalty-free, license to reproduce, prepare derivative works of,
+publicly display, publicly perform and distribute its Work and any resulting
+derivative works in any form.
+
+### 4. Limitations
+
+4.1 Redistribution. You may reproduce or distribute the Work only if (a) you do
+so under this License, (b) you include a complete copy of this License with
+your distribution, and (c) you retain without modification any copyright,
+patent, trademark, or attribution notices that are present in the Work.
+
+4.2 Derivative Works. You may specify that additional or different terms apply
+to the use, reproduction, and distribution of your derivative works of the Work
+("Your Terms") only if (a) Your Terms provide that the use limitation in Section
+2 applies to your derivative works, and (b) you identify the specific derivative
+works that are subject to Your Terms. Notwithstanding Your Terms, this License
+(including the redistribution requirements in Section 3.1) will continue to
+apply to the Work itself.
+
+4.3 Any other use without of prior consent of Licensors is prohibited. Research
+users explicitly acknowledge having received from Licensors all information
+allowing to appreciate the adequacy between of the Software and their needs and
+to undertake all necessary precautions for its execution and use.
+
+4.4 The Software is provided both as a compiled library file and as source
+code. In case of using the Software for a publication or other results obtained
+through the use of the Software, users are strongly encouraged to cite the
+corresponding publications as explained in the documentation of the Software.
+
+### 5. Disclaimer
+
+THE USER CANNOT USE, EXPLOIT OR DISTRIBUTE THE SOFTWARE FOR COMMERCIAL PURPOSES
+WITHOUT PRIOR AND EXPLICIT CONSENT OF LICENSORS. YOU MUST CONTACT INRIA FOR ANY
+UNAUTHORIZED USE: stip-sophia.transfert@inria.fr . ANY SUCH ACTION WILL
+CONSTITUTE A FORGERY. THIS SOFTWARE IS PROVIDED "AS IS" WITHOUT ANY WARRANTIES
+OF ANY NATURE AND ANY EXPRESS OR IMPLIED WARRANTIES, WITH REGARDS TO COMMERCIAL
+USE, PROFESSIONNAL USE, LEGAL OR NOT, OR OTHER, OR COMMERCIALISATION OR
+ADAPTATION. UNLESS EXPLICITLY PROVIDED BY LAW, IN NO EVENT, SHALL INRIA OR THE
+AUTHOR BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE
+GOODS OR SERVICES, LOSS OF USE, DATA, OR PROFITS OR BUSINESS INTERRUPTION)
+HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+### 6. Files subject to permissive licenses
+
+The contents of the file utils/loss_utils.py are based on publicly available
+code authored by Evan Su, which falls under the permissive MIT license.
+
+Title: pytorch-ssim
+
+Project code: https://github.com/Po-Hsun-Su/pytorch-ssim\
+Copyright Evan Su, 2017
+
+License: https://github.com/Po-Hsun-Su/pytorch-ssim/blob/master/LICENSE.txt (MIT)

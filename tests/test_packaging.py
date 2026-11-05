@@ -1,6 +1,6 @@
 # Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-"""The installed wheel must locate shaders without a source checkout."""
+"""Installed packages must carry their shaders and exact license notices."""
 import shutil
 import subprocess
 import sys
@@ -15,7 +15,7 @@ def test_wheel_and_sdist_include_shader_resources(tmp_path):
     source.mkdir()
     for name in ("pyproject.toml", "setup.py", "LICENSE", "NOTICE.md", "README.md"):
         shutil.copy2(root / name, source / name)
-    for name in ("src/trainer", "shaders", "licenses"):
+    for name in ("src/trainer", "shaders"):
         shutil.copytree(root / name, source / name,
                         ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
     result = subprocess.run(
@@ -27,13 +27,26 @@ def test_wheel_and_sdist_include_shader_resources(tmp_path):
 
     expected = {p.relative_to(root / "shaders").as_posix()
                 for p in (root / "shaders").rglob("*.slang")}
+    notices = {name: (root / name).read_bytes() for name in ("LICENSE", "NOTICE.md")}
     site = tmp_path / "installed"
     with zipfile.ZipFile(next((source / "dist").glob("*.whl"))) as wheel:
-        assert {"trainer/shaders/" + name for name in expected} <= set(wheel.namelist())
+        wheel_names = set(wheel.namelist())
+        assert {"trainer/shaders/" + name for name in expected} <= wheel_names
+        for name, expected_bytes in notices.items():
+            matches = [path for path in wheel_names
+                       if ".dist-info/" in path and path.endswith("/" + name)]
+            assert len(matches) == 1, matches
+            assert wheel.read(matches[0]) == expected_bytes
         wheel.extractall(site)
     with tarfile.open(next((source / "dist").glob("*.tar.gz"))) as archive:
-        contents = {name.split("/", 1)[1] for name in archive.getnames() if "/" in name}
-        assert {"shaders/" + name for name in expected} <= contents
+        members = {member.name.split("/", 1)[1]: member
+                   for member in archive.getmembers() if "/" in member.name}
+        assert {"shaders/" + name for name in expected} <= set(members)
+        for name, expected_bytes in notices.items():
+            stream = archive.extractfile(members[name])
+            assert stream is not None
+            with stream:
+                assert stream.read() == expected_bytes
 
     check = """
 import sys

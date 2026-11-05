@@ -160,7 +160,7 @@ The download helpers cover **three datasets**, obtained separately by users:
 
 Raw datasets are not part of the current tracked source tree. Dataset and
 derived-asset terms are separate from the source-code license; see
-[NOTICE.md](NOTICE.md#research-datasets-downloaded-separately) before downloading
+[NOTICE.md](NOTICE.md) before downloading
 or redistributing them. Public availability does not imply unrestricted rights.
 
 Fetch the [Mip-NeRF 360](https://jonbarron.info/mipnerf360/) dataset with the helper script (standard library only, no extra dependencies):
@@ -193,7 +193,7 @@ python scripts/data/download_tandt_db.py
 python scripts/data/download_tandt_db.py --set tandt   # or: --set db
 ```
 
-Same flags as above (`--dest`, `--force`, `--keep-zip`). The script prints a terms notice before fetching. Review the terms for the specific archive and intended use; see [Tanks & Temples](https://www.tanksandtemples.org/), [Deep Blending](https://visual.cs.ucl.ac.uk/pubs/deepblending/), and the dataset qualifications in [NOTICE.md](NOTICE.md#research-datasets-downloaded-separately).
+Same flags as above (`--dest`, `--force`, `--keep-zip`). The script prints a terms notice before fetching. Review the terms for the specific archive and intended use; see [Tanks & Temples](https://www.tanksandtemples.org/), [Deep Blending](https://visual.cs.ucl.ac.uk/pubs/deepblending/), and the dataset qualifications in [NOTICE.md](NOTICE.md).
 
 ## Quickstart
 
@@ -225,26 +225,9 @@ The suite covers Slang math against known inputs, gradient checks against finite
 
 This is a research trainer. The happy path (Mip-NeRF 360, SH0, structure-aware densification, Vulkan) is well travelled and gives the numbers above. 
 
-### TODOs/next steps
+## License
 
-- [ ] Experiment with view dependant reconstruction (Spherical harmonics / Spherical gaussians)
-- [ ] Harden the primitive generalization
-- [ ] Improve Adam's generalization and refactor optimizer state, slightly confusing rn
-- [ ] Implement HYPERPARAM-free densification strategy. SADGS is great, but required a lot of manual tuning. MCMC is nice for that, but wont converge as fast. I need to find a middle ground between speed (hopefully maintaining the 3k/4k step range for convergence) while avoiding overparameterized training setup.
-- [ ] Include Glomap/Colmap preprocessing stage
-- [ ] Improve viewer, likely should move to separate queues on separate devices and have shared memory mapped that viewer reads from and trainer pushes too.
-- [ ] Include PPISP to improve training quality
-- [ ] Refactor to allow easier integration of neural backbone for primitive prediction
-- [ ] Ideally this becomes a fast and efficient differentiable blended-primitive renderer that allows rapid experimentation of NVS and/or generative 3D experiments
-
-## License and third-party notices
-
-EA-owned source code is provided under the [EA license](LICENSE). Included
-third-party code retains its original copyrights and license terms; the EA
-license does not relicense those portions. See [NOTICE.md](NOTICE.md) for copied
-or ported code, separately installed dependencies, optional downloaded assets,
-and dataset attribution. Research references remain documented alongside the
-relevant algorithms.
+This project is provided under the BSD 3 Clause License, see [LICENSE](LICENSE) for details. See [NOTICE](NOTICE.md) for licensing details on other software and data.
 
 ## CONTRIBUTING
 

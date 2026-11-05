@@ -34,7 +34,7 @@ dev = [
 ]
 
 [tool.setuptools]
-license-files = ["LICENSE", "NOTICE.md", "licenses/*.txt", "licenses/*.md"]
+license-files = ["LICENSE", "NOTICE.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
