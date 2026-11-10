@@ -25,7 +25,6 @@ It converges in ~47s per scene at SH0 and ~69s at SH3, averaged over the full Mi
 
 ## Why this exists
 
-Most open 3DGS trainers are welded to CUDA.<br>
 By writing the kernels in Slang and having the whole system driven by slangpy, we aim to allow distributing this trainer on any system and any backend. 
 
 **Portability first.** The rasterizer, the gradients, the optimizer, and the densification kernels are all Slang. The same source compiles to SPIR-V for Vulkan and DXIL for D3D12 today, with room for more backends as slang-rhi grows. There are no `.cu` files anywhere and nothing that assumes a specific vendor.
@@ -150,18 +149,13 @@ Scenes use the Mip-NeRF 360 layout (a COLMAP `sparse/` folder plus `images/`). P
 
 ## Datasets
 
-The download helpers cover **three datasets**, obtained separately by users:
+The download helpers link to **three datasets** that can be obtained separately by users:
 
 | Dataset | Project / attribution | Included scene selection |
 | --- | --- | --- |
 | Mip-NeRF 360 | [Barron et al., CVPR 2022](https://jonbarron.info/mipnerf360/) | bicycle, bonsai, counter, garden, kitchen, room, stump; optional flowers and treehill |
 | Tanks & Temples | [Knapitsch et al., ACM TOG 2017](https://www.tanksandtemples.org/) | train, truck |
 | Deep Blending | [Hedman et al., ACM TOG 2018](https://visual.cs.ucl.ac.uk/pubs/deepblending/) | drjohnson, playroom |
-
-Raw datasets are not part of the current tracked source tree. Dataset and
-derived-asset terms are separate from the source-code license; see
-[NOTICE.md](NOTICE.md) before downloading
-or redistributing them. Public availability does not imply unrestricted rights.
 
 Fetch the [Mip-NeRF 360](https://jonbarron.info/mipnerf360/) dataset with the helper script (standard library only, no extra dependencies):
 
@@ -181,8 +175,6 @@ The archives are large (~12 GB for the public scenes, ~4.5 GB more for the extra
 - `--force` — re-download even if the scenes already exist.
 - `--keep-zip` — keep the downloaded `.zip` archives after extraction.
 
-The extra scenes (flowers, treehill) carry a redistribution caveat from the dataset authors; the script prints a notice before fetching them. See <https://jonbarron.info/mipnerf360/> for details.
-
 Fetch the **Tanks & Temples** and **Deep Blending** scenes (the other datasets the 3DGS papers report on) with a second helper. Both ship in one ~650 MB archive from the INRIA 3DGS authors:
 
 ```bash
@@ -193,7 +185,7 @@ python scripts/data/download_tandt_db.py
 python scripts/data/download_tandt_db.py --set tandt   # or: --set db
 ```
 
-Same flags as above (`--dest`, `--force`, `--keep-zip`). The script prints a terms notice before fetching. Review the terms for the specific archive and intended use; see [Tanks & Temples](https://www.tanksandtemples.org/), [Deep Blending](https://visual.cs.ucl.ac.uk/pubs/deepblending/), and the dataset qualifications in [NOTICE.md](NOTICE.md).
+Same flags as above (`--dest`, `--force`, `--keep-zip`).
 
 ## Quickstart
 
@@ -220,10 +212,6 @@ pytest -q
 ```
 
 The suite covers Slang math against known inputs, gradient checks against finite differences, the CLI contract, the training schedule, and a device-creation smoke test on each backend. GPU tests are skipped automatically where no device is available.
-
-## Status
-
-This is a research trainer. The happy path (Mip-NeRF 360, SH0, structure-aware densification, Vulkan) is well travelled and gives the numbers above. 
 
 ## License
 
