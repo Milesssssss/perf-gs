@@ -23,7 +23,7 @@ It converges in ~47s per scene at SH0 and ~69s at SH3, averaged over the full Mi
   <br><em>Mip-NeRF 360 bicycle, trained end to end by this pipeline and rendered from a held-out camera.</em>
 </p>
 
-## Why this exists
+## Why 
 
 By writing the kernels in Slang and having the whole system driven by slangpy, we aim to allow distributing this trainer on any system and any backend. 
 
@@ -34,12 +34,12 @@ By writing the kernels in Slang and having the whole system driven by slangpy, w
 **Built to be extended.** Primitives, losses, and densification strategies are separate shader units behind small interfaces, so adding a new primitive kind or a new loss should be a rather local change rather than surgery across the whole pipeline.
 
 
-## What it does
+## Features
 
 - Full training from COLMAP scenes: tile-binned forward rasterization, a hand-written backward pass, Adam, and a held-out evaluation split.
 - Densification you choose per run: a gradient (AbsGS-style) path, and a structure-aware (SAD-GS-style) path that grid-splits gaussians which under-resolve local image structure.
 - Mip-Splatting 3D smoothing filter for scale-correct, anti-aliased rendering.
-- Deterministic Nsight GPU Trace capture hooks for profiling the real, optimized kernels (this is Nvidia specific, but I want to allow integrating profiling also on AMD Radeon GPU Profiler (RGP)).
+- Deterministic Nsight GPU Trace capture hooks for profiling the real, optimized kernels (this is Nvidia specific, but we want to allow integrating profiling also on AMD Radeon GPU Profiler (RGP)).
 
 <p align="center">
   <img src="assets/examples_strip.jpg" alt="Three novel views rendered from a scene trained by this pipeline" width="95%">
