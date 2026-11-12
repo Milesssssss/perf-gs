@@ -54,10 +54,7 @@ class TrainingHub:
         panel produces one-shot commands, this loop consumes them and publishes
         phase/progress/log back (see :mod:`trainer.frontend.viewer.state`)."""
         from trainer.frontend.reconstruction import ReconTools
-        from trainer.frontend.settings import (
-            TrainingSetup,
-            viewer_stream_capacity,
-        )
+        from trainer.frontend.settings import TrainingSetup
 
         self.app.args.no_viewer = False  # the hub IS the viewer
         self.app.profiling_enabled = apply_profile_session_overrides(self.app.args)
@@ -70,8 +67,6 @@ class TrainingHub:
             device=self.app.device,
             width=self.app.args.width or 960,
             height=self.app.args.height or 540,
-            max_splats=viewer_stream_capacity(self.app.args.max_splats,
-                                              self.app.args.stream_max_splats),
             fovy=getattr(self.app.args, "fovy", 45.0),
             gpu_lock=self.app.gpu_lock,
             sh_degree=self.app.args.sh_degree,
@@ -386,18 +381,14 @@ class TrainingHub:
 
         Called with rendering suspended, immediately before anything reads the
         args, so every option the panel offers takes effect for real. The viewer's
-        own pipeline is rebuilt here too: its splat capacity / SH buffers / Mip
-        raster path are fixed at construction, so a changed model needs a new one
+        own pipeline is rebuilt here too: its SH buffers / Mip raster path are
+        fixed at construction, so a changed model needs a new one
         (no-op when the user left those alone).
         """
-        from trainer.frontend.settings import viewer_stream_capacity
-
         state = self.app._viewer.state
         for change in setup.apply_to(self.app.args):
             state.log(f"[setup] {change}")
         self.app.viewer.reconfigure_model(
-            max_splats=viewer_stream_capacity(self.app.args.max_splats,
-                                              self.app.args.stream_max_splats),
             sh_degree=self.app.args.sh_degree,
             mip_enabled=self.app.args.mip_splatting,
             mip_kernel_size=(self.app.args.mip_kernel_size

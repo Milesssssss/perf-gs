@@ -239,8 +239,22 @@ def build_parser() -> argparse.ArgumentParser:
                          "SIFT extraction/matching and bundle adjustment on the GPU. "
                          "Pass --no-recon-cuda for the CPU-only zips. The two "
                          "variants install side by side, so switching re-downloads.")
-    _shared(parser, "stream_max_splats")
     _shared(parser, "stream_every")
+    parser.add_argument("--vram-budget-gib", type=float, default=0.0,
+                    help="GPU memory this process may use, in GiB. 0 (default) = "
+                         "the budget Windows (DXGI) grants the process; no limit "
+                         "where that is unavailable. --max-splats is lowered "
+                         "(with a warning) when it would not fit.")
+    parser.add_argument("--image-residency", choices=("gpu", "stream"),
+                    default="stream",
+                    help="where training targets (and SAD structure fields) live: "
+                         "'stream' (default) = host RAM, uploaded inside each "
+                         "iteration's command buffer (bit-identical, no measured "
+                         "slowdown); 'gpu' = one texture per training camera.")
+    parser.add_argument("--adam-moments", choices=("fp32", "bf16"), default="fp32",
+                    help="storage precision of the Adam moments. 'bf16' (stochastic "
+                         "rounding) halves optimizer memory: 56 B/splat at SH0, "
+                         "236 B at SH3. Compile-time, so launch-only in the hub.")
     parser.add_argument("--backend", type=str, default="vulkan", choices=["vulkan", "d3d12"])
     parser.add_argument("--seed", type=int, default=0)
     _shared(parser, "mip_splatting")

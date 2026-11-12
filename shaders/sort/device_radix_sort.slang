@@ -137,9 +137,15 @@ void initGlobalHist(
 void prepareDispatchArgs(
     RWStructuredBuffer<uint> n_buf,
     RWStructuredBuffer<uint> dispatch_args,
+    RWStructuredBuffer<uint> sort_stats, // [0] peak requested pairs, [1] sorts that dropped pairs
     uniform uint max_blocks,     // defensive cap: never launch more groups than we have scratch for
     uniform uint max_sort_pairs) // capacity of the sort-pair buffers
 {
+    uint requested = n_buf[0];
+    sort_stats[0] = max(sort_stats[0], requested);
+    if (requested > max_sort_pairs)
+        sort_stats[1] += 1u;
+
     // Clamp the pair count to the sort-buffer capacity, IN PLACE, so every
     // downstream reader (upsweep/downsweep/identifyTileRanges) sees a value
     // that never exceeds what bin_emit actually wrote. bin_emit drops pairs
@@ -148,7 +154,7 @@ void prepareDispatchArgs(
     // block would set partition_end = N > capacity and READ past the buffer.
     // This is the single choke point: prepareDispatchArgs runs once, before
     // any n_buf consumer in the sort and before tile-range identification.
-    uint n = min(n_buf[0], max_sort_pairs);
+    uint n = min(requested, max_sort_pairs);
     n_buf[0] = n;
 
     uint active_blocks = (n + PART_SIZE - 1u) / PART_SIZE;

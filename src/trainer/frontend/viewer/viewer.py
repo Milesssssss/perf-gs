@@ -488,9 +488,6 @@ class Viewer:
         """The viewer's OWN (render-only) pipeline, sized for the snapshots it will
         receive. Kept separate from ``__init__`` so :meth:`reconfigure_model` can
         rebuild it when the hub's TRAINING SETUP changes the model."""
-        # NOTE can cut out splats
-        if max_sort_pairs is None:
-            max_sort_pairs = min(12_000_000, max(2_000_000, max_splats * 6))
         pipeline = TrainingPipeline(
             device=self.device, width=self.width, height=self.height,
             max_splats=max_splats,
@@ -505,27 +502,35 @@ class Viewer:
             pipeline.set_active_sh_degree(sh_degree)
         return pipeline
 
-    def reconfigure_model(self, *, max_splats: int, sh_degree: int,
+    def reconfigure_model(self, *, sh_degree: int,
                           mip_enabled: bool, mip_kernel_size: float) -> bool:
-        if (max_splats == self.max_splats and sh_degree == self.sh_degree
+        if (sh_degree == self.sh_degree
                 and mip_enabled == self._mip_enabled
                 and mip_kernel_size == self._mip_kernel_size):
             return False
         with self._render_lock:      # no frame in flight while we swap pipelines
             with self.runtime.queue_scope():
                 self.runtime.wait_for_idle()   # old buffers may still be in use
-            self.max_splats = max_splats
             self.sh_degree = sh_degree
             self._mip_enabled = mip_enabled
             self._mip_kernel_size = mip_kernel_size
             self._pipeline = self._build_view_pipeline(
-                max_splats, sh_degree, mip_enabled, mip_kernel_size,
+                self.max_splats, sh_degree, mip_enabled, mip_kernel_size,
                 self._explicit_sort_pairs)
             # The new buffers are empty: don't rasterize until a snapshot lands.
             self._has_data = False
-        print(f"[Viewer] model reconfigured: max_splats={max_splats:,} "
+        print(f"[Viewer] model reconfigured: max_splats={self.max_splats:,} "
               f"sh_degree={sh_degree} mip={mip_enabled}")
         return True
+
+    def _grow(self, count: int, limit: int) -> None:
+        """Re-allocate the viewer's buffers for ``count`` splats, doubling up to
+        ``limit``. The caller holds the render lock and re-uploads before releasing it."""
+        with self.runtime.queue_scope():
+            self.runtime.wait_for_idle()   # in-flight frames/copies still use the old buffers
+        self.max_splats = max(count, min(2 * self.max_splats, limit))
+        self._pipeline.resize(self.max_splats, self._explicit_sort_pairs)
+        print(f"[Viewer] capacity grown to {self.max_splats:,} splats")
 
     def live_splat_count(self, train_pipeline: TrainingPipeline) -> int:
         with self.runtime.queue_scope():
@@ -533,8 +538,16 @@ class Viewer:
         return int(counter.view(np.uint32)[0])
 
     def update_gaussians(self, train_pipeline: TrainingPipeline):
+        count = self.live_splat_count(train_pipeline)
+        if count <= self.max_splats:
+            self._copy_snapshot(train_pipeline, count)
+            return
+        with self._render_lock:      # no frame may draw the new, still-empty buffers
+            self._grow(count, limit=train_pipeline.max_splats)
+            self._copy_snapshot(train_pipeline, count)
+
+    def _copy_snapshot(self, train_pipeline: TrainingPipeline, count: int) -> None:
         src, dst = train_pipeline.buffers, self._pipeline.buffers
-        count = min(self.live_splat_count(train_pipeline), self.max_splats)
         batch = self.runtime.command_batch("viewer_update")
         encoder = batch.encoder
         _copy_splats(encoder, src.gaussians.storage, dst.gaussians.storage,
@@ -558,18 +571,17 @@ class Viewer:
 
     def preview_points(self, initial_points: dict) -> int:
         means = np.asarray(initial_points["means"], dtype=np.float32)
-        count = min(means.shape[0], self.max_splats)
-        if count < means.shape[0]:
-            print(f"[Viewer] preview clipped to {count:,} of {means.shape[0]:,} "
-                  f"SfM points (viewer capacity)")
+        count = means.shape[0]
         with self._render_lock:      # no frame reading the buffers mid-upload
+            if count > self.max_splats:
+                self._grow(count, limit=count)
             with self.runtime.queue_scope():
                 self._pipeline.set_gaussians(
-                    means=means[:count],
-                    log_scales=initial_points["log_scales"][:count],
-                    rot_quats=initial_points["rot_quats"][:count],
-                    opacities=initial_points["opacities"][:count],
-                    color_logits=initial_points["color_logits"][:count],
+                    means=means,
+                    log_scales=initial_points["log_scales"],
+                    rot_quats=initial_points["rot_quats"],
+                    opacities=initial_points["opacities"],
+                    color_logits=initial_points["color_logits"],
                 )
             self._pipeline.set_active_sh_degree(0)
             self._has_data = count > 0
@@ -606,7 +618,9 @@ class Viewer:
         self._frame_budget_off.clear()
 
     def _scene_due(self, now: float) -> bool:
-        if not self._training_active or self._frame_budget_off.is_set():
+        # A paused trainer leaves the queue idle, so the scene gets full frame rate.
+        if (not self._training_active or self._frame_budget_off.is_set()
+                or self._pause_event.is_set()):
             return True
         if self._scene_dirty.is_set():
             return True

@@ -146,17 +146,41 @@ def generate_primitive_slang() -> str:
     for f in GAUSSIAN_FIELDS:
         if f.normalization == "quaternion":
             lines.append(f"    primitive.{f.name} = normalize(primitive.{f.name});")
+    moments = [f for f in GAUSSIAN_FIELDS if f.differentiable]
     lines += ["}", "",
-              "// Per-gaussian Adam first/second moments (AoS): the adam kernel loads",
-              "// all m/v for one gaussian, steps, writes back (no atomics). One",
-              "// (m, v) pair per optimized field, in Gaussian3D field order.",
-              "struct AdamState", "{"]
-    for f in GAUSSIAN_FIELDS:
-        if not f.differentiable:
-            continue
+              "// Adam first/second moments in float32, the precision the optimizer",
+              "// computes in. One (m, v) pair per optimized field, in Gaussian3D",
+              "// field order.",
+              "struct AdamMoments", "{"]
+    for f in moments:
         lines.append(f"    {f.dtype} {f.moment_name}_m;")
         lines.append(f"    {f.dtype} {f.moment_name}_v;")
-    lines += ["};", "", "#endif // TRAINER_GAUSSIAN_TYPES", ""]
+    lines += ["};", "",
+              '#include "../common/adam_precision.slang"', "",
+              "// Stored per-gaussian moments (AoS): the adam kernel loads all m/v",
+              "// for one gaussian, steps, writes back (no atomics).",
+              "#if defined(ADAM_MOMENTS_BF16)",
+              "struct AdamState", "{"]
+    for f in moments:
+        lines.append(f"    uint{f.dtype[len('float'):]} {f.moment_name}_mv;  // bf16 (m, v)")
+    lines += ["};", "",
+              "AdamMoments loadAdamMoments(AdamState s)", "{", "    AdamMoments m;"]
+    for f in moments:
+        lines.append(f"    m.{f.moment_name}_m = bf16Lo(s.{f.moment_name}_mv);")
+        lines.append(f"    m.{f.moment_name}_v = bf16Hi(s.{f.moment_name}_mv);")
+    lines += ["    return m;", "}", "",
+              "AdamState storeAdamMoments(AdamMoments m, uint seed)", "{",
+              "    AdamState s;", "    uint rng = seed;"]
+    for f in moments:
+        lines.append(f"    s.{f.moment_name}_mv = "
+                     f"packBf16(m.{f.moment_name}_m, m.{f.moment_name}_v, rng);")
+    lines += ["    return s;", "}",
+              "#else",
+              "struct AdamState", "{", "    AdamMoments moments;", "};", "",
+              "AdamMoments loadAdamMoments(AdamState s)", "{", "    return s.moments;", "}", "",
+              "AdamState storeAdamMoments(AdamMoments m, uint seed)", "{",
+              "    AdamState s;", "    s.moments = m;", "    return s;", "}",
+              "#endif", "", "#endif // TRAINER_GAUSSIAN_TYPES", ""]
     return "\n".join(lines)
 
 

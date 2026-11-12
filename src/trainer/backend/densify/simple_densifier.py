@@ -233,7 +233,7 @@ class SimpleDensifier:
                     commands=commands, arena=arena, buffer=self.sh.adam_rest,
                     kernel=kernels.scatter_compact_adam_rest,
                     marker="scatter_compact_adam_rest",
-                    plane_count=self.sh.rest_floats * 2, capacity=self.max_primitives,
+                    plane_count=self.sh.moment_planes, capacity=self.max_primitives,
                     live_count=self.scan.resources.total,
                     valid_mask=resources.valid_mask.storage,
                     scan=self.scan.resources.work.storage,

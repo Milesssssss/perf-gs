@@ -72,7 +72,6 @@ class ViewerSession:
         device: spy.Device,
         width: int,
         height: int,
-        max_splats: int,
         fovy: float,
         gpu_lock,
         pipeline: TrainingPipeline,
@@ -90,7 +89,7 @@ class ViewerSession:
         state = Session(MODE_TRAIN)
         viewer = Viewer(
             device=device, width=width, height=height,
-            max_splats=max_splats, fovy=fovy, gpu_lock=gpu_lock,
+            fovy=fovy, gpu_lock=gpu_lock,
             sh_degree=pipeline.appearance_config.sh_degree,
             mip_enabled=pipeline.raster_config.mip_enabled,
             mip_kernel_size=pipeline.raster_config.kernel_size,
@@ -108,7 +107,6 @@ class ViewerSession:
         device: spy.Device,
         width: int,
         height: int,
-        max_splats: int,
         fovy: float,
         gpu_lock,
         sh_degree: int,
@@ -133,7 +131,7 @@ class ViewerSession:
         state = Session(MODE_HUB, setup=setup)
         viewer = Viewer(
             device=device, width=width, height=height,
-            max_splats=max_splats, fovy=fovy, gpu_lock=gpu_lock,
+            fovy=fovy, gpu_lock=gpu_lock,
             sh_degree=sh_degree, mip_enabled=mip_enabled,
             mip_kernel_size=mip_kernel_size, test_cameras=None,
             state=state,
@@ -154,14 +152,14 @@ class ViewerSession:
             return 0
         return self._viewer.preview_points(initial_points)
 
-    def reconfigure_model(self, *, max_splats: int, sh_degree: int,
+    def reconfigure_model(self, *, sh_degree: int,
                           mip_enabled: bool, mip_kernel_size: float) -> bool:
-        """Re-size/re-shape the viewer's own pipeline after the hub's TRAINING
+        """Re-shape the viewer's own pipeline after the hub's TRAINING
         SETUP changed the model (no-op when unchanged or with no viewer)."""
         if self._viewer is None:
             return False
         return self._viewer.reconfigure_model(
-            max_splats=max_splats, sh_degree=sh_degree,
+            sh_degree=sh_degree,
             mip_enabled=mip_enabled, mip_kernel_size=mip_kernel_size)
 
     def suspend_rendering(self) -> None:

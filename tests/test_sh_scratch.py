@@ -25,6 +25,7 @@ def _types():
 
     return SimpleNamespace(gaussian=layout(GAUSSIAN_FLOAT_COUNT * 4),
                            adam=layout(ADAM_STATE_FLOAT_COUNT * 4),
+                           sh_moments=layout(8),
                            projected=layout(28), blend=layout(40))
 
 

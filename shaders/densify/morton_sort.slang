@@ -248,8 +248,8 @@ void mortonScatterSH(
     uint fd = i * fu, fs = src * fu;
     for (uint c = 0u; c < fu; ++c)
         features_rest_out[fd + c] = features_rest_in[fs + c];
-    // adam_rest SoA float32: word c of gaussian g at c*max_splats + g.
-    uint au = rest_floats * 2u;
+    // adam_rest SoA: word c of gaussian g at c*max_splats + g.
+    uint au = rest_floats * SH_MOMENT_WORDS;
     for (uint c = 0u; c < au; ++c)
         adam_rest_out[c * max_splats + i] = adam_rest_in[c * max_splats + src];
 }
@@ -291,8 +291,8 @@ void mortonScatterAdamRest(
     if (i >= max_splats) return;
     if (i >= count_buf[0]) return;
     uint src = sorted_values[i];
-    // adam_rest SoA float32: word c of gaussian g at c*max_splats + g.
-    uint au = rest_floats * 2u;
+    // adam_rest SoA: word c of gaussian g at c*max_splats + g.
+    uint au = rest_floats * SH_MOMENT_WORDS;
     for (uint c = 0u; c < au; ++c)
         adam_rest_out[c * max_splats + i] = adam_rest_in[c * max_splats + src];
 }

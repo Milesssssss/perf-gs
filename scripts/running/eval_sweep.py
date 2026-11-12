@@ -58,7 +58,7 @@ REPO = Path(__file__).resolve().parent.parent.parent
 # sweep script hardcoded 360_v2 and silently skipped them.
 DEFAULT_SCENES = ["bicycle", "flowers", "garden", "stump", "treehill",
                   "bonsai", "counter", "kitchen", "room"]
-DATASET_ROOTS = ["360_v2", "360_extra_scenes"]
+DATASET_ROOTS = ["360_v2", "360_extra_scenes", "tandt", "db"]
 
 # The eval config the published numbers use: quarter res (the trainer's default
 # --downsample 4), 3k iters, structure-aware densify, mip-splatting, the paper
@@ -126,6 +126,9 @@ def run_cell(scene: str, axis: str, value: str, *, iters: int, force: bool,
         "train_wall_s": data.get("train_wall_s"),
         "n_gaussians": data.get("n_gaussians"),
         "iters": data.get("iters"),
+        **{key: data.get(key) for key in (
+            "max_splats", "max_sort_pairs", "peak_sort_pairs", "sort_overflows",
+            "targets_streamed", "vram_budget_bytes", "vram_usage_bytes")},
     }
 
 

@@ -45,6 +45,7 @@ def _viewer(*, training: bool, parked: bool, dirty: bool = False) -> Viewer:
         viewer._scene_dirty.set()
     viewer._last_scene_s = 0.0
     viewer._frame_budget_off = threading.Event()
+    viewer._pause_event = threading.Event()
     return viewer
 
 
@@ -91,6 +92,22 @@ def test_a_pending_change_overrides_the_budget() -> None:
     viewer = _viewer(training=True, parked=False, dirty=True)
     viewer._last_scene_s = 100.0
     assert viewer._scene_due(100.0)       # zero elapsed, but dirty
+
+
+def test_a_paused_run_is_never_throttled() -> None:
+    """Paused, the trainer submits nothing, so flying around the scene must be as
+    smooth as after the run instead of crawling at the training budget."""
+    viewer = _viewer(training=True, parked=False)
+    viewer._last_scene_s = 0.0
+    assert not viewer._scene_due(0.001)
+
+    viewer._pause_event.set()
+    assert viewer._scene_due(0.001)
+    assert viewer._scene_due(0.002)
+
+    viewer._pause_event.clear()
+    viewer._last_scene_s = 0.002
+    assert not viewer._scene_due(0.003)   # resumed: back on the ration
 
 
 def test_leaving_a_parked_camera_restores_the_free_fly_cap() -> None:

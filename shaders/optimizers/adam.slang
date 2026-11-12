@@ -19,6 +19,7 @@ struct AdamConfig
     float lr_color;
     float bias_correction1;
     float bias_correction2;
+    uint step;  // seeds bf16 stochastic rounding
 };
 
 float adam_scalar(
@@ -119,7 +120,7 @@ void adamStep(
     if (any_bad) return;
 
     Gaussian3D g = gaussians[idx];
-    AdamState s = adam_state[idx];
+    AdamMoments s = loadAdamMoments(adam_state[idx]);
 
     g.mean = adam_vec3(g.mean, g_mean, s.mean_m, s.mean_v,
                        cfg.lr_mean, cfg.bias_correction1, cfg.bias_correction2);
@@ -139,7 +140,7 @@ void adamStep(
                               cfg.lr_color, cfg.bias_correction1, cfg.bias_correction2);
 
     gaussians[idx] = g;
-    adam_state[idx] = s;
+    adam_state[idx] = storeAdamMoments(s, adamRoundingSeed(idx, cfg.step));
 
     // Zero the gradient accumulators for the next iteration.
     grad_mean_x[idx] = int64_t(0); grad_mean_y[idx] = int64_t(0); grad_mean_z[idx] = int64_t(0);
@@ -152,12 +153,12 @@ void adamStep(
 #include "generated/sh_types.slang"
 #include "../common/half_pack.slang"
 
-// SH-rest Adam v-floor. Moments are FLOAT32 (see below): the post-inv_pixels
-// SH-rest gradient is tiny (~1e-6), so v = g^2 ~ 1e-12 UNDERFLOWED fp16 to 0, and
-// a 1e-6 floor then crushed the Adam step ~1000x (measured: SH3 == SH0; float32
-// moments give +1.15 dB deg0->deg3). Keep inv_pixels (step normalization /
-// resolution-independence, same as the main params) and just store the moments
-// in float32 so the small v is representable. Floor only guards a literal zero.
+// SH-rest Adam v-floor. Moments are FLOAT32 or BF16 (adam_precision.slang),
+// never fp16: the post-inv_pixels SH-rest gradient is tiny (~1e-6), so
+// v = g^2 ~ 1e-12 UNDERFLOWED fp16 to 0, and a 1e-6 floor then crushed the Adam
+// step ~1000x (measured: SH3 == SH0; float32 moments give +1.15 dB deg0->deg3).
+// Keep inv_pixels (step normalization / resolution-independence, same as the
+// main params). Floor only guards a literal zero.
 static const float SH_V_FLOOR = 1e-15;
 
 [shader("compute")]
@@ -175,13 +176,15 @@ void adamStepRest(
     uniform float pixels_per_step,
     uniform uint rest_floats,
     uniform uint active_rest_floats,
-    uniform uint max_splats)
+    uniform uint max_splats,
+    uniform uint step)
 {
     uint idx = dtid.x;
     if (idx >= num_gaussians_counter[0]) return;
     if (cluster_visible[idx / CLUSTER_SIZE] == 0u) return;
 
     float inv_pixels = 1.0 / max(pixels_per_step, 1.0);
+    uint rng = adamRoundingSeed(idx, step);
     uint active = min(active_rest_floats, rest_floats);
     uint fu = halfFeatUints(active);     // only the active coeff uints
     uint pbase = idx * halfFeatUints(rest_floats);  // packed features stride
@@ -200,13 +203,11 @@ void adamStepRest(
             if (s >= active) break;
             float g = ((lane == 0u) ? g_pair.x : g_pair.y) * inv_pixels;
             if (isnan(g) || isinf(g)) continue;
-            uint m_addr = (s * 2u) * max_splats + idx;
-            uint v_addr = (s * 2u + 1u) * max_splats + idx;
-            float m = asfloat(adam_rest[m_addr]);
-            float v = asfloat(adam_rest[v_addr]);
+            float2 mv = loadRestMoments(adam_rest, s, idx, max_splats);
+            float m = mv.x;
+            float v = mv.y;
             p_out[lane] = adam_scalar((lane == 0u) ? p_pair.x : p_pair.y, g, m, v, lr_rest, bias_correction1, bias_correction2);
-            adam_rest[m_addr] = asuint(m);
-            adam_rest[v_addr] = asuint(max(v, SH_V_FLOOR));
+            storeRestMoments(adam_rest, s, idx, max_splats, float2(m, max(v, SH_V_FLOOR)), rng);
         }
         features_rest[pbase + u] = packHalf2x(p_out[0], p_out[1]);
     }

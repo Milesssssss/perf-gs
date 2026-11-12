@@ -44,9 +44,15 @@ from trainer.config.config_types import (
     validate_training_config,
 )
 from trainer.backend.compute.device import create_device
+from trainer.backend.memory.budget import GIB, available_bytes, fit_capacity
+from trainer.backend.memory.vram import query_video_memory
 from trainer.backend.render import stbn as stbn_module
 from trainer.common.metrics import psnr
-from trainer.backend.render.pipeline import TrainingPipeline
+from trainer.backend.render.pipeline import (
+    TrainingPipeline,
+    _module_for_reflection,
+    estimate_pipeline_bytes,
+)
 from trainer.contracts.codegen import TILE_AREA
 from trainer.frontend.cli import build_parser
 from trainer.frontend.densification import DensificationController, DensifyOutcome
@@ -179,6 +185,9 @@ class ShaderSpecialization:
     STBN's compacted backward is in the same position and takes the same out: a
     hub run gets the mask (the loss applies it at runtime) but not the compacted
     pixel loop, i.e. the correct sparse gradient without the speedup.
+
+    adam_bf16 stores the Adam moments as bf16 (ADAM_MOMENTS_BF16). It changes
+    buffer layouts, so in the hub it is a launch-time flag too.
     """
 
     backward_pixel_stride: int
@@ -191,6 +200,7 @@ class ShaderSpecialization:
     # to this fraction of a tile. 0 = leave them at the shader default (a full
     # tile), which is what every real run wants.
     stbn_staged_fraction: float = 0.0
+    adam_bf16: bool = False
 
     @classmethod
     def from_args(cls, args: argparse.Namespace) -> "ShaderSpecialization":
@@ -207,6 +217,7 @@ class ShaderSpecialization:
             hardness_is_one=(not hub and float(args.extinction_hardness) <= 1.0),
             stbn_enabled=enabled,
             stbn_staged_fraction=(max(staged, fraction) if enabled and staged else 0.0),
+            adam_bf16=getattr(args, "adam_moments", "fp32") == "bf16",
         )
 
     def compiler_defines(self) -> dict[str, str] | None:
@@ -223,6 +234,8 @@ class ShaderSpecialization:
         if self.stbn_staged_fraction > 0.0:
             defines["STBN_MAX_TILE_PIXELS"] = (
                 f"{stbn_module.pixels_per_tile(self.stbn_staged_fraction, TILE_AREA)}u")
+        if self.adam_bf16:
+            defines["ADAM_MOMENTS_BF16"] = "1"
         return defines or None
 
 
@@ -301,6 +314,8 @@ class TrainingApplication:
         self.error_log: ErrorLog | None = None
         self.target_textures: dict[int, Any] = {}
         self.structure_textures: dict[int, Any] = {}
+        self._stream_targets = False
+        self._memory_summary: dict = {}
         self.mean_lr: MeanLearningRateSchedule | None = None
         self.extinction_hardness_schedule: ExtinctionHardnessSchedule | None = None
         self.appearance_schedule: AppearanceSchedule | None = None
@@ -435,6 +450,7 @@ class TrainingApplication:
         """
         # ---- launch training loop --------------------
         result = self.build_training_loop().launch_training_loop()
+        self._memory_summary = self._report_memory()
 
         viewer = self._training_runtime.viewer
         pipeline = self._training_runtime.pipeline
@@ -486,6 +502,28 @@ class TrainingApplication:
         # The COMPLETED transition (and the result record) is published by the hub
         # once this returns — see ``TrainingHub._hub_train_scene``.
 
+    def _report_memory(self) -> dict:
+        """Print and return the run's sort-pair demand and measured VRAM."""
+        pipeline = self._pipeline
+        peak_pairs, overflows = (
+            int(v) for v in pipeline.buffers.sort_stats.to_numpy().view(np.uint32))
+        summary = {"max_splats": pipeline.max_splats,
+                   "max_sort_pairs": pipeline.max_sort_pairs,
+                   "peak_sort_pairs": peak_pairs, "sort_overflows": overflows,
+                   "targets_streamed": self._stream_targets}
+        measured = query_video_memory(self.device.info.adapter_name)
+        vram = ""
+        if measured is not None:
+            summary["vram_budget_bytes"], summary["vram_usage_bytes"] = measured
+            vram = (f"; VRAM in use {measured[1] / GIB:.2f} of "
+                    f"{measured[0] / GIB:.2f} GiB budget")
+        print(f"[memory] peak sort pairs {peak_pairs:,} of "
+              f"{pipeline.max_sort_pairs:,}{vram}")
+        if overflows:
+            print(f"[memory] WARNING: {overflows} sorts dropped pairs past the "
+                  f"sort capacity (those renders miss splats)")
+        return summary
+
     def _publish_finalize(self, label: str, fraction: float) -> None:
         """Publish post-training progress (no-op without a viewer).
 
@@ -530,12 +568,56 @@ class TrainingApplication:
             device=self.device,
             gpu_lock=self.gpu_lock,
             scene=scene,
+            max_splats=self._plan_memory(scene),
             lambda_l2=self.effective_lambda_l2,
             lambda_ssim=self.effective_lambda_ssim,
             initial_state=scene.colmapScene.initial_points,
         )
         self._pipeline.set_mipsplatting_cameras(
             [scene.colmapScene.images[i].camera for i in scene.train_indices])
+
+    def _plan_memory(self, scene: SceneContext) -> int:
+        """Fit splat capacity to the VRAM budget, loudly; returns the capacity.
+
+        Lowering the capacity changes the trained model, so it is the last
+        resort and always reported. The viewer is budgeted at full capacity: it
+        grows with the live splat count up to the trainer's.
+        """
+        args = self.args
+        self._stream_targets = args.image_residency == "stream"
+        structure = self._densify_mode == DensificationMode.STRUCTURE_AWARE
+        module = _module_for_reflection(self.device)
+        target_bytes = 0 if self._stream_targets else (
+            len(scene.train_indices) * scene.width * scene.height
+            * (4 + (8 if structure else 0)))
+
+        def cost(capacity: int) -> int:
+            shape = {"max_splats": capacity, "width": scene.width,
+                     "height": scene.height, "sh_degree": args.sh_degree}
+            total = estimate_pipeline_bytes(module, structure_aware=structure, **shape)
+            if not args.no_viewer:
+                total += estimate_pipeline_bytes(module, viewer_only=True, **shape)
+            return total + target_bytes
+
+        requested = args.max_splats
+        available = available_bytes(args.vram_budget_gib, self.device.info.adapter_name)
+        if available is None:
+            print(f"[memory] VRAM budget unknown (pass --vram-budget-gib); "
+                  f"capacity {requested:,} splats unchecked")
+            return requested
+        capacity = fit_capacity(requested, available, cost)
+        if capacity < scene.initial_gaussian_count:
+            raise RuntimeError(
+                f"VRAM budget of {available / GIB:.2f} GiB cannot hold the "
+                f"{scene.initial_gaussian_count:,} initial points; lower --sh-degree, "
+                f"--downsample more, or pass --no-viewer / --image-residency stream")
+        if capacity < requested:
+            print(f"[memory] WARNING: --max-splats {requested:,} does not fit the VRAM "
+                  f"budget; capacity lowered to {capacity:,} (densification stops "
+                  f"growing there)")
+        print(f"[memory] {available / GIB:.2f} GiB available; planned "
+              f"{cost(capacity) / GIB:.2f} GiB for {capacity:,} splats")
+        return capacity
 
 
     def _prepare_textures(self) -> None:
@@ -551,16 +633,24 @@ class TrainingApplication:
         pipeline = self._pipeline
         targets = self._targets.srgb
         indices = self._sceneContext.train_indices
-        bytes_per_pixel = 4 + (8 if self._densify_mode == DensificationMode.STRUCTURE_AWARE else 0)
+        # Streamed fields are derived per step on the GPU, never stored.
+        resident_fields = (self._densify_mode == DensificationMode.STRUCTURE_AWARE
+                           and not self._stream_targets)
+        bytes_per_pixel = 4 + (8 if resident_fields else 0)
         planned_bytes = len(indices) * self._sceneContext.width * self._sceneContext.height * bytes_per_pixel
-        print(f"[memory] {len(indices)} training targets/structure fields: "
+        where = "host RAM" if self._stream_targets else "GPU"
+        print(f"[memory] {len(indices)} training targets"
+              f"{'/structure fields' if resident_fields else ''} on {where}: "
               f"{planned_bytes / 1024**3:.2f} GiB")
         packed_targets = map_ordered(
             pipeline.pack_target_texture, [targets[i] for i in indices])
-        self.target_textures = {
-            i: pipeline.upload_target_texture(packed)
-            for i, packed in zip(indices, packed_targets)
-        }
+        if self._stream_targets:
+            self.target_textures = dict(zip(indices, packed_targets))
+        else:
+            self.target_textures = {
+                i: pipeline.upload_target_texture(packed)
+                for i, packed in zip(indices, packed_targets)
+            }
 
         self.structure_textures = StructureTextureProvider(
             args=self.args,
@@ -570,6 +660,7 @@ class TrainingApplication:
             densify_mode=self._densify_mode,
             target_textures=self.target_textures,
             pipeline=self._pipeline,
+            resident=not self._stream_targets,
         ).load()
 
     def _start_viewer(self, scene: SceneContext) -> None:
@@ -583,13 +674,10 @@ class TrainingApplication:
                 for i in scene.test_indices
                 if 0 <= i < len(images)
             ]
-            from trainer.frontend.settings import viewer_stream_capacity
             self.viewer = ViewerSession.create(
                 device=self.device,
                 width=scene.width,
                 height=scene.height,
-                max_splats=viewer_stream_capacity(self.args.max_splats,
-                                                  self.args.stream_max_splats),
                 fovy=getattr(self.args, "fovy", 45.0),
                 gpu_lock=self.gpu_lock,
                 pipeline=self._pipeline,
@@ -791,6 +879,7 @@ class TrainingApplication:
                 "observation_s": result.observation_seconds,
                 "iters": result.iterations,
                 "flat_bucket_backward": bool(self.args.flat_bucket_backward),
+                **self._memory_summary,
             }, indent=2))
 
             print(f"[final-test-psnr] TEST PSNR sRGB = {psnr:.3f} dB over "
@@ -1435,16 +1524,16 @@ class StructureTextureProvider:
                  scene: SceneContext, targets: list[np.ndarray],
                  densify_mode: DensificationMode,
                  target_textures: dict[int, Any] | None = None,
-                 pipeline: Any = None) -> None:
+                 pipeline: Any = None, resident: bool = True) -> None:
         self._args = args
         self._device = device
         self._scene = scene
         self._targets = targets
         self._densify_mode = densify_mode
-        # Pre-uploaded GPU target textures (rgba8_unorm, straight sRGB). When
-        # present, the GPU compute path reads these directly instead of
-        # re-uploading each image from numpy — enabling an all-GPU, no-readback
-        # build.
+        self._resident = resident
+        # Training targets: rgba8_unorm textures, or packed uint8 host images when
+        # streamed. The resident GPU build reads the textures directly — an
+        # all-GPU build with no readback.
         self._target_textures = target_textures
         self._pipeline = pipeline
 
@@ -1455,6 +1544,10 @@ class StructureTextureProvider:
         cached_fields = self._load_cache()
         if cached_fields is None and self._target_textures is not None:
             sadgs_gpu_backend = self._create_sadgs_gpu_backend()
+            if sadgs_gpu_backend is not None and not self._resident:
+                # A field is a pure function of its target: the pipeline derives
+                # it from the streamed target on the steps that accumulate.
+                return dict.fromkeys(self._scene.train_indices, sadgs_gpu_backend)
             if sadgs_gpu_backend is not None:
                 return self._build_on_gpu(sadgs_gpu_backend)
 
@@ -1543,8 +1636,8 @@ class StructureTextureProvider:
             from trainer.backend.densify.structure_analysis_gpu import StructureTensorGPU
             gpu_backend = StructureTensorGPU(
                 self._device, self._scene.width, self._scene.height)
-            print(f"[SAD] no cache; computing {self._scene.camera_count} fields "
-                  "on GPU...", flush=True)
+            print(f"[SAD] no cache; structure fields for {self._scene.camera_count} "
+                  "views come from the GPU...", flush=True)
             return gpu_backend
         except Exception as error:
             report_exception("[SAD] GPU structure-tensor setup failed; using CPU", error)
@@ -1571,6 +1664,8 @@ class StructureTextureProvider:
         packed = np.zeros(
             (self._scene.height, self._scene.width, 4), dtype=np.float16)
         packed[..., :3] = field
+        if not self._resident:
+            return packed       # streamed: the pipeline uploads it when used
         texture = self._device.create_texture(
             type=spy.TextureType.texture_2d,
             format=spy.Format.rgba16_float,
@@ -1869,14 +1964,14 @@ def _resolve_sh_band_interval(cli_interval: int, iters: int, sh_degree: int) -> 
     return max(1, iters // (2 * sh_degree))
 
 def create_pipeline(*, args: argparse.Namespace, device: Any, gpu_lock: Any,
-                    scene: SceneContext, lambda_l2: float,
+                    scene: SceneContext, max_splats: int, lambda_l2: float,
                     lambda_ssim: float,
                     initial_state: dict | None = None) -> TrainingPipeline:
     return TrainingPipeline(
         device=device,
         width=scene.width,
         height=scene.height,
-        max_splats=args.max_splats,
+        max_splats=max_splats,
         gpu_lock=gpu_lock,
         raster_config=RasterConfig(
             z_near_cull=args.z_near_cull,

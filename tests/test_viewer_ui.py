@@ -37,7 +37,6 @@ from trainer.frontend.settings import (
     Setting,
     TrainingSetup,
     validate,
-    viewer_stream_capacity,
 )
 from trainer.frontend.viewer.session import LogBuffer
 from trainer.frontend.viewer.ui import scale as sc
@@ -512,14 +511,6 @@ def test_choice_settings_round_trip_through_the_combo_index():
     assert setup.index_of("sh_degree") == 3
     setup.set_index("sh_degree", len(choices))  # out of range wraps, never raises
     assert setup.get("sh_degree") == choices[0]
-
-
-def test_viewer_capacity_can_only_be_raised_above_the_trainers():
-    """A snapshot is a raw GPU->GPU copy of the trainer's buffers AND its splat
-    counter, so a viewer smaller than the trainer would read past its own
-    storage: --stream-max-splats can only ever raise the capacity."""
-    assert viewer_stream_capacity(10_000_000, 7_000_000) == 10_000_000
-    assert viewer_stream_capacity(1_000_000, 7_000_000) == 7_000_000
 
 
 class _KeyEvent:

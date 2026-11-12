@@ -40,8 +40,11 @@ class _Pipeline:
         self.rendered: list[int] = []
         self.on_render = lambda _count: None
         self.runtime = SimpleNamespace(wait_for_idle=lambda: None)
-        self.buffers = SimpleNamespace(num_gaussians_counter=SimpleNamespace(
-            to_numpy=lambda: np.array([7], dtype=np.uint32)))
+        self.max_splats, self.max_sort_pairs = 7, 64
+        self.buffers = SimpleNamespace(
+            num_gaussians_counter=SimpleNamespace(
+                to_numpy=lambda: np.array([7], dtype=np.uint32)),
+            sort_stats=SimpleNamespace(to_numpy=lambda: np.array([9, 0], dtype=np.uint32)))
 
     def render(self, camera) -> None:
         self.rendered.append(camera)
@@ -241,6 +244,9 @@ def _application(tmp_path, viewer, pipeline, events):
     app.viewer = ViewerSession(viewer)
     viewer.update_gaussians = lambda _pipeline: events.append("snapshot")
     app.pipeline = pipeline
+    app.device = SimpleNamespace(info=SimpleNamespace(adapter_name="test"))
+    app._stream_targets = False
+    app._memory_summary = {}
     app.targets = SimpleNamespace(srgb=_targets(), linear=_targets().__getitem__)
     app.scene_context = SimpleNamespace(colmapScene=_scene(), test_indices=[0, 1, 2],
                                         holdout_stride=1, camera_count=3)

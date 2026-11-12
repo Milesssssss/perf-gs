@@ -84,6 +84,7 @@ class AdamOptimizer:
                     "lr_color": lrs.color,
                     "bias_correction1": bc1,
                     "bias_correction2": bc2,
+                    "step": self.step_count,
                 },
                 pixels_per_step=float(self._width * self._height),
             )
@@ -114,6 +115,7 @@ class AdamOptimizer:
                     rest_floats=rest_floats,
                     active_rest_floats=active_rest,
                     max_splats=self._max_splats,
+                    step=self.step_count,
                 )
 
     def clear_state(self):

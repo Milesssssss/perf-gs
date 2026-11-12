@@ -92,6 +92,25 @@ def _module_for_reflection(device: spy.Device) -> spy.Module:
     )
 
 
+def default_sort_pairs(max_splats: int, viewer_only: bool = False) -> int:
+    """Sort-pair capacity for ``max_splats``; pairs past it are dropped (and counted)."""
+    if viewer_only:
+        return min(12_000_000, max(2_000_000, max_splats * 6))
+    return max(buffers.DEFAULT_MAX_SORT_PAIRS, max_splats * 4)
+
+
+def estimate_pipeline_bytes(module: spy.Module, *, max_splats: int, width: int,
+                            height: int, sh_degree: int, structure_aware: bool = False,
+                            viewer_only: bool = False) -> int:
+    """Base GPU bytes a pipeline of this shape allocates (no GPU work)."""
+    sizes = {"max_splats": max_splats, "width": width, "height": height,
+             "max_sort_pairs": default_sort_pairs(max_splats, viewer_only),
+             "sh_rest_floats": sh_rest_coeffs(sh_degree) * 3}
+    if not viewer_only:
+        sizes["structure_aware"] = structure_aware
+    return buffers.estimate_allocation_bytes(module, viewer_only=viewer_only, **sizes)
+
+
 class TrainingPipeline:
     def __init__(
         self,
@@ -121,7 +140,7 @@ class TrainingPipeline:
         self.max_splats = max_splats
 
         if max_sort_pairs is None:
-            max_sort_pairs = max(buffers.DEFAULT_MAX_SORT_PAIRS, max_splats * 4)
+            max_sort_pairs = default_sort_pairs(max_splats, viewer_only)
 
         self.max_sort_pairs = max_sort_pairs
 
@@ -273,6 +292,8 @@ class TrainingPipeline:
         self._extinction_hardness: float = 1.0
 
         self._active_target = None if viewer_only else self.buffers.target_image
+        self._pending_target: np.ndarray | None = None
+        self._structure_texture: spy.Texture | None = None
 
         self._sorted_values = self.buffers.sort_values_a
 
@@ -598,14 +619,28 @@ class TrainingPipeline:
         too large to host-fill at a big --max-splats). All fp16-packed uint32."""
         sh = self.buffers.sh
         feat_count = self.max_splats * sh.feat_uints
-        # adam_rest is float32 (2 uints/coeff: m, v) -> 2*rest_floats uints.
-        adam_count = self.max_splats * sh.rest_floats * 2
+        adam_count = self.max_splats * sh.moment_planes
         self._dispatch(self.k_clear_uint_buffer, "clear_features_rest",
             thread_count=[feat_count, 1, 1],
             buffer=sh.features_rest.storage, count=feat_count)
         self._dispatch(self.k_clear_uint_buffer, "clear_adam_rest",
             thread_count=[adam_count, 1, 1],
             buffer=sh.adam_rest.storage, count=adam_count)
+
+    def resize(self, max_splats: int, max_sort_pairs: int | None = None) -> None:
+        """Re-allocate a render-only pipeline's buffers for ``max_splats``, keeping
+        its kernels. Contents are lost; the caller uploads before the next render."""
+        assert self.viewer_only, "resizing a training pipeline would drop its state"
+        self.max_splats = max_splats
+        self.max_sort_pairs = max_sort_pairs or default_sort_pairs(max_splats, viewer_only=True)
+        # Release the old set first so both never occupy VRAM at once.
+        self.buffers = self._sorted_values = self.scan_service.resources = None
+        self.buffers = buffers.allocate_viewer(
+            device=self.device, shared_data_module=self.shared_data_module,
+            max_splats=max_splats, width=self.width, height=self.height,
+            max_sort_pairs=self.max_sort_pairs, sh_rest_floats=self._sh_rest_floats)
+        self.scan_service.resources = self.buffers.scan
+        self._sorted_values = self.buffers.sort_values_a
 
     def set_gaussians(self, means: np.ndarray, log_scales: np.ndarray,
                       rot_quats: np.ndarray, opacities: np.ndarray,
@@ -718,10 +753,41 @@ class TrainingPipeline:
         """
         return self.upload_target_texture(self.pack_target_texture(img))
 
-    def set_target_texture(self, tex: spy.Texture) -> None:
+    def set_target_texture(self, tex: spy.Texture | np.ndarray) -> None:
         """Use a pre-uploaded target texture for subsequent forward+loss
-        calls. Cheap: just a reference swap — no copy, no upload."""
-        self._active_target = tex
+        calls. Cheap: just a reference swap — no copy, no upload.
+
+        A packed uint8 host image (:meth:`pack_target_texture`) instead streams:
+        the next loss uploads it into the owned target inside its command buffer."""
+        if isinstance(tex, np.ndarray):
+            self._pending_target = tex
+            self._active_target = self.buffers.target_image
+        else:
+            self._pending_target = None
+            self._active_target = tex
+
+    def _upload_texture(self, texture: spy.Texture, pixels: np.ndarray) -> None:
+        if self._batch is not None:
+            self._batch.encoder.upload_texture_data(texture, 0, 0, pixels)
+        else:
+            texture.copy_from_numpy(pixels)
+
+    def _streamed_structure_texture(self, field) -> spy.Texture:
+        """One owned rgba16_float structure texture, filled from a packed host
+        field or derived on the GPU from the active target by a structure builder
+        (anything with ``record_into(encoder, src, dst)``)."""
+        if self._structure_texture is None:
+            self._structure_texture = self.device.create_texture(
+                type=spy.TextureType.texture_2d, format=spy.Format.rgba16_float,
+                width=self.width, height=self.height,
+                usage=spy.TextureUsage.shader_resource | spy.TextureUsage.unordered_access,
+                label="structure_tensor_streamed")
+        if isinstance(field, np.ndarray):
+            self._upload_texture(self._structure_texture, field)
+        else:
+            field.record_into(self._batch.encoder, self._active_target,
+                              self._structure_texture)
+        return self._structure_texture
 
     # ------------------------------------------------------------------
     # Camera + forward pipeline
@@ -768,6 +834,7 @@ class TrainingPipeline:
             thread_count=[1, 1, 1],
             n_buf=b.scan_total.storage,
             dispatch_args=b.radix_dispatch_args.storage,
+            sort_stats=b.sort_stats.storage,
             max_blocks=max_blocks,
             # Clamp scan_total[0] to buffer capacity in place, so the sort and
             # tile-range stages never read past what bin_emit wrote (which is
@@ -1022,6 +1089,9 @@ class TrainingPipeline:
 
     def record_loss(self, contextual: IterationContextualVariables) -> None:
         """Record image-loss derivatives against the currently bound target."""
+        if self._pending_target is not None:
+            self._upload_texture(self.buffers.target_image, self._pending_target)
+            self._pending_target = None
         variables = (contextual.contextual_stbn
                      if contextual is not None else None)
         if self._adaptive is not None and variables is not None \
@@ -1224,9 +1294,12 @@ class TrainingPipeline:
         densification_variables = iteration_contextual_variables.densification_variables
         if (densification_variables is not None
                 and densification_variables.structure_tensor_texture is not None):
+            structure = densification_variables.structure_tensor_texture
+            if not isinstance(structure, spy.Texture):
+                structure = self._streamed_structure_texture(structure)
             with self._marker_group("structure_accum"):
                 _densify.accumulate_structure_scores(self,
-                    densification_variables.structure_tensor_texture,
+                    structure,
                     **(densification_variables.structure_kwargs or {})
                 )
 

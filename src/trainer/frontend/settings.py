@@ -28,17 +28,13 @@ Adding a knob is ONE row plus one ``add_to`` line in ``cli.py``: it then exists 
 the command line AND in the panel, and :func:`validate` (walked by the tests) fails
 if the two ever drift apart.
 
-Two settings cannot be honoured as freely as the rest, and the table says so
-instead of quietly ignoring them:
+One setting cannot be honoured as freely as the rest, and the table says so
+instead of quietly ignoring it:
 
   * ``backward_pixel_stride`` is a compile-time shader define, injected into
     ``compiler_options`` when the DEVICE is created - which in hub mode happens
     before the panel even exists. It is therefore ``launch_only``: shown with its
     launch value, not editable.
-  * ``stream_max_splats`` sizes the viewer's own gaussian buffers. The snapshot is
-    a raw GPU->GPU copy of the trainer's buffers INCLUDING the splat counter, so a
-    viewer smaller than the trainer would point its rasterizer past its own
-    storage; :func:`viewer_stream_capacity` therefore only ever raises it.
 """
 from __future__ import annotations
 
@@ -273,17 +269,6 @@ SETTINGS: tuple[Setting, ...] = (
                  "N iters. Now a zero-copy GPU->GPU blit, so a fine cadence "
                  "is cheap (was coarse when it required a GPU->CPU readback).",
             minimum=1, maximum=1_000, speed=1),
-    Setting("stream_max_splats", "viewer capacity", "stream", int, default=7_000_000,
-            help="capacity (splats) of the in-process viewer's own gaussian "
-                 "buffers. The snapshot is a raw GPU->GPU copy of the "
-                 "trainer's buffers INCLUDING the splat counter, so the "
-                 "viewer can never be smaller than --max-splats: this only "
-                 "ever RAISES its capacity (effective value = max of the "
-                 "two). Truncation for viewing is no longer possible (it "
-                 "belonged to the old shared-memory stream, which needed a "
-                 "host-side readback of the count).",
-            minimum=100_000, maximum=100_000_000, speed=50_000,
-            note="raised to the splat capacity if lower"),
 )
 
 SETTINGS_MAP: dict[str, Setting] = {s.setting_name: s for s in SETTINGS}
@@ -328,10 +313,6 @@ def validate() -> list[str]:
         if setting.group not in dict(GROUPS):
             problems.append(f"{setting.setting_name}: unknown group {setting.group!r}")
     return problems
-
-
-def viewer_stream_capacity(max_splats: int, stream_max_splats: int) -> int:
-    return max(int(max_splats), int(stream_max_splats))
 
 
 class TrainingSetup:

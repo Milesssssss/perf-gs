@@ -94,8 +94,10 @@ EXPECTED_DEFAULTS = {
     "colmap_bin": None,
     # install-time colmap/glomap build choice; CUDA by default (the only GPU path)
     "recon_cuda": True,
-    "stream_max_splats": 7_000_000,
     "stream_every": 10,
+    "vram_budget_gib": 0.0,
+    "image_residency": "stream",
+    "adam_moments": "fp32",
     "backend": "vulkan",
     "seed": 0,
     "mip_splatting": True,

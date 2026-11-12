@@ -207,9 +207,10 @@ class SphericalHarmonicsResources:
 
     Stored SEPARATELY from Gaussian3D so the default SH0 path allocates nothing.
     Features are fp16 pairs in ``features_rest[gid * feat_uints + word]``.
-    Adam moments remain FP32 SoA: plane ``2*s`` is m and ``2*s+1`` is v for
-    coefficient s, each with max_splats stride. Compaction and Morton re-sort
-    carry all planes through bounded batches of the shared scratch arena.
+    Adam moments are SoA planes of max_splats words, ``moment_planes`` in all:
+    float32 m and v planes per coefficient, or one bf16 (m, v) plane under
+    ``ADAM_MOMENTS_BF16``. Compaction and Morton re-sort carry all planes
+    through bounded batches of the shared scratch arena.
     """
 
     rest_floats: int
@@ -217,6 +218,7 @@ class SphericalHarmonicsResources:
     features_rest: spy.NDBuffer
     features_rest_grad: spy.NDBuffer
     adam_rest: spy.NDBuffer
+    moment_planes: int
     # features_rest / adam_rest are compacted + Morton-permuted via the shared
     # ScratchArena (single-output scatter -> arena -> copy back), so no dedicated
     # scratch buffers here anymore. features_rest_grad is per-iter gradient
@@ -280,6 +282,7 @@ class GaussianBuffers:
     radix_global_hist: spy.NDBuffer = field(init=False)
     radix_pass_hist: spy.NDBuffer = field(init=False)
     radix_dispatch_args: spy.NDBuffer = field(init=False)
+    sort_stats: spy.NDBuffer = field(init=False)  # uint[2]: peak requested pairs, sorts that dropped pairs
     # Per-tile sorted entry ranges.
     tile_start: spy.NDBuffer = field(init=False)                # uint[num_tiles]
     tile_end: spy.NDBuffer = field(init=False)                  # uint[num_tiles]
@@ -496,12 +499,13 @@ class GaussianBuffers:
 #TODO_refactor: same thing here, the _ShaderTypes has a hard contract with the Slang module.
 @dataclass
 class _ShaderTypes:
-    """The four Slang struct types :func:`allocate` sizes NDBuffers from,
+    """The Slang struct types :func:`allocate` sizes NDBuffers from,
     resolved once via reflection."""
     gaussian: object
     projected: object
     blend: object
     adam: object
+    sh_moments: object
 
                   
 #TODO_refactor: the reflection still has a hard dependency on the Slang module here, Ideally this type information should be passed from the caller
@@ -521,6 +525,7 @@ def _reflect_types(module: spy.Module) -> _ShaderTypes:
         projected=need("Projected2DGaussian"),
         blend=need("BlendData"),
         adam=need("AdamState"),
+        sh_moments=need("ShRestMoments"),
     )
 
 
@@ -669,6 +674,7 @@ def allocate(
     buffers.radix_global_hist = allocator.uint_buffer("radix_global_hist", RADIX_GLOBAL_HIST_SIZE)
     buffers.radix_pass_hist = allocator.uint_buffer("radix_pass_hist", 256 * max_blocks)
     buffers.radix_dispatch_args = allocator.indirect_buffer("radix_dispatch_args")
+    buffers.sort_stats = allocator.uint_buffer("sort_stats", 2)
     buffers.tile_start = allocator.uint_buffer("tile_start", num_tiles)
     buffers.tile_end = allocator.uint_buffer("tile_end", num_tiles)
 
@@ -766,20 +772,20 @@ def allocate(
 
     # --- optional view-dependent SH rest coefficients ---
     # Allocated only when sh_degree > 0. Features + gradients use fp16 pairs;
-    # Adam m/v remain separate FP32 SoA planes. Initial features are uploaded
-    # by buffer_io; adam_rest is zeroed by the clear kernel.
+    # Adam m/v are SoA planes in the compiled moment precision. Initial features
+    # are uploaded by buffer_io; adam_rest is zeroed by the clear kernel.
     if sh_rest_floats > 0:
         feat_uints = (sh_rest_floats + 1) // 2
+        moment_planes = sh_rest_floats * int(types.sh_moments.buffer_layout.reflection.stride) // 4
         buffers.sh = SphericalHarmonicsResources(
             rest_floats=sh_rest_floats,
             feat_uints=feat_uints,
             features_rest=allocator.uint_buffer("sh.features_rest", max_splats * feat_uints),
             features_rest_grad=allocator.uint_buffer("sh.features_rest_grad", max_splats * feat_uints),
-            # Adam moments FLOAT32 (2 uints/coeff: m, v). fp16 underflowed the tiny
-            # SH-rest v=g^2(~1e-12) to 0, crushing the step ~1000x. Stride is
-            # 2*sh_rest_floats. Compacted/re-sorted in bounded plane batches;
-            # this live buffer's size and numerical representation are unchanged.
-            adam_rest=allocator.uint_buffer("sh.adam_rest", max_splats * sh_rest_floats * 2),
+            # Never fp16: it underflowed the tiny SH-rest v=g^2(~1e-12) to 0,
+            # crushing the step ~1000x. Compacted/re-sorted in bounded plane batches.
+            adam_rest=allocator.uint_buffer("sh.adam_rest", max_splats * moment_planes),
+            moment_planes=moment_planes,
         )
 
     # --- Cluster-Cull-Compact scratch ---
@@ -796,6 +802,7 @@ def allocate(
 
     buffers.num_gaussians_counter.copy_from_numpy(np.zeros(1, dtype=np.uint32))
     buffers.training_step.copy_from_numpy(np.zeros(1, dtype=np.uint32))
+    buffers.sort_stats.copy_from_numpy(np.zeros(2, dtype=np.uint32))
 
     return buffers
 
@@ -871,6 +878,7 @@ def allocate_viewer(
     buffers.radix_global_hist = allocator.uint_buffer("radix_global_hist", RADIX_GLOBAL_HIST_SIZE)
     buffers.radix_pass_hist = allocator.uint_buffer("radix_pass_hist", 256 * max_blocks)
     buffers.radix_dispatch_args = allocator.indirect_buffer("radix_dispatch_args")
+    buffers.sort_stats = allocator.uint_buffer("sort_stats", 2)
 
     # Tile ranges + bucket CSR (used by identify_tile_ranges + bucket_count + forward).
     buffers.tile_start = allocator.uint_buffer("tile_start", num_tiles)
@@ -919,9 +927,11 @@ def allocate_viewer(
             features_rest=allocator.uint_buffer("sh.features_rest", max_splats * feat_uints),
             features_rest_grad=allocator.uint_buffer("sh.features_rest_grad", 1),
             adam_rest=allocator.uint_buffer("sh.adam_rest", 1),
+            moment_planes=0,
         )
 
     buffers.num_gaussians_counter.copy_from_numpy(np.zeros(1, dtype=np.uint32))
+    buffers.sort_stats.copy_from_numpy(np.zeros(2, dtype=np.uint32))
 
     return buffers
 

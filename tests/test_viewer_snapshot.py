@@ -98,6 +98,9 @@ class _Runtime:
     def queue_scope(self):
         return contextlib.nullcontext()
 
+    def wait_for_idle(self):
+        pass
+
 
 def _buffers(*, count: int, capacity: int = CAPACITY, sh: bool = False):
     """A stand-in for GaussianBuffers: the four per-splat buffers + the counter."""
@@ -117,18 +120,24 @@ def _snapshot(*, live: int, viewer_capacity: int = CAPACITY, sh: bool = False,
               mip: bool = False, active_sh_degree: int = 0, hardness: float = 1.0):
     """Run the real ``update_gaussians`` against fakes; return (encoder, viewer)."""
     encoder = _Encoder()
-    view_buffers = _buffers(count=0, capacity=viewer_capacity, sh=sh)
+    pipeline = SimpleNamespace(
+        buffers=_buffers(count=0, capacity=viewer_capacity, sh=sh),
+        raster_config=SimpleNamespace(mip_enabled=mip),
+        set_active_sh_degree=lambda degree: None,
+        set_extinction_hardness=lambda value: setattr(pipeline, "hardness", value),
+        resize=lambda capacity, _pairs: setattr(
+            pipeline, "buffers", _buffers(count=0, capacity=capacity, sh=sh)),
+    )
     invalidations: list[int] = []
     viewer = SimpleNamespace(
         runtime=_Runtime(encoder),
         max_splats=viewer_capacity,
         _has_data=False,
-        _pipeline=SimpleNamespace(
-            buffers=view_buffers,
-            raster_config=SimpleNamespace(mip_enabled=mip),
-            set_active_sh_degree=lambda degree: None,
-            set_extinction_hardness=lambda value: setattr(viewer._pipeline, "hardness", value),
-        ),
+        _pipeline=pipeline,
+        _render_lock=contextlib.nullcontext(),
+        _explicit_sort_pairs=None,
+        _grow=lambda count, limit: Viewer._grow(viewer, count, limit),
+        _copy_snapshot=lambda train, count: Viewer._copy_snapshot(viewer, train, count),
         live_splat_count=lambda pipeline: Viewer.live_splat_count(viewer, pipeline),
         # While training and parked on a test camera the render loop re-rasterizes
         # ONLY on this signal (see Viewer._scene_due), so a snapshot that failed to
@@ -136,7 +145,8 @@ def _snapshot(*, live: int, viewer_capacity: int = CAPACITY, sh: bool = False,
         invalidate_scene=lambda: invalidations.append(1),
         invalidations=invalidations,
     )
-    train = SimpleNamespace(buffers=_buffers(count=live, sh=sh),
+    view_buffers = pipeline.buffers
+    train = SimpleNamespace(buffers=_buffers(count=live, sh=sh), max_splats=CAPACITY,
                             _active_sh_degree=active_sh_degree, _extinction_hardness=hardness)
     Viewer.update_gaussians(viewer, train)
     return encoder, viewer, view_buffers
@@ -161,11 +171,12 @@ def test_the_counter_travels_in_the_same_batch_as_the_data() -> None:
     assert len(encoder.uploads) == 1 and encoder.copies
 
 
-def test_a_count_beyond_the_viewers_capacity_is_clamped() -> None:
-    encoder, _, view_buffers = _snapshot(live=5_000_000, viewer_capacity=1_000_000)
-    assert encoder.uploads[0][1].tolist() == [1_000_000]
-    assert dict(encoder.copies)[view_buffers.gaussians.storage] == \
-        1_000_000 * GAUSSIAN_STRIDE
+def test_a_count_beyond_the_viewers_capacity_grows_the_viewer() -> None:
+    encoder, viewer, _ = _snapshot(live=5_000_000, viewer_capacity=1_000_000)
+    assert viewer.max_splats == 5_000_000
+    assert encoder.uploads[0][1].tolist() == [5_000_000]
+    assert dict(encoder.copies)[viewer._pipeline.buffers.gaussians.storage] == \
+        5_000_000 * GAUSSIAN_STRIDE
 
 
 def test_sh_and_mip_buffers_follow_the_same_count() -> None:

@@ -134,11 +134,13 @@ def test_pipeline_factory_separates_configuration_ownership(monkeypatch) -> None
         device="device",
         gpu_lock="lock",
         scene=scene,
+        max_splats=123,
         lambda_l2=1.5,
         lambda_ssim=0.2,
     )
 
     assert result is sentinel
+    assert captured["max_splats"] == 123
     assert captured["raster_config"] == RasterConfig(
         z_near_cull=0.25,
         cluster_cull=False,
