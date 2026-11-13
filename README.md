@@ -74,9 +74,9 @@ Every pixel supervised. For reference, the SADGS columns show a fast existing tr
 | **Deep Blending** | **29.18** | **29.48** | **29.8** | **37.5** | **4.81** |  |  |
 
 <p align="center">
-  <img src="assets/psnr_sweep.png" alt="Held-out PSNR per scene, SH0 and SH3, with SADGS for reference" width="95%">
-  <br>
   <img src="assets/timing_sweep.png" alt="Training time per scene, SH0 and SH3, with SADGS for reference" width="95%">
+  <br>
+  <img src="assets/psnr_sweep.png" alt="Held-out PSNR per scene, SH0 and SH3, with SADGS for reference" width="95%">
 </p>
 
 SH3 adds 0.3–0.4 dB on every dataset for about a third more training time. SADGS's SH3 is higher on the indoor scenes.
