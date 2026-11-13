@@ -3,9 +3,9 @@
      30k iters); the Results figures are generated from the benchmark runs by
      scripts/plots/plot_readme_results.py. -->
 
-# SCATTO-GS
+# PERF-GS
 ## Slang-Compiled Accelerated Training-Time Optimization for Gaussian Splatting
-A fast and efficient Slang-based 3DGS trainer.
+A fast, modular and efficient Slang-based 3DGS trainer.
 
 ![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)
 ![Shaders](https://img.shields.io/badge/Shaders-Slang-DE3163)
