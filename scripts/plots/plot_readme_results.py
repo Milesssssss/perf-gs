@@ -213,42 +213,56 @@ def _series(grid: Grid, field: str) -> list[tuple[str, str, str, dict[str, Resul
     return series
 
 
-def plot_scene_bars(grid: Grid, field: str, ylabel: str, title: str, fmt: str,
-                    out: Path) -> None:
+def plot_scene_bars(grid: Grid, field: str, ylabel: str, title: str, fmt: str, out: Path,
+                    from_zero: bool = True) -> None:
+    """Labelled per-scene bars, each dataset followed by its average: Mip-NeRF 360 on
+    the first row, the other two datasets (and the legend) on the second."""
     series = _series(grid, field)
-    labels = list(SCENES) + [f"{name}\naverage" for name in DATASETS]
-    x = np.arange(len(labels))
+    rows = [("Mip-NeRF 360",), ("Tanks & Temples", "Deep Blending")]
+    groups = []
+    for names in rows:
+        row = []
+        for name in names:
+            row += [(scene, (scene,)) for scene in DATASETS[name]]
+            row.append((f"{name} average", DATASETS[name]))
+        groups.append(row)
+    slots = max(len(row) for row in groups)
     width = 0.8 / len(series)
-    fig, ax = plt.subplots(figsize=(20, 6), dpi=130)
-    tallest = 0.0
-    for index, (label, color, hatch, by_scene) in enumerate(series):
-        values = [getattr(by_scene[s], field) if by_scene[s] else None for s in SCENES]
-        values += [mean_of([by_scene[s] for s in scenes], field)
-                   for scenes in DATASETS.values()]
-        heights = [np.nan if v is None else v for v in values]
-        offset = (index - (len(series) - 1) / 2) * width
-        bars = ax.bar(x + offset, heights, width, label=label, color=color, hatch=hatch,
-                      edgecolor="white", linewidth=0.5, zorder=3)
-        for bar, value in zip(bars, values):
-            if value is None:
-                continue
-            tallest = max(tallest, value)
-            ax.annotate(fmt.format(value), (bar.get_x() + bar.get_width() / 2, value),
-                        xytext=(0, 2), textcoords="offset points", ha="center",
-                        va="bottom", rotation=90, fontsize=6.5, color=INK)
-    ax.axvline(len(SCENES) - 0.5, color="#bbbbbb", lw=1.0, ls="--", zorder=1)
-    for boundary in np.cumsum([len(s) for s in DATASETS.values()])[:-1]:
-        ax.axvline(boundary - 0.5, color="#e2e2e2", lw=0.8, zorder=1)
-    ax.set_xticks(x)
-    ax.set_xticklabels(labels, rotation=30, ha="right")
-    ax.set_ylabel(ylabel)
-    ax.set_ylim(0, tallest * 1.18 if tallest else 1)
-    _style(ax)
-    fig.legend(*ax.get_legend_handles_labels(), frameon=False, ncol=len(series),
-               loc="upper center", bbox_to_anchor=(0.5, 0.93))
-    fig.suptitle(title, y=0.985, fontsize=12)
-    fig.subplots_adjust(left=0.04, right=0.995, top=0.85, bottom=0.2)
-    fig.savefig(out)
+    # Sized so the text stays legible when the README scales the figure to its width.
+    with plt.rc_context({"font.size": 13}):
+        fig, axes = plt.subplots(len(rows), 1, figsize=(12, 10), dpi=130, sharey=True,
+                                 layout="constrained")
+        drawn = []
+        for ax, row in zip(axes, groups):
+            x = np.arange(len(row))
+            for index, (label, color, hatch, by_scene) in enumerate(series):
+                values = [mean_of([by_scene[s] for s in scenes], field) for _, scenes in row]
+                drawn += [v for v in values if v is not None]
+                offset = (index - (len(series) - 1) / 2) * width
+                ax.bar(x + offset, [np.nan if v is None else v for v in values], width,
+                       label=label, color=color, hatch=hatch, edgecolor="white",
+                       linewidth=0.5, zorder=3)
+                for xv, value in zip(x + offset, values):
+                    if value is not None:
+                        ax.annotate(fmt.format(value), (xv, value), xytext=(0, 3),
+                                    textcoords="offset points", ha="center", va="bottom",
+                                    rotation=90, fontsize=12, color=INK)
+            for i, (label, scenes) in enumerate(row):
+                if len(scenes) > 1:
+                    ax.axvline(i - 0.5, color="#bbbbbb", lw=1.0, ls="--", zorder=1)
+                    if i + 1 < len(row):
+                        ax.axvline(i + 0.5, color="#e2e2e2", lw=0.8, zorder=1)
+            ax.set_xticks(x, [label for label, _ in row], rotation=35, ha="right",
+                          rotation_mode="anchor")
+            ax.set_xlim(-0.6, slots - 0.4)
+            ax.set_ylabel(ylabel)
+            _style(ax)
+        bottom = 0.0 if from_zero else np.floor(min(drawn)) - 1
+        # Headroom for the rotated value labels.
+        axes[0].set_ylim(bottom, max(drawn) + 0.2 * (max(drawn) - bottom))
+        axes[-1].legend(frameon=False, loc="center right")
+        fig.suptitle(title, fontsize=14)
+        fig.savefig(out)
     plt.close(fig)
 
 
@@ -508,10 +522,10 @@ def main() -> int:
     REPORT.mkdir(parents=True, exist_ok=True)
     plot_scene_bars(grid, "psnr", "held-out PSNR (dB, sRGB)",
                     "Held-out PSNR per scene (3000 iterations, every pixel supervised)",
-                    "{:.2f}", ASSETS / "psnr_sweep.png")
+                    "{:.2f}", ASSETS / "psnr_sweep.png", from_zero=False)
     plot_scene_bars(grid, "seconds", "training time (seconds)",
                     "Training time per scene (3000 iterations, RTX 4080)",
-                    "{:.0f}", ASSETS / "timing_sweep.png")
+                    "{:.1f}", ASSETS / "timing_sweep.png")
     plot_vram(grid, ASSETS / "vram.png")
     plot_convergence(ASSETS / "convergence.png")
     plot_stbn_convergence(ASSETS / "stbn_convergence.png")
