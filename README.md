@@ -4,7 +4,6 @@
      scripts/plots/plot_readme_results.py. -->
 
 # PERF-GS
-## Slang-Compiled Accelerated Training-Time Optimization for Gaussian Splatting
 A fast, modular and efficient Slang-based 3DGS trainer.
 
 ![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)
