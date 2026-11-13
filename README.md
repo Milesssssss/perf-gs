@@ -15,8 +15,8 @@ A fast and efficient Slang-based 3DGS trainer.
 ![No CUDA required](https://img.shields.io/badge/CUDA-not%20required-2ea44f)
 ![Status](https://img.shields.io/badge/status-research-F5A623)
 
-A 3D Gaussian Splatting trainer written in [Slang](https://shader-slang.org) and driven from Python through [SlangPy](https://slangpy.shader-slang.org).<br>
-On an RTX 4080 it trains a Mip-NeRF 360 scene in under 30 seconds on average (28.8 seconds at SH0 with 50% sparse supervision). The codebase has no CUDA dependencies, is directly integratable with pytorch frontend and all shaders are dispatched via SlangPy.
+An extensible 3D Gaussian Splatting trainer written in [Slang](https://shader-slang.org) and driven from Python through [SlangPy](https://slangpy.shader-slang.org).<br>
+On an RTX 4080 it trains a Mip-NeRF 360 scene in under 30 seconds on average (28.8 seconds at SH0 with 50% sparse supervision). The codebase has no CUDA dependencies, is directly integratable with pytorch frontend and all shaders are dispatched via SlangPy and written in Slang.
 
 <p align="center">
   <img src="assets/teaser.jpg" alt="Mip-NeRF 360 bicycle scene trained by this pipeline, rendered from a held-out view" width="80%">
