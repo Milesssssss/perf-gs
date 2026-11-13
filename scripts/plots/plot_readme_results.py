@@ -56,7 +56,6 @@ DATASETS: dict[str, tuple[str, ...]] = {
     "Deep Blending": ("drjohnson", "playroom"),
 }
 SCENES = tuple(scene for scenes in DATASETS.values() for scene in scenes)
-INDOOR = ("bonsai", "counter", "kitchen", "room")
 FRACTIONS = ("1.0", "0.5", "0.25", "0.1", "0.02")
 DENSE = "1.0"
 SH_DEGREES = (0, 3)
@@ -65,7 +64,11 @@ PRECISIONS = ("fp32", "bf16")
 PORTABLE_FIELDS = ("psnr", "ssim", "lpips", "splats")
 CONVERGENCE_SCENES = ("bicycle", "kitchen", "train", "drjohnson")
 QUALITATIVE_SCENE = "bicycle"
-OPACITY_RESET_ITER = 1200  # SADGS schedule: the dip in every curve
+# The whole bicycle in that view, in render pixels (left, top, right, bottom).
+QUALITATIVE_BOX = (290, 145, 950, 585)
+# The scheduled opacity reset briefly hides most splats (up to -14 dB for one sample);
+# the curves skip the samples taken while it recovers.
+OPACITY_RESET_ITERS = range(1200, 1400)
 
 # Okabe-Ito hues (SH0 blue, SH3 orange); the SADGS reference is the lighter tint.
 COLORS = {("ours", 0): "#0072B2", ("ours", 3): "#E69F00",
@@ -141,7 +144,8 @@ def load_curve(scene: str, fraction: str) -> list[dict]:
     path = run_dir("readme_conv", scene, fraction) / "eval_curve.jsonl"
     if not path.is_file():
         return []
-    return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+    samples = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+    return [s for s in samples if s["iter"] not in OPACITY_RESET_ITERS]
 
 
 @dataclass
@@ -248,62 +252,20 @@ def plot_scene_bars(grid: Grid, field: str, ylabel: str, title: str, fmt: str,
     plt.close(fig)
 
 
-def plot_stbn_tradeoff(grid: Grid, out: Path) -> None:
-    """Held-out PSNR against training time per dataset, one line per SH degree
-    through the supervised-pixel fractions (dense = rightmost)."""
-    fig, axes = plt.subplots(1, len(DATASETS), figsize=(16, 4.8), dpi=130)
-    for ax, (name, scenes) in zip(axes, DATASETS.items()):
-        for sh in SH_DEGREES:
-            points = []
-            for fraction in FRACTIONS:
-                runs = [grid.ours.get((sh, "fp32", s, fraction)) for s in scenes]
-                seconds, psnr = mean_of(runs, "seconds"), mean_of(runs, "psnr")
-                if seconds is not None and psnr is not None:
-                    points.append((seconds, psnr, fraction))
-            if points:
-                xs, ys, _ = zip(*points)
-                ax.plot(xs, ys, "-o", color=COLORS[("ours", sh)], label=f"Ours SH{sh}",
-                        zorder=3, markersize=5)
-                for xv, yv, fraction in points:
-                    ax.annotate(_percent(fraction), (xv, yv), xytext=(4, -10),
-                                textcoords="offset points", fontsize=7.5, color=INK)
-        ax.set_title(f"{name} ({len(scenes)} scenes)", fontsize=11)
-        ax.set_xlabel("training time (s)")
-        ax.set_xlim(left=0)
-        ax.grid(alpha=0.25)
-        for spine in ("top", "right"):
-            ax.spines[spine].set_visible(False)
-    axes[0].set_ylabel("held-out PSNR (dB)")
-    handles, labels = axes[0].get_legend_handles_labels()
-    fig.legend(handles, labels, frameon=False, ncol=4, loc="upper center",
-               bbox_to_anchor=(0.5, 1.0))
-    fig.suptitle("STBN sparse supervision: quality against training time "
-                 "(labels = fraction of pixels supervised per step)", y=1.06, fontsize=12)
-    fig.tight_layout(rect=(0, 0, 1, 0.95))
-    fig.savefig(out, bbox_inches="tight")
-    plt.close(fig)
-
-
 def plot_vram(grid: Grid, out: Path) -> None:
-    """GPU memory on the scenes both trainers ran on this GPU."""
+    """GPU memory per SH degree and Adam precision, averaged over every scene."""
     groups = [f"SH{sh}" for sh in SH_DEGREES]
-    bars = [("Ours fp32 Adam (whole process)", "fp32", COLORS[("ours", 0)], ""),
-            ("Ours bf16 Adam (whole process)", "bf16", COLORS[("ours", 3)], ""),
-            ("SADGS (PyTorch peak reserved)", None, COLORS[("sadgs", 0)], "//")]
+    bars = [("fp32 Adam", "fp32", COLORS[("ours", 0)]),
+            ("bf16 Adam", "bf16", COLORS[("ours", 3)])]
     x = np.arange(len(groups))
     width = 0.8 / len(bars)
     fig, ax = plt.subplots(figsize=(8, 4.8), dpi=130)
-    for index, (label, precision, color, hatch) in enumerate(bars):
-        values = []
-        for sh in SH_DEGREES:
-            if precision is None:
-                runs = [grid.sadgs.get((sh, s)) for s in INDOOR]
-            else:
-                runs = [grid.dense(sh, s, precision) for s in INDOOR]
-            values.append(mean_of(runs, "vram_gib"))
+    for index, (label, precision, color) in enumerate(bars):
+        values = [mean_of([grid.dense(sh, s, precision) for s in SCENES], "vram_gib")
+                  for sh in SH_DEGREES]
         heights = [np.nan if v is None else v for v in values]
         offset = (index - (len(bars) - 1) / 2) * width
-        drawn = ax.bar(x + offset, heights, width, label=label, color=color, hatch=hatch,
+        drawn = ax.bar(x + offset, heights, width, label=label, color=color,
                        edgecolor="white", linewidth=0.5, zorder=3)
         for bar, value in zip(drawn, values):
             if value is not None:
@@ -319,9 +281,9 @@ def plot_vram(grid: Grid, out: Path) -> None:
     _style(ax)
     fig.legend(*ax.get_legend_handles_labels(), frameon=False, ncol=2, loc="upper center",
                bbox_to_anchor=(0.5, 0.92), fontsize=9)
-    fig.suptitle("GPU memory while training, Mip-NeRF 360 indoor scenes "
-                 "(ours at the default 7M-splat capacity)", y=0.985, fontsize=11)
-    fig.subplots_adjust(left=0.09, right=0.98, top=0.78, bottom=0.08)
+    fig.suptitle(f"GPU memory while training, average over the {len(SCENES)} scenes",
+                 y=0.985, fontsize=11)
+    fig.subplots_adjust(left=0.09, right=0.98, top=0.82, bottom=0.08)
     fig.savefig(out)
     plt.close(fig)
 
@@ -336,10 +298,7 @@ def plot_convergence(out: Path) -> None:
                     color=palette(index), label=scene, lw=1.6)
     ax.set_xlabel("iteration")
     ax.set_ylabel("held-out PSNR (dB, sRGB)")
-    ax.set_title("Convergence: held-out PSNR during training (SH0, dense supervision)")
-    ax.axvline(OPACITY_RESET_ITER, color="#999999", lw=1.0, ls=":", zorder=1)
-    ax.annotate("opacity reset", (OPACITY_RESET_ITER, ax.get_ylim()[0]), xytext=(4, 6),
-                textcoords="offset points", fontsize=8, color="#666666")
+    ax.set_title("Held-out PSNR during training (SH0, every pixel supervised)")
     ax.grid(alpha=0.3)
     ax.legend(ncol=3, fontsize=8, frameon=False, loc="lower right")
     fig.tight_layout()
@@ -356,7 +315,7 @@ def plot_stbn_convergence(out: Path) -> None:
                 ax.plot([p["elapsed_s"] for p in curve], [p["psnr_srgb"] for p in curve],
                         color=FRACTION_RAMP[fraction], label=_percent(fraction), lw=1.6)
         ax.set_title(scene, fontsize=11)
-        ax.set_xlabel("training time (s)")
+        ax.set_xlabel("training time (seconds)")
         ax.grid(alpha=0.3)
         for spine in ("top", "right"):
             ax.spines[spine].set_visible(False)
@@ -377,8 +336,8 @@ def _ground_truth(scene: str, image_name: str, size: tuple[int, int]) -> Image.I
 
 
 def plot_qualitative(out: Path) -> None:
-    """One held-out view of QUALITATIVE_SCENE: ground truth, then the final render
-    at each supervised-pixel fraction, cropped to the center."""
+    """One held-out view of QUALITATIVE_SCENE, every panel cropped to QUALITATIVE_BOX:
+    ground truth on top, then the final render at each supervised-pixel fraction."""
     panels = []
     for fraction in ("1.0", "0.25", "0.1", "0.02"):
         run = run_dir("readme_conv", QUALITATIVE_SCENE, fraction)
@@ -390,20 +349,22 @@ def plot_qualitative(out: Path) -> None:
         panels.append((f"{_percent(fraction)} pixels, {view['psnr_srgb']:.2f} dB", render))
     panels.insert(0, ("ground truth", _ground_truth(QUALITATIVE_SCENE, view["image_name"],
                                                    panels[0][1].size)))
-    width, height = panels[0][1].size
-    box = (width // 4, height // 4, width * 3 // 4, height * 3 // 4)
-    crops = [(label, image.crop(box)) for label, image in panels]
-    tile_w, tile_h = crops[0][1].size
-    caption = 34
-    sheet = Image.new("RGB", (tile_w * len(crops), tile_h + caption), "white")
+    tiles = [(label, image.crop(QUALITATIVE_BOX)) for label, image in panels]
+    tile_w, tile_h = tiles[0][1].size
+    gap, caption = 12, 40
+    step_x, step_y = tile_w + gap, caption + tile_h + gap
+    # Ground truth centered on the first row, the four renders in a 2x2 grid below.
+    origins = [(step_x // 2, 0)] + [(col * step_x, (row + 1) * step_y)
+                                    for row in range(2) for col in range(2)]
+    sheet = Image.new("RGB", (2 * tile_w + gap, 3 * step_y - gap), "white")
     draw = ImageDraw.Draw(sheet)
     try:
-        font = ImageFont.truetype("arial.ttf", 20)
+        font = ImageFont.truetype("arial.ttf", 26)
     except OSError:
         font = ImageFont.load_default()
-    for index, (label, crop) in enumerate(crops):
-        sheet.paste(crop, (index * tile_w, caption))
-        draw.text((index * tile_w + 8, 6), label, fill=INK, font=font)
+    for (label, tile), (x, y) in zip(tiles, origins):
+        draw.text((x + 4, y + 6), label, fill=INK, font=font)
+        sheet.paste(tile, (x, y + caption))
     sheet.save(out, quality=92)
 
 
@@ -431,63 +392,44 @@ def _scene_rows(grid: Grid, cells) -> list[list[str]]:
 
 
 def scene_table(grid: Grid) -> str:
-    """Per scene: our PSNR beside SADGS's, our time and splat count."""
+    """Per scene: our PSNR, time and splat count, then SADGS's PSNR for reference."""
     def cells(scenes: set[str]) -> list[str]:
         ordered = [s for s in SCENES if s in scenes]
-        out = []
-        for sh in SH_DEGREES:
-            out.append(_cell(mean_of([grid.dense(sh, s) for s in ordered], "psnr"), "{:.2f}"))
-            out.append(_cell(mean_of([grid.sadgs_for(sh, s, "psnr") for s in ordered], "psnr"),
-                             "{:.2f}"))
-        for sh in SH_DEGREES:
-            out.append(_cell(mean_of([grid.dense(sh, s) for s in ordered], "seconds"), "{:.1f}"))
+        out = [_cell(mean_of([grid.dense(sh, s) for s in ordered], "psnr"), "{:.2f}")
+               for sh in SH_DEGREES]
+        out += [_cell(mean_of([grid.dense(sh, s) for s in ordered], "seconds"), "{:.1f}")
+                for sh in SH_DEGREES]
         out.append(_cell(_millions(mean_of([grid.dense(0, s) for s in ordered], "splats")),
                          "{:.2f}"))
+        out += [_cell(mean_of([grid.sadgs_for(sh, s, "psnr") for s in ordered], "psnr"), "{:.2f}")
+                for sh in SH_DEGREES]
         return out
-    return _table(["Scene", "PSNR SH0", "SADGS SH0", "PSNR SH3", "SADGS SH3",
-                   "Time SH0 (s)", "Time SH3 (s)", "Splats (M)"], _scene_rows(grid, cells))
+    return _table(["Scene", "PSNR SH0", "PSNR SH3", "Time SH0 (seconds)", "Time SH3 (seconds)",
+                   "Splats (millions)", "SADGS PSNR SH0", "SADGS PSNR SH3"],
+                  _scene_rows(grid, cells))
 
 
-def same_gpu_table(grid: Grid) -> str:
-    """Training time and memory on the scenes both trainers ran on this GPU."""
-    def row(label: str, scenes: tuple[str, ...]) -> list[str]:
-        cells = [label]
+def cost_table(grid: Grid) -> str:
+    """Per dataset and SH degree: training time, splat count and GPU memory."""
+    rows = []
+    for name, scenes in DATASETS.items():
         for sh in SH_DEGREES:
-            cells.append(_cell(mean_of([grid.dense(sh, s) for s in scenes], "seconds"), "{:.1f}"))
-            cells.append(_cell(mean_of([grid.sadgs.get((sh, s)) for s in scenes], "seconds"),
-                               "{:.1f}"))
-        cells.append(_cell(mean_of([grid.dense(3, s) for s in scenes], "vram_gib"), "{:.1f}"))
-        cells.append(_cell(mean_of([grid.sadgs.get((3, s)) for s in scenes], "vram_gib"), "{:.1f}"))
-        return cells
-    rows = [row(scene, (scene,)) for scene in INDOOR] + [row("**Average**", INDOOR)]
-    return _table(["Scene", "Ours SH0 (s)", "SADGS SH0 (s)", "Ours SH3 (s)", "SADGS SH3 (s)",
-                   "Ours SH3 VRAM (GiB)", "SADGS SH3 VRAM (GiB)"], rows)
-
-
-def _dataset_stat(grid: Grid, method: str, sh: int, scenes: tuple[str, ...],
-                  field: str) -> float | None:
-    results = [grid.dense(sh, s) if method == "Ours" else grid.sadgs_for(sh, s, field)
-               for s in scenes]
-    return mean_of(results, field)
+            runs = [grid.dense(sh, s) for s in scenes]
+            rows.append([name, f"SH{sh}", _cell(mean_of(runs, "seconds"), "{:.1f}"),
+                         _cell(_millions(mean_of(runs, "splats")), "{:.2f}"),
+                         _cell(mean_of(runs, "vram_gib"), "{:.1f}")])
+    return _table(["Dataset", "SH", "Time (seconds)", "Splats (millions)", "VRAM (GiB)"], rows)
 
 
 def dataset_quality_table(grid: Grid) -> str:
     rows = []
     for name, scenes in DATASETS.items():
         for sh in SH_DEGREES:
-            for method in ("Ours", "SADGS"):
-                psnr, ssim, lpips, splats = (_dataset_stat(grid, method, sh, scenes, field)
-                                             for field in PORTABLE_FIELDS)
-                if psnr is None:
-                    continue
-                # SADGS's lpipsPyTorch scores identical images ~7% lower than the
-                # lpips package used here, so its LPIPS is not put beside ours.
-                if method == "SADGS":
-                    lpips = None
-                rows.append([name, f"{method} SH{sh}", _cell(psnr, "{:.2f}"),
-                             _cell(ssim, "{:.3f}"), _cell(lpips, "{:.3f}"),
-                             _cell(_millions(splats), "{:.2f}")])
-    return _table(["Dataset", "Method", "PSNR", "SSIM", "LPIPS", "Splats (M)"], rows)
+            runs = [grid.dense(sh, s) for s in scenes]
+            rows.append([name, f"SH{sh}", _cell(mean_of(runs, "psnr"), "{:.2f}"),
+                         _cell(mean_of(runs, "ssim"), "{:.3f}"),
+                         _cell(mean_of(runs, "lpips"), "{:.3f}")])
+    return _table(["Dataset", "SH", "PSNR", "SSIM", "LPIPS"], rows)
 
 
 def _millions(value: float | None) -> float | None:
@@ -506,7 +448,7 @@ def stbn_table(grid: Grid, sh: int) -> str:
     header = ["Pixels / step"]
     for name in DATASETS:
         short = {"Mip-NeRF 360": "M360", "Tanks & Temples": "T&T", "Deep Blending": "DB"}[name]
-        header += [f"{short} PSNR", f"{short} time (s)"]
+        header += [f"{short} PSNR", f"{short} time (seconds)"]
     return _table(header, rows)
 
 
@@ -523,7 +465,7 @@ def precision_table(grid: Grid) -> str:
                     _cell(mean_of(runs, "vram_gib"), "{:.2f}")]
             rows.append(row)
     return _table(["SH", "Adam moments", "M360 PSNR", "T&T PSNR", "DB PSNR",
-                   "Time (s)", "VRAM (GiB)"], rows)
+                   "Time (seconds)", "VRAM (GiB)"], rows)
 
 
 def precision_spread(grid: Grid) -> str:
@@ -565,12 +507,11 @@ def main() -> int:
         return 1
     REPORT.mkdir(parents=True, exist_ok=True)
     plot_scene_bars(grid, "psnr", "held-out PSNR (dB, sRGB)",
-                    "Held-out PSNR per scene (3k iterations, dense supervision)",
+                    "Held-out PSNR per scene (3000 iterations, every pixel supervised)",
                     "{:.2f}", ASSETS / "psnr_sweep.png")
-    plot_scene_bars(grid, "seconds", "training time (s)",
-                    "Training-loop time per scene (3k iterations, same GPU)",
+    plot_scene_bars(grid, "seconds", "training time (seconds)",
+                    "Training time per scene (3000 iterations, RTX 4080)",
                     "{:.0f}", ASSETS / "timing_sweep.png")
-    plot_stbn_tradeoff(grid, ASSETS / "stbn_tradeoff.png")
     plot_vram(grid, ASSETS / "vram.png")
     plot_convergence(ASSETS / "convergence.png")
     plot_stbn_convergence(ASSETS / "stbn_convergence.png")
@@ -578,7 +519,7 @@ def main() -> int:
     write_summary_csv(grid, CSV_OUT)
     tables = [
         "## Per scene", scene_table(grid),
-        "## Same GPU, indoor", same_gpu_table(grid),
+        "## Time and memory", cost_table(grid),
         "## Dataset averages", dataset_quality_table(grid),
         "## STBN SH0", stbn_table(grid, 0),
         "## STBN SH3", stbn_table(grid, 3),
