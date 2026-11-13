@@ -171,33 +171,7 @@ COLMAP scene  ->  init gaussians  ->  per-iteration loop:
   every N iters:  held-out eval  ->  PSNR / SSIM  ->  export PLY
 ```
 
-The loop keeps the GPU queue shallow with fence-based backpressure instead of draining it every step, so the CPU never races minutes ahead of the device.
-
-## Architecture
-
-`TrainingHub` handles interactive commands and reconstruction. It delegates each
-run to `TrainingApplication`, whose loop owns camera sampling, schedules,
-evaluation, and reporting. The backend consumes cameras, learning rates, and
-per-step render parameters; it does not depend on COLMAP entries or UI events.
-
-`TrainingPipeline.train_step(camera, lrs=..., contextual=...)` records a complete
-optimizer step. Experiments can instead call `record_forward`, `record_loss`,
-and `record_backward` inside `pipeline.recording(...)` to inspect intermediate
-results without applying Adam. Forward and backward must use the same per-step
-parameters; call `clear_gradients()` before each independent gradient sample.
-
-`GpuRuntime` owns command submission and queue waits. The viewer shares that
-device while keeping its own rendering buffers; snapshots carry primitive data,
-active SH degree, and extinction hardness. Generated contracts keep Python
-storage layouts and Slang structures aligned.
-
-Structure-aware buffers are allocated only for that densification mode and
-initialized before use. Training targets stay in host memory by default and are
-uploaded inside each step's command buffer (`--image-residency gpu` keeps one
-texture per training camera instead). At startup the trainer plans its GPU
-allocations against the VRAM budget Windows grants the process (or
-`--vram-budget-gib`) and lowers `--max-splats`, with a warning, when they would
-not fit.
+The loop keeps the GPU queue shallow with fence-based backpressure instead of draining it every step.
 
 ## Backends and portability
 
