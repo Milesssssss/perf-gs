@@ -158,8 +158,6 @@ SH3:
 
 ## How it trains
 
-## How it trains
-
 ```
 COLMAP scene  ->  init gaussians  ->  per-iteration loop:
 
