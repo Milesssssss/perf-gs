@@ -3,9 +3,8 @@
      30k iters); the Results figures are generated from the benchmark runs by
      scripts/plots/plot_readme_results.py. -->
 
-# SCATTO-GS
-## Slang-Compiled Accelerated Training-Time Optimization for Gaussian Splatting
-A fast and efficient Slang-based 3DGS trainer.
+# PERF-GS
+A fast, modular and efficient Slang-based 3DGS trainer.
 
 ![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)
 ![Shaders](https://img.shields.io/badge/Shaders-Slang-DE3163)
@@ -15,8 +14,8 @@ A fast and efficient Slang-based 3DGS trainer.
 ![No CUDA required](https://img.shields.io/badge/CUDA-not%20required-2ea44f)
 ![Status](https://img.shields.io/badge/status-research-F5A623)
 
-A 3D Gaussian Splatting trainer written in [Slang](https://shader-slang.org) and driven from Python through [SlangPy](https://slangpy.shader-slang.org).<br>
-On an RTX 4080 it trains a Mip-NeRF 360 scene in under 30 seconds on average (28.8 seconds at SH0 with 50% sparse supervision). The codebase has no CUDA dependencies, is directly integratable with pytorch frontend and all shaders are dispatched via SlangPy.
+An extensible 3D Gaussian Splatting trainer written in [Slang](https://shader-slang.org) and driven from Python through [SlangPy](https://slangpy.shader-slang.org).<br>
+On an RTX 4080 it trains a Mip-NeRF 360 scene in under 30 seconds on average (28.8 seconds at SH0 with 50% sparse supervision). The codebase has no CUDA dependencies, is directly integratable with pytorch frontend and all shaders are dispatched via SlangPy and written in Slang.
 
 <p align="center">
   <img src="assets/teaser.jpg" alt="Mip-NeRF 360 bicycle scene trained by this pipeline, rendered from a held-out view" width="80%">
@@ -74,9 +73,9 @@ Every pixel supervised. For reference, the SADGS columns show a fast existing tr
 | **Deep Blending** | **29.18** | **29.48** | **29.8** | **37.5** | **4.81** |  |  |
 
 <p align="center">
-  <img src="assets/psnr_sweep.png" alt="Held-out PSNR per scene, SH0 and SH3, with SADGS for reference" width="95%">
-  <br>
   <img src="assets/timing_sweep.png" alt="Training time per scene, SH0 and SH3, with SADGS for reference" width="95%">
+  <br>
+  <img src="assets/psnr_sweep.png" alt="Held-out PSNR per scene, SH0 and SH3, with SADGS for reference" width="95%">
 </p>
 
 SH3 adds 0.3–0.4 dB on every dataset for about a third more training time. SADGS's SH3 is higher on the indoor scenes.
@@ -158,8 +157,6 @@ SH3:
 
 ## How it trains
 
-## How it trains
-
 ```
 COLMAP scene  ->  init gaussians  ->  per-iteration loop:
 
@@ -173,33 +170,7 @@ COLMAP scene  ->  init gaussians  ->  per-iteration loop:
   every N iters:  held-out eval  ->  PSNR / SSIM  ->  export PLY
 ```
 
-The loop keeps the GPU queue shallow with fence-based backpressure instead of draining it every step, so the CPU never races minutes ahead of the device.
-
-## Architecture
-
-`TrainingHub` handles interactive commands and reconstruction. It delegates each
-run to `TrainingApplication`, whose loop owns camera sampling, schedules,
-evaluation, and reporting. The backend consumes cameras, learning rates, and
-per-step render parameters; it does not depend on COLMAP entries or UI events.
-
-`TrainingPipeline.train_step(camera, lrs=..., contextual=...)` records a complete
-optimizer step. Experiments can instead call `record_forward`, `record_loss`,
-and `record_backward` inside `pipeline.recording(...)` to inspect intermediate
-results without applying Adam. Forward and backward must use the same per-step
-parameters; call `clear_gradients()` before each independent gradient sample.
-
-`GpuRuntime` owns command submission and queue waits. The viewer shares that
-device while keeping its own rendering buffers; snapshots carry primitive data,
-active SH degree, and extinction hardness. Generated contracts keep Python
-storage layouts and Slang structures aligned.
-
-Structure-aware buffers are allocated only for that densification mode and
-initialized before use. Training targets stay in host memory by default and are
-uploaded inside each step's command buffer (`--image-residency gpu` keeps one
-texture per training camera instead). At startup the trainer plans its GPU
-allocations against the VRAM budget Windows grants the process (or
-`--vram-budget-gib`) and lowers `--max-splats`, with a warning, when they would
-not fit.
+The loop keeps the GPU queue shallow with fence-based backpressure instead of draining it every step.
 
 ## Backends and portability
 
