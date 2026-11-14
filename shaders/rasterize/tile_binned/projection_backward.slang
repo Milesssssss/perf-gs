@@ -35,13 +35,14 @@ void projectionBackward(
     StructuredBuffer<Gaussian3D> gaussians,
     StructuredBuffer<uint> num_gaussians_counter,
     StructuredBuffer<CameraData> camera,
-    // 2D gradient seeds, summed over all tiles by the blend backward.
-    StructuredBuffer<int64_t> grad_mean2d_x,
-    StructuredBuffer<int64_t> grad_mean2d_y,
-    StructuredBuffer<int64_t> grad_cov2d_a,
-    StructuredBuffer<int64_t> grad_cov2d_b,
-    StructuredBuffer<int64_t> grad_cov2d_c,
-    StructuredBuffer<int64_t> grad_comp,   // Mip: dL/d(opacity_compensation)
+    // 2D gradient seeds, summed over all tiles by the blend backward. This
+    // kernel is their only reader, so it resets them for the next step.
+    RWStructuredBuffer<int64_t> grad_mean2d_x,
+    RWStructuredBuffer<int64_t> grad_mean2d_y,
+    RWStructuredBuffer<int64_t> grad_cov2d_a,
+    RWStructuredBuffer<int64_t> grad_cov2d_b,
+    RWStructuredBuffer<int64_t> grad_cov2d_c,
+    RWStructuredBuffer<int64_t> grad_comp,   // Mip: dL/d(opacity_compensation)
     // 3D parameter gradients (this kernel is the sole writer per gaussian).
     RWStructuredBuffer<int64_t> grad_mean_x,
     RWStructuredBuffer<int64_t> grad_mean_y,
@@ -79,11 +80,21 @@ void projectionBackward(
 
     // Seed = accumulated 2D gradients. Depth/det seeds are 0 (the blend
     // backward produces no gradient w.r.t. depth_vs or cov2d_det).
-    float2 grad_mean2d = float2(
-        fromFixed(grad_mean2d_x[gid]), fromFixed(grad_mean2d_y[gid]));
+    int64_t seed_mean_x = grad_mean2d_x[gid], seed_mean_y = grad_mean2d_y[gid];
+    int64_t seed_cov_a = grad_cov2d_a[gid], seed_cov_b = grad_cov2d_b[gid];
+    int64_t seed_cov_c = grad_cov2d_c[gid], seed_comp = grad_comp[gid];
+    // Reset for the next step. Only splats the blend backward touched are
+    // nonzero, and culled/dead slots above were never touched, so this keeps
+    // every seed zero between steps without a capacity-wide clear.
+    if ((seed_mean_x | seed_mean_y | seed_cov_a | seed_cov_b | seed_cov_c | seed_comp) != int64_t(0))
+    {
+        grad_mean2d_x[gid] = int64_t(0); grad_mean2d_y[gid] = int64_t(0);
+        grad_cov2d_a[gid] = int64_t(0); grad_cov2d_b[gid] = int64_t(0);
+        grad_cov2d_c[gid] = int64_t(0); grad_comp[gid] = int64_t(0);
+    }
+    float2 grad_mean2d = float2(fromFixed(seed_mean_x), fromFixed(seed_mean_y));
     float3 grad_cov2d = float3(
-        fromFixed(grad_cov2d_a[gid]), fromFixed(grad_cov2d_b[gid]),
-        fromFixed(grad_cov2d_c[gid]));
+        fromFixed(seed_cov_a), fromFixed(seed_cov_b), fromFixed(seed_cov_c));
 
     Gaussian3D g = gaussians[gid];
 
@@ -98,7 +109,7 @@ void projectionBackward(
     var dp_model = diffPair(model);
 
     float f3d = (mip_enabled != 0u) ? filter_3D[gid] : 0.0;
-    float g_comp = fromFixed(grad_comp[gid]);   // Mip: dL/d(opacity_compensation) seed
+    float g_comp = fromFixed(seed_comp);   // Mip: dL/d(opacity_compensation) seed
     // Seeds match the old call exactly: dL/dmean2d, dL/dcov2d, 0 (depth), 0
     // (det), dL/dcomp. Wrapper is bwd_diff-able (interface methods aren't).
     bwd_diff(projectModel<GaussianModel>)(

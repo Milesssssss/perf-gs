@@ -82,7 +82,6 @@ class TestPipeline(TrainingPipeline):
         contextual = IterationContextualVariables(
             hardness_value=self._extinction_hardness, sh_degree=self._active_sh_degree)
         with self.recording("train_step"):
-            self._clear_2d_grad_seeds()
             self.record_forward(camera, contextual)
             self.record_loss(contextual)
             self.record_backward(contextual)

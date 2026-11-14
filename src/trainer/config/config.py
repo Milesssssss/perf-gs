@@ -41,6 +41,8 @@ class DensificationProperties:
     structure_kwargs: dict[str, Any] | None = None
     # Sum each splat's blend weight into the densify window (blend-weight pruning).
     track_blend_weight: bool = False
+    # Accumulate the per-step screen gradient densification thresholds on.
+    track_screen_grad: bool = True
             
 
 @dataclass(frozen=True)

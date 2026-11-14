@@ -206,3 +206,35 @@ def test_warp_forward_backward_matches_baseline(backend: str) -> None:
         pytest.fail(f"{len(mismatches)} gradient mismatches between thread-per-"
                     f"pixel and warp-per-pixel forward feeding the backward:\n"
                     + "\n".join(mismatches))
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_projection_backward_resets_the_seeds(backend: str) -> None:
+    """projection_backward consumes the 2D seeds and leaves them zero, so a
+    second backward without any clear yields the same geometry gradients."""
+    try:
+        device = create_device(backend=backend)
+    except Exception as exc:
+        pytest.skip(f"backend {backend!r} unavailable: {exc}")
+
+    W = H = 64
+    pipeline = TestPipeline(device=device, width=W, height=H, max_splats=128,
+                            loss_config=LossConfig(ssim_weight=0.0, alpha_weight=0.0))
+    pipeline.set_target_image(_target(H, W))
+    camera = simple_camera(width=W, height=H, eye=(0.0, 0.0, 0.0),
+                           target=(0.0, 0.0, 1.0), up=(0.0, 1.0, 0.0),
+                           fovy_degrees=60.0)
+
+    first = _grads_with(pipeline, _deep_scene(100, seed=3), camera,
+                        use_persplat=True, use_flat=True)
+    for name, buffer in pipeline.buffers.grad_2d_seed_buffers.items():
+        seeds = np.frombuffer(buffer.to_numpy().tobytes(), dtype=np.int64)
+        assert not seeds.any(), f"seed {name} not reset by projection_backward"
+
+    pipeline.forward_and_loss(camera)
+    pipeline.backward()
+    pipeline.device.wait_for_idle()
+    second = pipeline.read_gradients()
+    assert np.any(first["mean_x"] != 0.0) and np.any(first["log_scale_x"] != 0.0)
+    for name in GRAD_NAMES[:10]:   # geometry grads: stored, not accumulated
+        np.testing.assert_array_equal(second[name], first[name], err_msg=name)

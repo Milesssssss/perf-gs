@@ -1210,6 +1210,7 @@ class TrainingLoop:
                     # ALSO -> the product is hacky way to hide that our magic hyperparms should all be normalized
                     structure_kwargs={"per_view_grad_thresh": (self.args.sad_freq_grad_threshold * self.scene.width * self.scene.height * 3.0) if self._should_accumulate_structure(self.training_step) else None},
                     track_blend_weight=self._tracks_blend_weight(self.training_step),
+                    track_screen_grad=self._tracks_screen_grad(self.training_step),
                 ),
                 contextual_stbn=self._timed_stbn_variables(camera_index),
             ),
@@ -1342,6 +1343,11 @@ class TrainingLoop:
         first_window = self.args.prune_blend_from - self.args.densify_every
         return (self.args.prune_blend_weight > 0.0
                 and first_window < training_step <= self.args.densify_to)
+
+    def _tracks_screen_grad(self, training_step: int) -> bool:
+        """No densify tick reads the screen gradient after the last one."""
+        return (self.densify_mode != DensificationMode.NONE
+                and training_step <= self.args.densify_to)
 
     def _present_profile_frame_if_enabled(self) -> None:
         if self.runtime.profiler is not None:

@@ -19,6 +19,7 @@ import numpy as np
 import pytest
 
 from _pipeline_testkit import TestPipeline
+from trainer.config.config import DensificationProperties, IterationContextualVariables
 from trainer.data.dataset import simple_camera
 from trainer.backend.compute.device import create_device
 
@@ -147,3 +148,43 @@ def test_tracking_accumulates_across_iters(backend: str) -> None:
     # One visible iter per call: vis1 == 1, vis2 == 2.
     assert vis1 == 1, f"expected vis1==1, got {vis1}"
     assert vis2 == 2, f"expected vis2==2 (accumulated), got {vis2}"
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_untracked_step_leaves_the_screen_gradient_alone(backend: str) -> None:
+    """Past the densify window the backward skips the screen gradient: the
+    window accumulators keep their values and the per-step buffers stay zero."""
+    W = H = 32
+    pipeline = _setup(backend, W, H, max_splats=4)
+    pipeline.set_primitive_from_numpy(
+        means=np.array([[0.0, 0.0, 2.0]], dtype=np.float32),
+        log_scales=np.log(np.array([[0.2, 0.2, 0.2]], dtype=np.float32)),
+        rot_quats=np.array([[1.0, 0.0, 0.0, 0.0]], dtype=np.float32),
+        opacities=np.array([0.8], dtype=np.float32),
+        color_logits=np.array([[1.0, -1.0, -1.0]], dtype=np.float32),
+    )
+    target = np.zeros((H, W, 3), dtype=np.float32)
+    target[:, W // 2 :, 1] = 1.0
+    pipeline.set_target_image(target)
+    camera = simple_camera(
+        width=W, height=H,
+        eye=(0.0, 0.0, 0.0), target=(0.0, 0.0, 1.0), up=(0.0, 1.0, 0.0),
+        fovy_degrees=60.0,
+    )
+
+    pipeline.clear_tracking()
+    pipeline.clear_gradients()
+    pipeline.forward_and_loss(camera)
+    pipeline.backward()
+    tracked = pipeline.read_tracking()
+    assert tracked["visibility_count"][0] == 1
+
+    pipeline.forward_and_loss(camera)
+    pipeline.record_backward(IterationContextualVariables(
+        hardness_value=1.0, sh_degree=0,
+        densification_variables=DensificationProperties(track_screen_grad=False)))
+    untracked = pipeline.read_tracking()
+    for name in ("visibility_count", "grad_mean_2d_mag"):
+        np.testing.assert_array_equal(untracked[name], tracked[name], err_msg=name)
+    for buffer in (pipeline.buffers.grad_2d_x_iter, pipeline.buffers.grad_2d_y_iter):
+        assert not np.frombuffer(buffer.to_numpy().tobytes(), dtype=np.int64).any()

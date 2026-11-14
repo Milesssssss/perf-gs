@@ -7,10 +7,10 @@ test_backward_persplat both set lambda_ssim=0. This pins the two-pass SSIM
 gradient (ssimComputeMaps + ssimGradient) against an independent NumPy
 reference that implements the SAME math with a naive 2D Gaussian convolution.
 
-Purpose: lock the gradient so the separable (H-then-V) rewrite of the two
-121-tap window loops can be proven to produce the identical result. The
-separable form only reassociates the (exact, per-axis-clamped) window sum, so
-agreement should be float-tight (~1e-4 rel), not merely approximate.
+Purpose: lock the gradient of the separable (row-then-column) LDS-tiled
+shader against the naive 121-tap 2D window. The separable form only
+reassociates the zero-padded window sum, so agreement should be float-tight
+(~1e-4 rel), not merely approximate.
 """
 from __future__ import annotations
 
@@ -39,19 +39,17 @@ def _gauss_1d() -> np.ndarray:
     return np.exp(-0.5 * (d * d) / (SIGMA * SIGMA))
 
 
-def _clamp_conv2d(img: np.ndarray, k2d: np.ndarray) -> np.ndarray:
-    """2D convolution (correlation) with per-axis edge CLAMP, matching the
-    shader's clamp(q, 0, dim-1). img: (H,W,C). Naive 2D — the reference."""
-    H, W, C = img.shape
+def _zero_pad_conv2d(img: np.ndarray, k2d: np.ndarray) -> np.ndarray:
+    """2D correlation with ZERO padding (texels outside the image contribute
+    nothing; the window weight is not renormalized), as in 3DGS's F.conv2d.
+    img: (H,W,C). Naive 2D — the reference."""
+    H, W = img.shape[:2]
     R = WINDOW_RADIUS
+    padded = np.pad(img, ((R, R), (R, R), (0, 0)))
     out = np.zeros_like(img)
     for di in range(-R, R + 1):
         for dj in range(-R, R + 1):
-            w = k2d[di + R, dj + R]
-            ys = np.clip(np.arange(H) + di, 0, H - 1)
-            xs = np.clip(np.arange(W) + dj, 0, W - 1)
-            shifted = img[ys][:, xs]
-            out += w * shifted
+            out += k2d[di + R, dj + R] * padded[R + di:R + di + H, R + dj:R + dj + W]
     return out
 
 
@@ -63,11 +61,11 @@ def _ssim_grad_reference(x: np.ndarray, y: np.ndarray) -> np.ndarray:
     w_sum = k2d.sum()
     inv_w = 1.0 / w_sum
 
-    mu_x = _clamp_conv2d(x, k2d) * inv_w
-    mu_y = _clamp_conv2d(y, k2d) * inv_w
-    Ex2 = _clamp_conv2d(x * x, k2d) * inv_w
-    Ey2 = _clamp_conv2d(y * y, k2d) * inv_w
-    Exy = _clamp_conv2d(x * y, k2d) * inv_w
+    mu_x = _zero_pad_conv2d(x, k2d) * inv_w
+    mu_y = _zero_pad_conv2d(y, k2d) * inv_w
+    Ex2 = _zero_pad_conv2d(x * x, k2d) * inv_w
+    Ey2 = _zero_pad_conv2d(y * y, k2d) * inv_w
+    Exy = _zero_pad_conv2d(x * y, k2d) * inv_w
 
     sigma_x2 = Ex2 - mu_x * mu_x
     sigma_y2 = Ey2 - mu_y * mu_y
@@ -86,9 +84,9 @@ def _ssim_grad_reference(x: np.ndarray, y: np.ndarray) -> np.ndarray:
     m2 = (2.0 * dS_dsx2) * inv_w
     m3 = (dS_dsxy) * inv_w
 
-    cm1 = _clamp_conv2d(m1, k2d)
-    cm2 = _clamp_conv2d(m2, k2d)
-    cm3 = _clamp_conv2d(m3, k2d)
+    cm1 = _zero_pad_conv2d(m1, k2d)
+    cm2 = _zero_pad_conv2d(m2, k2d)
+    cm3 = _zero_pad_conv2d(m3, k2d)
 
     # loss = (1 - SSIM), so gradient negates the SSIM gradient.
     grad_ssim = -(cm1 + x * cm2 + y * cm3)
@@ -126,9 +124,10 @@ def _target(h: int, w: int) -> np.ndarray:
     return np.stack([xx, yy, (1.0 - xx) * yy], axis=-1).astype(np.float32)
 
 
+@pytest.mark.parametrize("size", [(24, 24), (40, 23)], ids=["square", "partial_tiles"])
 @pytest.mark.parametrize("backend", BACKENDS)
-def test_ssim_grad_matches_reference(backend: str):
-    W = H = 24
+def test_ssim_grad_matches_reference(backend: str, size: tuple[int, int]):
+    W, H = size
     try:
         device = create_device(backend=backend)
     except Exception as exc:

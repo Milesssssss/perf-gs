@@ -236,6 +236,9 @@ void backwardRasterizePerSplat(
     // pixels. Written only when track_blend_weight != 0.
     RWStructuredBuffer<int64_t> blend_weight_accum,
     uniform uint track_blend_weight,
+    // Per-step screen gradient for densification (grad_2d_*_iter). Off once
+    // densification has ended: nothing reads it then.
+    uniform uint track_screen_grad,
     // Per-iteration phase in [0, BACKWARD_PIXEL_STRIDE) selecting which pixel
     // subset this backward visits. Host toggles it each iter so the SGD is
     // unbiased. Ignored when BACKWARD_PIXEL_STRIDE == 1.
@@ -697,8 +700,11 @@ void backwardRasterizePerSplat(
             InterlockedAdd(grad_color_r[g_idx], toFixed(acc_color.x));
             InterlockedAdd(grad_color_g[g_idx], toFixed(acc_color.y));
             InterlockedAdd(grad_color_b[g_idx], toFixed(acc_color.z));
-            InterlockedAdd(grad_2d_x_iter[g_idx], toFixed(acc_absx));
-            InterlockedAdd(grad_2d_y_iter[g_idx], toFixed(acc_absy));
+            if (track_screen_grad != 0u)
+            {
+                InterlockedAdd(grad_2d_x_iter[g_idx], toFixed(acc_absx));
+                InterlockedAdd(grad_2d_y_iter[g_idx], toFixed(acc_absy));
+            }
         }
 
         // Warps advance to their next bucket; a barrier isn't needed because
@@ -742,6 +748,7 @@ void backwardRasterizePerBucket(
     RWStructuredBuffer<int64_t> grad_2d_y_iter,
     RWStructuredBuffer<int64_t> blend_weight_accum,
     uniform uint track_blend_weight,
+    uniform uint track_screen_grad,
     uniform uint pixel_phase,
 #if STBN_ENABLED
     StructuredBuffer<uint> stbn_table,
@@ -1008,7 +1015,10 @@ void backwardRasterizePerBucket(
         InterlockedAdd(grad_color_r[g_idx], toFixed(acc_color.x));
         InterlockedAdd(grad_color_g[g_idx], toFixed(acc_color.y));
         InterlockedAdd(grad_color_b[g_idx], toFixed(acc_color.z));
-        InterlockedAdd(grad_2d_x_iter[g_idx], toFixed(acc_absx));
-        InterlockedAdd(grad_2d_y_iter[g_idx], toFixed(acc_absy));
+        if (track_screen_grad != 0u)
+        {
+            InterlockedAdd(grad_2d_x_iter[g_idx], toFixed(acc_absx));
+            InterlockedAdd(grad_2d_y_iter[g_idx], toFixed(acc_absy));
+        }
     }
 }

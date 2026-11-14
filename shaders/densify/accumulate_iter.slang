@@ -4,6 +4,9 @@
 
 #include "../common/types.slang"
 
+#include "generated/execution_contract.slang"
+static const uint CLUSTER_SIZE = CONTRACT_CLUSTER_SIZE;
+
 [shader("compute")]
 [numthreads(256, 1, 1)]
 void accumulateIter(
@@ -12,11 +15,18 @@ void accumulateIter(
     RWStructuredBuffer<int64_t> grad_2d_y_iter,
     RWStructuredBuffer<int64_t> grad_mean_2d_mag_accum,
     RWStructuredBuffer<uint> visibility_count_accum,
+    StructuredBuffer<uint> num_gaussians_counter,
+    // Cluster-cull mask: seeded all-ones when disabled.
+    StructuredBuffer<uint> cluster_visible,
     uniform float2 frame_dim,
     uniform uint max_splats)
 {
     uint i = dtid.x;
     if (i >= max_splats) return;
+    // Dead slots and culled clusters got no screen gradient this step (and were
+    // folded to zero when last touched), so skip their reads.
+    if (i >= num_gaussians_counter[0]) return;
+    if (cluster_visible[i / CLUSTER_SIZE] == 0u) return;
 
     int64_t ix = grad_2d_x_iter[i];
     int64_t iy = grad_2d_y_iter[i];

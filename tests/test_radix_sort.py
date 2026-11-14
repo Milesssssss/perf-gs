@@ -43,7 +43,7 @@ def _make_device_and_kernels(backend: str):
 
 
 def _radix_sort(device, kernels, keys_lo: np.ndarray, keys_hi: np.ndarray,
-                values: np.ndarray):
+                values: np.ndarray, passes: int = 8):
     n = keys_lo.shape[0]
     # Capacity rounded up to a partition multiple; max_blocks derived from it.
     cap = max(PART_SIZE, ((n + PART_SIZE - 1) // PART_SIZE) * PART_SIZE)
@@ -80,7 +80,7 @@ def _radix_sort(device, kernels, keys_lo: np.ndarray, keys_hi: np.ndarray,
 
     src_lo, src_hi, src_v = kA_lo, kA_hi, vA
     dst_lo, dst_hi, dst_v = kB_lo, kB_hi, vB
-    for pass_idx in range(8):
+    for pass_idx in range(passes):
         radix_shift = (pass_idx % 4) * 8
         key_word = 0 if pass_idx < 4 else 1
 
@@ -183,3 +183,23 @@ def test_radix_sort_tile_depth_shape(backend: str) -> None:
         mask = got_hi == tile_id
         seg = got_lo[mask]
         assert np.all(seg[1:] >= seg[:-1]), f"depth not ascending within tile {tile_id}"
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+@pytest.mark.parametrize("passes", [5, 6])
+def test_radix_sort_skips_zero_digit_passes(backend: str, passes: int) -> None:
+    """The forward sorts (tile : depth) keys in only as many 8-bit passes as
+    the tile index needs: a pass above the significant bits sorts all-zero
+    digits, a stable identity, so the result equals the full 64-bit sort."""
+    device, kernels = _make_device_and_kernels(backend)
+    n = 50_000
+    rng = np.random.default_rng(passes)
+    tile_bits = 8 * (passes - 4)
+    keys_hi = rng.integers(0, 2**tile_bits, size=n, dtype=np.uint32)
+    keys_lo = rng.integers(0, 2**32, size=n, dtype=np.uint32)
+    values = np.arange(n, dtype=np.uint32)
+
+    got = _radix_sort(device, kernels, keys_lo, keys_hi, values, passes=passes)
+    want = _reference_sort(keys_lo, keys_hi, values)
+    for name, g, w in zip(("keys_lo", "keys_hi", "values"), got, want):
+        np.testing.assert_array_equal(g, w, err_msg=name)

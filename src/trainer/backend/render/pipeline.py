@@ -806,7 +806,7 @@ class TrainingPipeline:
         data[34:36] = 0.0  # padding
         self._camera_buffer.copy_from_numpy(np.ascontiguousarray(data.view(np.uint8)))
 
-    def _radix_sort_pairs(self) -> tuple[spy.NDBuffer, spy.NDBuffer, spy.NDBuffer]:
+    def _radix_sort_pairs(self, key_bits: int = 64) -> tuple[spy.NDBuffer, spy.NDBuffer, spy.NDBuffer]:
         """DeviceRadixSort (ported from GPUSorting, MIT). Returns the
         (keys_lo, keys_hi, values) triplet holding the sorted result.
 
@@ -819,7 +819,9 @@ class TrainingPipeline:
                        record to the *_out buffers.
 
         ``n`` (the actual pair count) lives in ``scan_total[0]`` on the
-        GPU; Python never reads it back in the hot path.
+        GPU; Python never reads it back in the hot path. ``key_bits`` bounds
+        the significant key bits: an 8-bit LSD pass above them only sorts zero
+        digits (a stable identity), so it is skipped.
         """
         b = self.buffers
         src_lo, src_hi, src_v = b.sort_keys_lo_a, b.sort_keys_hi_a, b.sort_values_a
@@ -850,7 +852,7 @@ class TrainingPipeline:
             b_global_hist=b.radix_global_hist.storage,
         )
 
-        for pass_idx in range(8):
+        for pass_idx in range((key_bits + 7) // 8):
             radix_shift = (pass_idx % 4) * 8
             key_word = 0 if pass_idx < 4 else 1
             with self._marker_group(f"pass_{pass_idx}"):
@@ -985,7 +987,9 @@ class TrainingPipeline:
             )
 
         with self._marker_group("radix_sort"):
-            sorted_lo, sorted_hi, sorted_v = self._radix_sort_pairs()
+            # Key = (tile index : 32-bit depth); the tile index needs few bits.
+            tile_bits = max(1, (num_tiles - 1).bit_length())
+            sorted_lo, sorted_hi, sorted_v = self._radix_sort_pairs(key_bits=32 + tile_bits)
 
         with self._marker_group("identify_tile_ranges"):
             self._dispatch(self.k_identify_tile_ranges, "identify_tile_ranges",
@@ -1059,11 +1063,12 @@ class TrainingPipeline:
     # ------------------------------------------------------------------
 
     def clear_gradients(self) -> None:
-        """Zero the 14 scalar param grads + 5 2D grad seeds. Full clear.
+        """Zero the 14 scalar param grads + 6 2D grad seeds. Full clear.
 
         Use before isolated forward/loss/backward probes that do not run Adam.
-        Also used at pipeline setup via the training loop before iter 1
-        (see :meth:`_clear_2d_grad_seeds` for the per-iter hot path)."""
+        Also used at pipeline setup via the training loop before iter 1. Per
+        step no clear is needed: projection_backward resets the seeds and Adam
+        the parameter grads after consuming them."""
         b = self.buffers
         for name in GRAD_SCALAR_COMPONENTS:
             self._dispatch(self.k_grad_clear, "grad_clear",
@@ -1071,15 +1076,6 @@ class TrainingPipeline:
                 grad_buffer=b.grad_buffers[name].storage,
                 max_splats=self.max_splats,
             )
-        for name in b.grad_2d_seed_buffers:
-            self._dispatch(self.k_grad_clear, "grad_clear",
-                thread_count=[self.max_splats, 1, 1],
-                grad_buffer=b.grad_2d_seed_buffers[name].storage,
-                max_splats=self.max_splats,
-            )
-
-    def _clear_2d_grad_seeds(self) -> None:
-        b = self.buffers
         for name in b.grad_2d_seed_buffers:
             self._dispatch(self.k_grad_clear, "grad_clear",
                 thread_count=[self.max_splats, 1, 1],
@@ -1143,8 +1139,13 @@ class TrainingPipeline:
                               and densification_variables.track_blend_weight)
         if track_blend_weight and not self.use_persplat_backward:
             raise RuntimeError("blend-weight tracking needs the per-splat backward")
-        blend_weight_kwargs = dict(blend_weight_accum=b.blend_weight_accum.storage,
-                                   track_blend_weight=int(track_blend_weight))
+        # The per-pixel backward writes the screen gradient unconditionally.
+        track_screen_grad = (densification_variables is None
+                             or densification_variables.track_screen_grad
+                             or not self.use_persplat_backward)
+        tracking_kwargs = {"blend_weight_accum": b.blend_weight_accum.storage,
+                           "track_blend_weight": int(track_blend_weight),
+                           "track_screen_grad": int(track_screen_grad)}
 
         with self._marker_group("rasterize_backward"):
             if self.use_persplat_backward:
@@ -1202,7 +1203,7 @@ class TrainingPipeline:
                         grad_color_b=gb["color_b"].storage,
                         grad_2d_x_iter=b.grad_2d_x_iter.storage,
                         grad_2d_y_iter=b.grad_2d_y_iter.storage,
-                        **blend_weight_kwargs,
+                        **tracking_kwargs,
                         pixel_phase=self._backward_pixel_phase,
                         **backward_stbn,
                         extinction_hardness=iteration_contextual_variables.hardness_value,
@@ -1227,7 +1228,7 @@ class TrainingPipeline:
                     grad_color_b=gb["color_b"].storage,
                     grad_2d_x_iter=b.grad_2d_x_iter.storage,
                     grad_2d_y_iter=b.grad_2d_y_iter.storage,
-                    **blend_weight_kwargs,
+                    **tracking_kwargs,
                     # SGD pixel-subsampling phase; rotates each backward so the
                     # visited subset alternates (no-op at BACKWARD_PIXEL_STRIDE=1).
                     pixel_phase=self._backward_pixel_phase,
@@ -1311,16 +1312,19 @@ class TrainingPipeline:
                     **(densification_variables.structure_kwargs or {})
                 )
 
-        with self._marker_group("accumulate_iter"):
-            self._dispatch(self.k_accumulate_iter, "accumulate_iter",
-                thread_count=[self.max_splats, 1, 1],
-                grad_2d_x_iter=b.grad_2d_x_iter.storage,
-                grad_2d_y_iter=b.grad_2d_y_iter.storage,
-                grad_mean_2d_mag_accum=b.grad_mean_2d_mag_accum.storage,
-                visibility_count_accum=b.visibility_count_accum.storage,
-                frame_dim=spy.float2(self.width, self.height),
-                max_splats=self.max_splats,
-            )
+        if track_screen_grad:
+            with self._marker_group("accumulate_iter"):
+                self._dispatch(self.k_accumulate_iter, "accumulate_iter",
+                    thread_count=[self.max_splats, 1, 1],
+                    grad_2d_x_iter=b.grad_2d_x_iter.storage,
+                    grad_2d_y_iter=b.grad_2d_y_iter.storage,
+                    grad_mean_2d_mag_accum=b.grad_mean_2d_mag_accum.storage,
+                    visibility_count_accum=b.visibility_count_accum.storage,
+                    num_gaussians_counter=b.num_gaussians_counter.storage,
+                    cluster_visible=b.cluster_visible.storage,
+                    frame_dim=spy.float2(self.width, self.height),
+                    max_splats=self.max_splats,
+                )
 
     def _run_regularization(self) -> None:
         config = self.regularization_config
@@ -1380,9 +1384,6 @@ class TrainingPipeline:
         self.set_active_sh_degree(contextual.sh_degree)
 
         with self._recording("train_step"):
-            with self._marker_group("clear_grads"):
-                # TODO this should not be here by itself
-                self._clear_2d_grad_seeds()
             with self._marker_group("forward"):
                 self.record_forward(camera, contextual)
             with self._marker_group("loss"):

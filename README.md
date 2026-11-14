@@ -1,7 +1,8 @@
 <!-- Images in assets/ are real outputs of this repo: teaser.jpg and
      examples_strip.jpg are renders from a trained bicycle scene (Mip-NeRF 360,
      30k iters); the Results figures are generated from the benchmark runs by
-     scripts/plots/plot_readme_results.py. -->
+     scripts/plots/plot_readme_results.py, and pareto.png by
+     scripts/plots/plot_pareto.py. -->
 
 # PERF-GS
 A fast, modular and efficient Slang-based 3DGS trainer.
@@ -15,7 +16,7 @@ A fast, modular and efficient Slang-based 3DGS trainer.
 ![Status](https://img.shields.io/badge/status-research-F5A623)
 
 An extensible 3D Gaussian Splatting trainer written in [Slang](https://shader-slang.org) and driven from Python through [SlangPy](https://slangpy.shader-slang.org).<br>
-On an RTX 4080 it trains a Mip-NeRF 360 scene in under 30 seconds on average (28.8 seconds at SH0 with 50% sparse supervision). The codebase has no CUDA dependencies, is directly integratable with pytorch frontend and all shaders are dispatched via SlangPy and written in Slang.
+On an RTX 4080 it trains a Mip-NeRF 360 scene in about 25 seconds on average (25.2 seconds at SH0 supervising every pixel, 23.5 seconds with 50% sparse supervision). The codebase has no CUDA dependencies, is directly integratable with pytorch frontend and all shaders are dispatched via SlangPy and written in Slang.
 
 <p align="center">
   <img src="assets/teaser.jpg" alt="Mip-NeRF 360 bicycle scene trained by this pipeline, rendered from a held-out view" width="80%">
@@ -45,7 +46,7 @@ By writing the kernels in Slang and having the whole system driven by slangpy, w
 
 ## Results
 
-**On an RTX 4080, a Mip-NeRF 360 scene trains in under 30 seconds on average:** 28.8 seconds at SH0 with 50% sparse supervision (26.38 dB), 31.3 seconds supervising every pixel (26.46 dB).
+**On an RTX 4080, a Mip-NeRF 360 scene trains in about 25 seconds on average:** 25.2 seconds at SH0 supervising every pixel (26.50 dB), 23.5 seconds with 50% sparse supervision (26.42 dB). The indoor scenes take 13.7–18.8 seconds. Stacking pruning, bf16 optimizer state and 50% sparse supervision trains bicycle in 22.9 seconds and room in 11.6 for under 0.1 dB of PSNR, and the fastest combination we tried in 15.7 and 8.5 seconds for 0.4 and 1.0 dB (see [Speed/quality trade-offs](#speedquality-trade-offs)).
 
 All runs: 3000 iterations, structure-aware densification with Mip-Splatting, every 8th view held out, one run each. Mip-NeRF 360 trains at quarter resolution, Tanks & Temples at 980×545 and Deep Blending at native resolution. Times cover the training loop only. Every configuration is in [docs/benchmark_results.csv](docs/benchmark_results.csv), and [scripts/plots/plot_readme_results.py](scripts/plots/plot_readme_results.py) regenerates the figures.
 
@@ -55,22 +56,22 @@ Every pixel supervised. For reference, the SADGS columns show a fast existing tr
 
 | Scene | PSNR SH0 | PSNR SH3 | Time SH0 (seconds) | Time SH3 (seconds) | Splats (millions) | SADGS PSNR SH0 | SADGS PSNR SH3 |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| bicycle | 24.42 | 24.80 | 33.9 | 45.3 | 5.30 | 24.46 |  |
-| flowers | 21.12 | 21.34 | 40.4 | 54.8 | 5.40 | 21.26 |  |
-| garden | 26.43 | 26.74 | 48.7 | 66.1 | 5.32 | 26.25 |  |
-| stump | 26.02 | 26.37 | 35.7 | 48.5 | 5.72 | 25.91 |  |
-| treehill | 22.16 | 22.21 | 39.8 | 53.5 | 5.47 | 22.11 |  |
-| bonsai | 29.98 | 30.56 | 19.2 | 24.8 | 2.08 | 29.72 | 30.94 |
-| counter | 27.45 | 27.97 | 22.9 | 30.3 | 1.86 | 27.31 | 28.55 |
-| kitchen | 29.88 | 30.52 | 23.2 | 30.3 | 1.67 | 29.98 | 31.03 |
-| room | 30.71 | 30.88 | 17.9 | 22.5 | 1.70 | 30.83 | 31.24 |
-| train | 20.28 | 20.52 | 35.2 | 48.8 | 3.45 |  |  |
-| truck | 24.84 | 25.27 | 28.8 | 39.2 | 2.90 |  |  |
-| drjohnson | 28.65 | 28.71 | 31.0 | 39.4 | 5.25 |  |  |
-| playroom | 29.71 | 30.25 | 28.6 | 35.6 | 4.37 |  |  |
-| **Mip-NeRF 360** | **26.46** | **26.82** | **31.3** | **41.8** | **3.83** | **26.43** |  |
-| **Tanks & Temples** | **22.56** | **22.89** | **32.0** | **44.0** | **3.17** |  |  |
-| **Deep Blending** | **29.18** | **29.48** | **29.8** | **37.5** | **4.81** |  |  |
+| bicycle | 24.46 | 24.85 | 27.2 | 39.4 | 5.23 | 24.46 |  |
+| flowers | 21.08 | 21.30 | 32.4 | 47.4 | 5.40 | 21.26 |  |
+| garden | 26.40 | 26.67 | 41.1 | 58.7 | 5.26 | 26.25 |  |
+| stump | 25.99 | 26.42 | 28.3 | 41.7 | 5.70 | 25.91 |  |
+| treehill | 22.19 | 22.28 | 31.9 | 45.9 | 5.55 | 22.11 |  |
+| bonsai | 30.07 | 30.55 | 14.8 | 20.8 | 2.07 | 29.72 | 30.94 |
+| counter | 27.45 | 28.00 | 18.4 | 25.6 | 1.84 | 27.31 | 28.55 |
+| kitchen | 29.99 | 30.13 | 18.8 | 25.6 | 1.68 | 29.98 | 31.03 |
+| room | 30.88 | 31.18 | 13.7 | 18.9 | 1.68 | 30.83 | 31.24 |
+| train | 20.21 | 20.48 | 29.3 | 43.4 | 3.34 |  |  |
+| truck | 24.98 | 25.25 | 23.7 | 33.5 | 2.94 |  |  |
+| drjohnson | 28.58 | 28.78 | 23.7 | 32.5 | 5.24 |  |  |
+| playroom | 29.68 | 30.02 | 21.8 | 29.1 | 4.28 |  |  |
+| **Mip-NeRF 360** | **26.50** | **26.82** | **25.2** | **36.0** | **3.82** | **26.43** |  |
+| **Tanks & Temples** | **22.59** | **22.87** | **26.5** | **38.4** | **3.14** |  |  |
+| **Deep Blending** | **29.13** | **29.40** | **22.7** | **30.8** | **4.76** |  |  |
 
 <p align="center">
   <img src="assets/timing_sweep.png" alt="Training time per scene, SH0 and SH3, with SADGS for reference" width="95%">
@@ -78,16 +79,16 @@ Every pixel supervised. For reference, the SADGS columns show a fast existing tr
   <img src="assets/psnr_sweep.png" alt="Held-out PSNR per scene, SH0 and SH3, with SADGS for reference" width="95%">
 </p>
 
-SH3 adds 0.3–0.4 dB on every dataset for about a third more training time. SADGS's SH3 is higher on the indoor scenes.
+SH3 adds about 0.3 dB on every dataset (0.27–0.32 dB) for 36–45% more training time. SADGS's SH3 is higher on the indoor scenes.
 
 | Dataset | SH | PSNR | SSIM | LPIPS |
 | --- | ---: | ---: | ---: | ---: |
-| Mip-NeRF 360 | SH0 | 26.46 | 0.809 | 0.216 |
+| Mip-NeRF 360 | SH0 | 26.50 | 0.809 | 0.216 |
 | Mip-NeRF 360 | SH3 | 26.82 | 0.817 | 0.207 |
-| Tanks & Temples | SH0 | 22.56 | 0.841 | 0.220 |
-| Tanks & Temples | SH3 | 22.89 | 0.847 | 0.210 |
-| Deep Blending | SH0 | 29.18 | 0.902 | 0.328 |
-| Deep Blending | SH3 | 29.48 | 0.905 | 0.322 |
+| Tanks & Temples | SH0 | 22.59 | 0.839 | 0.222 |
+| Tanks & Temples | SH3 | 22.87 | 0.847 | 0.209 |
+| Deep Blending | SH0 | 29.13 | 0.903 | 0.328 |
+| Deep Blending | SH3 | 29.40 | 0.905 | 0.321 |
 
 ### Training time and GPU memory
 
@@ -95,12 +96,12 @@ Averages per dataset, every pixel supervised:
 
 | Dataset | SH | Time (seconds) | Splats (millions) | VRAM (GiB) |
 | --- | ---: | ---: | ---: | ---: |
-| Mip-NeRF 360 | SH0 | 31.3 | 3.83 | 5.4 |
-| Mip-NeRF 360 | SH3 | 41.8 | 3.82 | 8.9 |
-| Tanks & Temples | SH0 | 32.0 | 3.17 | 5.3 |
-| Tanks & Temples | SH3 | 44.0 | 3.16 | 8.9 |
-| Deep Blending | SH0 | 29.8 | 4.81 | 5.4 |
-| Deep Blending | SH3 | 37.5 | 4.81 | 9.0 |
+| Mip-NeRF 360 | SH0 | 25.2 | 3.82 | 5.4 |
+| Mip-NeRF 360 | SH3 | 36.0 | 3.84 | 9.0 |
+| Tanks & Temples | SH0 | 26.5 | 3.14 | 5.4 |
+| Tanks & Temples | SH3 | 38.4 | 3.15 | 8.9 |
+| Deep Blending | SH0 | 22.7 | 4.76 | 5.5 |
+| Deep Blending | SH3 | 30.8 | 4.80 | 9.0 |
 
 <p align="center">
   <img src="assets/vram.png" alt="GPU memory while training with fp32 and bf16 optimizer state, SH0 and SH3" width="60%">
@@ -110,27 +111,27 @@ Memory is reserved up front for up to 7 million splats (`--max-splats`), so it i
 
 ### Sparse supervision (STBN)
 
-`--stbn-pixel-fraction` supervises only a blue-noise subset of the pixels at each step. Down to 25% it costs about 0.2 dB and trains up to 17% faster; at 2% quality drops sharply.
+`--stbn-pixel-fraction` supervises only a blue-noise subset of the pixels at each step. At 50% it costs under 0.1 dB and trains 2–7% faster, at 25% it costs 0.1–0.2 dB and trains 6–14% faster; at 2% quality drops sharply.
 
 SH0:
 
 | Pixels / step | M360 PSNR | M360 time (seconds) | T&T PSNR | T&T time (seconds) | DB PSNR | DB time (seconds) |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| 100% | 26.46 | 31.3 | 22.56 | 32.0 | 29.18 | 29.8 |
-| 50% | 26.38 | 28.8 | 22.50 | 30.6 | 29.20 | 27.5 |
-| 25% | 26.29 | 26.3 | 22.34 | 29.0 | 29.16 | 24.8 |
-| 10% | 25.81 | 25.4 | 22.07 | 28.7 | 28.98 | 23.5 |
-| 2% | 23.41 | 27.1 | 19.76 | 31.9 | 27.17 | 22.8 |
+| 100% | 26.50 | 25.2 | 22.59 | 26.5 | 29.13 | 22.7 |
+| 50% | 26.42 | 23.5 | 22.52 | 25.4 | 29.24 | 21.4 |
+| 25% | 26.27 | 21.6 | 22.42 | 24.0 | 29.02 | 19.6 |
+| 10% | 25.85 | 20.7 | 22.13 | 24.1 | 29.03 | 18.6 |
+| 2% | 23.39 | 22.6 | 19.82 | 27.5 | 26.96 | 18.0 |
 
 SH3:
 
 | Pixels / step | M360 PSNR | M360 time (seconds) | T&T PSNR | T&T time (seconds) | DB PSNR | DB time (seconds) |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| 100% | 26.82 | 41.8 | 22.89 | 44.0 | 29.48 | 37.5 |
-| 50% | 26.79 | 39.5 | 22.87 | 42.7 | 29.23 | 35.3 |
-| 25% | 26.66 | 36.9 | 22.69 | 41.2 | 29.31 | 32.4 |
-| 10% | 26.23 | 35.9 | 22.37 | 41.2 | 29.25 | 31.3 |
-| 2% | 23.68 | 39.8 | 20.11 | 48.5 | 27.44 | 30.5 |
+| 100% | 26.82 | 36.0 | 22.87 | 38.4 | 29.40 | 30.8 |
+| 50% | 26.73 | 34.5 | 22.79 | 37.5 | 29.38 | 29.1 |
+| 25% | 26.64 | 32.1 | 22.68 | 36.2 | 29.22 | 26.9 |
+| 10% | 26.22 | 31.3 | 22.45 | 36.7 | 29.36 | 26.4 |
+| 2% | 23.65 | 35.5 | 19.97 | 43.6 | 27.40 | 26.1 |
 
 <p align="center">
   <img src="assets/stbn_convergence.png" alt="Held-out PSNR against training time at 100, 25, 10 and 2 percent of pixels" width="95%">
@@ -144,10 +145,67 @@ SH3:
 
 | SH | Adam moments | M360 PSNR | T&T PSNR | DB PSNR | Time (seconds) | VRAM (GiB) |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| SH0 | fp32 | 26.46 | 22.56 | 29.18 | 31.2 | 5.37 |
-| SH0 | bf16 | 26.47 | 22.54 | 29.18 | 30.2 | 4.64 |
-| SH3 | fp32 | 26.82 | 22.89 | 29.48 | 41.5 | 8.92 |
-| SH3 | bf16 | 26.84 | 22.84 | 29.47 | 39.0 | 7.25 |
+| SH0 | fp32 | 26.50 | 22.59 | 29.13 | 25.0 | 5.42 |
+| SH0 | bf16 | 26.48 | 22.58 | 29.22 | 24.1 | 4.69 |
+| SH3 | fp32 | 26.82 | 22.87 | 29.40 | 35.6 | 8.97 |
+| SH3 | bf16 | 26.80 | 22.86 | 29.50 | 33.0 | 7.30 |
+
+### Per-step overhead
+
+All numbers above include four recent changes that leave the math unchanged:
+
+- The SSIM loss runs as two LDS-tiled separable passes (11-tap rows, then 11-tap columns) instead of two 121-tap window loops. Its gradient also lands closer to a float64 reference.
+- The projection backward resets the 2D gradient seeds it consumes, so no step clears all 7 million slots of six buffers any more.
+- The forward depth sort runs only the radix passes the tile index needs: 6 of 8 at quarter resolution.
+- Densification bookkeeping only reads live, visible splats, and stops after the last densification step.
+
+Bicycle at iteration 560, Nsight GPU Trace with clocks locked to base, milliseconds per step:
+
+| Pass | Before | After |
+| --- | ---: | ---: |
+| Gradient seed clear | 0.48 | 0 |
+| Radix sort | 1.58 | 1.24 |
+| SSIM loss | 1.65 | 0.29 |
+| Densification bookkeeping | 0.25 | 0.07 |
+| Projection backward | 0.22 | 0.27 |
+| **Whole step** | **10.50** | **8.07** |
+
+End to end at SH0, bicycle trains in 27.5 seconds instead of 34.8 (24.44 dB, was 24.42) and room in 13.8 seconds instead of 17.5 (30.68 dB, was 30.76; mean of three seeds, which spread by 0.24 dB). Over the whole benchmark at SH0, Mip-NeRF 360 went from 31.3 to 25.2 seconds, Tanks & Temples from 32.0 to 26.5 and Deep Blending from 29.8 to 22.7, with PSNR within 0.05 dB; at SH3 they take 36.0, 38.4 and 30.8 seconds instead of 41.8, 44.0 and 37.5.
+
+### Speed/quality trade-offs
+
+The knobs that buy speed with quality stack: sparse supervision (`--stbn-pixel-fraction`), bf16 optimizer state (`--adam-moments bf16`), blend-weight pruning (`--prune-blend-weight`, `--prune-blend-from`) and the opaque-core splat kernel (`--splat-kernel opaque_core --splat-profile-power 3 --splat-profile-onset 2`). Each point below is one combination trained on bicycle (one run) and room (mean of three seeds) at SH0 with the current code; the line joins the combinations that nothing else beats on both training time and PSNR.
+
+<p align="center">
+  <img src="assets/pareto.png" alt="Held-out PSNR against training time for combinations of sparse supervision, bf16 optimizer state, pruning and the opaque-core kernel" width="95%">
+</p>
+
+Sorted from slowest to fastest; the PSNR change and time are averaged over the two scenes, and bold rows are on the frontier of that average.
+
+| Configuration | bicycle PSNR | bicycle time (seconds) | room PSNR | room time (seconds) | PSNR change (dB) | Time vs. baseline |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| baseline (defaults) | 24.44 | 27.5 | 30.68 | 13.8 | 0.00 | 100% |
+| bf16 | 24.43 | 27.0 | 30.72 | 13.4 | +0.02 | 98% |
+| STBN 50% | 24.34 | 25.7 | 30.71 | 13.1 | −0.04 | 94% |
+| **prune** | **24.45** | **25.8** | **30.73** | **12.5** | **+0.03** | **92%** |
+| opaque core | 24.22 | 25.3 | 30.27 | 12.3 | −0.32 | 91% |
+| **bf16 + prune** | **24.45** | **24.1** | **30.70** | **12.1** | **+0.01** | **88%** |
+| STBN 25% | 24.24 | 23.1 | 30.41 | 12.5 | −0.24 | 87% |
+| STBN 10% | 23.69 | 21.7 | 30.03 | 12.3 | −0.70 | 84% |
+| **bf16 + prune + STBN 50%** | **24.37** | **22.9** | **30.60** | **11.6** | **−0.08** | **84%** |
+| bf16 + prune + opaque core | 24.24 | 21.8 | 30.20 | 10.8 | −0.34 | 79% |
+| bf16 + prune + STBN 25% | 24.22 | 19.8 | 30.36 | 10.1 | −0.27 | 73% |
+| **prune early** | **24.46** | **20.9** | **30.25** | **9.2** | **−0.21** | **71%** |
+| **bf16 + prune early + STBN 50% + opaque core** | **24.02** | **15.7** | **29.68** | **8.5** | **−0.71** | **59%** |
+
+"prune" is `--prune-blend-weight 0.2 --prune-blend-from 1900` and "prune early" is `--prune-blend-weight 0.3 --prune-blend-from 500`.
+
+- **Same quality, 12% faster:** `--adam-moments bf16 --prune-blend-weight 0.2 --prune-blend-from 1900`.
+- **Within 0.1 dB, 16% faster:** add `--stbn-pixel-fraction 0.5` (bicycle in 22.9 seconds, room in 11.6).
+- **Pruning early** is free on bicycle (24.46 dB in 20.9 seconds) but costs room 0.4 dB, so it suits large outdoor scenes.
+- **Everything stacked** trains bicycle in 15.7 seconds and room in 8.5 for 0.7 dB.
+
+[scripts/running/eval_pareto.py](scripts/running/eval_pareto.py) reruns the sweep (runs are cached) and every number is in [docs/pareto_results.csv](docs/pareto_results.csv).
 
 ### Convergence
 

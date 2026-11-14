@@ -87,41 +87,37 @@ def _tag(value: str) -> str:
     return value.replace(".", "p").replace("-", "neg").replace("/", "_")
 
 
-def run_cell(scene: str, axis: str, value: str, *, iters: int, force: bool,
-             extra: list[str], sweep_name: str) -> dict | None:
+def train_run(scene: str, run_name: str, flags: list[str], *, iters: int,
+              force: bool) -> dict | None:
+    """Train ``scene`` with BASE_ARGS + ``flags`` in a fresh subprocess, reusing a
+    cached ``test_psnr.json`` unless ``force``. Returns its metrics, or None."""
     scene_dir = _scene_dir(scene)
     if scene_dir is None:
         print(f"[sweep] SKIP {scene}: not found under "
               f"{', '.join('datasets/' + r for r in DATASET_ROOTS)}", flush=True)
         return None
 
-    run_name = f"sweep_{sweep_name}_{scene}_{_tag(value)}"
     result_json = REPO / "outputs" / "train" / run_name / "test_psnr.json"
-
     if result_json.exists() and not force:
-        print(f"[sweep] cached {scene} {axis}={value}", flush=True)
+        print(f"[sweep] cached {run_name}", flush=True)
     else:
         cmd = [
             sys.executable, str(REPO / "scripts" / "running" / "v2_train.py"),
             "--scene", str(scene_dir),
             "--iters", str(iters),
             *BASE_ARGS,
-            f"--{axis}", value,
-            *extra,
+            *flags,
             "--run-name", run_name,
         ]
-        print(f"[sweep] TRAIN {scene} {axis}={value} ...", flush=True)
+        print(f"[sweep] TRAIN {run_name} ...", flush=True)
         proc = subprocess.run(cmd, cwd=str(REPO))
         if proc.returncode != 0 or not result_json.exists():
-            print(f"[sweep] FAILED {scene} {axis}={value} (rc={proc.returncode})",
-                  flush=True)
+            print(f"[sweep] FAILED {run_name} (rc={proc.returncode})", flush=True)
             return None
 
     data = json.loads(result_json.read_text())
     return {
         "scene": scene,
-        "axis": axis,
-        "value": value,
         "psnr_srgb": data.get("psnr_srgb"),
         "train_wall_s": data.get("train_wall_s"),
         "n_gaussians": data.get("n_gaussians"),
@@ -130,6 +126,15 @@ def run_cell(scene: str, axis: str, value: str, *, iters: int, force: bool,
             "max_splats", "max_sort_pairs", "peak_sort_pairs", "sort_overflows",
             "targets_streamed", "vram_budget_bytes", "vram_usage_bytes")},
     }
+
+
+def run_cell(scene: str, axis: str, value: str, *, iters: int, force: bool,
+             extra: list[str], sweep_name: str) -> dict | None:
+    record = train_run(scene, f"sweep_{sweep_name}_{scene}_{_tag(value)}",
+                       [f"--{axis}", value, *extra], iters=iters, force=force)
+    if record is None:
+        return None
+    return {"scene": scene, "axis": axis, "value": value, **record}
 
 
 def _publish(out_dir: Path, results: list[dict], axis: str, iters: int,

@@ -3,22 +3,63 @@
 #include "../common/types.slang"
 #include "../common/stbn.slang"
 
-static const int WINDOW_RADIUS = 5;   // 11x11 window
-static const float SIGMA = 1.5;
+// SSIM over an 11x11 Gaussian window (sigma 1.5) with zero padding, as in
+// 3DGS's F.conv2d. Both passes are LDS-tiled and separable: the 2D window is
+// the outer product of a 1D Gaussian, so every 121-tap window sum becomes an
+// 11-tap row sum followed by an 11-tap column sum. A 16x16 group stages its
+// tile plus a 5-texel apron (26x26), row-filters 26x16 texels, then each
+// thread column-filters its own pixel.
+
+static const int WINDOW_RADIUS = 5;
+static const int WINDOW = 2 * WINDOW_RADIUS + 1;
 static const float C1 = 0.0001;  // (0.01)^2
 static const float C2 = 0.0009;  // (0.03)^2
 
-// Unnormalized Gaussian weight for window offset (di,dj) in [-R,R].
-static float gaussWeightRaw(int di, int dj)
+// exp(-k^2 / (2 * 1.5^2)) for k = -5..5 and 1 / (sum of the 121 2D weights).
+static const float GAUSS[WINDOW] = {
+    0.00386592014, 0.0285655008, 0.135335283, 0.411112291, 0.800737403, 1.0,
+    0.800737403, 0.411112291, 0.135335283, 0.0285655008, 0.00386592014 };
+static const float INV_WINDOW_SUM = 0.0707622378;
+
+static const uint TILE = 16;                          // = numthreads per axis
+static const uint THREADS = TILE * TILE;
+static const uint APRON = TILE + 2 * WINDOW_RADIUS;   // staged texels per axis
+static const uint APRON_TEXELS = APRON * APRON;
+static const uint ROW_SUMS = APRON * TILE;            // row-filtered texels
+
+bool insideFrame(int2 q, uint2 frame_dim)
 {
-    return exp(-0.5 * float(di * di + dj * dj) / (SIGMA * SIGMA));
+    return q.x >= 0 && q.y >= 0 && q.x < int(frame_dim.x) && q.y < int(frame_dim.y);
+}
+
+// Apron texel i of the group's staging area, in image coordinates.
+int2 apronTexel(uint3 group, uint i)
+{
+    return int2(group.xy * TILE) - WINDOW_RADIUS + int2(i % APRON, i / APRON);
+}
+
+// First staged texel of row-sum i (26 rows x 16 columns).
+uint rowSumBase(uint i)
+{
+    return (i / TILE) * APRON + i % TILE;
+}
+
+// Row sum read by the thread's pixel at column-pass tap k.
+uint columnTap(uint3 thread, int k)
+{
+    return (thread.y + k) * TILE + thread.x;
 }
 
 // --- Pass 1: compute the three back-projection maps m1,m2,m3 (per channel) ---
+groupshared float gs_x[3][APRON_TEXELS];        // rendered, per channel
+groupshared float gs_y[3][APRON_TEXELS];        // target, per channel
+groupshared float gs_moments[5][ROW_SUMS];      // row sums of x, y, xx, yy, xy
+
 [shader("compute")]
 [numthreads(16, 16, 1)]
 void ssimComputeMaps(
-    uint3 dtid: SV_DispatchThreadID,
+    uint3 gid: SV_GroupID,
+    uint3 gtid: SV_GroupThreadID,
     RWTexture2D<float4> output_image,   // rendered (sRGB, premult-over-black)
     RWTexture2D<float4> target_image,   // GT (sRGB in .rgb)
     RWTexture2D<float4> ssim_m1,
@@ -26,42 +67,72 @@ void ssimComputeMaps(
     RWTexture2D<float4> ssim_m3,
     uniform uint2 frame_dim)
 {
-    uint2 p = dtid.xy;
-    if (p.x >= frame_dim.x || p.y >= frame_dim.y) return;
-
-    float3 mu_x = float3(0.0), mu_y = float3(0.0);
-    float3 Ex2 = float3(0.0), Ey2 = float3(0.0), Exy = float3(0.0);
-    float w_sum = 0.0;
-
-    for (int di = -WINDOW_RADIUS; di <= WINDOW_RADIUS; di++)
+    uint t = gtid.y * TILE + gtid.x;
+    for (uint i = t; i < APRON_TEXELS; i += THREADS)
     {
-        for (int dj = -WINDOW_RADIUS; dj <= WINDOW_RADIUS; dj++)
+        int2 q = apronTexel(gid, i);
+        float3 x = float3(0.0), y = float3(0.0);   // zero padding
+        if (insideFrame(q, frame_dim))
         {
-            float w = gaussWeightRaw(di, dj);
-            w_sum += w;
-
-            int2 q = int2(p) + int2(dj, di);
-
-            bool valid =
-                q.x >= 0 && q.y >= 0 &&
-                q.x < int(frame_dim.x) &&
-                q.y < int(frame_dim.y);
-
-            if (!valid)
-                continue; // zero padding
-
-            float3 xq = output_image[uint2(q)].rgb;
-            float3 yq = target_image[uint2(q)].rgb;
-
-            mu_x += w * xq;
-            mu_y += w * yq;
-            Ex2  += w * xq * xq;
-            Ey2  += w * yq * yq;
-            Exy  += w * xq * yq;
+            x = output_image[uint2(q)].rgb;
+            y = target_image[uint2(q)].rgb;
+        }
+        [unroll] for (uint c = 0; c < 3; c++)
+        {
+            gs_x[c][i] = x[c];
+            gs_y[c][i] = y[c];
         }
     }
+    GroupMemoryBarrierWithGroupSync();
 
-    float inv_w = 1.0 / w_sum;
+    float3 mu_x, mu_y, Ex2, Ey2, Exy;
+    [unroll] for (uint c = 0; c < 3; c++)
+    {
+        for (uint i = t; i < ROW_SUMS; i += THREADS)
+        {
+            uint base = rowSumBase(i);
+            float sx = 0.0, sy = 0.0, sxx = 0.0, syy = 0.0, sxy = 0.0;
+            [unroll] for (int k = 0; k < WINDOW; k++)
+            {
+                float x = gs_x[c][base + k];
+                float y = gs_y[c][base + k];
+                sx += GAUSS[k] * x;
+                sy += GAUSS[k] * y;
+                sxx += GAUSS[k] * x * x;
+                syy += GAUSS[k] * y * y;
+                sxy += GAUSS[k] * x * y;
+            }
+            gs_moments[0][i] = sx;
+            gs_moments[1][i] = sy;
+            gs_moments[2][i] = sxx;
+            gs_moments[3][i] = syy;
+            gs_moments[4][i] = sxy;
+        }
+        GroupMemoryBarrierWithGroupSync();
+
+        float sx = 0.0, sy = 0.0, sxx = 0.0, syy = 0.0, sxy = 0.0;
+        [unroll] for (int k = 0; k < WINDOW; k++)
+        {
+            uint i = columnTap(gtid, k);
+            sx += GAUSS[k] * gs_moments[0][i];
+            sy += GAUSS[k] * gs_moments[1][i];
+            sxx += GAUSS[k] * gs_moments[2][i];
+            syy += GAUSS[k] * gs_moments[3][i];
+            sxy += GAUSS[k] * gs_moments[4][i];
+        }
+        mu_x[c] = sx;
+        mu_y[c] = sy;
+        Ex2[c] = sxx;
+        Ey2[c] = syy;
+        Exy[c] = sxy;
+        if (c < 2)
+            GroupMemoryBarrierWithGroupSync();   // next channel reuses gs_moments
+    }
+
+    uint2 p = gid.xy * TILE + gtid.xy;
+    if (p.x >= frame_dim.x || p.y >= frame_dim.y) return;
+
+    float inv_w = INV_WINDOW_SUM;
     mu_x *= inv_w;  mu_y *= inv_w;
     float3 sigma_x2 = Ex2 * inv_w - mu_x * mu_x;
     float3 sigma_y2 = Ey2 * inv_w - mu_y * mu_y;
@@ -103,10 +174,14 @@ void ssimComputeMaps(
 // k of TILE_AREA of its terms and scaling by TILE_AREA/k estimates the FULL
 // SSIM gradient, unbiased, with higher variance. Pass 1 therefore still runs
 // over every pixel and its cost is not reduced by the mask.
+groupshared float gs_maps[9][APRON_TEXELS];     // m1.rgb, m2.rgb, m3.rgb
+groupshared float gs_map_rows[3][ROW_SUMS];     // one channel's row sums
+
 [shader("compute")]
 [numthreads(16, 16, 1)]
 void ssimGradient(
-    uint3 dtid: SV_DispatchThreadID,
+    uint3 gid: SV_GroupID,
+    uint3 gtid: SV_GroupThreadID,
     RWTexture2D<float4> output_image,
     RWTexture2D<float4> target_image,
     RWTexture2D<float4> ssim_m1,
@@ -122,11 +197,65 @@ void ssimGradient(
     uniform float w_alpha,
     uniform float lambda_l2)
 {
-    uint2 p = dtid.xy;
+    uint t = gtid.y * TILE + gtid.x;
+    for (uint i = t; i < APRON_TEXELS; i += THREADS)
+    {
+        int2 q = apronTexel(gid, i);
+        float3 m1 = float3(0.0), m2 = float3(0.0), m3 = float3(0.0);   // zero padding
+        if (insideFrame(q, frame_dim))
+        {
+            m1 = ssim_m1[uint2(q)].rgb;
+            m2 = ssim_m2[uint2(q)].rgb;
+            m3 = ssim_m3[uint2(q)].rgb;
+        }
+        [unroll] for (uint c = 0; c < 3; c++)
+        {
+            gs_maps[c][i] = m1[c];
+            gs_maps[3 + c][i] = m2[c];
+            gs_maps[6 + c][i] = m3[c];
+        }
+    }
+    GroupMemoryBarrierWithGroupSync();
+
+    // Convolve the back-projection maps with the SAME Gaussian.
+    float3 cm1, cm2, cm3;
+    [unroll] for (uint c = 0; c < 3; c++)
+    {
+        for (uint i = t; i < ROW_SUMS; i += THREADS)
+        {
+            uint base = rowSumBase(i);
+            float s1 = 0.0, s2 = 0.0, s3 = 0.0;
+            [unroll] for (int k = 0; k < WINDOW; k++)
+            {
+                s1 += GAUSS[k] * gs_maps[c][base + k];
+                s2 += GAUSS[k] * gs_maps[3 + c][base + k];
+                s3 += GAUSS[k] * gs_maps[6 + c][base + k];
+            }
+            gs_map_rows[0][i] = s1;
+            gs_map_rows[1][i] = s2;
+            gs_map_rows[2][i] = s3;
+        }
+        GroupMemoryBarrierWithGroupSync();
+
+        float s1 = 0.0, s2 = 0.0, s3 = 0.0;
+        [unroll] for (int k = 0; k < WINDOW; k++)
+        {
+            uint i = columnTap(gtid, k);
+            s1 += GAUSS[k] * gs_map_rows[0][i];
+            s2 += GAUSS[k] * gs_map_rows[1][i];
+            s3 += GAUSS[k] * gs_map_rows[2][i];
+        }
+        cm1[c] = s1;
+        cm2[c] = s2;
+        cm3[c] = s3;
+        if (c < 2)
+            GroupMemoryBarrierWithGroupSync();   // next channel reuses gs_map_rows
+    }
+
+    uint2 p = gid.xy * TILE + gtid.xy;
     if (p.x >= frame_dim.x || p.y >= frame_dim.y) return;
 
-    // Unselected pixels: zero gradient, and skip the 121-tap map convolution
-    // below (the one place the mask also saves work in the loss itself).
+    // Unselected pixels: zero gradient.
     if (!stbnSelected(stbn_table, p, stbn_dims, stbn_slice, stbn_tile_pixels))
     {
         dL_dC[p] = float4(0.0);
@@ -139,31 +268,7 @@ void ssimGradient(
     float3 x = rendered.rgb;
     float3 y = target.rgb;   // sRGB, no linearization
 
-    // Convolve the back-projection maps with the SAME Gaussian.
-    float3 cm1 = float3(0.0), cm2 = float3(0.0), cm3 = float3(0.0);
-    for (int di = -WINDOW_RADIUS; di <= WINDOW_RADIUS; di++)
-    {
-        for (int dj = -WINDOW_RADIUS; dj <= WINDOW_RADIUS; dj++)
-        {
-            int2 q = int2(p) + int2(dj, di);
-
-            bool valid =
-                q.x >= 0 && q.y >= 0 &&
-                q.x < int(frame_dim.x) &&
-                q.y < int(frame_dim.y);
-
-            if (!valid)
-                continue;
-
-            float w = gaussWeightRaw(di, dj);
-
-            cm1 += w * ssim_m1[uint2(q)].rgb;
-            cm2 += w * ssim_m2[uint2(q)].rgb;
-            cm3 += w * ssim_m3[uint2(q)].rgb;
-        }
-    }
-
-    //dSSIM_total/dx(p); rhe loss uses (1 - SSIM), so negate it!
+    // dSSIM_total/dx(p); the loss uses (1 - SSIM), so negate it.
     float3 grad_ssim = -(cm1 + x * cm2 + y * cm3);
 
     // L1 gradient (matches l1_l2_loss.slang): d|x-y|/dx = sign(x-y).

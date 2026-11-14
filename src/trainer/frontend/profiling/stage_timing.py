@@ -58,7 +58,7 @@ STAGE_MAP: dict[str, tuple[str, ...]] = {
     "loss": ("loss",),
     "backward_raster": ("rasterize_backward",),
     "backward_projection_sh": ("projection_backward", "sh_backward"),
-    "optimizer_update": ("clear_grads", "adam", "regularization"),
+    "optimizer_update": ("adam", "regularization"),
     # Densification bookkeeping that runs INSIDE the step (gradient/eta accum).
     "densify_accum": ("structure_accum", "accumulate_iter"),
 }
