@@ -34,8 +34,7 @@ from trainer.frontend.viewer.ui.sections import (
     viewer_section,
 )
 
-# Backdrop behind the panel while there is no scene to show. Written straight
-# into the (non-sRGB) present format, so this is already display-encoded color.
+# No-scene backdrop, written straight into the non-sRGB present format, so already display-encoded.
 BACKDROP = spy.float4(0.055, 0.065, 0.080, 1.0)
 
 
@@ -69,13 +68,7 @@ def _build_proj_matrix(fovy_deg: float, aspect: float,
 
 
 def _fovy_from_proj(proj: np.ndarray) -> float | None:
-    """Recover vertical FOV (degrees) from a projection matrix.
-
-    Both ``_build_proj_matrix`` here and the dataset/COLMAP pinhole builders
-    put ``cot(fovy/2)`` in the (1,1) entry (for COLMAP that equals
-    ``2*fy_pixels/H``). Snapping to a test camera reuses its own vertical FOV so
-    the viewer framing is comparable to the eval render at that camera. Returns
-    None if the entry is non-positive (degenerate/unset projection)."""
+    """Vertical FOV (degrees) from the ``cot(fovy/2)`` (1,1) projection entry, or None if degenerate."""
     m11 = float(proj[1, 1])
     if m11 <= 1e-6:
         return None
@@ -85,12 +78,7 @@ def _fovy_from_proj(proj: np.ndarray) -> float | None:
 def _copy_splats(encoder, src, dst, count: int, capacity: int) -> None:
     """Copy the first ``count`` splats of a per-splat buffer, not the allocation.
 
-    The per-splat stride comes from the buffer's own size: every one of these is
-    allocated as ``capacity`` (``--max-splats``) elements, and their strides differ
-    (56 B of ``Gaussian3D``, the half-packed ``features_rest``, 4 B of
-    ``filter_3D``), so deriving it here keeps the layouts out of this function.
-    ``dst.size`` is respected too — the viewer may be configured with a different
-    capacity than the trainer.
+    ``src`` holds ``capacity`` elements, so the stride is derived from its size; ``dst`` capacity may differ.
     """
     stride = src.size // max(1, capacity)
     size = min(count * stride, src.size, dst.size)
@@ -99,14 +87,10 @@ def _copy_splats(encoder, src, dst, count: int, capacity: int) -> None:
 
 
 def _linear_present_format(surface: spy.Surface) -> spy.Format:
-    """Choose a NON-sRGB swapchain format for presentation.
+    """Choose a non-sRGB swapchain format for presentation.
 
-    ``output_image`` already holds sRGB-ENCODED color (the renderer composites
-    in sRGB — the same values the stored PNGs are written from). Presenting it
-    through an sRGB surface makes the blit re-apply the sRGB OETF, double-
-    encoding the color -> a washed-out viewer while the PNGs look correct.
-    Configuring the surface with the linear twin of its preferred format writes
-    those sRGB values to the display verbatim, matching the PNG path."""
+    ``output_image`` is already sRGB-encoded; an sRGB surface would encode it twice (a washed-out viewer).
+    """
     def name(f) -> str:
         return getattr(f, "name", str(f)).lower()
 
@@ -117,7 +101,7 @@ def _linear_present_format(surface: spy.Surface) -> spy.Format:
         formats = []
     preferred = info.preferred_format
     if "srgb" not in name(preferred):
-        return preferred  # already linear — nothing to fix
+        return preferred
 
     twins = {
         "bgra8_unorm_srgb": "bgra8_unorm",
@@ -129,7 +113,6 @@ def _linear_present_format(surface: spy.Surface) -> spy.Format:
         for f in formats:
             if name(f) == want:
                 return f
-    # Fallback: any supported non-sRGB 8-bit unorm, then any non-sRGB format.
     for f in formats:
         if "srgb" not in name(f) and name(f) in ("bgra8_unorm", "rgba8_unorm", "bgrx8_unorm"):
             return f
@@ -146,16 +129,11 @@ class FlyCamera:
         self.speed = speed
         self.sensitivity = 0.2
         self._set_basis_from_euler(yaw, pitch, roll)
-        # Reference "up" for roll-free mouse-look: yaw rotates about this axis
-        # and right is always rebuilt perpendicular to it, so looking around
-        # never rolls. R/T rotate it (persistent roll); Y (set_ref_up_to_current)
-        # resets it to the current view. Scene-agnostic — NOT tied to world +Y.
+        # Roll-free mouse-look reference: yaw rotates about it and right stays perpendicular; not world +Y.
         self._ref_up = self._up.copy()
 
     def _set_basis_from_euler(self, yaw: float, pitch: float, roll: float) -> None:
-        """Seed the (right, up, forward) basis from Euler angles, matching the
-        old world-up convention so a given (yaw, pitch, roll) yields the same
-        frame it used to."""
+        """Seed the (right, up, forward) basis from Euler angles in the world-up (+Y) convention."""
         yaw_r = math.radians(yaw)
         pitch_r = math.radians(pitch)
         f = np.array([
@@ -166,8 +144,7 @@ class FlyCamera:
         world_up = np.array([0.0, 1.0, 0.0])
         r0 = np.cross(world_up, f)
         n = np.linalg.norm(r0)
-        # Near-vertical forward makes right ill-defined vs world up; fall back
-        # to the x-axis so the basis stays finite (roll is degenerate here).
+        # Near-vertical forward leaves right ill-defined; fall back to +X so the basis stays finite.
         r0 = r0 / n if n > 1e-8 else np.array([1.0, 0.0, 0.0])
         u0 = np.cross(f, r0)
         a = math.radians(roll)
@@ -177,8 +154,7 @@ class FlyCamera:
         self._orthonormalize()
 
     def _orthonormalize(self) -> None:
-        """Re-establish a right-handed orthonormal basis (right x up = forward)
-        from the current forward + right, killing accumulated float drift."""
+        """Re-orthonormalize the basis (right x up = forward) from forward + right, removing float drift."""
         f = self._fwd / (np.linalg.norm(self._fwd) + 1e-12)
         r = self._right - f * np.dot(self._right, f)
         r = r / (np.linalg.norm(r) + 1e-12)
@@ -186,10 +162,7 @@ class FlyCamera:
         self._fwd, self._right, self._up = f, r, u
 
     def _rebuild_from_ref(self) -> None:
-        """Rebuild (right, up) from the current forward and ``self._ref_up``,
-        forcing right PERPENDICULAR to ref_up (horizon level w.r.t. ref_up).
-        All roll lives in ref_up; mouse-look never tilts right out of the ref_up
-        plane, so no drift accumulates no matter the drag path."""
+        """Rebuild (right, up) from forward, keeping right perpendicular to ``_ref_up`` (all roll lives there)."""
         f = self._fwd / (np.linalg.norm(self._fwd) + 1e-12)
         r = np.cross(self._ref_up, f)
         n = np.linalg.norm(r)
@@ -230,7 +203,6 @@ class FlyCamera:
         self._ref_up = self._up / (np.linalg.norm(self._up) + 1e-12)
 
     def move(self, keys: set, dt: float):
-        # Move at the mouse-wheel-configured speed (see adjust_speed).
         vel = self.speed * dt
         if "w" in keys:
             self.eye += self._fwd * vel
@@ -240,7 +212,7 @@ class FlyCamera:
             self.eye -= self._right * vel
         if "d" in keys:
             self.eye += self._right * vel
-        # Q/E translate along the CURRENT (roll-aware) up, so they track roll.
+        # Q/E translate along the current (roll-aware) up, so they track roll.
         if "q" in keys:
             self.eye += self._up * vel
         if "e" in keys:
@@ -304,12 +276,9 @@ class _CameraRig:
         self.test_cameras: list[tuple[str, Camera]] = list(test_cameras or [])
         self.index = -1                 # -1 == free-fly
         self.exact: Camera | None = None  # rendered verbatim while parked
-        # Called when the PARKED selection changes. While training and parked, the
-        # render loop only re-rasterizes on demand (see Viewer._scene_due), so a
-        # snap that nothing announced would leave the previous camera on screen.
+        # Parked + training re-renders only on demand, so an unannounced snap would leave the old camera up.
         self._on_change = on_change or (lambda: None)
 
-    # ---- panel bindings ----
     def names(self) -> list[str]:
         return ["Free-fly"] + [f"{i + 1:02d}  {name}"
                                for i, (name, _) in enumerate(self.test_cameras)]
@@ -382,8 +351,7 @@ class _CameraRig:
 
 
 class _ShaderWatcher:
-    """Polls .slang files for mtime changes. Calls device.reload_all_programs()
-    when a change is detected (after a debounce period)."""
+    """Polls .slang mtimes and reloads all programs once a change has been debounced."""
 
     DEBOUNCE_S = 0.4
     POLL_INTERVAL = 0.5
@@ -485,9 +453,7 @@ class Viewer:
     def _build_view_pipeline(self, max_splats: int, sh_degree: int,
                              mip_enabled: bool, mip_kernel_size: float,
                              max_sort_pairs: int | None) -> TrainingPipeline:
-        """The viewer's OWN (render-only) pipeline, sized for the snapshots it will
-        receive. Kept separate from ``__init__`` so :meth:`reconfigure_model` can
-        rebuild it when the hub's TRAINING SETUP changes the model."""
+        """The viewer's own render-only pipeline, sized for the snapshots it will receive."""
         pipeline = TrainingPipeline(
             device=self.device, width=self.width, height=self.height,
             max_splats=max_splats,
@@ -524,8 +490,10 @@ class Viewer:
         return True
 
     def _grow(self, count: int, limit: int) -> None:
-        """Re-allocate the viewer's buffers for ``count`` splats, doubling up to
-        ``limit``. The caller holds the render lock and re-uploads before releasing it."""
+        """Re-allocate the viewer's buffers for ``count`` splats, doubling up to ``limit``.
+
+        The caller holds the render lock and re-uploads before releasing it.
+        """
         with self.runtime.queue_scope():
             self.runtime.wait_for_idle()   # in-flight frames/copies still use the old buffers
         self.max_splats = max(count, min(2 * self.max_splats, limit))
@@ -534,8 +502,7 @@ class Viewer:
 
     def live_splat_count(self, train_pipeline: TrainingPipeline) -> int:
         with self.runtime.queue_scope():
-            counter = train_pipeline.buffers.num_gaussians_counter.to_numpy()
-        return int(counter.view(np.uint32)[0])
+            return train_pipeline.primitives.count()
 
     def update_gaussians(self, train_pipeline: TrainingPipeline):
         count = self.live_splat_count(train_pipeline)
@@ -550,22 +517,18 @@ class Viewer:
         src, dst = train_pipeline.buffers, self._pipeline.buffers
         batch = self.runtime.command_batch("viewer_update")
         encoder = batch.encoder
-        _copy_splats(encoder, src.gaussians.storage, dst.gaussians.storage,
+        _copy_splats(encoder, src.primitive.values.storage, dst.primitive.values.storage,
                      count, src.max_splats)
         if src.sh_enabled and dst.sh_enabled:
-            _copy_splats(encoder, src.features_rest.storage,
-                         dst.features_rest.storage, count, src.max_splats)
+            _copy_splats(encoder, src.sh.features_rest.storage,
+                         dst.sh.features_rest.storage, count, src.max_splats)
         if self._pipeline.raster_config.mip_enabled:
-            src_f = getattr(src, "filter_3D", None)
-            dst_f = getattr(dst, "filter_3D", None)
-            if src_f is not None and dst_f is not None:
-                _copy_splats(encoder, src_f.storage, dst_f.storage,
-                             count, src.max_splats)
-       
-        encoder.upload_buffer_data(dst.num_gaussians_counter.storage, 0,np.array([count], dtype=np.uint32))
+            _copy_splats(encoder, src.primitive.filter_3d.storage,
+                         dst.primitive.filter_3d.storage, count, src.max_splats)
+        encoder.upload_buffer_data(dst.primitive.active_count.storage, 0, np.array([count], dtype=np.uint32))
         self.runtime.submit(batch)
-        self._pipeline.set_active_sh_degree(train_pipeline._active_sh_degree)
-        self._pipeline.set_extinction_hardness(train_pipeline._extinction_hardness)
+        self._pipeline.set_active_sh_degree(train_pipeline.active_sh_degree)
+        self._pipeline.set_extinction_hardness(train_pipeline.extinction_hardness)
         self._has_data = count > 0
         self.invalidate_scene()
 
@@ -600,8 +563,7 @@ class Viewer:
         return self._start_event.is_set()
 
     def wait_for_start(self, poll: float = 0.05) -> None:
-        """Block until 'Start Training' is pressed or the viewer window closes
-        (so a closed viewer can't hang the trainer forever)."""
+        """Block until 'Start Training' is pressed or the viewer closes, so a closed viewer can't hang training."""
         while not self._start_event.is_set():
             if self._stop_event.is_set() or (self._thread and not self._thread.is_alive()):
                 break
@@ -646,8 +608,7 @@ class Viewer:
         return self._pause_event.is_set()
 
     def pause_training(self) -> None:
-        # Optimizer activity only controls render throttling; the run stays
-        # pausable through its camera sweeps and post-training analysis.
+        # Optimizer activity only throttles rendering; camera sweeps and post-training analysis stay pausable.
         if self.state.snapshot().can_pause and not self._pause_event.is_set():
             self._pause_event.set()
 
@@ -662,8 +623,7 @@ class Viewer:
     def request_stop_training(self) -> None:
         if not self.state.training_stopping():
             return
-        # Publish STOPPING before waking a paused worker; its completion must
-        # not be overwritten by this request after it has already returned.
+        # Publish STOPPING before waking a paused worker, so this request can't overwrite its completion.
         self._stop_training.set()
         self._pause_event.clear()
 
@@ -717,8 +677,7 @@ class Viewer:
         print("[Viewer] up reference set to current view")
 
     def _save_frame(self) -> None:
-        """Write the last rendered frame to a PNG for offline diffing against
-        the eval output (outputs/<run>/cams/cam_XX/...)."""
+        """Write the last rendered frame to a PNG for offline diffing against the eval output."""
         try:
             from PIL import Image
             img = self._pipeline.read_output_image()[..., :3]
@@ -828,7 +787,7 @@ class Viewer:
 
         def on_key(event):
             if ui.handle_keyboard(event):
-                return  # UI consumed it (typing in a widget)
+                return
             keys.handle(event)
 
         def on_mouse(event):
@@ -879,14 +838,11 @@ class Viewer:
                     now = time.perf_counter()
                     if self._scene_due(now):
                         camera = self._rig.camera(self.width, self.height, w / h)
-                        self._pipeline._encoder = enc
-                        try:
+                        with self._pipeline.commands.attached(batch):
                             self._pipeline.rasterize(camera)
-                        finally:
-                            self._pipeline._encoder = None
                         self._scene_dirty.clear()
                         self._last_scene_s = now
-                    enc.blit(surface_tex, self._pipeline.buffers.output_image)
+                    enc.blit(surface_tex, self._pipeline.buffers.raster.output_image)
                 else:
                     enc.clear_texture_float(surface_tex, clear_value=BACKDROP)
                 ui.begin(w, h, window)
@@ -910,7 +866,7 @@ class Viewer:
         window.on_mouse_event = on_mouse
         window.on_resize = on_resize
         if self._hub:
-            window.on_drop_files = on_drop  # drag a dataset folder onto the window
+            window.on_drop_files = on_drop
 
         watcher = _ShaderWatcher(
             self.device, self._pipeline, self.runtime) if self.hot_reload else None
@@ -924,7 +880,6 @@ class Viewer:
             if watcher:
                 watcher.poll()
 
-            # Keep the surface matched to the window
             _reconfigure(window.width, window.height)
 
             now = time.perf_counter()

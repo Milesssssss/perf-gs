@@ -1,24 +1,14 @@
 // Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-// Generic tile-enumeration walks over an IScreenFootprint, shared by the two
-// binning kernels so they stay in structural lock-step:
-//   * bin_count calls countTiles() to SUM the touched tiles (sizes the scan).
-//   * bin_emit  calls emitTiles()  to WRITE one (tile,depth,primitive) pair
-//     per touched tile at the scanned offset.
-// Both drive the SAME footprint methods with the SAME inputs, so they visit an
-// identical tile set — a mismatch would desync the prefix-scan offsets from the
-// emitted pairs and the radix sort would read garbage. Keeping the walk here,
-// once, generic over the footprint, makes that agreement structural rather than
-// two hand-kept-in-sync copies (and lets any primitive reuse both kernels).
+// Tile walks over an IScreenFootprint shared by the count and emit binning kernels, so both visit
+// an identical tile set (a mismatch desyncs the scanned offsets from the emitted pairs).
 
 #ifndef TRAINER_TILE_WALK_SLANG
 #define TRAINER_TILE_WALK_SLANG
 
 #include "../../core/interfaces.slang"
 
-// Count the tiles the footprint crosses within the tile rectangle
-// [tile_min, tile_max]. `bbox_min/bbox_max` are the frame-clamped AABB edges
-// the per-strip crossing tests refine against.
+// Tiles the footprint crosses in [tile_min, tile_max]; bbox_min/bbox_max is the frame-clamped AABB.
 uint countTiles<F : IScreenFootprint>(
     F fp, uint2 tile_min, uint2 tile_max, float2 bbox_min, float2 bbox_max)
 {
@@ -44,11 +34,8 @@ uint countTiles<F : IScreenFootprint>(
     return count;
 }
 
-// Emit one sort pair per touched tile, starting at `write_slot`. The composite
-// key is (tile_id : depth) — keys_hi holds tile_id = ty*num_tiles_x + tx, keys_lo
-// the depth-sortable bits — and `value` is the primitive index. Writes past
-// `max_sort_pairs` are dropped (graceful overflow, never memory corruption),
-// mirroring the exclusive-scan capacity clamp on the read side.
+// One pair per touched tile from write_slot: keys_hi = tile_id, keys_lo = sortable depth,
+// value = primitive index. Writes past max_sort_pairs are dropped rather than corrupting memory.
 void emitTiles<F : IScreenFootprint>(
     F fp, uint2 tile_min, uint2 tile_max, float2 bbox_min, float2 bbox_max,
     uint num_tiles_x, uint key_lo, uint value, uint write_slot, uint max_sort_pairs,

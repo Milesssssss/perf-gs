@@ -4,8 +4,7 @@
 
 #include "../common/types.slang"
 
-#include "generated/execution_contract.slang"
-static const uint CLUSTER_SIZE = CONTRACT_CLUSTER_SIZE;
+#include "common/execution.slang"
 
 [shader("compute")]
 [numthreads(256, 1, 1)]
@@ -23,8 +22,7 @@ void accumulateIter(
 {
     uint i = dtid.x;
     if (i >= max_splats) return;
-    // Dead slots and culled clusters got no screen gradient this step (and were
-    // folded to zero when last touched), so skip their reads.
+    // Dead slots and culled clusters got no screen gradient (already folded to zero), so skip their reads.
     if (i >= num_gaussians_counter[0]) return;
     if (cluster_visible[i / CLUSTER_SIZE] == 0u) return;
 
@@ -33,9 +31,7 @@ void accumulateIter(
 
     if (ix == int64_t(0) && iy == int64_t(0)) return;
 
-    // Convert the per-iter screen-space gradient from PIXEL units to NDC
-    // ([-1,1]) units BEFORE taking the norm, matching gsplat's densification
-    // signal (grads[...,0] *= width/2, grads[...,1] *= height/2)
+    // Pixel -> NDC units before the norm, matching gsplat's densification signal.
     float fx = fromFixed(ix) * (frame_dim.x * 0.5);
     float fy = fromFixed(iy) * (frame_dim.y * 0.5);
     float m = sqrt(fx * fx + fy * fy);

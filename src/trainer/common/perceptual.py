@@ -1,30 +1,12 @@
 # Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-"""LPIPS (Zhang et al. 2018) for held-out evaluation, as an OPTIONAL capability.
-
-PSNR and SSIM are numpy-only and always available; LPIPS needs torch plus the
-``lpips`` package's pretrained AlexNet. That is a heavyweight dependency for a
-trainer whose entire point is not needing one, so it is loaded lazily, on the
-CPU, and only when a caller asks for it. Everything degrades to ``None`` if it is
-absent — a missing perceptual metric must never fail a training run, and it must
-never be silently substituted with something else either.
-
-Why CPU: the GPU is running the thing being measured. A second framework holding
-a context on the same device would contend with the workload whose speed is the
-experiment. At the evaluation resolution this costs ~50 ms per view, which is
-already small next to the render plus SSIM in the same sweep.
-
-Convention follows the reference implementation: inputs are RGB in [0, 1],
-scaled to [-1, 1], NCHW. The metric is computed at full evaluation resolution
-(no resize), so it is comparable across regimes but not necessarily against a
-paper that scored at a different resolution.
-"""
+"""Optional LPIPS (Zhang et al. 2018) for held-out evaluation, lazily loaded on the CPU
+(the GPU runs the workload being measured); ``None`` when torch/lpips are absent."""
 from __future__ import annotations
 
 import numpy as np
 
-# Module-level, because constructing the network reads 233 MB of weights and a
-# sweep calls this once per view.
+# Module-level: building the network reads ~233 MB of weights and a sweep calls this per view.
 _NET = None
 _LOADED_NET = ""
 _STATE = "unloaded"          # unloaded | ready | unavailable
@@ -38,22 +20,14 @@ def availability() -> dict:
             "resolution": "full evaluation resolution (no resize)"}
 
 
-# VGG, not AlexNet. 3DGS, Mip-NeRF 360 and essentially every NeRF/splatting paper
-# report the VGG variant, and the two are NOT interchangeable: measured on this
-# trainer's held-out bicycle renders, AlexNet reads 0.1662 where VGG reads 0.2194 —
-# 1.32x lower. Defaulting to AlexNet made our numbers look better than published
-# 30k-iteration results at 3000 iterations, which is how the discrepancy was
-# noticed. Keep VGG as the default so a reported LPIPS is comparable to the
-# literature; 'alex' stays selectable for a cheap in-loop signal.
+# VGG: the variant the papers report; AlexNet values are not interchangeable (~1.3x lower).
 DEFAULT_NET = "vgg"
 
 
 def load(net: str = DEFAULT_NET) -> bool:
-    """Load the LPIPS network once. Returns False (and stays quiet afterwards)
-    when the dependency is missing, so callers can just check the return."""
+    """Load the LPIPS network once; returns False, and stays quiet afterwards, if unavailable."""
     global _NET, _LOADED_NET, _STATE, _REASON
-    # Keyed on the net: returning a cached AlexNet for a VGG request would be the
-    # same apples-to-oranges error this default exists to prevent.
+    # Keyed on the net: a cached AlexNet must never answer a VGG request.
     if _STATE == "ready" and _LOADED_NET == net:
         return True
     if _STATE == "unavailable":
@@ -86,12 +60,7 @@ def is_available() -> bool:
 
 def lpips(rendered: np.ndarray, target: np.ndarray,
           net: str = DEFAULT_NET) -> float | None:
-    """Per-image LPIPS for HxWx3 sRGB arrays in [0, 1]; ``None`` if unavailable.
-
-    Lower is better. Not comparable to PSNR/SSIM in sign — the tables must say
-    so, and the aggregation code must not average it in the same direction as
-    the others by accident.
-    """
+    """Per-image LPIPS (lower is better) of HxWx3 sRGB in [0, 1]; ``None`` if unavailable."""
     if not load(net):
         return None
     import torch

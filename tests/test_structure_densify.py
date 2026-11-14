@@ -17,7 +17,7 @@ import numpy as np
 import pytest
 
 from _pipeline_testkit import TestPipeline
-from trainer.backend.densify.densify import DensifyConfig, StructureConfig
+from trainer.config.config import DensifyConfig, StructureConfig
 from trainer.data.dataset import simple_camera
 from trainer.backend.compute.device import create_device
 
@@ -37,7 +37,7 @@ def _setup(backend: str, max_splats: int = 256, sh_degree: int = 0) -> TestPipel
 
 
 def _count(p: TestPipeline) -> int:
-    return int(p.buffers.num_gaussians_counter.to_numpy().view(np.uint32)[0])
+    return int(p.buffers.primitive.active_count.to_numpy().view(np.uint32)[0])
 
 
 def _count_actions(p: TestPipeline, pre_count: int) -> dict[str, int]:
@@ -48,7 +48,7 @@ def _count_actions(p: TestPipeline, pre_count: int) -> dict[str, int]:
     the GPU themselves. ``pre_count`` is the count BEFORE the densify so we
     only look at the pre-densify slots (post-densify slots include appended
     children, whose action tag is stale KEEP)."""
-    raw = p.buffers.action_buffer.to_numpy()
+    raw = p.buffers.densification.actions.to_numpy()
     a = np.frombuffer(raw.tobytes(), dtype=np.uint32)[:pre_count]
     return {
         "n_keep":  int((a == 0).sum()),
@@ -73,21 +73,21 @@ def _set_eta(p: TestPipeline, idx: int, *, n_total: int,
         a[idx] = val
         buf.copy_from_numpy(a)
 
-    w(b.eta_n_total, n_total)
-    w(b.eta_buffers["n_high"], n_high)
-    w(b.eta_buffers["n_low"], n_low)
+    w(b.eta.n_total, n_total)
+    w(b.eta.components["n_high"], n_high)
+    w(b.eta.components["n_low"], n_low)
     for ax, key in enumerate(("max_x", "max_y", "max_z")):
-        w(b.eta_buffers[key], int(eta_max[ax] * 65536.0))
+        w(b.eta.components[key], int(eta_max[ax] * 65536.0))
 
     # is_grad_high signal: avg_grad = (mag/65536)/vis, compared against the
     # convention-scaled floor grad_threshold*W*H*3 (~0.12 at 64x64). Set vis=1
     # and a mag comfortably above it (or at zero, below).
     vis = 1
     mag = int(1.0 * 65536.0) if grad_high else 0  # avg_grad = 1.0 (>> ~0.12 floor), or 0
-    w(b.visibility_count_accum, vis)
+    w(b.densification.visibility_count, vis)
     a = np.zeros(N, dtype=np.int64)
     a[idx] = mag
-    b.grad_mean_2d_mag_accum.copy_from_numpy(a)
+    b.densification.grad_mean_2d_mag.copy_from_numpy(a)
 
 
 def _one_gaussian(p: TestPipeline, scale=0.1, opacity=0.9) -> None:
@@ -115,7 +115,7 @@ def test_anisotropic_split_child_count(backend: str) -> None:
     cfg = StructureConfig(tau_split=0.8, tau_prune=0.8, split_power=0.5,
                           max_split_factor=4, dense_scale=0.0)
     pre_count = _count(p)
-    p.densify_structure_aware(cfg)
+    p.structure_densifier.densify(cfg)
 
     # n_x = ceil(sqrt(4)) = 2, n_y = ceil(sqrt(2)) = 2, n_z = 1 -> 4 children.
     actions = _count_actions(p, pre_count)
@@ -137,7 +137,7 @@ def test_small_gaussian_clones_not_splits(backend: str) -> None:
     cfg = StructureConfig(tau_split=0.8, tau_prune=0.8, split_power=0.5,
                           max_split_factor=4, dense_scale=0.2)
     pre_count = _count(p)
-    p.densify_structure_aware(cfg)
+    p.structure_densifier.densify(cfg)
 
     actions = _count_actions(p, pre_count)
     assert actions["n_clone"] == 1, f"expected 1 clone, got {actions}"
@@ -145,7 +145,7 @@ def test_small_gaussian_clones_not_splits(backend: str) -> None:
     assert _count(p) == 2, f"clone should append exactly 1 duplicate, got {_count(p)}"
 
     # The clone is an exact duplicate of the parent (same first-14 floats).
-    g = np.frombuffer(p.buffers.gaussians.to_numpy().tobytes(),
+    g = np.frombuffer(p.buffers.primitive.values.to_numpy().tobytes(),
                       dtype=np.float32).reshape(-1, 14)
     assert np.allclose(g[0], g[1]), "clone is not an exact duplicate of the parent"
 
@@ -160,7 +160,7 @@ def test_no_split_when_ratio_below_threshold(backend: str) -> None:
 
     cfg = StructureConfig(tau_split=0.8)
     pre_count = _count(p)
-    p.densify_structure_aware(cfg)
+    p.structure_densifier.densify(cfg)
     actions = _count_actions(p, pre_count)
     assert actions["n_split"] == 0, f"expected 0 splits, got {actions}"
     assert _count(p) == 1
@@ -176,7 +176,7 @@ def test_no_split_when_gradient_low(backend: str) -> None:
 
     cfg = StructureConfig(tau_split=0.8)
     pre_count = _count(p)
-    p.densify_structure_aware(cfg)
+    p.structure_densifier.densify(cfg)
     actions = _count_actions(p, pre_count)
     assert actions["n_split"] == 0, f"expected 0 splits, got {actions}"
     assert _count(p) == 1
@@ -191,7 +191,7 @@ def test_prune_low_ratio(backend: str) -> None:
 
     cfg = StructureConfig(tau_prune=0.8)
     pre_count = _count(p)
-    p.densify_structure_aware(cfg)
+    p.structure_densifier.densify(cfg)
     actions = _count_actions(p, pre_count)
     assert actions["n_prune"] == 1, f"expected 1 prune, got {actions}"
     assert _count(p) == 0
@@ -206,7 +206,7 @@ def test_split_factor_capped(backend: str) -> None:
              eta_max=(100.0, 0.0, 0.0), grad_high=True)
 
     cfg = StructureConfig(tau_split=0.8, split_power=0.5, max_split_factor=3)
-    p.densify_structure_aware(cfg)
+    p.structure_densifier.densify(cfg)
     # x: min(ceil(sqrt(100))=10, cap 3) = 3; y,z = 1 -> 3 children.
     assert _count(p) == 3
 
@@ -215,32 +215,32 @@ def test_split_factor_capped(backend: str) -> None:
 @pytest.mark.parametrize("sh_degree", [0, 3])
 def test_full_grid_parallel_children_and_fresh_moments(backend, sh_degree) -> None:
     """512 children span several cooperative-lane iterations; all inherit SH."""
-    from trainer.backend.memory import buffer_io
+    from trainer.common.sh import unpack_features_rest
 
     p = _setup(backend, max_splats=600, sh_degree=sh_degree)
     _one_gaussian(p, scale=0.3, opacity=0.7)
     _set_eta(p, 0, n_total=10, n_high=10, eta_max=(64, 64, 64))
     if sh_degree:
         rest = np.arange(p.buffers.sh.rest_floats, dtype=np.float32)[None, :] * 0.01
-        p.set_features_rest(rest)
-        p.buffers.adam_rest_state.copy_from_numpy(
+        p.primitives.write_features_rest(rest)
+        p.buffers.sh.adam_rest.copy_from_numpy(
             np.full(p.max_splats * p.buffers.sh.rest_floats * 2, 0x3F800000, np.uint32))
     cfg = StructureConfig(ks_scale_power=1.2, opacity_cap=0)
-    stats = p.densify_structure_aware(cfg)
+    stats = p.structure_densifier.densify(cfg)
     assert _count(p) == 512 and not stats["overbudget"]
     g = _read_gaussians(p, 512)
     expected_scale = np.log(0.3) - 1.2 * np.log(8)
     np.testing.assert_allclose(g[:, 3:6], expected_scale, atol=1e-6)
     assert np.unique(g[:, :3], axis=0).shape[0] == 512
     np.testing.assert_allclose(g[:, :3].mean(axis=0), [0, 0, 3], atol=1e-6)
-    adam = p.buffers.adam_state.to_numpy().view(np.float32).reshape(p.max_splats, -1)
+    adam = p.buffers.adam.state.to_numpy().view(np.float32).reshape(p.max_splats, -1)
     assert np.all(adam[:512] == 0)
     if sh_degree:
-        packed = p.buffers.features_rest.to_numpy().view(np.uint32)
-        features = buffer_io.unpack_features_rest(
+        packed = p.buffers.sh.features_rest.to_numpy().view(np.uint32)
+        features = unpack_features_rest(
             packed[:512 * p.buffers.sh.feat_uints], 512, p.buffers.sh.rest_floats)
         np.testing.assert_array_equal(features, np.repeat(features[:1], 512, axis=0))
-        moments = p.buffers.adam_rest_state.to_numpy().view(np.uint32).reshape(-1, p.max_splats)
+        moments = p.buffers.sh.adam_rest.to_numpy().view(np.uint32).reshape(-1, p.max_splats)
         assert np.all(moments[:, :512] == 0)
 
 
@@ -254,7 +254,7 @@ def test_overbudget_drops_children_without_implicit_percentiles(
     _set_eta(p, 0, n_total=10, n_high=10, eta_max=(64, 64, 64))
     monkeypatch.setattr(np, "percentile", lambda *a, **k: pytest.fail(
         "production overflow must not run CPU percentile diagnostics"))
-    stats = p.densify_structure_aware(StructureConfig())
+    stats = p.structure_densifier.densify(StructureConfig())
     assert _count(p) == 7 and stats["overbudget"]
     assert np.all(np.isfinite(_read_gaussians(p, 7)))
     assert "overflow children DROPPED" in capsys.readouterr().out
@@ -265,9 +265,9 @@ def test_clones_count_toward_requested_tail_growth(backend, capsys) -> None:
     p = _setup(backend, max_splats=1)
     _one_gaussian(p)
     _set_eta(p, 0, n_total=10, n_high=10, eta_max=(4, 2, 0.05))
-    stats = p.densify_structure_aware(StructureConfig(dense_scale=0.2))
+    stats = p.structure_densifier.densify(StructureConfig(dense_scale=0.2))
     assert _count(p) == 1 and stats["overbudget"]
-    assert int(p.buffers.densify_children_sum.to_numpy()[0]) == 1
+    assert int(p.buffers.structure.children_sum.to_numpy()[0]) == 1
     assert "requested 1 new children" in capsys.readouterr().out
 
 
@@ -284,20 +284,20 @@ def test_candidate_compaction_partial_wave_and_reuse(backend) -> None:
     b = p.buffers
     total = np.zeros(p.max_splats, np.uint32)
     total[:n] = 10
-    b.eta_n_total.copy_from_numpy(total)
-    b.eta_buffers["n_high"].copy_from_numpy(total)
-    b.eta_buffers["n_low"].copy_from_numpy(np.zeros_like(total))
+    b.eta.n_total.copy_from_numpy(total)
+    b.eta.components["n_high"].copy_from_numpy(total)
+    b.eta.components["n_low"].copy_from_numpy(np.zeros_like(total))
     for axis in ("max_x", "max_y", "max_z"):
-        b.eta_buffers[axis].copy_from_numpy(total * 65536)
-    b.visibility_count_accum.copy_from_numpy((total > 0).astype(np.uint32))
-    b.grad_mean_2d_mag_accum.copy_from_numpy((total > 0).astype(np.int64) * 65536)
-    p.densify_structure_aware(StructureConfig(dense_scale=0.2))
+        b.eta.components[axis].copy_from_numpy(total * 65536)
+    b.densification.visibility_count.copy_from_numpy((total > 0).astype(np.uint32))
+    b.densification.grad_mean_2d_mag.copy_from_numpy((total > 0).astype(np.int64) * 65536)
+    p.structure_densifier.densify(StructureConfig(dense_scale=0.2))
     assert _count(p) == 514
-    assert int(b.densify_children_sum.to_numpy()[0]) == n
-    p.clear_structure_scores()
-    p.densify_structure_aware(StructureConfig(dense_scale=0.2))
+    assert int(b.structure.children_sum.to_numpy()[0]) == n
+    p.structure_densifier.clear_scores()
+    p.structure_densifier.densify(StructureConfig(dense_scale=0.2))
     assert _count(p) == 514
-    assert int(b.densify_children_sum.to_numpy()[0]) == 0
+    assert int(b.structure.children_sum.to_numpy()[0]) == 0
 
 
 @pytest.mark.parametrize("backend", BACKENDS)
@@ -316,7 +316,7 @@ def test_full_controller_tick_includes_mip_timing_and_queue(backend) -> None:
     _one_gaussian(p, scale=0.3, opacity=0.7)
     _set_eta(p, 0, n_total=10, n_high=10, eta_max=(64, 64, 64))
     camera = simple_camera(width=64, height=64, eye=(0, 0, 0), target=(0, 0, 3))
-    p.set_mipsplatting_cameras([camera] * 3)
+    p.mip_filter.set_cameras([camera] * 3)
     queue = QueueLimiter(p.runtime, max_depth=5)
     controller = DensificationController(
         pipeline=p, args=SimpleNamespace(reset_every=1200),
@@ -335,11 +335,11 @@ def test_full_controller_tick_includes_mip_timing_and_queue(backend) -> None:
         outcome = controller.run(500, events, 1)
     assert outcome.kind == "structure" and _count(p) == 512
     assert queue.depth == 3  # densification, Morton, and the expensive Mip submit.
-    filters = p.buffers.filter_3D.to_numpy()
+    filters = p.buffers.primitive.filter_3d.to_numpy()
     assert np.all(filters[:512] > 0) and np.all(filters[512:] == 0)
     markers = timing.samples[0]["markers_ms"]
     assert {"densify_structure", "densify_tracking", "morton_sort", "mip_filter"} <= markers.keys()
-    assert p._step_timer is None
+    assert p.commands.timer is None
 
 
 def _quat_to_matrix(q: np.ndarray) -> np.ndarray:
@@ -392,14 +392,14 @@ def test_anisotropic_split_preserves_covariance(backend: str) -> None:
     # = 1.0 is the variance-preserving choice paired with the sqrt(12) spacing.
     cfg = StructureConfig(tau_split=0.8, tau_prune=0.8, split_power=0.5,
                           max_split_factor=8, dense_scale=0.0, ks_scale_power=1.0)
-    p.densify_structure_aware(cfg)
+    p.structure_densifier.densify(cfg)
 
     m = _count(p)
     assert m == 6, f"expected 3*2*1 = 6 grid children, got {m}"
 
     # Read back the 6 children: packed 14 floats each (mean[0:3], log_scale[3:6],
     # rot_quat[6:10], opacity[10], sh0[11:14]).
-    g = np.frombuffer(p.buffers.gaussians.to_numpy().tobytes(),
+    g = np.frombuffer(p.buffers.primitive.values.to_numpy().tobytes(),
                       dtype=np.float32).reshape(-1, 14)[:m].astype(np.float64)
     child_means = g[:, 0:3]
     child_scales = np.exp(g[:, 3:6])
@@ -464,30 +464,36 @@ def test_scoring_kernel_flags_large_gaussian(backend: str) -> None:
         tex.copy_from_numpy(np.ascontiguousarray(field))
         return tex
 
+    def _score(p):
+        p.structure_densifier.clear_scores()
+        p.rasterize(cam)
+        p.structure_densifier.accumulate_scores(
+            _make_tex(p), p.rasterizer.camera_buffer, pass_idx=0)
+
     def _set_grad_high(p):
         # The split gate ANDs in is_grad_high; inject an above-threshold avg
         # grad so the test isolates the eta/frequency behaviour.
         N = p.max_splats
-        p.buffers.visibility_count_accum.copy_from_numpy(np.ones(N, dtype=np.uint32))
+        p.buffers.densification.visibility_count.copy_from_numpy(np.ones(N, dtype=np.uint32))
         mag = np.full(N, int(1.0 * 65536.0), dtype=np.int64)
-        p.buffers.grad_mean_2d_mag_accum.copy_from_numpy(mag)
+        p.buffers.densification.grad_mean_2d_mag.copy_from_numpy(mag)
 
     # Large gaussian -> big projected extent -> eta > 1 -> should split.
     p_big = _setup(backend)
     _one_gaussian(p_big, scale=0.5)
-    p_big.compute_structure_scores([cam], [_make_tex(p_big)], cfg)
+    _score(p_big)
     _set_grad_high(p_big)
     pre_big = _count(p_big)
-    p_big.densify_structure_aware(cfg)
+    p_big.structure_densifier.densify(cfg)
     actions_big = _count_actions(p_big, pre_big)
 
     # Tiny gaussian -> small extent -> eta < 1 -> no split.
     p_small = _setup(backend)
     _one_gaussian(p_small, scale=0.001)
-    p_small.compute_structure_scores([cam], [_make_tex(p_small)], cfg)
+    _score(p_small)
     _set_grad_high(p_small)
     pre_small = _count(p_small)
-    p_small.densify_structure_aware(cfg)
+    p_small.structure_densifier.densify(cfg)
     actions_small = _count_actions(p_small, pre_small)
 
     assert actions_big["n_split"] >= 1, "large gaussian should violate frequency and split"
@@ -497,7 +503,7 @@ def test_scoring_kernel_flags_large_gaussian(backend: str) -> None:
 def _read_gaussians(p: TestPipeline, n: int) -> np.ndarray:
     """Read back the first n gaussians as an (n, 14) float array (mean[0:3],
     log_scale[3:6], rot_quat[6:10], opacity[10], sh0[11:14])."""
-    g = np.frombuffer(p.buffers.gaussians.to_numpy().tobytes(),
+    g = np.frombuffer(p.buffers.primitive.values.to_numpy().tobytes(),
                       dtype=np.float32).reshape(-1, 14)
     return g[:n]
 
@@ -507,12 +513,12 @@ def _read_eta(p: TestPipeline, n: int) -> dict[str, np.ndarray]:
     def r(buf):
         return np.frombuffer(buf.to_numpy().tobytes(), dtype=np.uint32)[:n]
     return {
-        "n_total": r(p.buffers.eta_n_total),
-        "n_high":  r(p.buffers.eta_buffers["n_high"]),
-        "n_low":   r(p.buffers.eta_buffers["n_low"]),
-        "max_x":   r(p.buffers.eta_buffers["max_x"]),
-        "max_y":   r(p.buffers.eta_buffers["max_y"]),
-        "max_z":   r(p.buffers.eta_buffers["max_z"]),
+        "n_total": r(p.buffers.eta.n_total),
+        "n_high":  r(p.buffers.eta.components["n_high"]),
+        "n_low":   r(p.buffers.eta.components["n_low"]),
+        "max_x":   r(p.buffers.eta.components["max_x"]),
+        "max_y":   r(p.buffers.eta.components["max_y"]),
+        "max_z":   r(p.buffers.eta.components["max_z"]),
     }
 
 
@@ -556,7 +562,7 @@ def test_eta_carried_through_filler_densify(backend: str) -> None:
         opacities=opac,
         color_logits=np.zeros((4, 3), dtype=np.float32),
     )
-    p.buffers.num_gaussians_counter.copy_from_numpy(np.array([4], dtype=np.uint32))
+    p.buffers.primitive.active_count.copy_from_numpy(np.array([4], dtype=np.uint32))
 
     # Unique eta signature per parent so we can identify who landed where.
     # (values are arbitrary but distinct; max_* stored as fixed-point uint.)
@@ -565,29 +571,29 @@ def test_eta_carried_through_filler_densify(backend: str) -> None:
         a = np.zeros(N, dtype=dtype)
         a[:4] = vals
         buf.copy_from_numpy(a)
-    wbuf(p.buffers.eta_n_total, [11, 22, 33, 44])
-    wbuf(p.buffers.eta_buffers["n_high"], [1, 2, 3, 4])
-    wbuf(p.buffers.eta_buffers["n_low"], [5, 6, 7, 8])
-    wbuf(p.buffers.eta_buffers["max_x"], [100, 200, 300, 400])
-    wbuf(p.buffers.eta_buffers["max_y"], [110, 210, 310, 410])
-    wbuf(p.buffers.eta_buffers["max_z"], [120, 220, 320, 420])
+    wbuf(p.buffers.eta.n_total, [11, 22, 33, 44])
+    wbuf(p.buffers.eta.components["n_high"], [1, 2, 3, 4])
+    wbuf(p.buffers.eta.components["n_low"], [5, 6, 7, 8])
+    wbuf(p.buffers.eta.components["max_x"], [100, 200, 300, 400])
+    wbuf(p.buffers.eta.components["max_y"], [110, 210, 310, 410])
+    wbuf(p.buffers.eta.components["max_z"], [120, 220, 320, 420])
 
     # Grad/visibility signal driving the KEEP/CLONE/SPLIT decision. avg_grad =
     # (mag/65536)/vis; the internal floor is grad_thresh * W*H*3 = 0.0002 *
     # 64*64*3 = ~2.46. Give idx 1,2 avg_grad = 5.0 (>> floor) and idx 0 zero
     # grad (-> KEEP). vis=1 for all live slots.
     vis = np.zeros(N, dtype=np.uint32); vis[:4] = 1
-    p.buffers.visibility_count_accum.copy_from_numpy(vis)
+    p.buffers.densification.visibility_count.copy_from_numpy(vis)
     mag = np.zeros(N, dtype=np.int64)
     mag[1] = mag[2] = int(5.0 * 65536.0)   # avg_grad = 5.0 >> ~2.46 floor
     mag[0] = mag[3] = 0                     # KEEP / (PRUNE decided by opacity)
-    p.buffers.grad_mean_2d_mag_accum.copy_from_numpy(mag)
+    p.buffers.densification.grad_mean_2d_mag.copy_from_numpy(mag)
 
     cfg = DensifyConfig(t_opacity=0.005, t_big_scale=1e9)
     # scale_thresh between the small (0.01) and large (0.30) scales so idx 2
     # splits and idx 1 clones. grad_thresh at gsplat's 0.0002. Disable big-scale
     # prune (t_big_scale huge + allow_scale_prune False) so only opacity prunes.
-    p.densify_simple(cfg, grad_thresh=0.0002, scale_thresh=0.1,
+    p.simple_densifier.run(cfg, grad_thresh=0.0002, scale_thresh=0.1,
                      prune_big_scale=1e9, allow_scale_prune=False,
                      carry_eta=True)
 
@@ -665,17 +671,17 @@ def test_eta_carried_through_morton_sort(backend: str) -> None:
         opacities=np.full(k, 0.9, dtype=np.float32),
         color_logits=np.zeros((k, 3), dtype=np.float32),
     )
-    p.buffers.num_gaussians_counter.copy_from_numpy(np.array([k], dtype=np.uint32))
+    p.buffers.primitive.active_count.copy_from_numpy(np.array([k], dtype=np.uint32))
 
     # eta signature = round(10 * (x + 1)) so it's uniquely tied to position.
     N = p.max_splats
     sig = np.zeros(N, dtype=np.uint32)
     sig[:k] = (10 * (xs + 1)).astype(np.uint32)   # [50,40,30,20,10]
-    p.buffers.eta_n_total.copy_from_numpy(sig)
+    p.buffers.eta.n_total.copy_from_numpy(sig)
     for key in ("n_high", "n_low", "max_x", "max_y", "max_z"):
-        p.buffers.eta_buffers[key].copy_from_numpy(sig)
+        p.buffers.eta.components[key].copy_from_numpy(sig)
 
-    p.morton_sort(np.array([-1, -1, -1], np.float32),
+    p.morton.reorder(np.array([-1, -1, -1], np.float32),
                   np.array([5, 5, 5], np.float32), carry_eta=True)
 
     g = _read_gaussians(p, k)

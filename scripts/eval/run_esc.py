@@ -1,16 +1,9 @@
 #!/usr/bin/env python
 # Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-"""Entry point for the ESC harness.
+"""Entry point for the ESC harness: puts ``scripts/eval`` on ``sys.path`` and runs :func:`esc.cli.main`.
 
-Adds this directory (``scripts/eval``) to ``sys.path`` so the ``esc`` package
-resolves whether the harness is launched by path or as a module, then delegates
-to :func:`esc.cli.main`.
-
-Examples:
     python scripts/eval/run_esc.py analyze
-    python scripts/eval/run_esc.py score -c 0.7 -e 0.6 -u 0.8 -l 0.7 -t 0.5 -s 0.9
-    python scripts/eval/run_esc.py evaluate --agent-cmd "my-agent --prompt-file {prompt_file}"
 """
 
 from __future__ import annotations

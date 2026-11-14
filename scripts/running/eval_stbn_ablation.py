@@ -1,57 +1,9 @@
 # Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-"""STBN sparse-supervision PAPER SUITE: train the grid, then produce every table,
-figure and number the study needs, resumably and unattended.
+"""STBN sparse-supervision paper suite: train the grid, then build every table, figure and number.
 
-This grew out of a four-cell ablation (dense / white / independent blue /
-spatiotemporal blue on one scene set) and is now the whole study. One long run
-fills ``outputs/paper_stbn/`` with the quantitative data and paper-ready figures.
-
-    # the whole thing, unattended (hours; run it on an IDLE GPU)
-    .venv/Scripts/python.exe scripts/running/eval_stbn_ablation.py
-
-    # what would run, and the projected cost, without training anything
-    .venv/Scripts/python.exe scripts/running/eval_stbn_ablation.py --dry-run
-
-    # smoke test: one scene, 100 iterations, every stage exercised end to end
-    .venv/Scripts/python.exe scripts/running/eval_stbn_ablation.py --smoke
-
-    # re-derive every table/figure from completed runs, training nothing
-    .venv/Scripts/python.exe scripts/running/eval_stbn_ablation.py --analyze-only
-
-WHAT IT RUNS
-
-    A  primary 25% ablation      13 scenes x 4 regimes x 3 seeds
-    B  pixel-budget sweep        rho in {0.10, 0.25, 0.50}, seed 42, reusing A
-    C  convergence               8 checkpoints on the seed-42 25% cells
-    D  runtime breakdown         per-stage GPU timing, 4 representative scenes
-    E  sampling diagnostics      the masks themselves, no training
-    F  gradient diagnostic       sparse-vs-dense gradient at frozen states
-    G  qualitative              contact sheets, error maps, ranked crops
-
-The four regimes, identical in everything but the mask:
-
-    full        100% of pixels                --stbn-pixel-fraction 1.0
-    iid_white   25%, fresh white mask/step    --stbn-source white  --stbn-independent
-    indep_blue  25%, fresh blue mask/step     --stbn-source nvidia --stbn-independent
-    stbn        25%, the per-camera walk      --stbn-source nvidia
-
-and the two contrasts everything rests on: ``iid_white -> indep_blue`` is the
-spatial arrangement, ``indep_blue -> stbn`` is the temporal ordering.
-
-RESUMABILITY. Every cell is a fresh subprocess, and every cell is identified by a
-hash of its exact invocation. A cell whose outputs exist AND whose recorded hash
-matches is reused; anything else re-runs with the reason logged. So an interrupted
-suite resumes for free, and a changed flag invalidates exactly the cells it
-affects rather than silently mixing two configurations into one table.
-
-Prerequisite for indep_blue + stbn: the NVIDIA asset (NON-COMMERCIAL licence) --
-    .venv/Scripts/python.exe scripts/data/download_stbn.py
-
-RUN IT ON AN IDLE GPU. Timings are wall-clock, so a profiler, a second trainer or
-a live viewer sharing the device silently inflates every one of them. The
-device-wide memory poll assumes the same thing and reports its baseline so a
-violation is visible.
+Cells are fresh subprocesses reused by invocation hash; run on an idle GPU since timings are wall-clock.
+Usage: python scripts/running/eval_stbn_ablation.py [--dry-run | --smoke | --analyze-only]
 """
 from __future__ import annotations
 
@@ -139,13 +91,7 @@ def _parse_args() -> argparse.Namespace:
 
 
 def _apply_smoke(args: argparse.Namespace) -> None:
-    """A cheap end-to-end rehearsal of every moving part.
-
-    Deliberately still runs all four regimes, the convergence ladder, the stage
-    timer, the gradient probe and the qualitative pass — a smoke test that skipped
-    stages would not tell us the thing we want to know before committing to a
-    multi-hour run. Only the scene count, seed count and iteration count shrink.
-    """
+    """Cheap end-to-end rehearsal: every stage still runs; only scenes, seeds and iterations shrink."""
     args.scenes = "bicycle"
     args.seeds = str(cfg.PRIMARY_SEED)
     args.iters = 100
@@ -218,9 +164,7 @@ def main() -> int:
     }
 
     if args.gradient_study:
-        # Measurement-only mode: no training grid, no manifest cells. Writes into
-        # gradient_analysis/ and findings_gradient_study.json so it cannot
-        # overwrite a completed suite's report.
+        # Measurement-only; writes its own findings file so it cannot overwrite a completed suite's report.
         started = time.perf_counter()
         study_scenes = tuple(s.strip() for s in
                              args.gradient_study_scenes.split(",") if s.strip())
@@ -252,10 +196,7 @@ def main() -> int:
               "from cells already on disk.")
         counts = {"ok": 0, "cached": 0, "failed": 0, "skipped": 0,
                   "wall_hours": 0.0}
-        # Re-fold every cell whose artifacts are on disk, so the manifest rows
-        # are re-derived from what actually exists rather than trusted from a
-        # previous session. run_cell reuses (never retrains) when the hash
-        # matches, and reports the reason when it does not.
+        # Re-derive manifest rows from what is on disk; a dry-run run_cell reuses, never retrains.
         from paper_suite.runner import run_cell
         for cell in plan:
             if not manifest.outputs_present(cell):
@@ -286,16 +227,11 @@ def main() -> int:
     print(f"[suite] integrity: {integrity['ok']}/{integrity['planned']} usable, "
           f"{integrity['failed']} failed, {integrity['missing']} missing")
 
-    # ---- analysis --------------------------------------------------------
     results = ResultSet(plan, manifest)
     findings: dict[str, dict] = {}
 
     def stage(name: str, fn) -> None:
-        """Run one analysis stage; a stage that raises must not lose the others.
-
-        The training hours are the expensive part and they are already on disk by
-        now, so an analysis bug should cost one section of the report, not the run.
-        """
+        """Run one analysis stage; a stage that raises must not lose the others."""
         print(f"[suite] analysis: experiment {name}", flush=True)
         try:
             findings[name] = fn()

@@ -1,8 +1,7 @@
 // Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-// Commit a shared-arena scatter without copying unused capacity. Counts stay
-// GPU-resident. AoS records are a contiguous prefix; SoA records occupy the
-// live prefix of EACH capacity-strided component (not one flat prefix).
+// Commits a shared-arena scatter without copying unused capacity (counts stay GPU-resident). AoS records
+// are a contiguous prefix; SoA records occupy the live prefix of each capacity-strided component.
 
 static const uint COPY_GROUP_SIZE = 256u;
 static const uint COPY_DISPATCH_WIDTH = 65535u;

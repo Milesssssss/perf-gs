@@ -1,41 +1,8 @@
 # Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-"""The application's state machine — what the UI is a view OF.
+"""The application's state machine: independent dataset, training and result lifecycles the UI is a view of.
 
-The panel used to read one ``phase`` string plus a handful of loose booleans, so
-"is a dataset loading", "is a run going" and "does a result exist" were all the
-same axis and the UI had to infer meaning from combinations that could not all be
-represented. Here they are THREE independent lifecycles that happen to run in one
-session:
-
-    DatasetState    EMPTY -> INSPECTING -> [RECONSTRUCTING] -> LOADING -> READY
-                                                                       -> ERROR
-    TrainingState   IDLE -> INITIALIZING -> RUNNING <-> PAUSED -> STOPPING
-                                                     -> FINALIZING -> COMPLETED
-                                                                   -> FAILED
-    ResultState     NONE -> INITIALIZED -> TRAINED -> EXPORTED
-
-plus :class:`ToolsState` for the optional COLMAP/GLOMAP binaries, because
-installing them is a long operation that has nothing to do with either lifecycle.
-
-Everything the UI shows is derived from those states in ONE place
-(:class:`Snapshot`), so a widget never re-derives policy and two widgets can never
-disagree. The orchestrator drives transitions through :class:`Session`; the render
-thread only reads snapshots.
-
-Three UI mechanisms live here rather than in the panel, because they are state and
-not decoration:
-
-  * :class:`Activity` — the current long-running operation, with a fraction when
-    one is knowable and an indeterminate spinner-equivalent when it is not. Every
-    operation that can take noticeable time publishes one, which is what makes
-    "did my click do anything" answerable.
-  * :class:`Notice` — transient acknowledgements (toasts). Successes expire on
-    their own; errors stay until something replaces them.
-  * :class:`Confirm` — a pending question with the command it will run if
-    accepted. There is no modal-dialog widget in this UI toolkit, so a
-    confirmation is a state the relevant section renders inline. That also keeps
-    destructive actions next to the thing being destroyed.
+The orchestrator drives transitions through :class:`Session`; the render thread only reads snapshots.
 """
 from __future__ import annotations
 
@@ -48,12 +15,10 @@ from enum import StrEnum
 from trainer.frontend.settings import TrainingSetup
 
 LOG_CAPACITY = 400
-# How long a success/info toast stays up. Errors and warnings do not expire: an
-# unresolved failure must not scroll away before it is read.
+# Success/info toast lifetime; errors and warnings never expire, so a failure can't scroll away unread.
 NOTICE_TTL_S = 6.0
 MAX_NOTICES = 3
-# Loss samples kept for the graph. The publisher's cadence is --log-every, so this
-# is a window of ticks, not of iterations.
+# Loss samples kept for the graph: a window of --log-every ticks, not of iterations.
 LOSS_HISTORY = 240
 
 
@@ -90,8 +55,7 @@ class ToolsState(StrEnum):
     READY = "ready"
 
 
-# Session modes: the hub owns the whole lifecycle from an empty window; a plain
-# `--scene` run arrives with its dataset already chosen and only ever observes.
+# Session modes: the hub owns the lifecycle from an empty window; a `--scene` run only observes.
 MODE_TRAIN = "train"
 MODE_HUB = "hub"
 
@@ -111,17 +75,11 @@ ERROR = "error"
 
 _DATASET_BUSY = (DatasetState.INSPECTING, DatasetState.RECONSTRUCTING,
                  DatasetState.LOADING)
-# PAUSED is deliberately NOT busy: a paused run is waiting for the user, and the
-# things a paused session can still do (export, inspect, configure) are exactly
-# the things it should not lock.
+# PAUSED is not busy: a paused session must stay free to export, inspect and configure.
 _TRAINING_BUSY = (TrainingState.INITIALIZING, TrainingState.RUNNING,
                   TrainingState.STOPPING, TrainingState.FINALIZING)
 _TRAINING_LIVE = (*_TRAINING_BUSY, TrainingState.PAUSED)
 
-
-# --------------------------------------------------------------------------
-# value records
-# --------------------------------------------------------------------------
 
 def format_duration(seconds: float | None) -> str:
     """``1m 23s`` / ``2h 04m`` — reading time, not raw seconds."""
@@ -161,8 +119,7 @@ class DatasetInfo:
     width: int = 0
     height: int = 0
     points: int = 0
-    # Where a reconstruction of this dataset was written (images -> COLMAP), so
-    # the panel can say the training scene is derived rather than the drop itself.
+    # Where an images -> COLMAP reconstruction was written, i.e. the derived training scene.
     scene_dir: str = ""
 
     @property
@@ -222,11 +179,7 @@ class TrainingStats:
 class ResultInfo:
     """The reconstruction that currently exists — the object the user acts on.
 
-    Deliberately carries NO quality metric. The only PSNR the panel has access to
-    live is the reporter's re-render of the ONE camera that iteration sampled, and
-    showing that next to "30,000 iterations" reads as the dataset-wide test score
-    it is not. An honest number costs a sweep over every held-out view — that is
-    what ``--evaluation`` produces, into ``final_psnr.json`` / ``eval_curve.jsonl``.
+    Deliberately has no quality metric: the only live PSNR is one sampled camera, not a test score.
     """
 
     iterations: int = 0
@@ -236,8 +189,7 @@ class ResultInfo:
     run_dir: str = ""
     exported_path: str = ""
     exported_mb: float = 0.0
-    # True once the configuration has been edited since this result was produced:
-    # what is on screen no longer matches what the panel would train next.
+    # True once the configuration is edited after this result, so the next run would not reproduce it.
     stale_config: bool = False
 
     def summary(self) -> str:
@@ -245,17 +197,13 @@ class ResultInfo:
         return " · ".join(parts)
 
     def quality(self) -> str:
-        """The size of the model, which the panel CAN know exactly."""
+        """The size of the model, which the panel can know exactly."""
         return f"{format_count(self.splats)} splats"
 
 
 @dataclass(frozen=True)
 class Activity:
-    """One long-running operation, as the UI needs to show it.
-
-    ``fraction`` is None when no honest number exists — the UI then shows an
-    indeterminate readout instead of a bar that would lie about being at 0%.
-    """
+    """One long-running operation; ``fraction`` is None when no honest number exists (indeterminate)."""
 
     label: str = ""
     fraction: float | None = None
@@ -300,11 +248,7 @@ class Notice:
 
 @dataclass(frozen=True)
 class Confirm:
-    """A pending question, rendered inline by the section it belongs to.
-
-    ``command`` is what the orchestrator runs if the user accepts, so the UI never
-    has to remember what it asked about.
-    """
+    """A pending question, rendered inline by its section; ``command`` runs if the user accepts."""
 
     key: str                      # which section renders it
     title: str
@@ -315,18 +259,8 @@ class Confirm:
     alt_command: str = ""
 
 
-# --------------------------------------------------------------------------
-# log
-# --------------------------------------------------------------------------
-
 class LogBuffer:
-    """Bounded, de-noised log tail.
-
-    Subprocess output (COLMAP, GLOMAP) arrives as raw lines, sometimes carrying
-    carriage-return progress redraws and long runs of identical lines. Only the
-    last segment of a ``\\r`` redraw is kept, blank lines are dropped, and an
-    immediately repeated line is counted instead of repeated.
-    """
+    """Bounded, de-noised log tail: keeps the last ``\\r`` redraw segment, drops blanks, counts repeats."""
 
     def __init__(self, capacity: int = LOG_CAPACITY) -> None:
         self._lines: deque[str] = deque(maxlen=capacity)
@@ -364,10 +298,6 @@ class LogBuffer:
         return len(self._lines)
 
 
-# --------------------------------------------------------------------------
-# the snapshot: every question the UI asks, answered once
-# --------------------------------------------------------------------------
-
 @dataclass(frozen=True)
 class Snapshot:
     """Immutable view of the whole session for one UI frame."""
@@ -390,17 +320,11 @@ class Snapshot:
     recon_cuda: bool = True
     export_name: str = "output.ply"
     log: tuple[str, ...] = ()
-    # Panel disclosure, kept here so it is one testable place rather than mutable
-    # closure state in the render thread. This toolkit cannot open or close a
-    # collapsing header programmatically, so "collapsed by default" is expressed as
-    # visibility the user opts into.
+    # Panel disclosure as opt-in visibility: the toolkit cannot collapse a header programmatically.
     show_all_config: bool = False
     show_log: bool = False
-    # (iteration, loss) samples for the loss graph, oldest first. Bounded: this is
-    # a shape-of-the-curve readout, not a record — the run's own jsonl is that.
+    # (iteration, loss) samples for the graph, oldest first; bounded, since the run's jsonl is the record.
     loss_history: tuple[tuple[int, float], ...] = ()
-
-    # ---- top-level: what state is the application in? ----
 
     @property
     def busy(self) -> bool:
@@ -434,12 +358,7 @@ class Snapshot:
 
     @property
     def state_label(self) -> str:
-        """The session in one line — the SUBJECT, not the operation.
-
-        What is happening is the badge plus the activity readout; repeating it here
-        (and again in :meth:`next_step`) is how a header ends up saying "Inspecting
-        dataset" three times.
-        """
+        """The session in one line: the subject, not the operation (the badge and activity say that)."""
         if self.dataset_state in _DATASET_BUSY:
             return self.dataset.name or "working"
         if self.dataset_state == DatasetState.ERROR:
@@ -448,8 +367,7 @@ class Snapshot:
             return "training failed"
         if self.training_state == TrainingState.PAUSED:
             return f"paused at iteration {self.stats.step:,}"
-        # A live run: the badge already says RUNNING, so the useful complement is
-        # WHAT is being trained.
+        # A live run: the badge already says RUNNING, so name what is being trained.
         if self.training_state in _TRAINING_BUSY:
             return self.dataset.name or "training"
         # Export is the more recent news than the completion that preceded it.
@@ -482,16 +400,13 @@ class Snapshot:
             return "READY"
         return "EMPTY"
 
-    # ---- what can I do next? (one source for every enabled= binding) ----
-
     @property
     def hub(self) -> bool:
         return self.mode == MODE_HUB
 
     @property
     def can_drop(self) -> bool:
-        """Drag-and-drop stays live for the whole session — it is how a user moves
-        on to the next dataset — but not while an operation owns the GPU."""
+        """Drop stays live all session (it is how a user moves on), except while an operation owns the GPU."""
         return self.hub and not self.busy and self.confirm is None
 
     @property
@@ -548,21 +463,14 @@ class Snapshot:
 
     @property
     def can_configure(self) -> bool:
-        """Parameters are read when a run is BUILT, so the only time an edit would
-        be silently ignored is while one is training. Everything else — installing
-        tools, reconstructing, a finished run — stays editable, because those are
-        exactly the moments a user sets the NEXT run up."""
+        """Locked only while a run is training, since parameters are read when a run is built."""
         return self.hub and self.training_state not in (
             TrainingState.INITIALIZING, TrainingState.RUNNING,
             TrainingState.STOPPING, TrainingState.FINALIZING)
 
     @property
     def primary_action(self) -> str:
-        """The one action the panel should present most prominently.
-
-        Naming it here rather than in the panel is what keeps "what can I do next"
-        answerable from state alone.
-        """
+        """The one action the panel should present most prominently."""
         if self.confirm is not None:
             return "confirm"
         if self.busy:
@@ -586,11 +494,7 @@ class Snapshot:
         return "none"
 
     def next_step(self) -> str:
-        """One sentence telling the user what to do next.
-
-        Empty while an operation is running: there is nothing to do but wait, and
-        the activity readout already says what for.
-        """
+        """One sentence telling the user what to do next (empty while an activity runs)."""
         if self.confirm is not None:
             return self.confirm.title
         if self.activity.active:
@@ -607,15 +511,10 @@ class Snapshot:
         }.get(self.primary_action, "")
 
 
-# --------------------------------------------------------------------------
-# the session: the only mutable thing, and the only lock
-# --------------------------------------------------------------------------
-
 class Session:
     """Locked state shared by the render thread and the orchestrator.
 
-    The render thread READS snapshots and POSTS commands; the orchestrator takes
-    commands and publishes transitions. Neither touches the other's objects.
+    Render thread: reads snapshots, posts commands. Orchestrator: takes commands, publishes transitions.
     """
 
     def __init__(self, mode: str = MODE_TRAIN, log_lines: int = 40,
@@ -629,11 +528,8 @@ class Session:
         self._command: str | None = None
         self._snap = Snapshot(mode=mode)
         self._paused_run: tuple[TrainingState, Activity] | None = None
-        # Editable parameters: user INPUT, not published state, hence its own store
-        # (see trainer.frontend.settings).
+        # Editable parameters are user input, not published state, hence their own store.
         self.setup = setup if setup is not None else TrainingSetup()
-
-    # ---- reading ----
 
     def snapshot(self) -> Snapshot:
         """The frame's consistent view, with expired notices dropped."""
@@ -675,11 +571,10 @@ class Session:
         with self._lock:
             return self._snap.export_name
 
-    # ---- render thread: post intent ----
+    # Render thread: post intent.
 
     def drop(self, path: str) -> None:
-        """A folder was dropped. Kept separate from :meth:`request` so the
-        orchestrator can decide whether it needs confirmation first."""
+        """Post a dropped folder, separately from :meth:`request` so the orchestrator can confirm first."""
         with self._lock:
             self._dropped = str(path)
 
@@ -697,7 +592,7 @@ class Session:
             command, self._command = self._command, None
             return command
 
-    # ---- render thread: settings the orchestrator reads later ----
+    # Render thread: settings the orchestrator reads later.
 
     def set_matcher_index(self, index: int) -> None:
         with self._lock:
@@ -722,14 +617,11 @@ class Session:
             self._snap = replace(self._snap, show_log=bool(shown))
 
     def mark_config_edited(self) -> None:
-        """A parameter changed: any existing result no longer matches what the
-        next run would produce. Drives the "modified" hint on the result."""
+        """A parameter changed: mark any existing result stale (drives the result's "modified" hint)."""
         with self._lock:
             if self._snap.has_result and not self._snap.result.stale_config:
                 self._snap = replace(self._snap, result=replace(
                     self._snap.result, stale_config=True))
-
-    # ---- notices, confirmations ----
 
     def notify(self, text: str, kind: str = OK) -> None:
         """Post a transient acknowledgement (see :class:`Notice`)."""
@@ -760,8 +652,6 @@ class Session:
         with self._lock:
             return self._snap.confirm
 
-    # ---- activity (long-running work) ----
-
     def begin_activity(self, label: str, fraction: float | None = None) -> None:
         with self._lock:
             self._snap = replace(self._snap,
@@ -769,12 +659,9 @@ class Session:
 
     def set_progress(self, label: str = "", fraction: float | None = None,
                      active: bool = True, detail: str | None = None) -> None:
-        """Update the current activity. Shaped to match the progress parsers, which
-        emit ``(label, fraction)`` per output line.
+        """Update the current activity, matching the progress parsers' ``(label, fraction)`` per line.
 
-        ``detail`` is optional so a per-item callback ("camera 12/194") can publish
-        the bar and its caption in ONE locked update instead of a set_progress +
-        set_detail pair; omitted, the existing detail is preserved.
+        ``detail`` lets a per-item callback publish bar and caption in one locked update; None keeps it.
         """
         with self._lock:
             if not active:
@@ -787,8 +674,7 @@ class Session:
                 detail=current.detail if detail is None else str(detail)))
 
     def set_detail(self, detail: str = "") -> None:
-        """Refine the current activity ("evaluating camera 12/194") without
-        touching its label or fraction."""
+        """Refine the current activity ("evaluating camera 12/194") without touching its label or fraction."""
         with self._lock:
             self._snap = replace(self._snap,
                                  activity=replace(self._snap.activity,
@@ -797,8 +683,6 @@ class Session:
     def end_activity(self) -> None:
         with self._lock:
             self._snap = replace(self._snap, activity=Activity())
-
-    # ---- dataset lifecycle ----
 
     def dataset_inspecting(self, path: str) -> None:
         """A drop was accepted: acknowledge it before anything is read."""
@@ -809,7 +693,7 @@ class Session:
                 activity=Activity(label="Inspecting dataset"))
 
     def dataset_detected(self, kind: str, *, scene_dir: str = "") -> None:
-        """Say WHAT was detected as soon as it is known, before loading it."""
+        """Say what was detected as soon as it is known, before loading it."""
         with self._lock:
             self._snap = replace(self._snap, dataset=replace(
                 self._snap.dataset, kind=str(kind), scene_dir=str(scene_dir)))
@@ -843,19 +727,14 @@ class Session:
             self._snap = replace(self._snap,
                                  dataset=replace(self._snap.dataset, **fields))
 
-    # ---- tools lifecycle ----
-
     def tools(self, state: ToolsState) -> None:
         with self._lock:
             activity = (Activity(label="Installing reconstruction tools", fraction=0.0)
                         if state == ToolsState.INSTALLING else Activity())
             self._snap = replace(self._snap, tools_state=state, activity=activity)
 
-    # ---- training lifecycle ----
-
     def training_initializing(self, target_iterations: int = 0) -> None:
-        """Acknowledge Start/Restart immediately: the scene load and pipeline build
-        come BEFORE the first iteration and are the longest part of a short run."""
+        """Acknowledge Start/Restart at once: scene load and pipeline build precede the first iteration."""
         with self._lock:
             self._paused_run = None
             stats = TrainingStats(total=int(target_iterations))
@@ -921,13 +800,9 @@ class Session:
                                  training_error=str(reason), activity=Activity())
 
     def publish_training(self, **fields) -> None:
-        """Merge live numbers; fields not passed keep their previous value, so a
-        throughput tick and a loss/psnr tick publish independently.
+        """Merge live numbers; fields not passed keep their previous value.
 
-        A loss value is ALSO appended to :attr:`Snapshot.loss_history` for the
-        graph. Recording it here rather than in a separate call means the graph is
-        fed by whatever cadence the reporter already runs on and costs nothing
-        extra — the loss readback is the expensive part and it is not ours.
+        A loss is also appended to :attr:`Snapshot.loss_history`, so the graph costs no extra readback.
         """
         with self._lock:
             stats = replace(self._snap.stats, **fields)
@@ -936,8 +811,6 @@ class Session:
             if loss is not None:
                 history = (*history, (int(stats.step), float(loss)))[-LOSS_HISTORY:]
             self._snap = replace(self._snap, stats=stats, loss_history=history)
-
-    # ---- result lifecycle ----
 
     def result_initialized(self, splats: int = 0) -> None:
         """Init gaussians are on screen but nothing has been trained yet."""
@@ -967,15 +840,10 @@ class Session:
             self._snap = replace(self._snap, result_state=ResultState.NONE,
                                  result=ResultInfo(), result_error="")
 
-    # ---- whole-session reset ----
-
     def clear_session(self) -> None:
-        """Back to the empty drop target.
+        """Back to the empty drop target, keeping tools, matcher/build choices, parameters and the log.
 
-        Keeps what is not this dataset's story: the installed tools, the matcher
-        and build choices, the parameter values (the user's own), and the log.
-        Pending intent is dropped so a click that arrived just before the reset
-        cannot act on the session that was cleared.
+        Pending intent is dropped so a click just before the reset cannot act on the cleared session.
         """
         with self._lock:
             self._dropped = None
@@ -990,8 +858,7 @@ class Session:
                 result_error="", activity=Activity(), confirm=None)
 
     def reset_for_new_run(self) -> None:
-        """Between runs on the SAME dataset: the previous run's numbers and result
-        go, the dataset stays (it does not need re-reading)."""
+        """Between runs on the same dataset: drop the previous run's numbers and result, keep the dataset."""
         with self._lock:
             self._paused_run = None
             self._snap = replace(
@@ -999,8 +866,6 @@ class Session:
                 stats=TrainingStats(), loss_history=(),
                 result_state=ResultState.NONE, result=ResultInfo(),
                 result_error="", confirm=None)
-
-    # ---- log (secondary: diagnostics, not user feedback) ----
 
     def log(self, message: str) -> None:
         with self._lock:
@@ -1016,12 +881,9 @@ class Session:
 
 
 class View:
-    """Per-frame snapshot cache for the render thread.
+    """Per-frame snapshot cache for the render thread; attribute access forwards to the snapshot.
 
-    The loop calls :meth:`sample` once per frame; every binding then reads the SAME
-    frozen snapshot, so one lock is taken per frame and no two widgets can show
-    state from different instants. Attribute access forwards to the snapshot, so
-    bindings read as ``lambda: view.can_export``.
+    Call :meth:`sample` once per frame so every binding reads the same frozen state (one lock per frame).
     """
 
     def __init__(self, session: Session) -> None:

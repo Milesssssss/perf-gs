@@ -11,6 +11,7 @@ from _pipeline_testkit import TestPipeline
 
 from trainer.backend.compute.device import create_device
 from trainer.backend.memory.buffers import GRAD_SCALAR_COMPONENTS
+from trainer.backend.optimize.adam import AdamOptimizer
 from trainer.backend.render.pipeline import TrainingPipeline
 from trainer.config.config import AdamLRs, AppearanceConfig, LossConfig
 from trainer.data.dataset import simple_camera
@@ -50,7 +51,7 @@ def _splats(device, count: int = 3) -> TestPipeline:
         rot_quats=np.tile(np.array([1.0, 0.0, 0.0, 0.0], np.float32), (count, 1)),
         opacities=np.full(count, 0.7, np.float32),
         color_logits=np.tile(np.array([1.5, -1.5, -1.5], np.float32), (count, 1)))
-    pipeline.clear_gradients()
+    pipeline.optimizer.zero_grad()
     return pipeline
 
 
@@ -70,12 +71,12 @@ def test_bf16_moments_halve_memory_and_round_only_the_stored_moments(backend) ->
     for name, defines in (("fp32", None), ("bf16", BF16)):
         device = _device(backend, defines)
         pipeline = _splats(device)
-        pipeline.set_target_texture(pipeline.pack_target_texture(target))
+        pipeline.targets.select(pipeline.targets.pack(target))
         pipeline.train_step(CAMERA, lrs=lrs, active_sh_degree=1)
         device.wait_for_idle()
         b = pipeline.buffers
-        runs[name] = [_words(b.gaussians), _words(b.features_rest),
-                      _words(b.adam_state), _words(b.adam_rest_state)]
+        runs[name] = [_words(b.primitive.values), _words(b.sh.features_rest),
+                      _words(b.adam.state), _words(b.sh.adam_rest)]
         device.close()
     gaussians, features, adam, adam_rest = runs["fp32"]
     gaussians_b, features_b, adam_b, adam_rest_b = runs["bf16"]
@@ -103,22 +104,23 @@ def test_stochastic_rounding_keeps_the_second_moment_moving(backend) -> None:
     pipeline = _splats(device, count=16)
     b = pipeline.buffers
     start = np.full(16 * 14, np.float32(0.25).view(np.uint32), np.uint32)  # m=0, v=0.25
-    b.adam_state.storage.copy_from_numpy(start)
+    b.adam.state.storage.copy_from_numpy(start)
     gradient = np.full(16, 1 << 16, np.int64)  # 1.0 in fixed point
     steps = 300
     for step in range(1, steps + 1):
         for name in GRAD_SCALAR_COMPONENTS:
-            b.grad_buffers[name].copy_from_numpy(gradient)
-        pipeline._dispatch(pipeline.k_adam, "adam", thread_count=[16, 1, 1],
-            gaussians=b.gaussians.storage, adam_state=b.adam_state.storage,
-            num_gaussians_counter=b.num_gaussians_counter.storage,
-            **b.grad_kwargs(), cluster_visible=b.cluster_visible.storage,
+            b.gradients.params[name].copy_from_numpy(gradient)
+        pipeline.commands.dispatch(pipeline.kernels.kernel(*AdamOptimizer.KERNELS["adam"]),
+            "adam", thread_count=[16, 1, 1],
+            gaussians=b.primitive.values.storage, adam_state=b.adam.state.storage,
+            num_gaussians_counter=b.primitive.active_count.storage,
+            **b.gradients.param_kwargs(), cluster_visible=b.raster.cluster_visible.storage,
             cfg={"lr_mean": 0.0, "lr_scale": 0.0, "lr_rot": 0.0, "lr_opacity": 0.0,
                  "lr_color": 0.0, "bias_correction1": 1.0, "bias_correction2": 1.0,
                  "step": step},
             pixels_per_step=1.0)
     device.wait_for_idle()
-    _, v = _halves(_words(b.adam_state))
+    _, v = _halves(_words(b.adam.state))
     device.close()
     exact = 1.0 - 0.75 * 0.999 ** steps
     assert abs(v.mean() / exact - 1.0) < 0.01
@@ -138,7 +140,7 @@ def test_bf16_training_run_with_sh_and_densification(backend, tmp_path, monkeypa
         "--sad-structure-every", "2",
     ])
     monkeypatch.setattr("trainer.frontend.app.available_bytes", lambda *_: None)
-    monkeypatch.setattr("trainer.frontend.app.TrainingPipeline",
+    monkeypatch.setattr("trainer.frontend.factory.TrainingPipeline",
                         lambda **kwargs: TrainingPipeline(max_sort_pairs=512, **kwargs))
     app = TrainingApplication(args)
     app.prepare_training_context()
@@ -147,7 +149,7 @@ def test_bf16_training_run_with_sh_and_densification(backend, tmp_path, monkeypa
         app.pipeline.runtime.wait_for_idle()
         sh = app.pipeline.buffers.sh
         assert sh.moment_planes == sh.rest_floats
-        assert np.isfinite(_words(app.pipeline.buffers.gaussians).view(np.float32)).all()
+        assert np.isfinite(_words(app.pipeline.buffers.primitive.values).view(np.float32)).all()
     finally:
         app.runtime.artifacts.close_all()
         app.device.close()

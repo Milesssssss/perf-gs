@@ -1,29 +1,8 @@
 # Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-"""The viewer's docked panel: declarative composition + state BINDINGS.
+"""The viewer's docked panel: declarative widgets bound to state getters, re-evaluated once per frame.
 
-The old panel could only be updated by pushing strings into it from the render
-loop (``ui.set("status", ...)``) and by flipping ``widget.enabled`` by hand, so
-every readout cost a line in the panel build AND a line in the hot loop, and the
-loop grew a copy of the UI's logic. Here a widget instead PULLS from a getter:
-
-    panel.text(lambda: f"{stats().step}/{stats().total} iters")
-    panel.button("Train", start, enabled=lambda: state.can_train)
-    panel.progress(lambda: state.progress().fraction)
-
-:meth:`refresh` re-evaluates every binding once per frame — the render loop calls
-it and knows nothing else about the UI. Adding a control or a readout is one
-declarative line next to the others, and it can both read and drive state.
-
-Text bindings are wrapped/elided to the panel's live content width (see
-:mod:`.text`), which is what stops long paths and log lines from being clipped
-mid-word. That width is in LOGICAL units and the panel is sized in pixels via the
-display scale (see :mod:`.scale`) — sgl builds the font atlas at the monitor's
-content scale, so on a 150% display raw-pixel wrapping under-measures every line
-by 1.5x and the text clips anyway. Widget labels are deliberately EMPTY: sgl
-hard-codes ``ImGui::PushItemWidth(300)``, so a labelled combo/slider draws its
-label past the 300px control and off the edge of a ~380px panel; captions
-therefore go on their own line above the control.
+Captions sit above each control: sgl hard-codes ``PushItemWidth(300)``, which pushes inline labels off the panel.
 """
 from __future__ import annotations
 
@@ -38,8 +17,7 @@ from trainer.frontend.viewer.ui.dock import Dock, Rect
 from trainer.frontend.viewer.ui.scale import display_scale
 
 Getter = Callable[[], Any]
-# A value that is either static or pulled from state each frame (a zero-arg
-# callable). Every widget factory below accepts both.
+# A static value or a zero-arg getter pulled each frame; every widget factory accepts both.
 Dynamic = Any
 
 # How a text value that overflows the panel is shortened.
@@ -64,11 +42,7 @@ def _fit(value: str, mode: str, width: float, lines: int) -> list[str]:
 
 
 class _TextBlock:
-    """One logical text value rendered over a fixed pool of ``Text`` widgets.
-
-    The pool is allocated at build time (so widget order matches the build order)
-    and unused rows are hidden, which keeps a one-line value one line tall.
-    """
+    """One text value over a fixed ``Text`` row pool, allocated at build time so widget order is build order."""
 
     def __init__(self, parent: spy.ui.Widget, getter: Getter, *,
                  lines: int, mode: str, gate: Getter | None = None) -> None:
@@ -124,9 +98,7 @@ class Panel:
                  anchor: str = "left", thickness: float = 380.0,
                  min_thickness: float = 340.0, scale: float | None = None) -> None:
         self._ctx = spy.ui.Context(device)
-        # ``thickness``/``min_thickness`` are logical: the panel holds the same
-        # amount of text on a 100% and a 150% display (it is just wider in pixels
-        # there, because so is the font). Pass ``scale`` explicitly to test.
+        # ``thickness``/``min_thickness`` are logical, so the panel holds the same text at any display scale.
         self._dock = Dock(anchor, thickness, min_thickness,
                           scale=display_scale() if scale is None else scale)
         rect = self._dock.rect
@@ -151,39 +123,24 @@ class Panel:
         return bool(self._root.visible)
 
     def toggle(self) -> None:
-        """Show/hide the panel. ImGui gives its window a close box, so without a
-        way back a stray click on it would lose the whole UI for the session."""
+        """Show/hide the panel: the way back after a stray click on ImGui's window close box."""
         self._root.visible = not self._root.visible
 
-    # ---- composition -----------------------------------------------------
-
     def _widget_id(self, visible_label: str = "") -> str:
-        """``visible_label`` plus a unique, invisible ImGui id suffix.
+        """``visible_label`` plus a unique, invisible ``##`` ImGui id suffix.
 
-        ImGui identifies a widget by its label and hides everything after a
-        ``##``. Controls here put their caption on the line above, so they were all
-        built with the same empty label and shared ONE id across the window: a text
-        edit lost focus after one keystroke, and a drag could scrub a different
-        field. Every id-bearing widget must route its label through here.
+        Every id-bearing widget must use this: same-labelled (e.g. empty) widgets would otherwise share one id.
         """
         self._widget_seq += 1
         return f"{visible_label}##w{self._widget_seq}"
 
     @staticmethod
     def _relabel(getter: Getter, suffix: str) -> Getter:
-        """Keep a dynamically-labelled widget's id stable: a ``label`` binding
-        overwrites the label every frame and would strip the ``##`` suffix."""
+        """Keep a dynamic label's ``##`` id suffix, which a per-frame ``label`` binding would strip."""
         return lambda: f"{getter()}{suffix}"
 
     def bind(self, widget: spy.ui.Widget, **getters: Dynamic) -> spy.ui.Widget:
-        """Drive widget PROPERTIES from state, re-evaluated every frame::
-
-            panel.bind(button, enabled=lambda: state.can_train)
-
-        Any writable property works (``enabled``, ``visible``, ``label``,
-        ``value``, ``fraction``, ``items``, ...), so a new control needs no
-        support code in the render loop.
-        """
+        """Drive any writable widget property (``enabled``, ``visible``, ``label``, ...) from state, every frame."""
         pairs = [(name, _as_getter(g)) for name, g in getters.items() if g is not None]
         if pairs:
             def apply(_width: float, widget=widget, pairs=pairs) -> None:
@@ -194,9 +151,7 @@ class Panel:
 
     def text(self, value: Dynamic = "", *, lines: int = 1, mode: str = WRAP,
              visible: Dynamic = None) -> None:
-        """A text readout. ``value`` may be a string or a getter; it is wrapped
-        (or elided, see ``mode``) to the panel's live width across ``lines``
-        rows. ``visible`` gates the whole block (hidden rows take no space)."""
+        """A text readout wrapped (or elided per ``mode``) to the panel's live width over ``lines`` rows."""
         block = _TextBlock(self._parent, _as_getter(value), lines=lines, mode=mode,
                            gate=None if visible is None else _as_getter(visible))
         self._bindings.append(block.refresh)
@@ -206,8 +161,7 @@ class Panel:
         spy.ui.Text(self._parent, "")
 
     def log(self, lines_getter: Getter, *, lines: int = 8) -> None:
-        """A tail of the last ``lines`` (wrapped) log lines from a sequence
-        getter — the multi-line replacement for a single clipped status line."""
+        """A tail of the last ``lines`` (wrapped) log lines from a sequence getter."""
         block = _LogBlock(self._parent, lines_getter, lines=lines)
         self._bindings.append(block.refresh)
 
@@ -223,8 +177,7 @@ class Panel:
 
     def button(self, label: Dynamic, on_click: Callable[[], None],
                **binds: Dynamic) -> spy.ui.Button:
-        # A button's label IS its id, so two buttons showing the same text (or
-        # both momentarily "" while their getters have not run) would collide.
+        # A button's label is its id, so same-text (or not-yet-bound "") buttons would collide.
         suffix = self._widget_id()
         button = spy.ui.Button(
             self._parent, (label if isinstance(label, str) else "") + suffix,
@@ -235,25 +188,13 @@ class Panel:
         return button
 
     def _caption_row(self, caption: str, binds: dict) -> None:
-        """A control's caption, on the line above it (sgl's hard-coded item width
-        pushes a real widget label off the panel — see the module docstring).
-
-        It inherits the control's ``visible`` gate: a caption that outlives its own
-        widget is an orphan label, which is exactly how a hidden section leaks a
-        stray "feature matcher" into an empty panel.
-        """
+        """A control's caption on the line above it, sharing the control's ``visible`` gate so it never orphans."""
         if caption:
             self.text(caption, visible=binds.get("visible"))
 
     def input_text(self, value: Dynamic, on_change: Callable[[str], None],
                    **binds: Dynamic) -> spy.ui.InputText:
-        """A single-line text field — the only text entry this toolkit has.
-
-        Used for the export filename, so a result can be named without a file
-        dialog (there is none in this windowing layer). The value is NOT re-bound
-        from state while the user types: pushing a getter into the widget every
-        frame would fight the caret.
-        """
+        """A single-line text field whose value is not re-bound each frame, which would fight the caret."""
         widget = spy.ui.InputText(self._parent, self._widget_id(),
                                   value=str(_as_getter(value)()),
                                   callback=on_change)
@@ -272,9 +213,7 @@ class Panel:
 
     def combo(self, caption: str, items: Dynamic, value: Dynamic,
               on_change: Callable[[int], None], **binds: Dynamic) -> spy.ui.ComboBox:
-        """A dropdown with its caption on the line ABOVE (see module docstring).
-        ``items`` may be a getter, so a list that changes at runtime (the camera
-        list) needs no manual rebuild in the render loop."""
+        """A dropdown captioned on the line above; ``items`` may be a getter for a list that changes at runtime."""
         self._caption_row(caption, binds)
         get_items = _as_getter(items)
         box = spy.ui.ComboBox(self._parent, self._widget_id(),
@@ -315,14 +254,7 @@ class Panel:
     def drag_int(self, caption: str, value: Dynamic, on_change: Callable[[int], None],
                  *, minimum: int = 0, maximum: int = 0, speed: float = 1.0,
                  fmt: str = "%d", **binds: Dynamic) -> spy.ui.DragInt:
-        """A drag field for an INT with a wide range (iterations, splat counts).
-
-        Preferred over :meth:`slider_int` whenever the range spans orders of
-        magnitude: a slider maps 100..100,000,000 onto ~300px, so a single pixel
-        is ~300k splats and an exact value is unreachable. A drag has no track —
-        drag to scrub coarsely, ctrl+click to type the exact number — and
-        ``always_clamp`` keeps a typed value inside [minimum, maximum].
-        """
+        """A drag field for a wide-range int (iterations, splat counts); a slider can't reach exact values."""
         self._caption_row(caption, binds)
         widget = spy.ui.DragInt(
             self._parent, self._widget_id(), value=int(_as_getter(value)()),
@@ -338,7 +270,7 @@ class Panel:
                    on_change: Callable[[float], None], *, minimum: float = 0.0,
                    maximum: float = 0.0, speed: float = 0.01, fmt: str = "%.3f",
                    **binds: Dynamic) -> spy.ui.DragFloat:
-        """A drag field for a FLOAT (see :meth:`drag_int` for why not a slider)."""
+        """A drag field for a float (see :meth:`drag_int` for why not a slider)."""
         self._caption_row(caption, binds)
         widget = spy.ui.DragFloat(
             self._parent, self._widget_id(), value=float(_as_getter(value)()),
@@ -352,11 +284,7 @@ class Panel:
 
     @contextlib.contextmanager
     def section(self, title: str, **binds: Dynamic):
-        """A collapsible section header; nest widgets inside it::
-
-            with panel.section("DATASET"):
-                panel.text(...)
-        """
+        """A collapsible section header; widgets built inside the ``with`` block nest under it."""
         group = spy.ui.Group(self._parent, title)
         self.bind(group, **binds)
         previous, self._parent = self._parent, group
@@ -366,17 +294,14 @@ class Panel:
             self._parent = previous
 
     def add(self, build: Callable[[Panel], None]) -> Panel:
-        """Append a section built by a callable — how the viewer composes the
-        panel out of independent, testable section builders."""
         build(self)
         return self
 
-    # ---- per-frame ------------------------------------------------------
-
     def layout(self, window_width: float, window_height: float) -> None:
-        """Re-pin the panel to its edge, ADOPTING a user resize of its free edge
-        (see :mod:`.dock`). Writes pos/size only when they actually differ, so an
-        in-progress border drag is never fought."""
+        """Re-pin the panel to its edge, adopting a user resize of its free edge.
+
+        Writes pos/size only when they differ, so an in-progress border drag is never fought.
+        """
         live = Rect(self._root.position.x, self._root.position.y,
                     self._root.size.x, self._root.size.y)
         rect = self._dock.resolve(window_width, window_height, live)
@@ -390,9 +315,9 @@ class Panel:
         for index, binding in enumerate(self._bindings):
             try:
                 binding(width)
-            except Exception as error:  # noqa: BLE001 - one bad getter must not
-                if index not in self._failed:  # kill the render thread or the
-                    self._failed.add(index)    # rest of the panel
+            except Exception as error:  # noqa: BLE001 - one bad getter must not kill the render thread or the panel
+                if index not in self._failed:
+                    self._failed.add(index)
                     print(f"[Viewer] UI binding #{index} failed: {error}")
 
     def handle_keyboard(self, event) -> bool:
@@ -404,8 +329,7 @@ class Panel:
         return self._ctx.handle_mouse_event(event)
 
     def begin(self, width: int, height: int, window=None) -> None:
-        """Passing the sgl ``window`` lets ImGui drive the mouse cursor, so the
-        panel's resizable border actually shows a resize cursor."""
+        """Passing the sgl ``window`` lets ImGui drive the mouse cursor (e.g. the border's resize cursor)."""
         self._ctx.begin_frame(width, height, window)
 
     def end(self, surface_texture, encoder) -> None:
@@ -413,7 +337,5 @@ class Panel:
 
 
 def bullets(entries: Sequence[tuple[str, str]], pad: int = 11) -> str:
-    """Format ``(key, action)`` help rows into aligned lines. The panel font is
-    proportional, so this is only a rough column — good enough for a help block
-    and it wraps cleanly."""
+    """Format ``(key, action)`` help rows into roughly aligned lines (the panel font is proportional)."""
     return "\n".join(f"{key:<{pad}s}{action}" for key, action in entries)

@@ -1,8 +1,7 @@
 # Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
 """Capture Python and native stderr before GPU setup, without a Python callback
-on a Vulkan/SlangPy logging thread. Fatal exits keep the bytes already written.
-"""
+on a Vulkan/SlangPy logging thread. Fatal exits keep the bytes already written."""
 from __future__ import annotations
 
 import codecs
@@ -32,10 +31,8 @@ def report_exception(context: str, error: BaseException,
 
 class ErrorLog:
     """Session-scoped stderr tee: durable file, original terminal, and viewer tail.
-
-    A pipe would lose its unread tail on abort. Redirect fd 2 straight to the
-    file instead; the forwarding thread is only for the live terminal/panel.
-    """
+    fd 2 goes straight to the file (a pipe would lose its unread tail on abort);
+    the forwarding thread only feeds the live terminal/panel."""
 
     def __init__(self, path: Path) -> None:
         self.path = path.resolve()

@@ -20,18 +20,16 @@ def default_workers_numbers(count: int | None = None) -> int:
 
 def map_ordered(fn: Callable[[T], R], items: Iterable[T], *,
                 workers: int | None = None, lookahead: int = 2) -> Iterator[R]:
-    """Yield ``fn(item)`` for every item, IN ORDER, computed on a thread pool.
+    """Yield ``fn(item)`` for every item, in order, computed on a thread pool.
 
-    ``workers`` defaults to :func:`default_workers`; at most
-    ``workers * lookahead`` results are in flight (see the module docstring). An
-    exception from ``fn`` propagates to the consumer on the item that raised,
-    exactly as the equivalent list comprehension would.
+    At most ``workers * lookahead`` results are in flight; an exception from ``fn``
+    surfaces on the item that raised, as in the equivalent list comprehension.
     """
     items = list(items)
     if workers is None:
         workers = default_workers_numbers(len(items))
     if workers <= 1 or len(items) <= 1:
-        yield from map(fn, items)          # no pool at all for a trivial sweep
+        yield from map(fn, items)
         return
 
     limit = max(1, workers * max(1, lookahead))

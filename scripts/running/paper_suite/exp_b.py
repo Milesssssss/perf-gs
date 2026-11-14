@@ -1,26 +1,8 @@
 # Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-"""Experiment B — the pixel-budget sweep.
+"""Experiment B: the pixel-budget sweep, as gaps against each scene's shared dense run.
 
-Seed 42, rho in {0.10, 0.25, 0.50}, the three sparse regimes, all 13 scenes. The
-rho=0.25 column is the SAME cells Experiment A trained (not a re-run), and the
-dense baseline is shared across all three columns because a pixel fraction does
-not apply to dense supervision — there is one dense run per scene and it is the
-reference for every budget.
-
-Everything here is expressed as a GAP AGAINST DENSE on the same scene, rather than
-as an absolute score, because absolute PSNR varies by ~5 dB across these scenes
-and would swamp a budget effect of a few tenths. The dense run is the natural
-per-scene control, and it is paired exactly.
-
-One comparability caveat is carried explicitly through this experiment. The
-rho=0.25 cells are the instrumented ones: their loop contains the convergence
-ladder's eight held-out sweeps, whose cost ``train_active_s`` subtracts. The 0.10
-and 0.50 cells have no mid-loop sweeps and need no correction. So the
-time-versus-fraction curve mixes one corrected point with two uncorrected ones.
-Experiment A's timing validation measures whether that correction is sound; the
-figure and table both annotate the corrected point, and the report states the
-measured discrepancy rather than leaving the reader to assume there is none.
+Only the rho=0.25 cells' active time is observation-corrected; tables and figures mark that point.
 """
 from __future__ import annotations
 
@@ -94,10 +76,7 @@ def _gap_rows(results: ResultSet, scenes, fractions, seed: int) -> list[dict]:
                     continue
                 reference = dense.get(scene)
                 if reference is None:
-                    # No dense control for this scene: a gap cannot be formed,
-                    # and inventing one from another scene's dense run would be
-                    # meaningless. Skipped, and visible as a missing scene in the
-                    # aggregate's completeness flag.
+                    # No dense control: skipped, and visible in the aggregate's completeness flag.
                     continue
 
                 def gap(metric: str):
@@ -105,9 +84,7 @@ def _gap_rows(results: ResultSet, scenes, fractions, seed: int) -> list[dict]:
                     base = reference.get(metric)
                     if value is None or base is None:
                         return None
-                    # Signed so NEGATIVE always means "worse than dense",
-                    # including for LPIPS, where the raw values are lower-better
-                    # and the naive difference would carry the opposite sign.
+                    # Signed so negative always means worse than dense, including for lower-better LPIPS.
                     if stats.HIGHER_IS_BETTER.get(metric):
                         return value - base
                     return base - value
@@ -134,8 +111,7 @@ def _gap_rows(results: ResultSet, scenes, fractions, seed: int) -> list[dict]:
                     "speedup_vs_dense": ((dense_active / active)
                                          if active and dense_active else None),
                     "n_gaussians": result.metric("n_gaussians"),
-                    # True when this cell's active time required subtracting
-                    # mid-loop observation cost.
+                    # Whether this cell's active time had mid-loop observation cost subtracted.
                     "timing_corrected": bool(result.cell.convergence),
                 })
     return rows
@@ -213,10 +189,6 @@ def _contrasts(results: ResultSet, scenes, fractions, seed: int) -> list[dict]:
     return rows
 
 
-# ---------------------------------------------------------------------------
-# Figures
-# ---------------------------------------------------------------------------
-
 def _figure_gaps(aggregate: list[dict], figures_dir: Path, fractions) -> None:
     plt = figs.pyplot()
     if plt is None:
@@ -230,8 +202,7 @@ def _figure_gaps(aggregate: list[dict], figures_dir: Path, fractions) -> None:
               ("lpips_gap_vs_dense", "LPIPS gap vs dense", 4),
               ("train_active_s", "active train time (s)", 1),
               ("speedup_vs_dense", "speedup vs dense ($\\times$)", 2)]
-    # Four panels each need their own y-label and tick labels; the extra width
-    # keeps tight_layout from having to give up (it warns and leaves overlaps).
+    # Extra width so tight_layout can fit four labelled panels without overlaps.
     fig, axes = plt.subplots(1, len(panels),
                              figsize=(figs.FIG_WIDTH_DOUBLE * 1.25, 2.4))
     for ax, (key, ylabel, _digits) in zip(axes, panels):

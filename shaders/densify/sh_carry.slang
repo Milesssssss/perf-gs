@@ -1,11 +1,7 @@
 // Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-// Shared SH-rest carry helpers for the densify split/clone variants.
-//
-// The optional features_rest coefficients + their Adam moments must follow each
-// gaussian through densification exactly as Gaussian3D + AdamState do. Children
-// INHERIT the parent's coefficients with FRESH (zeroed) Adam moments, mirroring
-// how split/clone give children a zeroed AdamState.
+// Shared SH-rest carry helpers for the densify split/clone variants: children inherit the parent's
+// coefficients with fresh (zeroed) Adam moments, like their zeroed AdamState.
 
 #ifndef TRAINER_SH_CARRY_SLANG
 #define TRAINER_SH_CARRY_SLANG
@@ -13,11 +9,9 @@
 #include "../common/half_pack.slang"
 #include "../common/adam_precision.slang"
 
-// Copy SH rest coefficients parent->child and zero the child's rest Adam
-// moments. features_rest is fp16 AoS: (rest_floats+1)/2 uints/gaussian
-// (2 coeffs each). adam_rest is SoA: word k of gaussian `slot` lives at
-// k*max_splats + slot (k in [0, SH_MOMENT_WORDS*rest_floats)). A zero word is a
-// zero moment in either precision.
+// Copies rest coefficients parent->child and zeroes the child's rest moments (a zero word is a zero
+// moment in either precision). features_rest is fp16 AoS, (rest_floats+1)/2 uints per gaussian;
+// adam_rest is SoA: word k of `slot` at k*max_splats + slot, k < SH_MOMENT_WORDS*rest_floats.
 void shInheritRest(uint child, uint parent, uint rest_floats, uint max_splats,
                    RWStructuredBuffer<uint> features_rest,
                    RWStructuredBuffer<uint> adam_rest)
@@ -31,8 +25,7 @@ void shInheritRest(uint child, uint parent, uint rest_floats, uint max_splats,
         adam_rest[c * max_splats + child] = 0u;
 }
 
-// Zero a slot's rest Adam moments in place (a SPLIT parent slot becomes child-0:
-// it keeps its own features_rest but gets fresh Adam moments).
+// A SPLIT parent slot becomes child-0: it keeps its features_rest but gets fresh rest moments.
 void shZeroRestAdam(uint slot, uint rest_floats, uint max_splats,
                     RWStructuredBuffer<uint> adam_rest)
 {

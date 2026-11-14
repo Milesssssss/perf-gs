@@ -1,14 +1,7 @@
 // Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-// Simple threshold-based densification (reference 3DGS strategy).
-//
-// If avg_grad > grad_thresh → densify (split if big, clone if small).
-// If opacity < t_opacity → prune.
-// If max_scale > t_big_scale → prune.
-// If it blended under min_blend_weight pixels per view it appeared in → prune.
-//
-// Split/clone classification: max_scale > scale_thresh → split, else clone.
-// scale_thresh is typically scene_extent * 0.01 (percent_dense in reference).
+// Simple threshold-based densification (reference 3DGS strategy): prune transparent, oversized or
+// underweight splats; densify high-gradient ones (split if max_scale > scale_thresh, else clone).
 
 #include "../common/types.slang"
 #include "../common/math.slang"
@@ -60,11 +53,7 @@ void decideActionsSimple(
         return;
     }
 
-    // Prune: too big — ONLY after the first opacity reset (gsplat gates this
-    // on step > reset_every). Pruning large splats from the start deletes the
-    // big kNN-init blobs in sparse/distant regions before densification can
-    // subdivide them into detail. t_big_scale is already scene-scale-normalized
-    // by the caller (prune_scale3d * scene_extent).
+    // Prune too-big splats only after the first opacity reset, so big init blobs get subdivided first.
     if (allow_scale_prune != 0u && max_scale > t_big_scale)
     {
         action[i] = ACTION_PRUNE;
@@ -86,7 +75,6 @@ void decideActionsSimple(
 
     if (avg_grad > grad_thresh)
     {
-        // Big gaussians get split, small ones get cloned.
         if (max_scale > scale_thresh)
             action[i] = ACTION_SPLIT;
         else

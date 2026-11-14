@@ -1,15 +1,8 @@
 # Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-"""Paired evaluation — turn a codebase + agent into an :class:`EscResult`.
+"""Paired evaluation: turn a codebase + agent into an :class:`EscResult`.
 
-The orchestrator runs every change task across every seed in an isolated
-sandbox, gates the outcome, folds hidden tests into success, then reduces the six
-dimensions and aggregates them. Static dimensions (``S`` and the concept-entropy
-part of ``L``) are computed directly on the codebase; ``C``, ``E`` and ``U`` come
-from the agent runs; ``T`` comes from supplied regression-safety evidence.
-
-Dimensions that were not measured (e.g. no mutation evidence) are dropped from
-the geometric mean and renormalised rather than counted as zero.
+Unmeasured dimensions (e.g. no mutation evidence) are dropped and renormalised, not counted as zero.
 """
 
 from __future__ import annotations
@@ -51,8 +44,6 @@ from esc.tasks.registry import (
 from esc.workspace import create_sandbox
 
 
-# --- Static-only analysis (no agent required) -------------------------------
-
 def analyze_static(root: Path, config: EscConfig) -> dict:
     """Compute the agent-free dimensions: ``S`` and the static part of ``L``."""
     s_value, s_diag = score_static_quality(root, config)
@@ -64,8 +55,6 @@ def analyze_static(root: Path, config: EscConfig) -> dict:
         "locality_diagnostics": l_diag,
     }
 
-
-# --- Per-run helpers --------------------------------------------------------
 
 def _git_changed_files(root: Path) -> list[str]:
     result = subprocess.run(
@@ -132,8 +121,6 @@ def run_comprehension_task(
     result = agent.run_comprehension_task(request)
     return grade_comprehension(task, result, seed)
 
-
-# --- Full evaluation --------------------------------------------------------
 
 def collect_runs(
     root: Path,

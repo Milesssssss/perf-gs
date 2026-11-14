@@ -11,8 +11,6 @@ from typing import Protocol, runtime_checkable
 from esc.model import AgentTelemetry, PatchStats
 
 
-# --- Change tasks -----------------------------------------------------------
-
 @dataclass(frozen=True)
 class ChangeTaskRequest:
     """Ask an agent to make a change inside ``workspace``."""
@@ -25,15 +23,12 @@ class ChangeTaskRequest:
 
 @dataclass(frozen=True)
 class ChangeTaskResult:
-    """What the agent did. ``patch_stats`` may be None, in which case the harness
-    derives the structural footprint from the workspace's git diff."""
+    """What the agent did; a None ``patch_stats`` is derived from the workspace's git diff."""
 
     telemetry: AgentTelemetry
     patch_stats: PatchStats | None = None
     notes: str = ""
 
-
-# --- Comprehension tasks ----------------------------------------------------
 
 @dataclass(frozen=True)
 class ComprehensionRequest:
@@ -55,8 +50,6 @@ class ComprehensionResult:
     context_tokens: int
 
 
-# --- Refactor proposals (loop) ----------------------------------------------
-
 @dataclass(frozen=True)
 class RefactorRequest:
     """Ask an agent to improve a hotspot without changing behaviour."""
@@ -75,8 +68,6 @@ class RefactorResult:
     changed: bool
     summary: str = ""
 
-
-# --- The boundary -----------------------------------------------------------
 
 @runtime_checkable
 class AgentRunner(Protocol):

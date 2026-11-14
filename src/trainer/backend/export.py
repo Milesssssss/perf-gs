@@ -12,18 +12,10 @@ from PIL import Image
 from trainer.backend.render.pipeline import TrainingPipeline
 from trainer.data.dataset import Camera
 from trainer.data.ply import write_gaussian_ply
-from trainer.contracts.codegen import gaussian_numpy_dtype
-from trainer.backend.memory import buffer_io
 
 
 def render_to_png(pipeline: TrainingPipeline, camera: Camera, path: str | Path) -> None:
-    """Render once and save the result as an 8-bit sRGB PNG.
-
-    COLORSPACE: the renderer composites in sRGB (matches INRIA 3DGS / gsplat /
-    SADGS), so the output is already display-encoded — write it directly, no
-    gamma. (Previously the renderer's output was treated as linear and this
-    applied a 1/2.2 gamma; that was the pre-migration semantics.)
-    """
+    """Render once and save the result as an 8-bit PNG; the output is already sRGB (no gamma)."""
     pipeline.render(camera)
     img = pipeline.read_output_image()
 
@@ -37,25 +29,10 @@ def render_to_png(pipeline: TrainingPipeline, camera: Camera, path: str | Path) 
 
 
 def save_ply(pipeline: TrainingPipeline, path: str | Path) -> None:
-    """Export the pipeline's current gaussians as a 3DGS-format .ply.
-
-    Reads the GPU buffers, then delegates the format serialization to
-    :func:`trainer.data.ply.write_gaussian_ply` (inverse of
-    :func:`trainer.data.ply.load_ply`).
-    """
-    n = int(pipeline.buffers.num_gaussians_counter.to_numpy().view(np.uint32)[0])
-    if n == 0:
+    """Export the live gaussians as a 3DGS-format .ply (inverse of ``load_ply``)."""
+    gaussians = pipeline.primitives.read()
+    if len(gaussians) == 0:
         raise ValueError("pipeline has 0 gaussians; nothing to save")
-
-    raw = pipeline.buffers.gaussians.to_numpy()
-    gaussians = np.frombuffer(raw.tobytes(), dtype=gaussian_numpy_dtype())[:n]
-
-    # Optional view-dependent SH: unpack the fp16-packed higher-band coefficients
-    # and export them as f_rest_*.
-    features_rest = None
-    if pipeline.buffers.sh_enabled:
-        sh = pipeline.buffers.sh
-        packed = np.frombuffer(pipeline.buffers.features_rest.to_numpy().tobytes(),
-                               dtype=np.uint32)[: n * sh.feat_uints]
-        features_rest = buffer_io.unpack_features_rest(packed, n, sh.rest_floats)
+    features_rest = (pipeline.primitives.read_features_rest(len(gaussians))
+                     if pipeline.buffers.sh_enabled else None)
     write_gaussian_ply(gaussians, path, features_rest=features_rest)

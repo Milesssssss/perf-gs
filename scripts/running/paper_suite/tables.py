@@ -2,22 +2,7 @@
 
 """CSV and Eurographics/booktabs LaTeX emission.
 
-Two rules run through this module.
-
-**Missing is not zero.** Every writer renders an absent value as an empty CSV
-field and as ``--`` in LaTeX. A failed or unrun cell must be visibly absent in the
-artifact a human reads, because the alternative — a 0.0 in a PSNR column — reads
-as a catastrophic result rather than as no result.
-
-**Incompleteness is annotated, not smoothed.** An aggregate computed over fewer
-cells than planned is marked (``n`` is printed, and the LaTeX gets a dagger), so a
-mean over 11 of 13 scenes can never be mistaken for a mean over 13.
-
-The LaTeX targets ``booktabs`` (``\\toprule``/``\\midrule``/``\\bottomrule``) and
-uses ``siunitx``-free plain numeric columns so the tables paste into a Eurographics
-template without pulling in packages the template may not load. Each emitted file
-carries a comment naming the CSV it was generated from, so a number in the paper
-can be traced back to the run that produced it.
+Missing values render as empty/``--``, never zero; incomplete aggregates are daggered.
 """
 from __future__ import annotations
 
@@ -42,12 +27,7 @@ def _fmt(value: Any, digits: int = 3) -> str:
 
 
 def write_csv(path: Path, rows: Sequence[dict], columns: Sequence[str]) -> Path:
-    """Write ``rows`` with an explicit column order.
-
-    Explicit columns (rather than union-of-keys) so a table's schema is stable
-    across runs even when a particular run happens to lack a field — otherwise
-    column order would drift with the data and diffs become unreadable.
-    """
+    """Write ``rows`` with an explicit column order, so the schema is stable when a run lacks a field."""
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.writer(handle)
@@ -69,12 +49,7 @@ def latex_table(*, caption: str, label: str, column_spec: str,
                 notes: str = "", source: str = "",
                 midrule_before: Iterable[int] = (),
                 small: bool = True) -> str:
-    """A booktabs table body.
-
-    ``midrule_before`` takes ROW INDICES (into ``rows``) that should be preceded
-    by a ``\\midrule`` — used to separate dataset families and the aggregate row
-    from the per-scene rows.
-    """
+    """A booktabs table body; ``midrule_before`` holds the row indices to precede with a rule."""
     breaks = set(midrule_before)
     lines: list[str] = []
     if source:
@@ -107,11 +82,7 @@ def latex_table(*, caption: str, label: str, column_spec: str,
 
 
 def num(value: Any, digits: int = 2, *, plus: bool = False) -> str:
-    """LaTeX numeric cell; ``--`` when absent, optional explicit sign.
-
-    The explicit ``+`` matters in a delta table: a column of values where only the
-    negatives carry a sign invites the reader to skim past the improvements.
-    """
+    """LaTeX numeric cell; ``--`` when absent, optional explicit sign."""
     if value is None or (isinstance(value, float) and value != value):
         return LATEX_NA
     if plus:

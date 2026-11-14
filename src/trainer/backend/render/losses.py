@@ -1,113 +1,79 @@
 # Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-"""Image-space loss recording, decoupled from the primitive rasterizer.
-
-Extracts ``Pipeline.record_loss``'s SSIM / L1+L2 logic so the loss can be recorded
-independently of HOW the pixels were produced (a future learned render head or a
-different primitive reuses it unchanged). ``ImageLoss.record`` emits into a
-caller batch or creates one runtime-owned transient batch for the complete
-multi-pass loss. It returns the image-space gradient texture the backward uses.
-"""
+"""Photometric loss: writes dL/dC for the backward pass."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-
 import slangpy as spy
 
+from trainer.backend.compute.gpu import CommandRecorder
+from trainer.backend.compute.kernels import KernelLibrary
+from trainer.backend.memory.buffers import LossResources
 from trainer.config.config import LossConfig
-from trainer.backend.compute.gpu import CommandBatch, GpuRuntime
-
-
-@dataclass(frozen=True)
-class LossResult:
-    """Output of a loss pass: dL/d(rendered color), written per pixel into the
-    image-gradient texture the backward rasterizer reads."""
-    image_gradient: spy.Texture
 
 
 class ImageLoss:
-    """Records the photometric loss (SSIM+L1+L2 or plain L1+L2) that seeds the
-    per-pixel color gradient. Owns the loss kernels + SSIM scratch textures; the
-    rendered/target textures + config are supplied per call so a step can vary
-    the target and loss weights freely."""
+    """SSIM + L1 (+ L2) when ``ssim_weight > 0``, otherwise L1 + L2.
 
-    def __init__(self, *, ssim_maps_kernel, ssim_grad_kernel, loss_kernel,
-                 ssim_m1, ssim_m2, ssim_m3, image_gradient: spy.Texture,
-                 width: int, height: int, runtime: GpuRuntime,
+    The STBN mask applies here: unsampled pixels get zero gradient, sampled ones are reweighted.
+    """
+
+    KERNELS = {
+        "loss": ("losses/l1_l2_loss.slang", "computeLossGrad"),
+        "ssim_maps": ("losses/ssim_loss.slang", "ssimComputeMaps"),
+        "ssim_grad": ("losses/ssim_loss.slang", "ssimGradient"),
+    }
+
+    def __init__(self, commands: CommandRecorder, kernels: KernelLibrary, *,
+                 resources: LossResources, width: int, height: int,
                  config: LossConfig) -> None:
-        self._k_ssim_maps = ssim_maps_kernel
-        self._k_ssim_grad = ssim_grad_kernel
-        self._k_loss = loss_kernel
-        self._ssim_m1 = ssim_m1
-        self._ssim_m2 = ssim_m2
-        self._ssim_m3 = ssim_m3
-        self._image_gradient = image_gradient
+        self._commands = commands
+        self._k = kernels.load(self.KERNELS)
+        self._r = resources
         self._width = width
         self._height = height
-        self._runtime = runtime
-        self._config = config
+        self.config = config
 
-    @staticmethod
-    def _emit(batch: CommandBatch, kernel, marker: str, **kwargs) -> None:
-        batch.dispatch(kernel, marker, **kwargs)
+    @property
+    def image_gradient(self) -> spy.Texture:
+        return self._r.image_gradient
 
-    @staticmethod
-    def _group(batch: CommandBatch, label: str):
-        return batch.marker_group(label)
-
-    def record(self, batch: CommandBatch | None, *, rendered: spy.Texture,
-               target: spy.Texture, stbn_kwargs: dict) -> LossResult:
-        """``stbn_kwargs`` are the four ``stbn_*`` mask parameters (see
-        :meth:`trainer.backend.render.stbn.StbnMask.shader_kwargs`). The loss is
-        where sparse supervision is DEFINED — it zeroes the gradient of every
-        pixel this slice does not sample and scales the rest by TILE_AREA/k — so
-        the backward can then skip those pixels without changing the result."""
-        owned_batch = batch is None
-        if batch is None:
-            batch = self._runtime.command_batch("image_loss")
-        config = self._config
+    def record(self, *, rendered: spy.Texture, target: spy.Texture, stbn_kwargs: dict) -> None:
+        commands, config, r = self._commands, self.config, self._r
+        threads = [self._width, self._height, 1]
         dims = spy.uint2(self._width, self._height)
         if config.ssim_weight > 0:
-            # Two-pass SSIM: pass 1 builds the m1/m2/m3 back-projection maps,
-            # pass 2 convolves them and blends with the L1 + alpha gradient.
-            with self._group(batch, "ssim_maps"):
-                self._emit(batch, self._k_ssim_maps, "ssim_maps",
-                    thread_count=[self._width, self._height, 1],
+            with commands.marker_group("ssim_maps"):
+                commands.dispatch(self._k.ssim_maps, "ssim_maps",
+                    thread_count=threads,
                     output_image=rendered,
                     target_image=target,
-                    ssim_m1=self._ssim_m1,
-                    ssim_m2=self._ssim_m2,
-                    ssim_m3=self._ssim_m3,
-                    frame_dim=dims,
-                )
-            with self._group(batch, "ssim_grad"):
-                self._emit(batch, self._k_ssim_grad, "ssim_grad",
-                    thread_count=[self._width, self._height, 1],
+                    ssim_m1=r.ssim_m1,
+                    ssim_m2=r.ssim_m2,
+                    ssim_m3=r.ssim_m3,
+                    frame_dim=dims)
+            with commands.marker_group("ssim_grad"):
+                commands.dispatch(self._k.ssim_grad, "ssim_grad",
+                    thread_count=threads,
                     output_image=rendered,
                     target_image=target,
-                    ssim_m1=self._ssim_m1,
-                    ssim_m2=self._ssim_m2,
-                    ssim_m3=self._ssim_m3,
-                    dL_dC=self._image_gradient,
+                    ssim_m1=r.ssim_m1,
+                    ssim_m2=r.ssim_m2,
+                    ssim_m3=r.ssim_m3,
+                    dL_dC=r.image_gradient,
                     frame_dim=dims,
                     lambda_ssim=config.ssim_weight,
                     w_alpha=config.alpha_weight,
                     lambda_l2=config.l2_weight,
-                    **stbn_kwargs,
-                )
+                    **stbn_kwargs)
         else:
-            with self._group(batch, "l1_l2_loss"):
-                self._emit(batch, self._k_loss, "loss",
-                    thread_count=[self._width, self._height, 1],
+            with commands.marker_group("l1_l2_loss"):
+                commands.dispatch(self._k.loss, "loss",
+                    thread_count=threads,
                     output_image=rendered,
                     target_image=target,
-                    dL_dC=self._image_gradient,
+                    dL_dC=r.image_gradient,
                     frame_dim=dims,
                     w_alpha=config.alpha_weight,
                     lambda_l2=config.l2_weight,
-                    **stbn_kwargs,
-                )
-        if owned_batch:
-            self._runtime.submit(batch)
-        return LossResult(image_gradient=self._image_gradient)
+                    **stbn_kwargs)

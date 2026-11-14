@@ -1,17 +1,8 @@
 # Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-"""Understandability ``U`` — can a fresh agent build the right mental model?
+"""Understandability ``U``: can a fresh agent build the right mental model from read-only questions?
 
-Graded from read-only comprehension tasks (no edits allowed). Each run
-contributes four terms:
-
-    answer       correctness of the free-text answer
-    files        F1 of the files the agent identified vs the ground truth
-    calibration  1 - Brier(confidence, was_correct)  (over/under-confidence)
-    context      how little context the agent needed to answer
-
-This is a stronger readability probe than asking an LLM "rate this 1-10", since
-it scores whether the architecture *communicates* where responsibilities live.
+Each run blends answer correctness, cited-file F1, calibration (1 - Brier) and context economy.
 """
 
 from __future__ import annotations

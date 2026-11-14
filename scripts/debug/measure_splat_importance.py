@@ -1,22 +1,9 @@
 # Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-"""How many splats does a trained model actually need?
+"""How many splats does a trained model actually need? Per-splat blend-weight importance + prune curves.
 
-Trains with the normal protocol up to ``--probe-iter``, then measures:
-  * importance: the total blend weight (sum of alpha * T) each splat contributes
-    over every training view. Colour is affine in sh0 (0.5 + C0 * sh0), so the
-    existing backward under a unit red image gradient yields C0 * importance
-    in the red colour gradient - no extra shader needed;
-  * prune curves: held-out PSNR after virtually removing the least important
-    k% of splats (opacity forced to ~0), without any retraining;
-  * optionally (--time-steps), the training-step time before and after really
-    removing the least important --time-prune-fraction of the splats.
-
-Usage (any v2_train.py flag is accepted):
-    .venv/Scripts/python.exe scripts/debug/measure_splat_importance.py \\
-        --scene datasets/360_v2/bicycle --iters 3000 --probe-iter 3000 \\
-        --densify-mode structure_aware --mip-splatting --seed 42 --no-viewer \\
-        --out outputs/importance/bicycle_gaussian_3000.json
+Colour is affine in sh0, so the backward of a unit red image gradient yields C0 * importance.
+    .venv/Scripts/python.exe scripts/debug/measure_splat_importance.py --scene datasets/360_v2/bicycle --iters 3000 --out outputs/importance/bicycle_gaussian_3000.json
 """
 
 from __future__ import annotations
@@ -34,9 +21,8 @@ for _sub in ("running", "debug", "plots"):
     if _path not in sys.path:
         sys.path.append(_path)
 
-from trainer.backend.densify.densify import DensifyConfig
+from trainer.config.config import DensifyConfig
 from trainer.config.config import AdamLRs, IterationContextualVariables
-from trainer.contracts.codegen import gaussian_numpy_dtype
 from trainer.frontend.app import TrainingApplication
 from trainer.frontend.cli import build_parser
 from trainer.frontend.evaluation.evaluation import eval_test_psnr_srgb
@@ -71,28 +57,28 @@ def parse_args():
 
 
 def read_gaussians(pipeline) -> np.ndarray:
-    n = int(pipeline.buffers.num_gaussians_counter.to_numpy().view(np.uint32)[0])
-    raw = pipeline.buffers.gaussians.to_numpy().tobytes()
-    return np.frombuffer(raw, dtype=gaussian_numpy_dtype())[:n].copy()
+    n = int(pipeline.buffers.primitive.active_count.to_numpy().view(np.uint32)[0])
+    raw = pipeline.buffers.primitive.values.to_numpy().tobytes()
+    return np.frombuffer(raw, dtype=pipeline.buffers.primitive.layout.dtype)[:n].copy()
 
 
 def write_gaussians(pipeline, gaussians: np.ndarray) -> None:
-    pipeline.buffers.gaussians.copy_from_numpy(
+    pipeline.buffers.primitive.values.copy_from_numpy(
         np.ascontiguousarray(gaussians).view(np.float32).reshape(-1))
 
 
 def splat_importance(pipeline, cameras, contextual, n: int) -> np.ndarray:
     """Sum over the given views of each splat's blend weight alpha * T."""
-    pipeline.clear_gradients()
+    pipeline.optimizer.zero_grad()
     unit_red = np.zeros((pipeline.height, pipeline.width, 4), dtype=np.float32)
     unit_red[..., 0] = 1.0
-    pipeline.buffers.dL_dC_texture.copy_from_numpy(unit_red)
+    pipeline.buffers.loss.image_gradient.copy_from_numpy(unit_red)
     for camera in cameras:
-        with pipeline.recording("importance"):
+        with pipeline.commands.recording("importance"):
             pipeline.rasterize(camera, contextual)
             pipeline.record_backward(contextual)
     pipeline.runtime.wait_for_idle()
-    raw = pipeline.buffers.grad_buffers["color_r"].to_numpy().tobytes()
+    raw = pipeline.buffers.gradients.params["color_r"].to_numpy().tobytes()
     grad = np.frombuffer(raw, dtype=np.int64)[:n].astype(np.float64)
     return grad / FIXED_POINT_SCALE / SH_C0
 
@@ -150,12 +136,12 @@ def remove_least_important(pipeline, gaussians: np.ndarray, importance: np.ndarr
     trial = gaussians.copy()
     trial["opacity"][np.argsort(importance)[:round(fraction * importance.size)]] = PRUNED_LOGIT
     write_gaussians(pipeline, trial)
-    pipeline.densify_simple(DensifyConfig(), grad_thresh=float("inf"),
+    pipeline.simple_densifier.run(DensifyConfig(), grad_thresh=float("inf"),
                             allow_scale_prune=False)
-    pipeline.clear_tracking()
-    pipeline.compute_3d_filter()
+    pipeline.densify_stats.clear()
+    pipeline.mip_filter.compute()
     pipeline.runtime.wait_for_idle()
-    return int(pipeline.buffers.num_gaussians_counter.to_numpy().view(np.uint32)[0])
+    return int(pipeline.buffers.primitive.active_count.to_numpy().view(np.uint32)[0])
 
 
 def training_step_ms(app, steps: int, warmup: int = 20) -> float:
@@ -170,7 +156,7 @@ def training_step_ms(app, steps: int, warmup: int = 20) -> float:
             pipeline.runtime.wait_for_idle()
             started = time.perf_counter()
         index = scene.train_indices[step % len(scene.train_indices)]
-        pipeline.set_target_texture(app.target_textures[index])
+        pipeline.targets.select(app.target_textures[index])
         limiter.before_submit()
         pipeline.train_step(scene.colmapScene.images[index].camera, lrs=lrs)
         limiter.record(pipeline.last_submit_id)

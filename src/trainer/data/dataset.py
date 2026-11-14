@@ -33,8 +33,7 @@ def build_view_matrix(eye: np.ndarray, target: np.ndarray, up: np.ndarray) -> np
     right /= np.linalg.norm(right)
     up_ortho = np.cross(right, forward)
 
-    # Row-major R with rows = basis vectors, translation = -R @ eye.
-    # World point p -> view point v = R @ (p - eye).
+    # Rows of R are the basis vectors; p -> R @ (p - eye), so t = -R @ eye.
     R = np.stack([right, up_ortho, forward], axis=0).astype(np.float32)
     t = -R @ eye
 

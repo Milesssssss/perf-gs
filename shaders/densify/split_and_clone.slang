@@ -1,23 +1,7 @@
 // Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-// Phase B of densification: produce children for SPLIT and CLONE actions.
-//
-// One thread per gaussian, operating over the PRE-densification range.
-// - SPLIT: overwrite slot i with child-1 (scale / 1.6, jittered position
-//   within parent covariance), zero its Adam state. Atomic-append child-2
-//   (same rule, different jitter) at the tail with zeroed Adam state.
-// - CLONE: atomic-append an EXACT copy of the parent at the tail with
-//   ZEROED Adam state; parent slot i untouched. No position jitter —
-//   matches gsplat's duplicate(): `torch.cat([p, p[sel]])` + fresh
-//   optimizer state. Parent and child diverge via per-iter gradient
-//   noise under a fresh Adam moment buffer. (Inheriting Adam would
-//   make the twins take identical first steps and defeat the
-//   purpose of duplicating.)
-// - KEEP / PRUNE: no-op here. PRUNE is handled by the scatter-compact
-//   pass using the mask from Phase C.
-//
-// Both the split-scale-divisor (1.6) and the random-sample jitter are
-// from Kerbl et al. (3D Gaussian Splatting, §5.2).
+// Densify phase B: SPLIT replaces slot i with child-1 and appends child-2 (scale / 1.6, jittered; 3DGS §5.2);
+// CLONE appends an exact copy. Children get zeroed Adam state so clone twins don't take identical steps.
 
 #include "../common/types.slang"
 #include "../common/math.slang"
@@ -31,7 +15,6 @@ static const uint ACTION_PRUNE = 3;
 static const float SPLIT_SCALE_DIVISOR = 1.6;
 
 // Cheap deterministic-per-seed uniform[0,1).
-// Wang hash is overkill for our use but it's 5 ops and predictable.
 uint _wang_hash(uint x)
 {
     x = (x ^ 61u) ^ (x >> 16u);
@@ -57,8 +40,7 @@ float2 _randn2(uint seed)
     return float2(r * cos(a), r * sin(a));
 }
 
-// Draw a 3D offset from N(0, Σ) where Σ = R S^2 R^T (the world-space
-// 3D covariance from the current log_scale + rot_quat).
+// Offset drawn from N(0, Σ), Σ = R S^2 R^T being the parent's world-space covariance.
 float3 _sample_parent_cov_offset(float3 log_scale, float4 rot_quat, uint seed)
 {
     float2 a = _randn2(seed);
@@ -67,8 +49,7 @@ float3 _sample_parent_cov_offset(float3 log_scale, float4 rot_quat, uint seed)
     float3 z = float3(a.x, a.y, b.x);
 
     float3 scale = exp(log_scale);
-    // Σ^{1/2} = R * diag(scale): for a zero-mean N(0,I) sample z, the
-    // offset R*S*z is distributed N(0, R*S*S*R^T) = N(0, Σ).
+    // R*S*z ~ N(0, R S S R^T) = N(0, Σ) for z ~ N(0, I).
     float3x3 R = matrixFromQuaternion(rot_quat);
     float3 scaled = float3(scale.x * z.x, scale.y * z.y, scale.z * z.z);
     return mul(R, scaled);
@@ -79,15 +60,11 @@ Gaussian3D _child_for_split(Gaussian3D parent, uint seed)
     Gaussian3D child = parent;
     float3 offset = _sample_parent_cov_offset(parent.log_scale, parent.rot_quat, seed);
     child.mean = parent.mean + offset;
-    // Divide scale by the split divisor. In log space that's
-    // log_scale - log(1.6).
     child.log_scale = parent.log_scale - log(SPLIT_SCALE_DIVISOR);
     return child;
 }
 
-// Zero-initialized AdamState: children start with fresh Adam moments. Uses the
-// Slang zero-init cast so it never enumerates AdamState's contract-generated
-// fields (a new moment field needs no edit here).
+// Zero-init cast, so new AdamState fields need no edit here.
 AdamState _zero_adam()
 {
     return (AdamState)0;
@@ -101,9 +78,7 @@ void splitAndClone(
     RWStructuredBuffer<AdamState> adam_state,
     RWStructuredBuffer<uint> num_gaussians_counter,
     StructuredBuffer<uint> action,
-    // Snapshot of num_gaussians_counter[0] taken BEFORE this dispatch.
-    // Kept in a separate buffer so we can atomically bump the counter
-    // without racing our own bounds check. Written by snapshotCount.
+    // Pre-dispatch count snapshot (snapshotCount), so bumping the counter can't race the bounds check.
     StructuredBuffer<uint> pre_count_buf,
     uniform uint max_splats)
 {
@@ -119,8 +94,6 @@ void splitAndClone(
 
     if (a == ACTION_SPLIT)
     {
-        // Generate two children from independent seeds, overwrite
-        // parent slot with one and append the other.
         Gaussian3D c1 = _child_for_split(parent, i * 2u);
         Gaussian3D c2 = _child_for_split(parent, i * 2u + 1u);
 
@@ -131,7 +104,6 @@ void splitAndClone(
             gaussians[tail] = c2;
             adam_state[tail] = _zero_adam();
         }
-        // Overwrite parent slot with child-1.
         gaussians[i] = c1;
         adam_state[i] = _zero_adam();
     }
@@ -149,10 +121,7 @@ void splitAndClone(
     }
 }
 
-// SH variant of splitAndClone: identical gaussian/Adam behavior PLUS carrying
-// the optional features_rest coefficients (children inherit the parent's, fresh
-// rest-Adam). Dispatched INSTEAD of splitAndClone on the SH path (it owns the
-// same atomic append, so it must replace, not run alongside).
+// splitAndClone plus the SH rest carry; must replace it, not run alongside (same atomic append).
 [shader("compute")]
 [numthreads(256, 1, 1)]
 void splitAndCloneSH(

@@ -1,36 +1,9 @@
 # Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-"""Training-run inspector & comparer — a GUI for eyeballing and comparing the
-artifacts written by ``scripts/v2_train.py`` into ``outputs/train/<run>/``.
+"""Tkinter GUI comparing two v2_train.py runs (``outputs/train/<run>/``): metric curves and render | GT | render views.
 
-Pick two run folders (A and B) and it gives you two linked views:
-
-  * a chart that overlays a chosen metric for both runs — training curves
-    (loss / psnr / gaussian count / lr / it-per-s over iterations or elapsed
-    time), or the final per-camera PSNR from ``final_psnr.json``;
-  * a camera comparer that shows, side by side, run A's render | ground truth |
-    run B's render for a chosen camera at a chosen iteration, with a live
-    per-image PSNR readout and an optional amplified error view.
-
-Zero third-party GUI deps: pure tkinter + PIL (already a project dependency),
-so it runs anywhere the trainer runs. Fully standalone from the trainer, like
-``stream_viewer.py``.
-
-A run folder is expected to contain (all optional — the UI degrades if some are
-missing):
-    config.json          training config
-    log.jsonl            per-log-step metrics (iter, loss_*, psnr_instant, ...)
-    densify_log.jsonl    per-densify-step events (used to mark the chart)
-    final_psnr.json      summary + per-camera PSNR at the final iteration
-    cams/cam_NN/         gt.png + iter_NNNNNN.png preview renders
-
-Usage:
-    .venv/Scripts/python.exe scripts/inspect_runs.py
-    # or preselect:
-    .venv/Scripts/python.exe scripts/inspect_runs.py \
-        --run-a outputs/train/runX --run-b outputs/train/runY
-    # or point at a different root to auto-list from:
-    .venv/Scripts/python.exe scripts/inspect_runs.py --root outputs/train
+Reads config.json, log.jsonl, densify_log.jsonl, final_psnr.json and cams/cam_NN/*.png, each optional.
+    python scripts/plots/inspect_runs.py [--run-a DIR] [--run-b DIR] [--root outputs/train]
 """
 from __future__ import annotations
 
@@ -46,10 +19,9 @@ from tkinter import filedialog, ttk
 
 from PIL import Image, ImageTk
 
-# Run A / Run B identity colors, reused everywhere (chart lines, legend, labels).
-COLOR_A = "#4f9dff"   # blue
-COLOR_B = "#ff8a3d"   # orange
-COLOR_GT = "#9aa0a6"  # neutral grey (ground truth)
+COLOR_A = "#4f9dff"
+COLOR_B = "#ff8a3d"
+COLOR_GT = "#9aa0a6"
 BG = "#1e1f22"
 FG = "#e8e8e8"
 GRID = "#33353a"
@@ -58,9 +30,6 @@ AXIS = "#6b6f76"
 ITER_RE = re.compile(r"iter_(\d+)\.png$", re.IGNORECASE)
 
 
-# --------------------------------------------------------------------------- #
-# Data loading
-# --------------------------------------------------------------------------- #
 def _load_json(path: Path):
     try:
         return json.loads(path.read_text())
@@ -96,14 +65,12 @@ class Run:
         self.densify = _load_jsonl(self.path / "densify_log.jsonl")
         self.final = _load_json(self.path / "final_psnr.json") or {}
 
-        # per_cam metrics keyed by cam_idx (from final_psnr.json).
         self._percam: dict[int, dict] = {}
         for row in self.final.get("per_cam", []):
             idx = row.get("cam_idx")
             if idx is not None:
                 self._percam[int(idx)] = row
 
-        # cams/cam_NN -> {"gt": Path|None, "iters": {iter:int -> Path}}
         self.cams: dict[int, dict] = {}
         cams_dir = self.path / "cams"
         if cams_dir.is_dir():
@@ -153,16 +120,10 @@ class Run:
 
     @property
     def avg_psnr(self):
-        # Current schema: psnr_srgb (mean of per-image PSNR on the test split,
-        # paper metric). Old runs used avg_psnr_srgb (dB-of-mean-MSE, all cams).
+        # Older final_psnr.json files only have avg_psnr_srgb (dB of mean MSE over all cams).
         return self.final.get("psnr_srgb", self.final.get("avg_psnr_srgb"))
 
 
-# --------------------------------------------------------------------------- #
-# Metric registry — what the chart can plot
-# --------------------------------------------------------------------------- #
-# source "log": time series from log.jsonl, x = iter or elapsed_s.
-# source "percam": final per-camera value from final_psnr.json, x = cam_idx.
 METRICS = [
     ("loss (rolling)",       "log",    "loss_rolling"),
     ("loss (instant)",       "log",    "loss_instant"),
@@ -176,9 +137,6 @@ METRICS = [
 METRIC_BY_LABEL = {label: (src, key) for label, src, key in METRICS}
 
 
-# --------------------------------------------------------------------------- #
-# Canvas line chart
-# --------------------------------------------------------------------------- #
 def _nice_ticks(lo: float, hi: float, target: int = 6) -> list[float]:
     """A short list of 'round' tick values covering [lo, hi]."""
     if not math.isfinite(lo) or not math.isfinite(hi) or hi <= lo:
@@ -216,12 +174,7 @@ def _fmt_tick(v: float) -> str:
 
 
 class LineChart(tk.Canvas):
-    """A minimal overlaid line chart. Feed it series via ``set_series`` and it
-    handles axes, gridlines, a legend, optional log-Y, and vertical markers.
-
-    Optional ``on_pick(x_value)`` is called with the data-space x nearest a
-    left click — used to link the per-camera chart to the camera comparer.
-    """
+    """Overlaid line chart; ``on_pick(x)``, if set, receives the data-space x of a left click."""
 
     PAD_L, PAD_R, PAD_T, PAD_B = 64, 16, 34, 40
 
@@ -232,7 +185,7 @@ class LineChart(tk.Canvas):
         self._log_y = False
         self._x_label = "iter"
         self._title = ""
-        self._plot_box = None  # (x0, y0, x1, y1) in pixels
+        self._plot_box = None
         self._xr = self._yr = None
         self.on_pick = None
         self.bind("<Configure>", lambda e: self.redraw())
@@ -286,7 +239,6 @@ class LineChart(tk.Canvas):
                 ylo_d = min(pos)
         if yhi_d <= ylo_d:
             yhi_d = ylo_d + (abs(ylo_d) or 1.0) * 0.1
-        # small headroom
         if self._log_y:
             ylo, yhi = math.log10(ylo_d), math.log10(yhi_d)
             ylo -= (yhi - ylo) * 0.05
@@ -297,7 +249,6 @@ class LineChart(tk.Canvas):
         self._xr = (xlo, xhi)
         self._yr = (ylo, yhi)
 
-        # --- gridlines + y ticks ---
         if self._log_y:
             lo_e, hi_e = math.floor(ylo), math.ceil(yhi)
             y_ticks = [10 ** e for e in range(int(lo_e), int(hi_e) + 1)]
@@ -310,7 +261,6 @@ class LineChart(tk.Canvas):
                 self.create_text(x0 - 6, py, anchor="e", fill=AXIS,
                                  text=_fmt_tick(yt), font=("", 8))
 
-        # --- x ticks ---
         for xt in _nice_ticks(xlo, xhi):
             px = self._tx(xt, xlo, xhi, x0, x1)
             if x0 - 1 <= px <= x1 + 1:
@@ -318,7 +268,6 @@ class LineChart(tk.Canvas):
                 self.create_text(px, y1 + 6, anchor="n", fill=AXIS,
                                  text=_fmt_tick(xt), font=("", 8))
 
-        # axes frame
         self.create_rectangle(x0, y0, x1, y1, outline=AXIS)
         self.create_text(x0, y1 + 22, anchor="w", fill=AXIS,
                          text=self._x_label, font=("", 9))
@@ -326,14 +275,12 @@ class LineChart(tk.Canvas):
             self.create_text((x0 + x1) / 2, y0 - 18, fill=FG, text=self._title,
                              font=("", 10, "bold"))
 
-        # --- vertical markers (e.g. densify iters) ---
         for mk in self._markers:
             if xlo <= mk["x"] <= xhi:
                 px = self._tx(mk["x"], xlo, xhi, x0, x1)
                 self.create_line(px, y0, px, y1, fill=mk.get("color", GRID),
                                  dash=(2, 3))
 
-        # --- series ---
         for s in drawable:
             pts = []
             for x, y in zip(s["xs"], s["ys"]):
@@ -347,7 +294,6 @@ class LineChart(tk.Canvas):
                 self.create_oval(pts[0] - 3, pts[1] - 3, pts[0] + 3, pts[1] + 3,
                                  fill=s["color"], outline="")
 
-        # --- legend ---
         ly = y0 + 6
         for s in drawable:
             self.create_line(x1 - 150, ly, x1 - 130, ly, fill=s["color"], width=3)
@@ -366,9 +312,6 @@ class LineChart(tk.Canvas):
         self.on_pick(xlo + t * (xhi - xlo))
 
 
-# --------------------------------------------------------------------------- #
-# Image panel — one render or GT view with a caption
-# --------------------------------------------------------------------------- #
 class ImagePanel(tk.Frame):
     def __init__(self, master, title, title_color):
         super().__init__(master, bg=BG)
@@ -380,8 +323,8 @@ class ImagePanel(tk.Frame):
         self.canvas.pack(side="top", fill="both", expand=True)
         self.caption = tk.Label(self, text="", fg=FG, bg=BG, font=("", 9))
         self.caption.pack(side="bottom", fill="x")
-        self._pil = None          # current PIL image (RGB) to display
-        self._photo = None        # keep a ref so Tk doesn't GC it
+        self._pil = None
+        self._photo = None  # keep a ref so Tk doesn't GC it
         self.canvas.bind("<Configure>", lambda e: self._render())
 
     def set_title(self, text):
@@ -412,9 +355,6 @@ class ImagePanel(tk.Frame):
         self.canvas.create_image(cw / 2, ch / 2, image=self._photo)
 
 
-# --------------------------------------------------------------------------- #
-# Image cache + PSNR helper
-# --------------------------------------------------------------------------- #
 class ImageCache:
     """Decodes PNGs once and hands back PIL (RGB) and numpy (float [0,1])."""
 
@@ -467,9 +407,6 @@ def _error_image(render: np.ndarray, gt: np.ndarray, amp: float) -> Image.Image:
     return Image.fromarray((err * 255).astype(np.uint8), mode="RGB")
 
 
-# --------------------------------------------------------------------------- #
-# Application
-# --------------------------------------------------------------------------- #
 class InspectorApp(tk.Tk):
     def __init__(self, root_dir: Path, run_a: Path | None, run_b: Path | None):
         super().__init__()
@@ -488,7 +425,6 @@ class InspectorApp(tk.Tk):
 
         self.refresh_all()
 
-    # -- style ------------------------------------------------------------- #
     def _build_style(self):
         style = ttk.Style(self)
         try:
@@ -500,7 +436,6 @@ class InspectorApp(tk.Tk):
         style.configure("TCombobox", padding=2)
         style.map("TCombobox", fieldbackground=[("readonly", "#2a2c31")])
 
-    # -- toolbar (run pickers) --------------------------------------------- #
     def _build_toolbar(self):
         bar = tk.Frame(self, bg=BG)
         bar.pack(side="top", fill="x", padx=8, pady=6)
@@ -535,13 +470,11 @@ class InspectorApp(tk.Tk):
     def _label_for(self, run: Run | None) -> str:
         return run.name if run else "(none — click Browse…)"
 
-    # -- body (chart | image comparer) ------------------------------------- #
     def _build_body(self):
         paned = tk.PanedWindow(self, orient="horizontal", bg=BG, sashwidth=6,
                                sashrelief="flat", bd=0)
         paned.pack(side="top", fill="both", expand=True, padx=8, pady=(0, 8))
 
-        # ----- left: chart + its controls -----
         left = tk.Frame(paned, bg=BG)
         ctl = tk.Frame(left, bg=BG)
         ctl.pack(side="top", fill="x", pady=(0, 4))
@@ -575,7 +508,6 @@ class InspectorApp(tk.Tk):
         self.chart.on_pick = self._chart_picked
         paned.add(left, minsize=420, width=640)
 
-        # ----- right: camera comparer -----
         right = tk.Frame(paned, bg=BG)
         cc = tk.Frame(right, bg=BG)
         cc.pack(side="top", fill="x", pady=(0, 4))
@@ -597,7 +529,6 @@ class InspectorApp(tk.Tk):
                  length=90, command=lambda v: self.refresh_images()
                  ).pack(side="left")
 
-        # iteration slider
         it_frame = tk.Frame(right, bg=BG)
         it_frame.pack(side="top", fill="x")
         tk.Label(it_frame, text="Iteration", fg=FG, bg=BG).pack(side="left")
@@ -615,9 +546,7 @@ class InspectorApp(tk.Tk):
         self.panel_a = ImagePanel(panels, "Run A", COLOR_A)
         self.panel_gt = ImagePanel(panels, "Ground truth", COLOR_GT)
         self.panel_b = ImagePanel(panels, "Run B", COLOR_B)
-        # grid with uniform equal-weight columns so each panel is an exact third
-        # (pack/expand only splits *leftover* space, which skews on unequal
-        # requested sizes and squeezes one panel to a sliver).
+        # Uniform grid columns give exact thirds; pack/expand splits only leftover space and squeezes panels.
         panels.rowconfigure(0, weight=1)
         for col, p in enumerate((self.panel_a, self.panel_gt, self.panel_b)):
             p.grid(row=0, column=col, sticky="nsew", padx=2)
@@ -625,7 +554,6 @@ class InspectorApp(tk.Tk):
 
         paned.add(right, minsize=520)
 
-    # -- run selection ----------------------------------------------------- #
     def _browse(self, which: str):
         init = str(self.root_dir if self.root_dir.exists() else Path.cwd())
         chosen = filedialog.askdirectory(title=f"Select run folder ({which.upper()})",
@@ -655,7 +583,6 @@ class InspectorApp(tk.Tk):
         self.cache = ImageCache()
         self.refresh_all()
 
-    # -- refresh orchestration --------------------------------------------- #
     def refresh_all(self):
         self._update_summary()
         self._rebuild_camera_list()
@@ -679,7 +606,6 @@ class InspectorApp(tk.Tk):
     def _runs(self):
         return [r for r in (self.run_a, self.run_b) if r]
 
-    # -- chart ------------------------------------------------------------- #
     def refresh_chart(self):
         src, key = METRIC_BY_LABEL[self.metric_var.get()]
         series = []
@@ -699,7 +625,7 @@ class InspectorApp(tk.Tk):
                         continue
                     for it in run.densify_iters():
                         markers.append({"x": it, "color": color})
-        else:  # percam
+        else:
             x_label = "camera index"
             for run, color in ((self.run_a, COLOR_A), (self.run_b, COLOR_B)):
                 if not run:
@@ -713,7 +639,6 @@ class InspectorApp(tk.Tk):
                               title=self.metric_var.get(), markers=markers)
 
     def _chart_picked(self, x_value):
-        # In per-camera mode a click selects the nearest camera.
         src, _ = METRIC_BY_LABEL[self.metric_var.get()]
         if src != "percam" or not self._cam_indices:
             return
@@ -721,7 +646,6 @@ class InspectorApp(tk.Tk):
         self.cam_var.set(self._cam_label(nearest))
         self._on_cam_change()
 
-    # -- camera list ------------------------------------------------------- #
     def _rebuild_camera_list(self):
         idxs = set()
         for run in self._runs():
@@ -737,7 +661,6 @@ class InspectorApp(tk.Tk):
         self._rebuild_iter_list()
 
     def _cam_label(self, cam_idx: int) -> str:
-        # Prefer the ground-truth image name from either run's final_psnr.
         for run in self._runs():
             row = run.percam(cam_idx)
             if row and row.get("image_name"):
@@ -755,7 +678,6 @@ class InspectorApp(tk.Tk):
         self._rebuild_iter_list()
         self.refresh_images()
 
-    # -- iteration slider -------------------------------------------------- #
     def _rebuild_iter_list(self):
         cam_idx = self._selected_cam_idx()
         iters = set()
@@ -771,7 +693,6 @@ class InspectorApp(tk.Tk):
             self.iter_label.config(text="—")
             return
         self.iter_scale.config(from_=0, to=n - 1, state="normal")
-        # Keep at the newest iteration by default.
         self.iter_scale.set(n - 1)
         self.iter_label.config(text=f"{self._iters[-1]:,}")
 
@@ -789,12 +710,10 @@ class InspectorApp(tk.Tk):
         idx = max(0, min(idx, len(self._iters) - 1))
         return self._iters[idx]
 
-    # -- images ------------------------------------------------------------ #
     def refresh_images(self):
         cam_idx = self._selected_cam_idx()
         it = self._current_iter()
 
-        # Ground truth (prefer A, fall back to B); returns (pil, arr) or None.
         gt_entry = None
         for run in self._runs():
             cam = run.cams.get(cam_idx) if cam_idx is not None else None
@@ -835,9 +754,8 @@ class InspectorApp(tk.Tk):
                 panel.show(pil, cap)
 
 
-# --------------------------------------------------------------------------- #
 def _auto_pick_recent(root: Path, n: int = 2) -> list[Path]:
-    """Newest run dirs under ``root`` that look like real runs (have a log)."""
+    """Newest ``n`` run dirs under ``root`` that have a log.jsonl or cams/ folder."""
     if not root.is_dir():
         return []
     cand = [d for d in root.iterdir() if d.is_dir()

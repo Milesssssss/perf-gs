@@ -1,41 +1,7 @@
 # Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-"""The training knobs the CLI and the hub panel BOTH expose - declared once.
-
-A :class:`Setting` is one knob, stated in full exactly once: how argparse should
-accept it (flag, type, choices, default, help) and how the panel should render it
-(caption, group, drag range, format). ``cli.py`` mounts these rows on its parser
-(:meth:`Setting.add_to`) and the viewer's TRAINING SETUP section renders the same
-rows, so the two cannot disagree about a type, a default or a set of choices -
-there is no second copy to update.
-
-    SETTINGS        - the knobs (a subset of the CLI; the rest of cli.py is
-                      launch-only and has no panel widget)
-    GROUPS          - the panel's grouping/order, so related knobs sit together
-    TrainingSetup   - the lock-protected value store the panel edits
-
-In hub mode the viewer comes up BEFORE a dataset (and therefore before the run) is
-chosen, so these stay open. The orchestrator seeds the store from the parsed args
-(:meth:`TrainingSetup.from_args`) and calls :meth:`TrainingSetup.apply_to` once,
-immediately before the run is built. Nothing reads the values continuously - a run
-resolves its schedules and buffer sizes at construction time, which is why the
-section stops being editable while a run is being built or trained (see
-``SessionSnapshot.can_configure``). It opens back up when the run finishes: the
-store is what the NEXT run is built from, so editing it and pressing Train again is
-how a run is re-launched with new values.
-
-Adding a knob is ONE row plus one ``add_to`` line in ``cli.py``: it then exists on
-the command line AND in the panel, and :func:`validate` (walked by the tests) fails
-if the two ever drift apart.
-
-One setting cannot be honoured as freely as the rest, and the table says so
-instead of quietly ignoring it:
-
-  * ``backward_pixel_stride`` is a compile-time shader define, injected into
-    ``compiler_options`` when the DEVICE is created - which in hub mode happens
-    before the panel even exists. It is therefore ``launch_only``: shown with its
-    launch value, not editable.
-"""
+"""Training knobs the CLI and the hub panel both expose, each declared once as a :class:`Setting`.
+:class:`TrainingSetup` is the panel's store, applied to the args right before a run is built."""
 from __future__ import annotations
 
 import argparse
@@ -44,6 +10,13 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from trainer.config.config import (
+    AppearanceConfig,
+    CompositorConfig,
+    LossConfig,
+    ShaderSpecialization,
+    StbnConfig,
+)
 from trainer.config.config_types import DensificationMode
 
 # Widget kinds, derived from a Setting's own declaration (see :attr:`Setting.kind`).
@@ -52,8 +25,7 @@ FLOAT = "float"
 BOOL = "bool"
 CHOICE = "choice"
 
-# Panel groups, in display order. Keeping this list ordered (rather than sorting
-# SETTINGS by group) is what guarantees the UI order is a deliberate choice.
+# Panel groups in display order (explicit, rather than sorting SETTINGS by group).
 GROUPS: tuple[tuple[str, str], ...] = (
     ("schedule", "SCHEDULE"),
     ("densify", "DENSIFICATION"),
@@ -84,7 +56,7 @@ class Setting:
 
     @property
     def flag(self) -> str:
-        """``densify_from`` -> ``--densify-from``: the dest IS the flag."""
+        """``densify_from`` -> ``--densify-from``: the dest is the flag."""
         return "--" + self.setting_name.replace("_", "-")
 
     @property
@@ -133,12 +105,10 @@ class Setting:
 
 
 SETTINGS: tuple[Setting, ...] = (
-    # ---- SCHEDULE: how long the run is. The mean-LR decay horizon deliberately
-    #      is NOT here: it follows --iters (cli.py --position-lr-max-steps 0).
+    # The mean-LR decay horizon is deliberately not a setting: it follows --iters.
     Setting("iters", "iterations", "schedule", int, default=3000,
             minimum=100, maximum=200_000, speed=25,
             note="the LR decay horizon follows this"),
-    # ---- DENSIFICATION: the growth schedule and its ceiling.
     Setting("densify_mode", "strategy", "densify", str,
             default=DensificationMode.STRUCTURE_AWARE.value,
             choices=tuple(m.value for m in DensificationMode),
@@ -160,8 +130,7 @@ SETTINGS: tuple[Setting, ...] = (
             minimum=0, maximum=200_000, speed=25, note="0 = never reset"),
     Setting("max_splats", "splat capacity", "densify", int, default=7_000_000,
             minimum=100_000, maximum=100_000_000, speed=50_000),
-    # ---- LOSS.
-    Setting("lambda_ssim", "SSIM weight", "loss", float, default=0.2,
+    Setting("lambda_ssim", "SSIM weight", "loss", float, default=LossConfig.ssim_weight,
             help="SSIM loss weight (3DGS default 0.2); 0 = pure L2",
             minimum=0.0, maximum=1.0, speed=0.005, fmt="%.3f",
             note="0 = pure L1/L2"),
@@ -173,8 +142,8 @@ SETTINGS: tuple[Setting, ...] = (
                  "0 = off (no samples, empty graph).",
             minimum=0, maximum=10_000, speed=10, note="0 = off"),
 
-    # ---- APPEARANCE: view-dependent color + the Mip-Splatting filter.
-    Setting("sh_degree", "SH degree", "appearance", int, default=0, choices=(0, 1, 2, 3),
+    Setting("sh_degree", "SH degree", "appearance", int, default=AppearanceConfig.sh_degree,
+            choices=(0, 1, 2, 3),
             help="Spherical-harmonics degree for view-dependent color (classic "
                  "3DGS). 0 (default) = view-independent SH band-0 (DC) only, the "
                  "original bit-identical path. 1-3 enables higher bands, stored in "
@@ -195,8 +164,8 @@ SETTINGS: tuple[Setting, ...] = (
                  "differentiable opacity compensation. Targets the high-frequency "
                  "detail gap vs SADGS (which uses the same 3D filter). Default on; "
                  "pass --no-mip-splatting for the bit-identical vanilla renderer."),
-    # ---- PERFORMANCE: speed-for-quality trades.
-    Setting("extinction_hardness", "extinction hardness k", "perf", float, default=1.0,
+    Setting("extinction_hardness", "extinction hardness k", "perf", float,
+            default=CompositorConfig.extinction_hardness,
             help="Compositor extinction hardness k (a shader UNIFORM, so "
                  "no recompile). 1.0 (default) = standard alpha-over "
                  "(bit-identical). k>1 hardens the per-splat transmittance "
@@ -218,7 +187,8 @@ SETTINGS: tuple[Setting, ...] = (
                  "the pre-schedule behavior). No-op when "
                  "--extinction-hardness <= 1.",
             minimum=-1, maximum=20_000, speed=10, note="-1 = no ramp"),
-    Setting("backward_pixel_stride", "backward pixel stride", "perf", int, default=1,
+    Setting("backward_pixel_stride", "backward pixel stride", "perf", int,
+            default=ShaderSpecialization.backward_pixel_stride,
             choices=(1, 2, 4, 8, 16),
             help="Stochastic pixel-subsampling stride for the backward "
                  "rasterizer (BACKWARD_PIXEL_STRIDE shader define). "
@@ -228,7 +198,8 @@ SETTINGS: tuple[Setting, ...] = (
                  "cost. Injected as a compile-time define.",
             launch_only=True,
             note="compile-time: set it with --backward-pixel-stride"),
-    Setting("stbn_pixel_fraction", "STBN pixel fraction", "perf", float, default=1.0,
+    Setting("stbn_pixel_fraction", "STBN pixel fraction", "perf", float,
+            default=StbnConfig.pixel_fraction,
             help="Fraction rho of pixels each backward supervises, chosen by a "
                  "spatiotemporal blue-noise mask (NVIDIA STBN, re-ranked per "
                  "tile so EXACTLY rho*64 of every 8x8 tile is sampled). 1.0 "
@@ -242,7 +213,8 @@ SETTINGS: tuple[Setting, ...] = (
                  "Mutually exclusive with --backward-pixel-stride > 1.",
             minimum=0.02, maximum=1.0, speed=0.01, fmt="%.3f",
             note="1 = every pixel (off)"),
-    Setting("stbn_warmup_iters", "STBN warmup steps", "perf", int, default=0,
+    Setting("stbn_warmup_iters", "STBN warmup steps", "perf", int,
+            default=StbnConfig.warmup_iters,
             help="Steps spent ramping the STBN pixel fraction from 1.0 down to "
                  "--stbn-pixel-fraction (log-linear, so it passes through the "
                  "intermediate densities). Sparse supervision is hardest on the "
@@ -250,7 +222,6 @@ SETTINGS: tuple[Setting, ...] = (
                  "starting dense is the cheap hedge. 0 (default) = the target "
                  "fraction from step 1. No-op at --stbn-pixel-fraction 1.0.",
             minimum=0, maximum=20_000, speed=10, note="0 = no ramp"),
-    # ---- EVALUATION: the passes that render the WHOLE camera set.
     Setting("evaluation", "eval + final metrics", "eval", bool, default=True,
             help="Run the passes that render every camera: the periodic eval "
                  "sweep (--eval-every, which lands on the LAST iteration whenever "
@@ -263,7 +234,6 @@ SETTINGS: tuple[Setting, ...] = (
                  "own flag left off, and it does not touch the explicit "
                  "--render-all-every / --psnr-curve opt-ins.",
             note="off = no full-camera-set renders"),
-    # ---- VIEWER STREAM: what the live viewer costs.
     Setting("stream_every", "snapshot every N iters", "stream", int, default=10,
             help="push a gaussian snapshot to the in-process viewer every "
                  "N iters. Now a zero-copy GPU->GPU blit, so a fine cadence "
@@ -280,19 +250,11 @@ def group_settings(group: str) -> list[Setting]:
 
 
 def captions(settings: Sequence[Setting]) -> list[str]:
-    """Small helper for tests/diagnostics: the captions of a group, in order."""
     return [s.caption for s in settings]
 
 
 def validate() -> list[str]:
-    """Every way a row can be wrong or unmounted, as a list of complaints.
-
-    Sharing one object makes type/choices/default drift impossible, so what is
-    left to check is internal: that the panel's drag domain CONTAINS the default
-    (a range excluding it would silently clamp the documented default the moment
-    the panel touched it), and that ``cli.py`` actually mounted the row - a knob
-    in the table but not on the parser would give a widget wired to nothing.
-    """
+    """Every way a row can be wrong or unmounted, as a list of complaints."""
     from trainer.frontend.cli import build_parser  # local: cli.py imports us
 
     mounted = set(vars(build_parser().parse_args([])))
@@ -354,8 +316,6 @@ class TrainingSetup:
     def values(self) -> dict[str, Any]:
         with self._lock:
             return dict(self._values)
-
-    # ---- hand over to the run ----
 
     def apply_to(self, args: Any) -> list[str]:
         changes: list[str] = []

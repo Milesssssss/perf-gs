@@ -1,15 +1,7 @@
 // Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-// The Gaussian's screen FOOTPRINT: its SnugBox AABB + AccuTile ellipse-tile
-// crossing, packaged as an IScreenFootprint so the binning kernels
-// (rasterize/tile_binned/tile_walk.slang) enumerate touched tiles generically.
-//
-// This is the gaussian conformer of the binning contract — it just gathers the
-// SnugBox bbox, the ellipse's inverse-covariance params (EllipseParams), and
-// the x/y-extremum offsets ONCE in make(), then serves the per-tile-strip
-// crossing queries the count/emit walks drive. A 2D disk would supply a
-// DiskFootprint (circle bbox + circle-tile crossing) with no change to the
-// walks or the kernels beyond swapping the constructed footprint type.
+// The Gaussian's screen footprint (SnugBox AABB + AccuTile ellipse-tile crossing) as an IScreenFootprint,
+// so the binning kernels (rasterize/tile_binned/tile_walk.slang) enumerate touched tiles generically.
 
 #ifndef TRAINER_GAUSSIAN_FOOTPRINT_SLANG
 #define TRAINER_GAUSSIAN_FOOTPRINT_SLANG
@@ -26,12 +18,9 @@ struct GaussianFootprint : IScreenFootprint
     float2 aabb_max;
     float x_d_args;     // x-offset where the ellipse's y-extrema occur
     float y_d_args;     // y-offset where the ellipse's x-extrema occur
-    bool visible;       // SnugBox has extent AND EllipseParams well-formed
+    bool visible;       // SnugBox has extent and EllipseParams well-formed
 
-    // Build the footprint from the projected gaussian (screen mean + 2D
-    // covariance) and its pre-sigmoid opacity. Computes SnugBox, the ellipse
-    // params, and the extremum offsets up front so the walk queries are pure
-    // reads. `opacity_logit` matches what SnugBox/AccuTile sigmoid internally.
+    // Computes SnugBox, ellipse params and extremum offsets up front so the walk queries are pure reads.
     static GaussianFootprint make(float2 mean_2d, float3 cov2d, float opacity_logit)
     {
         GaussianFootprint fp;

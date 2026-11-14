@@ -1,20 +1,7 @@
 # Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-"""GPU runtime + command-batch abstraction.
-
-Extracts the queue/submission and command-recording machinery out of
-``Pipeline`` so it is owned by cross-cutting infrastructure rather than the
-rasterizer. Behavior is preserved EXACTLY:
-
-  * flat + nested debug markers with deterministic per-name colors,
-  * one command buffer per recorded batch, submitted once under the gpu_lock,
-  * the transient one-shot batch used when a dispatch happens with no active
-    batch (e.g. an indirect dispatch driven from ``render()``).
-
-``Pipeline`` retains an ``_encoder`` compatibility property (backed by a
-``CommandBatch``) so external encoder owners — the densify pass and the live
-viewer, which build their own encoder and assign it — keep working unchanged.
-"""
+"""GPU runtime (queue + submission) and command recording: each recorded batch
+becomes one command buffer submitted under the shared queue lock."""
 
 from __future__ import annotations
 
@@ -29,10 +16,7 @@ import slangpy as spy
 
 @lru_cache(maxsize=None)
 def marker_color(name: str) -> tuple[float, float, float]:
-    """Deterministic pseudo-random RGB for a debug-marker/group name, so the
-    same phase gets the same color across runs (profiler captures stay
-    diff-able). Uses blake2s, NOT builtin hash() — CPython salts str hashing
-    per-process, which would recolor every run."""
+    """Run-stable RGB for a debug-marker name (blake2s: builtin hash() is salted per process)."""
     digest = hashlib.blake2s(name.encode("utf-8"), digest_size=3).digest()
     # Bias into [0.35, 1.0] so colors stay legible (never near-black).
     return tuple(0.35 + (b / 255.0) * 0.65 for b in digest)  # type: ignore[return-value]
@@ -40,17 +24,12 @@ def marker_color(name: str) -> tuple[float, float, float]:
 
 @dataclass(frozen=True)
 class SubmitHandle:
-    """Opaque handle to a submitted command buffer; wait on it to bound queue
-    depth without a full device idle."""
+    """A submitted command buffer; wait on it to bound queue depth without a full device idle."""
     submit_id: int
 
 
 class CommandBatch:
-    """
-    One command-buffer's worth of recorded GPU work.
-    Wraps a ``spy.CommandEncoder`` and provides the dispatch / marker helpers
-    that record into it.
-    """
+    """One command buffer's worth of recorded GPU work (wraps a ``spy.CommandEncoder``)."""
 
     def __init__(self, encoder: spy.CommandEncoder, label: str = "") -> None:
         self._encoder = encoder
@@ -61,19 +40,15 @@ class CommandBatch:
         return self._encoder
 
     def dispatch(self, kernel, marker: str, **kwargs) -> None:
-        """Record a kernel dispatch tagged with a flat debug marker."""
         self._encoder.insert_debug_marker(marker, spy.math.float3(*marker_color(marker)))
         kernel.dispatch(command_encoder=self._encoder, **kwargs)
 
     def dispatch_indirect(self, kernel, marker: str, args_buf: spy.NDBuffer,
                           offset: int = 0, **kwargs) -> None:
-        """Record an indirect compute dispatch (group count read from
-        ``args_buf`` at ``offset`` as three uint32s: groups_x/y/z).
+        """Record an indirect dispatch; groups_x/y/z are uint32s at ``offset`` in ``args_buf``.
 
-        Opens a scoped compute pass, binds the pipeline, writes entry-point
-        params via a ShaderCursor (matching ``kernel.dispatch(**kwargs)``), then
-        ``dispatch_compute_indirect``. No explicit barrier before the fetch:
-        sgl's resource tracking covers the write of ``args_buf`` (verified)."""
+        No barrier before the fetch: sgl's resource tracking covers the ``args_buf`` write.
+        """
         self._encoder.insert_debug_marker(marker, spy.math.float3(*marker_color(marker)))
         pass_enc = self._encoder.begin_compute_pass()
         try:
@@ -97,15 +72,10 @@ class CommandBatch:
 
 
 class GpuRuntime:
-    """Owns the device + queue-lock discipline and hands out CommandBatches.
+    """Owns the device and hands out CommandBatches; submissions serialize under ``gpu_lock``.
 
-    Submissions are serialized under ``gpu_lock`` (shared with any other thread
-    on this device — notably the live viewer). The lock defaults to a no-op so
-    single-threaded use is unchanged.
-
-    The lock covers submitting a command buffer and the queue-wide
-    ``wait_for_idle``. It does NOT cover a single-submission fence wait (see
-    :meth:`wait_for_submit`) or the viewer's ``present`` (see :meth:`submit`).
+    The lock (shared with the viewer; a no-op by default) covers submits and ``wait_for_idle``,
+    not single-submission fence waits or the viewer's ``present``.
     """
 
     def __init__(self, device: spy.Device,
@@ -114,16 +84,12 @@ class GpuRuntime:
         self.gpu_lock = gpu_lock if gpu_lock is not None else contextlib.nullcontext()
 
     def command_batch(self, label: str) -> CommandBatch:
-        """Start recording a new batch on a fresh command encoder."""
         return CommandBatch(self.device.create_command_encoder(), label)
 
     def submit(self, batch: CommandBatch,
                after_submit: Callable[[], None] | None = None) -> SubmitHandle:
-        """Finish + submit a batch under the queue lock.
-
-        ``after_submit`` (the viewer's ``surface.present``) runs AFTER the lock is
-        released, so a present that stalls cannot hold the queue shut against the
-        trainer. sgl owns any queue-object serialization present needs.
+        """Submit under the queue lock; ``after_submit`` (viewer present, serialized by sgl)
+        runs after unlocking, so a stalled present cannot hold the queue against the trainer.
         """
         cmd = batch.finish()
         with self.gpu_lock:
@@ -133,18 +99,105 @@ class GpuRuntime:
         return SubmitHandle(submit_id)
 
     def wait_for_submit(self, handle: SubmitHandle | int) -> None:
-        """Wait for ONE submission's fence. Deliberately NOT under ``gpu_lock``:
-        it needs no exclusive queue access, and holding the lock across a GPU wait
-        makes the viewer and the trainer serialize instead of sharing the device.
+        """Wait for one submission's fence; not under ``gpu_lock``, which would serialize
+        the viewer and the trainer for the whole GPU wait.
         """
         submit_id = handle.submit_id if isinstance(handle, SubmitHandle) else handle
         self.device.wait_for_submit(submit_id)
 
     def wait_for_idle(self) -> None:
-        """Queue-wide idle wait — this one DOES need the lock (it is a queue op)."""
+        """Queue-wide idle wait; a queue operation, so it takes the lock."""
         with self.gpu_lock:
             self.device.wait_for_idle()
 
     def queue_scope(self):
         """Lock scope for compound queue-adjacent operations (reload/reconfigure)."""
         return self.gpu_lock
+
+
+class RecordingTransaction:
+    """A recorded batch plus host-state commits that run once its submit succeeds."""
+
+    def __init__(self, batch: CommandBatch) -> None:
+        self.batch = batch
+        self._commits: list[Callable[[], None]] = []
+
+    def after_submit(self, commit: Callable[[], None]) -> None:
+        self._commits.append(commit)
+
+    def commit(self) -> None:
+        for commit in self._commits:
+            commit()
+
+
+class CommandRecorder:
+    """Records GPU work into the active batch, or submits each dispatch on its own.
+
+    Shared by every GPU component, so a training step is one command buffer; ``timer``
+    (a ``StepTimer``) is set only while profiling and timestamps every marker group.
+    """
+
+    def __init__(self, runtime: GpuRuntime) -> None:
+        self.runtime = runtime
+        self.batch: CommandBatch | None = None
+        self.timer = None
+        self.last_submit_id = 0
+
+    def dispatch(self, kernel, marker: str, **kwargs) -> None:
+        if self.batch is not None:
+            self.batch.dispatch(kernel, marker, **kwargs)
+            return
+        transient = self.runtime.command_batch(marker)
+        transient.dispatch(kernel, marker, **kwargs)
+        self.last_submit_id = self.runtime.submit(transient).submit_id
+
+    def dispatch_indirect(self, kernel, marker: str, args_buf: spy.NDBuffer,
+                          offset: int = 0, **kwargs) -> None:
+        if self.batch is not None:
+            self.batch.dispatch_indirect(kernel, marker, args_buf, offset, **kwargs)
+            return
+        transient = self.runtime.command_batch(marker)
+        transient.dispatch_indirect(kernel, marker, args_buf, offset, **kwargs)
+        self.last_submit_id = self.runtime.submit(transient).submit_id
+
+    @contextlib.contextmanager
+    def marker_group(self, label: str):
+        if self.batch is None:
+            yield
+            return
+        batch, timer = self.batch, self.timer
+        interval = timer.open(label, batch.encoder) if timer is not None else -1
+        with batch.marker_group(label):
+            try:
+                yield
+            finally:
+                if timer is not None:
+                    timer.close(interval, batch.encoder)
+
+    @contextlib.contextmanager
+    def recording(self, label: str):
+        """Record into a fresh batch and submit it once, only if the body succeeds."""
+        batch = self.runtime.command_batch(label)
+        transaction = RecordingTransaction(batch)
+        self.batch = batch
+        try:
+            yield transaction
+            self.last_submit_id = self.runtime.submit(batch).submit_id
+            transaction.commit()
+        finally:
+            self.batch = None
+
+    @contextlib.contextmanager
+    def attached(self, batch: CommandBatch):
+        """Record into a batch the caller owns and submits (the viewer frame)."""
+        previous, self.batch = self.batch, batch
+        try:
+            yield
+        finally:
+            self.batch = previous
+
+    def upload_texture(self, texture: spy.Texture, pixels) -> None:
+        if self.batch is not None:
+            self.batch.encoder.upload_texture_data(texture, 0, 0, pixels)
+        else:
+            texture.copy_from_numpy(pixels)

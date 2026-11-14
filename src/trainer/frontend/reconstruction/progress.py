@@ -1,16 +1,7 @@
 # Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-"""Turn setup/reconstruction output into a DETERMINATE progress fraction.
-
-Both operations are long (minutes to tens of minutes) and both are a fixed
-sequence of stages, so a stage table plus the ``[i/n]`` counters colmap already
-prints is enough for a real fraction — no spinner that lies.
-
-Stages are matched on the explicit ``[stage] <name>`` lines our own code emits
-(:mod:`.tools`, :mod:`.pipeline`), so rewording a human-readable log line can
-never silently break the bar. Pure text -> ``(label, fraction)``: the caller
-decides what to do with it (the viewer pushes it into ``SessionState``).
-"""
+"""Turn setup/reconstruction output into a determinate progress fraction, keyed on the explicit
+``[stage] <name>`` lines our own code emits so rewording a log line cannot break the bar."""
 from __future__ import annotations
 
 import re
@@ -38,8 +29,7 @@ class ParsedProgress:
     fraction: float
 
 
-# ReconTools.setup(): the colmap CUDA zip is ~360 MB against glomap's ~70, hence
-# the wider span.
+# ReconTools.setup(): colmap's CUDA zip (~360 MB) dwarfs glomap's (~70 MB), hence the wider span.
 SETUP_STAGES: tuple[Stage, ...] = (
     Stage("colmap", "installing colmap", 0.0, 0.75),
     Stage("glomap", "installing glomap", 0.75, 0.98),
@@ -58,10 +48,7 @@ RECON_STAGES: tuple[Stage, ...] = (
 
 
 class ProgressParser:
-    """Feed it output lines; it tracks the current stage and interpolates.
-
-    Monotonic: a late log line from an earlier stage cannot rewind the bar.
-    """
+    """Feed it output lines; it tracks the current stage and interpolates, never rewinding."""
 
     def __init__(self, stages: Iterable[Stage]) -> None:
         self._stages = tuple(stages)

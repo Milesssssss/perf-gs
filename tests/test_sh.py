@@ -18,7 +18,7 @@ from _pipeline_testkit import TestPipeline
 from trainer.config.config import AdamLRs, AppearanceConfig, LossConfig
 from trainer.data.dataset import simple_camera
 from trainer.backend.compute.device import create_device
-from trainer.backend.memory import buffer_io
+from trainer.common.sh import pack_features_rest, unpack_features_rest
 
 BACKENDS = ["vulkan", "d3d12"]
 
@@ -26,16 +26,16 @@ BACKENDS = ["vulkan", "d3d12"]
 def _read_features_rest(p: TestPipeline, n: int) -> np.ndarray:
     """Read + unpack the fp16-packed features_rest for the first n gaussians."""
     sh = p.buffers.sh
-    packed = np.frombuffer(p.buffers.features_rest.to_numpy().tobytes(),
+    packed = np.frombuffer(p.buffers.sh.features_rest.to_numpy().tobytes(),
                            dtype=np.uint32)[: n * sh.feat_uints]
-    return buffer_io.unpack_features_rest(packed, n, sh.rest_floats)
+    return unpack_features_rest(packed, n, sh.rest_floats)
 
 
 def _read_features_grad(p: TestPipeline, n: int) -> np.ndarray:
     sh = p.buffers.sh
-    packed = np.frombuffer(p.buffers.features_rest_grad.to_numpy().tobytes(),
+    packed = np.frombuffer(p.buffers.sh.features_rest_grad.to_numpy().tobytes(),
                            dtype=np.uint32)[: n * sh.feat_uints]
-    return buffer_io.unpack_features_rest(packed, n, sh.rest_floats)
+    return unpack_features_rest(packed, n, sh.rest_floats)
 
 
 def _pack_adam_mv(m: np.ndarray, v: np.ndarray, max_splats: int) -> np.ndarray:
@@ -56,7 +56,7 @@ def _pack_adam_mv(m: np.ndarray, v: np.ndarray, max_splats: int) -> np.ndarray:
 def _read_adam_m(p: TestPipeline, n: int) -> np.ndarray:
     rf = p.buffers.sh.rest_floats
     ms = p.max_splats
-    raw = np.frombuffer(p.buffers.adam_rest_state.to_numpy().tobytes(), dtype=np.float32)
+    raw = np.frombuffer(p.buffers.sh.adam_rest.to_numpy().tobytes(), dtype=np.float32)
     out = np.empty((n, rf), dtype=np.float32)
     idx = np.arange(n)
     for s in range(rf):
@@ -104,7 +104,7 @@ def test_sh_forward_is_view_dependent(backend: str) -> None:
     # Band-1 z-term on the R channel: rest coeff index 1, channel 0.
     rest = np.zeros(p.buffers.sh.rest_floats, np.float32)
     rest[1 * 3 + 0] = 5.0
-    p.set_features_rest(rest.reshape(1, -1))
+    p.primitives.write_features_rest(rest.reshape(1, -1))
     p.set_active_sh_degree(1)
 
     # Both cameras look at the gaussian (centered), from +z-behind vs +x-side,
@@ -142,7 +142,7 @@ def test_sh_zero_rest_matches_sh0(backend: str) -> None:
 
 def _upload_rest(p: TestPipeline, gid0_rest: np.ndarray) -> None:
     """Upload gaussian 0's rest coefficients (rest is zero for other slots)."""
-    p.set_features_rest(gid0_rest.reshape(1, -1))
+    p.primitives.write_features_rest(gid0_rest.reshape(1, -1))
 
 
 @pytest.mark.parametrize("backend", BACKENDS)
@@ -175,7 +175,7 @@ def test_sh_rest_gradient_finite_difference(backend: str) -> None:
     target[..., 0] = 0.4
     target[..., 1] = 0.6
     target[..., 2] = 0.5
-    p.set_target_image(target)
+    p.targets.set_image(target)
 
     def loss_with(rest_vec: np.ndarray) -> float:
         _place()
@@ -189,8 +189,8 @@ def test_sh_rest_gradient_finite_difference(backend: str) -> None:
     _upload_rest(p, rest0)
     p.set_active_sh_degree(3)
     p.forward_and_loss(cam)
-    p.clear_gradients()
-    p.backward()
+    p.optimizer.zero_grad()
+    p.run_backward()
     analytic = _read_features_grad(p, 1)[0].astype(np.float64)
 
     eps = 2e-3
@@ -227,7 +227,7 @@ def test_sh_mean_gradient_includes_view_term(backend: str) -> None:
 
     target = np.zeros((H, W, 3), np.float32)
     target[..., 0] = 0.4; target[..., 1] = 0.6; target[..., 2] = 0.5
-    p.set_target_image(target)
+    p.targets.set_image(target)
 
     def place(mean: np.ndarray) -> None:
         p.set_primitive_from_numpy(means=mean.astype(np.float32),
@@ -238,8 +238,8 @@ def test_sh_mean_gradient_includes_view_term(backend: str) -> None:
 
     place(mean0)
     p.forward_and_loss(cam)
-    p.clear_gradients()
-    p.backward()
+    p.optimizer.zero_grad()
+    p.run_backward()
     grads = p.read_gradients()
     analytic = np.array([grads["mean_x"][0], grads["mean_y"][0], grads["mean_z"][0]])
 
@@ -275,7 +275,7 @@ def test_sh_training_updates_rest_and_reduces_loss(backend: str) -> None:
 
     target = np.zeros((H, W, 3), np.float32)
     target[..., 0] = 0.9; target[..., 1] = 0.1; target[..., 2] = 0.2
-    p.set_target_image(target)
+    p.targets.set_image(target)
 
     rest_floats = p.buffers.sh.rest_floats
     # features_rest starts at zero (set_gaussians clears it).
@@ -334,7 +334,7 @@ def test_sh_active_band_adam_matches_full_width(backend: str) -> None:
             means=means, log_scales=log_scales, rot_quats=rot, opacities=opac,
             color_logits=np.zeros((1, 3), np.float32))
         p.set_active_sh_degree(active_deg)
-        p.set_target_image(target)
+        p.targets.set_image(target)
         lrs = AdamLRs()
         for _ in range(40):
             p.step_split_for_active_band_test(cam, lrs=lrs, adam_degree=adam_degree)
@@ -385,18 +385,18 @@ def test_sh_features_rest_survives_morton_sort(backend: str) -> None:
     rest_floats = p.buffers.sh.rest_floats
     rest = np.zeros((max_splats, rest_floats), np.float32)
     rest[:n, 0] = np.arange(n)
-    p.buffers.features_rest.copy_from_numpy(buffer_io.pack_features_rest(rest))
+    p.buffers.sh.features_rest.copy_from_numpy(pack_features_rest(rest))
     m = np.zeros((max_splats, rest_floats), np.float32)
     m[:n, 0] = np.arange(n)
-    p.buffers.adam_rest_state.copy_from_numpy(
+    p.buffers.sh.adam_rest.copy_from_numpy(
         _pack_adam_mv(m, np.zeros_like(m), p.max_splats))
 
     world_min = means.min(axis=0) - 1.0
     world_max = means.max(axis=0) + 1.0
-    p.morton_sort(world_min, world_max)
+    p.morton.reorder(world_min, world_max)
     p.device.wait_for_idle()
 
-    floats = np.frombuffer(p.buffers.gaussians.to_numpy().tobytes(),
+    floats = np.frombuffer(p.buffers.primitive.values.to_numpy().tobytes(),
                            dtype=np.float32).reshape(-1, 14)
     sorted_sh0_r = floats[:n, 11]   # original slot index carried in sh0.r
 
@@ -420,22 +420,22 @@ def _force_clone_eta(p: TestPipeline, idx: int = 0) -> None:
         a[idx] = val
         buf.copy_from_numpy(a)
 
-    w(b.eta_n_total, 10)
-    w(b.eta_buffers["n_high"], 10)
-    w(b.eta_buffers["n_low"], 0)
+    w(b.eta.n_total, 10)
+    w(b.eta.components["n_high"], 10)
+    w(b.eta.components["n_low"], 0)
     for key, val in (("max_x", 4.0), ("max_y", 2.0), ("max_z", 0.05)):
-        w(b.eta_buffers[key], int(val * 65536.0))
-    w(b.visibility_count_accum, 1)
+        w(b.eta.components[key], int(val * 65536.0))
+    w(b.densification.visibility_count, 1)
     a = np.zeros(N, dtype=np.int64)
     a[idx] = int(1.0 * 65536.0)
-    b.grad_mean_2d_mag_accum.copy_from_numpy(a)
+    b.densification.grad_mean_2d_mag.copy_from_numpy(a)
 
 
 @pytest.mark.parametrize("backend", BACKENDS)
 def test_sh_densify_clone_inherits_rest(backend: str) -> None:
     """A structure-densify CLONE must duplicate the gaussian AND its
     features_rest coefficients, with the child getting fresh (zero) rest-Adam."""
-    from trainer.backend.densify.densify import StructureConfig
+    from trainer.config.config import StructureConfig
 
     try:
         device = create_device(backend=backend)
@@ -456,19 +456,19 @@ def test_sh_densify_clone_inherits_rest(backend: str) -> None:
     rest = np.zeros((64, rest_floats), np.float32)
     parent_rest = (np.arange(rest_floats, dtype=np.float32) + 1.0) * 0.01
     rest[0] = parent_rest
-    p.buffers.features_rest.copy_from_numpy(buffer_io.pack_features_rest(rest))
+    p.buffers.sh.features_rest.copy_from_numpy(pack_features_rest(rest))
     # Stamp the parent's rest-Adam non-zero so we can prove the child gets fresh.
     m = np.zeros((64, rest_floats), np.float32)
     m[0] = 7.0
-    p.buffers.adam_rest_state.copy_from_numpy(_pack_adam_mv(m, m, p.max_splats))
+    p.buffers.sh.adam_rest.copy_from_numpy(_pack_adam_mv(m, m, p.max_splats))
 
     _force_clone_eta(p, 0)
     cfg = StructureConfig(tau_split=0.8, tau_prune=0.8, split_power=0.5,
                           max_split_factor=4, dense_scale=0.2)  # small -> CLONE
-    p.densify_structure_aware(cfg)
+    p.structure_densifier.densify(cfg)
     p.device.wait_for_idle()
 
-    count = int(p.buffers.num_gaussians_counter.to_numpy().view(np.uint32)[0])
+    count = int(p.buffers.primitive.active_count.to_numpy().view(np.uint32)[0])
     assert count == 2, f"expected 1 clone (count 2), got {count}"
 
     rest_out = _read_features_rest(p, 2)
@@ -485,11 +485,11 @@ def test_sh_ply_roundtrip_features_rest(tmp_path) -> None:
     """features_rest survives a PLY write/read round-trip through the INRIA
     channel-major f_rest_* ordering (pure CPU, no GPU)."""
     from trainer.data.ply import load_ply, write_gaussian_ply
-    from trainer.contracts.codegen import gaussian_numpy_dtype
 
     n, rest_floats = 5, 45
     rng = np.random.default_rng(0)
-    g = np.zeros(n, dtype=gaussian_numpy_dtype())
+    g = np.zeros(n, dtype=[("mean", "<f4", 3), ("log_scale", "<f4", 3), ("rot_quat", "<f4", 4),
+                           ("opacity", "<f4"), ("sh0", "<f4", 3)])
     g["mean"] = rng.standard_normal((n, 3)).astype(np.float32)
     g["log_scale"] = rng.standard_normal((n, 3)).astype(np.float32)
     g["rot_quat"][:, 0] = 1.0
@@ -534,7 +534,7 @@ def test_sh_viewer_mirrors_view_dependent_color(backend: str) -> None:
         color_logits=np.zeros((1, 3), np.float32))
     rest = np.zeros(train.buffers.sh.rest_floats, np.float32)
     rest[1 * 3 + 0] = 5.0   # band-1 z-term on R
-    train.set_features_rest(rest.reshape(1, -1))
+    train.primitives.write_features_rest(rest.reshape(1, -1))
     train.set_active_sh_degree(1)
 
     # Viewer builds its own SH-enabled viewer_only pipeline; no window until start().

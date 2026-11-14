@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any, Callable, Sequence
 import numpy as np
 from PIL import Image
 
+from trainer.backend.memory.budget import allocated_bytes
 from trainer.common.metrics import psnr as psnr_image, ssim as ssim_image
 from trainer.frontend.run_control import Checkpoint, uninterrupted
 
@@ -23,8 +24,7 @@ if TYPE_CHECKING:
 
 SCHEMA_VERSION = 3
 
-# Render-timing sample count for the reported FPS. Enough to average out a
-# stray hitch, short enough to stay a rounding error on a 3k-iteration run.
+# Render-timing samples: enough to average out a hitch, negligible on a 3k-iteration run.
 DEFAULT_FPS_FRAMES = 60
 FPS_WARMUP_FRAMES = 5
 
@@ -77,102 +77,25 @@ def device_info(pipeline: "TrainingPipeline") -> dict:
     return info
 
 
-def _buffer_bytes(obj: Any) -> int:
-    """Byte size of an NDBuffer / Buffer, or 0 for anything else.
-
-    Defensive by design: this is accounting, and a slangpy API shift must never
-    be able to fail a training run that has already succeeded.
-    """
-    for path in (("storage", "desc", "size"), ("desc", "size"), ("size",)):
-        node = obj
-        try:
-            for attr in path:
-                node = getattr(node, attr)
-            if isinstance(node, int) and node > 0:
-                return node
-        except Exception:                                  # noqa: BLE001
-            continue
-    return 0
-
-
-def _texture_bytes(tex: Any) -> int:
-    try:
-        desc = tex.desc
-        width = int(getattr(desc, "width", 0) or 0)
-        height = int(getattr(desc, "height", 0) or 0)
-        # 4 channels x 4 bytes is the worst case among the formats we create;
-        # this is a labelled upper bound, not a claim of exactness.
-        return width * height * 16
-    except Exception:                                      # noqa: BLE001
-        return 0
-
-
 def gpu_allocation(pipeline: "TrainingPipeline") -> dict:
-    """Sum of the trainer's OWN device allocations, by dataclass field.
-
-    This is the reproducible half of "peak GPU memory": it depends only on
-    ``--max-splats``, the frame size and the SH degree, so two runs of the same
-    config report the same number on any machine. It excludes driver/runtime
-    overhead and any allocation the trainer does not own — the suite driver polls
-    the device-wide figure separately for that. Reported as both, never merged.
-    """
-    result: dict[str, Any] = {"buffers_bytes": 0, "textures_bytes": 0,
-                              "by_field": {}}
-    try:
-        buffers = pipeline.buffers
-    except Exception:                                      # noqa: BLE001
-        return result
-
-    total_buf = 0
-    by_field: dict[str, int] = {}
-    for name in dir(buffers):
-        if name.startswith("_"):
-            continue
-        try:
-            value = getattr(buffers, name)
-        except Exception:                                  # noqa: BLE001
-            continue
-        if callable(value):
-            continue
-        size = 0
-        if isinstance(value, dict):
-            size = sum(_buffer_bytes(v) for v in value.values())
-        else:
-            size = _buffer_bytes(value)
-        if size > 0:
-            by_field[name] = size
-            total_buf += size
-
-    tex_total = 0
-    for attr in ("target_texture", "output_texture", "structure_texture"):
-        tex = getattr(buffers, attr, None)
-        if tex is not None:
-            tex_total += _texture_bytes(tex)
-
-    result["buffers_bytes"] = int(total_buf)
-    result["textures_bytes"] = int(tex_total)
-    result["total_bytes"] = int(total_buf + tex_total)
-    result["total_mb"] = round((total_buf + tex_total) / (1024 * 1024), 2)
-    result["by_field"] = dict(sorted(by_field.items(), key=lambda kv: -kv[1]))
-    result["note"] = (
-        "trainer-owned allocations only, walked from GaussianBuffers; excludes "
-        "driver/runtime overhead. textures_bytes is an upper bound (16 B/px). "
-        "READ THIS AS CAPACITY, NOT USE: the per-splat buffers are sized from "
-        "--max-splats up front, so this figure is a constant of the config and "
-        "is identical across sampling regimes. Divide by max_splats for "
-        "bytes-per-splat, and multiply by the achieved n_gaussians for the "
-        "working set actually touched.")
-    return result
+    """The trainer's own device allocations by field, as slangpy reports them.
+    Machine-independent (``--max-splats``, frame size, SH degree); excludes driver overhead."""
+    by_field = allocated_bytes(pipeline.buffers)
+    total = sum(by_field.values())
+    return {
+        "total_bytes": total,
+        "total_mb": round(total / (1024 * 1024), 2),
+        "by_field": dict(sorted(by_field.items(), key=lambda kv: -kv[1])),
+        "note": ("trainer-owned allocations walked from GaussianBuffers; excludes "
+                 "driver/runtime overhead. Capacity, not use: per-splat buffers are "
+                 "sized from --max-splats, so divide by max_splats for bytes-per-splat."),
+    }
 
 
 def stbn_asset_fingerprint(args: "argparse.Namespace") -> dict:
-    """Identity of the sampling asset this run actually read.
-
-    The STBN volume is a downloaded, non-vendored, NON-COMMERCIAL asset, so
-    "which STBN" is a real experimental variable: the report pins it by content
-    hash, not by filename.
-    """
-    from trainer.backend.render import stbn as stbn_module
+    """Identity of the STBN asset this run read, pinned by content hash rather than filename."""
+    from trainer.backend.compute.execution import TILE_AREA
+    from trainer.backend.render import stbn_table
 
     source = str(getattr(args, "stbn_source", ""))
     record: dict[str, Any] = {
@@ -181,17 +104,17 @@ def stbn_asset_fingerprint(args: "argparse.Namespace") -> dict:
         "warmup_iters": int(getattr(args, "stbn_warmup_iters", 0)),
         "independent": bool(getattr(args, "stbn_independent", False)),
         "stbn_seed": int(getattr(args, "stbn_seed", 0)),
-        "tile_pixels": stbn_module.pixels_per_tile(
+        "tile_pixels": stbn_table.pixels_per_tile(
             float(getattr(args, "stbn_pixel_fraction", 1.0))),
-        "tile_area": stbn_module.TILE_AREA,
+        "tile_area": TILE_AREA,
     }
-    if source == stbn_module.SOURCE_WHITE:
+    if source == stbn_table.SOURCE_WHITE:
         record["asset"] = "generated (per-tile permutations from stbn_seed)"
         return record
 
     override = str(getattr(args, "stbn_file", "") or "")
     path = (Path(override) if override
-            else stbn_module.nvidia_volume_path())
+            else stbn_table.nvidia_volume_path())
     record["asset_path"] = str(path)
     try:
         data = path.read_bytes()
@@ -203,32 +126,8 @@ def stbn_asset_fingerprint(args: "argparse.Namespace") -> dict:
     return record
 
 
-def adaptive_sampling_record(pipeline: "TrainingPipeline") -> dict:
-    """What the importance-guided sampler actually did, or ``{"enabled": False}``.
-
-    Two halves, and the split is the point. ``config`` is what was ASKED for; the
-    rest is what was MEASURED on the device — the realized mean/min/max p, the
-    saturated fraction, and the actually-selected pixel count. The budget claim
-    ``(1/N) sum p_i = rho`` is therefore verified per run rather than asserted by
-    the solver, and ``budget_error_max`` is the worst single iteration.
-
-    Draining the per-iteration stats needs a device readback, so this runs once,
-    after the timed loop — never inside it.
-    """
-    sampler = getattr(pipeline, "adaptive_sampler", None)
-    if sampler is None:
-        return {"enabled": False}
-    try:
-        return {"enabled": True, "config": sampler.config_record(),
-                "measured": sampler.stats_summary()}
-    except Exception as error:                             # noqa: BLE001
-        return {"enabled": True, "error": f"{type(error).__name__}: {error}"}
-
-
 def process_environment() -> dict:
-    """Interpreter + numeric-stack versions, for the manifest's reproducibility
-    block. Version drift in numpy/scipy can move SSIM in the last digits, so it
-    is recorded rather than assumed."""
+    """Interpreter and numeric-stack versions; numpy/scipy drift can move SSIM's last digits."""
     versions: dict[str, str] = {}
     for module in ("numpy", "scipy", "slangpy", "PIL"):
         try:
@@ -243,19 +142,13 @@ def process_environment() -> dict:
     }
 
 
-# ---------------------------------------------------------------------------
-# Held-out per-view metrics + render dump
-# ---------------------------------------------------------------------------
-
 # The forward stops a pixel's walk once its transmittance drops below this.
 _EARLY_OUT_TRANSMITTANCE = 1e-4
 
 
 def _overdraw(pipeline: "TrainingPipeline", alpha: np.ndarray) -> dict:
-    """Blend-loop work of the frame just rendered: sorted splats each pixel
-    walked up to its last blended one (what the backward replays), the
-    tile-splat pairs the sort carried, and the share of pixels whose walk
-    stopped early because they went opaque."""
+    """Blend-loop work of the frame just rendered: per-pixel walk length (what the backward
+    replays), tile-splat pairs sorted, and the share of pixels that went opaque early."""
     tile_counts, walk, _, _ = pipeline.read_bin_debug()
     return {
         "walk_mean": float(walk.mean()),
@@ -277,12 +170,7 @@ def evaluate_test_views(
     checkpoint: Checkpoint = uninterrupted,
 ) -> tuple[list[dict], dict]:
     """Per-view PSNR/SSIM over the held-out split, optionally dumping renders.
-
-    Metrics are computed from the FLOAT render (exactly as the existing final
-    metrics pass does) — not from the PNG — so the 8-bit round trip cannot move
-    a reported dB. The PNG is written for downstream perceptual metrics and
-    qualitative figures, which are 8-bit metrics anyway.
-    """
+    Metrics use the float render, not the PNG, so the 8-bit round trip cannot move a score."""
     checkpoint()
     pipeline.runtime.wait_for_idle()
     if render_dir is not None:
@@ -313,8 +201,7 @@ def evaluate_test_views(
             "width": int(rendered.shape[1]),
             **_overdraw(pipeline, image[..., 3]),
         }
-        # Computed from the same float render as PSNR/SSIM, before any PNG
-        # round trip, so all three metrics describe one identical image.
+        # Same float render as PSNR/SSIM, so all three metrics describe one image.
         record["lpips"] = (perceptual.lpips(rendered, target)
                                 if lpips_ready else None)
         if render_dir is not None:
@@ -335,13 +222,11 @@ def evaluate_test_views(
         return float(np.std(values)) if values else None
 
     summary = {
-        # Paper metric: the MEAN of per-image scores over the held-out split.
+        # Paper metric: the mean of per-image scores over the held-out split.
         "psnr_srgb": _mean("psnr_srgb"),
         "ssim_srgb": _mean("ssim_srgb"),
         "lpips": _mean("lpips"),
-        # Spread ACROSS VIEWS of one run — not a seed-to-seed uncertainty. The
-        # suite computes the across-seed std separately; conflating them would
-        # overstate what a single run establishes.
+        # Spread across views of one run, not a seed-to-seed uncertainty.
         "psnr_srgb_std_views": _std("psnr_srgb"),
         "ssim_srgb_std_views": _std("ssim_srgb"),
         "lpips_std_views": _std("lpips"),
@@ -361,14 +246,8 @@ def evaluate_test_views(
 def measure_render_fps(pipeline: "TrainingPipeline", scene,
                        cam_idx: int, frames: int, *,
                        checkpoint: Checkpoint = uninterrupted) -> dict:
-    """Steady-state render throughput for ONE held-out camera.
-
-    Serialized on purpose: each frame waits for the GPU, so this is per-frame
-    latency (1/latency FPS), not pipelined throughput. That is the number a
-    "render FPS" column should mean, and it is the one that stays comparable
-    between a dense and a sparse run — the sparse mask only touches the backward,
-    so any large divergence here is a red flag rather than a result.
-    """
+    """Steady-state render FPS for one held-out camera.
+    Serialized on purpose: each frame waits for the GPU, so this measures per-frame latency."""
     if frames <= 0:
         return {"frames": 0, "fps": None, "ms_per_frame": None}
     camera = scene.images[cam_idx].camera
@@ -397,10 +276,6 @@ def measure_render_fps(pipeline: "TrainingPipeline", scene,
     }
 
 
-# ---------------------------------------------------------------------------
-# Report assembly
-# ---------------------------------------------------------------------------
-
 def build_report(
     *,
     pipeline: "TrainingPipeline",
@@ -422,8 +297,7 @@ def build_report(
 
     n_gaussians = None
     try:
-        n_gaussians = int(pipeline.buffers.num_gaussians_counter
-                          .to_numpy().view(np.uint32)[0])
+        n_gaussians = pipeline.primitives.count()
     except Exception:                                      # noqa: BLE001
         pass
 
@@ -434,16 +308,13 @@ def build_report(
         "iters_requested": int(args.iters),
         "iters_completed": completed,
         "timing": {
-            # Wall-clock across the loop, frozen at the last iteration with the
-            # GPU drained (identical to test_psnr.json's train_wall_s).
+            # Frozen at the last iteration with the GPU drained (same as test_psnr.json's).
             "train_wall_s": wall,
             # The number sparse-vs-dense speed claims must use.
             "train_active_s": active,
-            # In-window observation cost: the part contained in train_wall_s and
-            # therefore the only part subtracted from it.
+            # In-window observation cost: the only part subtracted from train_wall_s.
             "observation_s": observation,
-            # Every observation, including the post-freeze final sweep. Reported
-            # so the two can be reconciled instead of appearing to disagree.
+            # Includes the post-freeze final sweep.
             "observation_total_s": float(
                 loop_timing.get("observation_total_s", observation) or 0.0),
             "iters_per_s_active": (completed / active) if active > 0 else None,
@@ -480,7 +351,6 @@ def build_report(
             "extent": float(scene_context.extent),
         },
         "stbn": stbn_asset_fingerprint(args),
-        "adaptive_stbn": adaptive_sampling_record(pipeline),
         "config": {
             "densify_mode": str(getattr(args, "densify_mode", "")),
             "mip_splatting": bool(args.mip_splatting),

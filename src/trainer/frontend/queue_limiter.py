@@ -1,18 +1,7 @@
 # Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-"""GPU submit-queue backpressure.
-
-Bounds how far the CPU runs ahead of the GPU: keep a rolling window of the last
-``max_depth`` submit IDs and wait on the oldest before recording a new one, so a
-later ``wait_for_idle`` never has to drain a huge backlog — without ever draining
-the queue in the hot path.
-
-Depth is a throughput knob, not only a safety valve: at depth 1 an iteration
-cannot be recorded until the previous one has finished on the GPU, so the host
-half of a step (context, schedules, ~50 dispatches) serializes against GPU
-execution instead of overlapping it. Measured on bicycle: ~127 it/s at depth 1
-vs ~155 at depth 3.
-"""
+"""GPU submit-queue backpressure: bounds how far the CPU runs ahead of the GPU without ever
+draining the queue in the hot path; depth also sets how much host and GPU work overlap."""
 
 from __future__ import annotations
 
@@ -42,19 +31,13 @@ class QueueLimiter:
 
     def before_submit(self) -> None:
         """Wait until fewer than ``max_depth`` submits are in flight.
-
-        A loop, not a single pop: callers record submits this never pairs with (a
-        densify tick records two extra), and popping one per call let the window
-        grow without bound — which made throughput depend on how many densify
-        ticks had gone by.
-        """
+        A loop, not a single pop: callers also record unpaired submits (e.g. densify ticks)."""
         while len(self._ring) >= self._max_depth:
             oldest = self._ring.popleft()
             if oldest:  # 0 means "no submit yet"
                 self._runtime.wait_for_submit(oldest)
 
     def record(self, submit_id: int) -> None:
-        """Add a submit ID to the window."""
         self._ring.append(submit_id)
 
     def clear(self) -> None:

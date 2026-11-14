@@ -57,8 +57,7 @@ def load_ply(path: str | Path) -> dict[str, np.ndarray]:
         [verts["f_dc_0"], verts["f_dc_1"], verts["f_dc_2"]], axis=-1
     ).astype(np.float32)
 
-    # Optional higher SH bands. INRIA writes f_rest channel-major (all coeffs of
-    # R, then G, then B); convert back to our coeff-major [coeff*3 + channel].
+    # INRIA's f_rest is channel-major; ours is coeff-major [coeff*3 + channel].
     rest_names = sorted(
         (nm for nm in available if nm.startswith("f_rest_")),
         key=lambda s: int(s.rsplit("_", 1)[-1]))

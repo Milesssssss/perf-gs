@@ -1,42 +1,7 @@
 // Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-// Block-local stable radix sort on 64-bit keys with paired uint32 values.
-// Keys split into (keys_lo, keys_hi) to avoid relying on native uint64
-// (Slang lacks portable uint64 atomics / arithmetic).
-//
-// Per-pass structure (8 passes, one 8-bit digit each):
-//   blockSort        — 256 threads/wg, 256 items/wg. 8 sub-passes of
-//                      stable 1-bit splits in LDS. Writes block-sorted
-//                      data back in place, plus per-block histogram
-//                      (block_hist) and per-(block,digit) exclusive
-//                      scan within block (block_start).
-//   globalScan       — 256 threads (one per digit). Each walks all
-//                      blocks for its digit, writes per-(block,digit)
-//                      global prefix and the digit's total count.
-//   scanDigitTotals  — single wg, exclusive scan of 256 digit totals
-//                      to get each digit's global base offset.
-//   scatterFinal     — N threads. O(1) per element: final_pos =
-//                      digit_global_base[d] + block_prefix[gid,d]
-//                      + (lid - block_start[gid,d]).
-//
-// Stability: each 1-bit split uses an exclusive scan of the flag
-// (bit==0 ? 1 : 0). Items with bit=0 keep their input order; items
-// with bit=1 keep their input order. Stable by construction. Over
-// 8 sub-passes the block is sorted by 8-bit digit, stable.
-//
-// Sentinel handling: threads past ``n_buf[0]`` load 0xFFFFFFFF keys
-// (digit 0xFF). These participate in the LDS sort (so the 256-wide
-// scans remain uniform) but are *not counted* in block_hist and are
-// *not written* back by blockSort or scatterFinal. Because sentinels
-// hit digit 0xFF and stable sort preserves their original (end-of-
-// block) position within that digit, they end up strictly after all
-// real items in each block's sorted layout. scatter therefore writes
-// real items into positions [0, n) in the destination buffer.
-//
-// Previous implementation (one-thread-per-bin global scatter looping
-// over N) cost O(256·N) global reads per pass and was 98% of the
-// training step's GPU time. This replacement is O(N·log N_block)
-// mostly in LDS; measured ~20× speedup on cactus.
+// Stable LSD radix sort of 64-bit keys as (keys_lo, keys_hi) uint pairs (no portable uint64) with
+// uint32 values; each 8-bit pass runs blockSort -> globalScan -> scanDigitTotals -> scatterFinal.
 
 #ifndef TRAINER_RADIX_SORT_SLANG
 #define TRAINER_RADIX_SORT_SLANG
@@ -96,11 +61,7 @@ void blockSort(
     gs_val[lid] = val;
     GroupMemoryBarrierWithGroupSync();
 
-    // 8 stable 1-bit splits. Each iteration computes the flag
-    // (bit == 0) per thread, exclusive-scans it over the block to get
-    // each thread's rank among zero-bits, then reshuffles LDS so all
-    // zero-bits come first (in input order), followed by one-bits (also
-    // in input order).
+    // 8 stable 1-bit splits: zero bits move first, then one bits, each keeping input order.
     for (uint sub = 0u; sub < 8u; ++sub)
     {
         uint k_lo_me  = gs_klo[lid];
@@ -138,15 +99,12 @@ void blockSort(
         GroupMemoryBarrierWithGroupSync();
     }
 
-    // LDS is now block-sorted by 8-bit digit. Write real items back.
     uint klo_s = gs_klo[lid];
     uint khi_s = gs_khi[lid];
     uint val_s = gs_val[lid];
 
-    // Because sentinels all have digit 0xFF and stable sort preserved
-    // their original (per-block tail) position within that digit, real
-    // items now occupy positions [0, real_in_block) in this block's
-    // sorted LDS. See the file-level comment.
+    // Sentinel keys (digit 0xFF) keep their tail position under the stable sort, so real items
+    // occupy [0, real_in_block) and only they are written or counted.
     uint real_in_block = min(SORT_BLOCK_SIZE, n - block_base);
     bool real_slot = lid < real_in_block;
 
@@ -165,8 +123,7 @@ void blockSort(
     }
     GroupMemoryBarrierWithGroupSync();
 
-    // Exclusive scan of gs_hist -> block_start (position of digit d's
-    // real items within this block's sorted layout).
+    // block_start[d]: first position of digit d's real items in the block's sorted layout.
     gs_scan[lid] = gs_hist[lid];
     GroupMemoryBarrierWithGroupSync();
     for (uint off = 1u; off < RADIX_BINS; off <<= 1u)
@@ -181,15 +138,7 @@ void blockSort(
     block_start[gid.x * RADIX_BINS + lid] = excl;
 }
 
-// Per-digit serial scan across all active blocks. 256 threads, one per
-// digit. Each thread walks ``ceil(n / SORT_BLOCK_SIZE)`` entries
-// (block_hist[b * 256 + d]), writes per-(block, digit) running prefix
-// into block_prefix[], and writes the per-digit total to digit_total[].
-//
-// Reading ``n`` from ``n_buf`` means we skip trailing all-sentinel
-// blocks (n_pairs << max_sort_pairs is the common case: 50k pairs vs
-// a 4M cap means 15k of 15625 blocks are pure sentinel). Walking only
-// the active blocks drops this from O(max_blocks) to O(n/256).
+// One thread per digit serially scans block_hist over the active blocks only (n from n_buf).
 [shader("compute")]
 [numthreads(RADIX_BINS, 1, 1)]
 void globalScan(
@@ -214,9 +163,7 @@ void globalScan(
     digit_total[d] = running;
 }
 
-// Single-workgroup exclusive scan of the 256 digit_total values into
-// digit_global_base. Identical in spirit to the old scanHistogram but
-// separated out so its intent is obvious.
+// Single-workgroup exclusive scan of digit_total into digit_global_base.
 groupshared uint gs_dtotal[RADIX_BINS];
 
 [shader("compute")]
@@ -241,7 +188,6 @@ void scanDigitTotals(
     digit_global_base[lid] = gs_dtotal[lid] - my_val;   // exclusive
 }
 
-// Final scatter. One thread per element; O(1) per thread.
 [shader("compute")]
 [numthreads(SORT_BLOCK_SIZE, 1, 1)]
 void scatterFinal(

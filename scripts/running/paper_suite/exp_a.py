@@ -1,34 +1,8 @@
 # Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-"""Experiment A — the primary 25% ablation.
+"""Experiment A: the primary 25% ablation and its spatial-vs-temporal decomposition.
 
-13 scenes x 4 regimes x 3 seeds at rho = 0.25, 3000 iterations. Produces the
-paper's main quantitative table, the dataset-family aggregate, and the
-spatial-vs-temporal decomposition.
-
-The decomposition is the point of the whole design, so it is worth restating what
-each contrast isolates and why the arithmetic is valid:
-
-    indep_blue - iid_white      SPATIAL: same independent per-step draw, same
-                                per-tile count, same reweighting; only the noise
-                                the slices were ranked from differs.
-    stbn       - indep_blue     TEMPORAL: the same 64 blue-noise slices; only the
-                                slice ORDER differs (independent draw vs each
-                                camera's own visit counter).
-    stbn       - iid_white      the two effects combined, and it should be close
-                                to their sum — if it is not, they interact, which
-                                is itself worth reporting.
-    stbn       - full           the cost of sparsity: what 25% of the pixels gives
-                                up against dense supervision.
-
-Timing needs one extra care. The seed-42 cells carry the convergence ladder, so
-their wall-clock contains eight held-out sweeps that the other seeds' does not.
-``train_active_s`` subtracts that cost, but a subtraction is a correction, not a
-measurement, so the headline speed numbers are taken from the two UNOBSERVED seeds
-and seed 42 is reported separately as a cross-check
-(:func:`timing_validation`). If the corrected and uncorrected figures agree, the
-correction is sound and that is stated; if they do not, the discrepancy is
-reported rather than averaged away.
+Headline speed comes from the unobserved seeds; seed 42's eval-corrected time is only a cross-check.
 """
 from __future__ import annotations
 
@@ -137,13 +111,7 @@ def _scene_rows(results: ResultSet, scenes, seeds, fraction) -> list[dict]:
 
 
 def _dataset_rows(results: ResultSet, scenes, seeds, fraction) -> list[dict]:
-    """Aggregates over dataset families, and over all scenes.
-
-    Two groupings are emitted: the four fine families (Mip-NeRF 360 split into
-    outdoor/indoor, T&T, Deep Blending) and the three coarse ones the literature
-    reports. Both carry ``complete``, so an aggregate over a partially-failed
-    family is never mistaken for a full one.
-    """
+    """Aggregates over fine and coarse dataset families and over all scenes, each flagged ``complete``."""
     rows: list[dict] = []
     groupings: list[tuple[str, dict[str, tuple[str, ...]]]] = [
         ("family", {k: v for k, v in cfg.DATASET_FAMILIES.items()}),
@@ -177,9 +145,7 @@ def _dataset_rows(results: ResultSet, scenes, seeds, fraction) -> list[dict]:
                     "complete": (len(present_scenes) == len(members)
                                  and len(cells) == len(members) * len(seeds)),
                 }
-                # Scene-then-seed pooling would weight a scene by how many of its
-                # seeds survived. Average within a scene first so every scene
-                # counts once, which is also the unit the CIs use.
+                # Average within a scene first so every scene counts once (also the CI unit).
                 for metric in ("psnr_srgb", "ssim_srgb", "lpips",
                                "train_active_s", "n_gaussians", "render_fps"):
                     per_scene = []
@@ -237,14 +203,7 @@ def _paired(results: ResultSet, scenes, seeds, fraction
 
 
 def timing_validation(results: ResultSet, scenes, fraction) -> dict:
-    """Does subtracting observation time reconcile seed 42 with the clean seeds?
-
-    Seed 42 carries eight held-out sweeps inside its loop; seeds 1337/2026 carry
-    none. If ``train_active_s`` is doing its job, seed 42's corrected active time
-    should sit inside the seed-to-seed spread of the unobserved runs. This
-    computes that comparison per regime so the report can state it as a checked
-    fact instead of an assumption.
-    """
+    """Per regime: does seed 42's observation-corrected active time match the unobserved seeds'?"""
     clean_seeds = tuple(s for s in cfg.SEEDS if s != cfg.PRIMARY_SEED)
     out: dict = {"clean_seeds": list(clean_seeds),
                  "observed_seed": cfg.PRIMARY_SEED, "per_regime": {}}
@@ -294,10 +253,6 @@ def timing_validation(results: ResultSet, scenes, fraction) -> dict:
     return out
 
 
-# ---------------------------------------------------------------------------
-# Figures
-# ---------------------------------------------------------------------------
-
 def _figure_per_scene_bars(results: ResultSet, scenes, seeds, fraction,
                            figures_dir: Path) -> None:
     plt = figs.pyplot()
@@ -342,8 +297,7 @@ def _figure_per_scene_bars(results: ResultSet, scenes, seeds, fraction,
                    error_kw={"linewidth": 0.6})
         ax.set_ylabel(ylabel)
         if metric in QUALITY_METRICS:
-            # The regimes differ by tenths of a dB; a zero-based axis would
-            # flatten the entire result into one band.
+            # Regimes differ by tenths of a dB; a zero-based axis would flatten them.
             figs.zoom_to_data(ax, finite,
                               min_pad=(0.05 if metric == "psnr_srgb" else 0.002))
     axes[-1].set_xticks(x)
@@ -356,11 +310,7 @@ def _figure_per_scene_bars(results: ResultSet, scenes, seeds, fraction,
 
 
 def _figure_paired_deltas(objects, figures_dir: Path) -> None:
-    """Per-scene paired deltas with the bootstrap interval on the mean.
-
-    Shows every scene as a point, so a mean that depends on one outlier is
-    visible as one, and negative cases are as prominent as positive ones.
-    """
+    """Per-scene paired deltas (one point per scene, so outliers show) with the bootstrap CI on the mean."""
     plt = figs.pyplot()
     if plt is None:
         return
@@ -401,10 +351,6 @@ def _figure_paired_deltas(objects, figures_dir: Path) -> None:
     fig.tight_layout()
     figs.save(fig, figures_dir, "expA_paired_deltas")
 
-
-# ---------------------------------------------------------------------------
-# LaTeX
-# ---------------------------------------------------------------------------
 
 def _latex_main(dataset_rows: list[dict], latex_dir: Path, fraction: float,
                 seeds) -> None:
@@ -548,10 +494,6 @@ def _latex_family(dataset_rows: list[dict], latex_dir: Path,
         source="tables/main_25pct_dataset_summary.csv")
     tables.write_latex(latex_dir / "table_dataset_family.tex", body)
 
-
-# ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
 
 def run(results: ResultSet, out: dict, *, scenes=cfg.SCENES, seeds=cfg.SEEDS,
         fraction: float = cfg.PRIMARY_FRACTION) -> dict:

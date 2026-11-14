@@ -1,33 +1,8 @@
 # Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-"""Edge-docking geometry for the viewer panel — including the resize fix.
+"""Edge-docking geometry for the viewer panel, with a user-resizable thickness.
 
-THE BUG this replaces: the old ``layout()`` re-asserted BOTH position and size
-every frame. ImGui's manual-resize path wins while the mouse is down, so the
-panel followed the border drag, but on mouse-up the per-frame
-``SetNextWindowSize`` took over again and snapped it straight back to the
-hard-coded thickness (verified with a synthesized border drag: size tracked the
-mouse to 440px, then reverted to 300px on release). Re-asserting the size every
-frame also means fighting ImGui for ownership of the window rect all the time,
-which is what made the panel feel "totally bugged" during a drag.
-
-THE FIX, all of it in :meth:`Dock.resolve` (pure geometry, no ImGui):
-
-  * ADOPT the user's drag: when the docked edge is still pinned and the panel
-    still spans its edge, the live thickness IS the new thickness. The gesture
-    therefore survives mouse-up instead of being reverted.
-  * CLAMP it to ``[min_thickness, span * max_fraction]`` so the panel can never
-    be dragged to unreadable or to swallowing the viewport.
-  * Re-pin only what the user did NOT ask for (position, and the span axis), and
-    let the caller write pos/size ONLY when they differ from what ImGui already
-    has (:meth:`needs_write`) — so a settled panel is never written to at all and
-    ImGui keeps ownership of an in-progress drag.
-
-UNITS: thicknesses are LOGICAL (font-table units, i.e. pixels at a 100% display),
-rects and the live rect from ImGui are DEVICE PIXELS, and ``scale`` converts
-between them (see :mod:`.scale`). That keeps one number — the panel's thickness —
-meaningful on any display: at 150% the panel is 1.5x wider in pixels and holds
-exactly the same amount of text, because the font is 1.5x wider too.
+Thicknesses are logical units (pixels at a 100% display); rects are device pixels; ``scale`` converts.
 """
 from __future__ import annotations
 
@@ -35,10 +10,7 @@ from dataclasses import dataclass
 
 ANCHORS = ("left", "right", "top", "bottom")
 
-# Content geometry of an ImGui window: 8px padding each side, plus room for the
-# vertical scrollbar so wrapped text never sits under it. These are ImGui STYLE
-# values, which sgl leaves in raw pixels even on a HiDPI display (unlike the
-# font), so they are subtracted before converting to logical units.
+# ImGui style metrics stay raw pixels on HiDPI (unlike the font): subtract them before converting to logical.
 PADDING = 8.0
 SCROLLBAR = 18.0
 
@@ -60,12 +32,9 @@ class Rect:
 class Dock:
     """Pins a panel to one window edge and owns its user-resizable thickness."""
 
-    # A drag of the docked (outer) edge or the title bar moves the panel; only a
-    # drag that leaves the panel pinned to its edge counts as a resize.
+    # Only a drag that leaves the panel pinned to its edge counts as a resize.
     PIN_TOL = 2.0
-    # The span axis drifts by a pixel or two mid-drag / mid-window-resize; allow
-    # that, but refuse to adopt a thickness while the panel is collapsed or
-    # being corner-dragged (span far off), which would read a bogus size.
+    # Allows mid-drag span drift but rejects collapsed/corner-dragged rects, which would read a bogus size.
     SPAN_TOL = 8.0
     # Below this, writing pos/size would just re-send what ImGui already has.
     WRITE_EPS = 0.5
@@ -84,7 +53,7 @@ class Dock:
 
     @property
     def thickness(self) -> float:
-        """Panel thickness in LOGICAL units (width when docked left/right)."""
+        """Panel thickness in logical units (width when docked left/right)."""
         return self._thickness
 
     @property
@@ -99,21 +68,18 @@ class Dock:
 
     @property
     def vertical(self) -> bool:
-        """True when the panel is a side bar (thickness is a WIDTH)."""
+        """True when the panel is a side bar (thickness is a width)."""
         return self.anchor in ("left", "right")
 
     def content_width(self) -> float:
-        """Usable text width inside the panel, in LOGICAL units — i.e. directly
-        comparable with :mod:`.text` widths, whatever the display scale."""
+        """Usable text width inside the panel in logical units, comparable with :mod:`.text` widths."""
         return max(32.0, self._rect.w - 2.0 * PADDING - SCROLLBAR) / self.scale
 
     def resolve(self, window_w: float, window_h: float,
                 live: Rect | None = None) -> Rect:
         """Return the rect the panel should occupy this frame.
 
-        ``live`` is the panel's CURRENT rect as reported by ImGui, in device
-        pixels (i.e. including an in-progress or just-finished user resize); pass
-        None to force the stored thickness.
+        ``live``: ImGui's current device-pixel rect (a user resize is adopted); None forces the stored thickness.
         """
         w = max(1.0, float(window_w))
         h = max(1.0, float(window_h))
@@ -135,11 +101,8 @@ class Dock:
         return self._rect
 
     def needs_write(self, live: Rect | None) -> bool:
-        """Whether the resolved rect must be pushed to ImGui. False while the
-        panel already sits there — the key to not fighting an active drag."""
+        """Whether the resolved rect must be pushed to ImGui; skipping no-op writes avoids fighting a drag."""
         return live is None or not live.approx_eq(self._rect, self.WRITE_EPS)
-
-    # ---- internals ----
 
     def _clamp(self, thickness: float, limit: float) -> float:
         """Both arguments and the result are in logical units."""
@@ -147,9 +110,7 @@ class Dock:
         return float(min(max(thickness, self.min_thickness), largest))
 
     def _dragged_thickness(self, live: Rect, w: float, h: float) -> float | None:
-        """The thickness IN PIXELS the user just dragged the panel to, or None if
-        this live rect is not a resize of the free edge (panel moved, collapsed,
-        or the window itself resized)."""
+        """Pixel thickness the user just dragged the free edge to, or None if ``live`` is not such a resize."""
         if self.anchor == "left":
             pinned = abs(live.x) <= self.PIN_TOL
             spans = abs(live.h - h) <= self.SPAN_TOL

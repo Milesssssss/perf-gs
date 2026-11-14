@@ -7,9 +7,7 @@
 #include "../../common/math.slang"
 #include "../../core/interfaces.slang"
 
-// Mean world -> view -> clip -> ndc -> pixel. The single source of truth for
-// the projection convention shared by the full gaussian projection below and by
-// the Mip-Splatting 3D-filter kernel (shaders/mip/compute_3d_filter.slang).
+// Mean world -> view -> clip -> ndc -> pixel; single source of truth shared with mip/compute_3d_filter.slang.
 [Differentiable]
 void projectMeanToPixel(
     float3 mean,
@@ -28,11 +26,8 @@ void projectMeanToPixel(
     mean_2d = (ndc * 0.5 + 0.5) * frame_dim;
 }
 
-// Perspective-projection Jacobian J = d(pixel)/d(view) at the mean, with the
-// standard 1.3*tan_fov clamp on the off-axis terms. Single source of truth for
-// the affine covariance projection (project below) and structure-aware
-// densification (shaders/densify/score_structure_aware.slang). Row 2 is 0: the
-// screen projection drops depth. fx/fy are recovered from the clip matrix.
+// Perspective Jacobian J = d(pixel)/d(view) at the mean with the standard 1.3*tan_fov clamp;
+// shared with structure-aware densification (densify/score_structure_aware.slang).
 [Differentiable]
 float3x3 projectionJacobian(
     float3 mean_vs,
@@ -57,7 +52,6 @@ float3x3 projectionJacobian(
     );
 }
 
-//[PreferRecompute]
 [Differentiable]
 void projectGaussian3DTo2D(
     float3 mean,
@@ -75,15 +69,12 @@ void projectGaussian3DTo2D(
     out float cov2d_det,
     out float opacity_compensation)   // Mip coef3d*coef2d (1.0 when off)
 {
-    // Transform mean to view space and project to pixels (shared convention).
     float3 mean_vs;
     float clip_w;
     projectMeanToPixel(mean, world_to_view, view_to_clip, frame_dim, mean_vs, mean_2d, clip_w);
     depth_vs = mean_vs.z;
 
-    // 3D covariance in view space. Mip-Splatting 3D smoothing filter: enlarge
-    // each axis by the per-gaussian world-space low-pass size (isotropic add in
-    // squared-scale space). filter_3D == 0 leaves the scale unchanged.
+    // Mip-Splatting 3D smoothing filter: isotropic add of the world-space low-pass size in squared-scale space.
     float3 scale0 = exp(log_scale);
     float3 scale = sqrt(scale0 * scale0 + filter_3D * filter_3D);
     float3x3 Sigma3D = buildCovariance3D(scale, rot_quat);
@@ -92,8 +83,6 @@ void projectGaussian3DTo2D(
 
     float3x3 J = projectionJacobian(mean_vs, view_to_clip, frame_dim);
 
-    // 2D covariance
-    // mat2 cov2d_full = mat2(J * Vrk * transpose(J));
     float3x3 cov2d_full = mul(J, mul(Sigma_view, transpose(J)));
 
     float a = cov2d_full[0][0] + kernel_size;
@@ -117,21 +106,13 @@ void projectGaussian3DTo2D(
     cov2d = float3(a, b, c);
     cov2d_det = a * c - b * b;
 
-    // Mip-Splatting opacity compensation (DIFFERENTIABLE): coef3d * coef2d,
-    // multiplies alpha in the blend. Gated on mip_enabled (a no_diff uniform)
-    // so vanilla stays exactly 1.0 with no spurious gradient. coef3d depends on
-    // log_scale (via scale0), coef2d on the projected cov (a,b,c) -> autodiff
-    // routes dL/dcomp back to scale/rot/mean, matching mip-splatting's backward
-    // (coef -> cov -> scale, plus the coef-weighted opacity gradient in eval).
+    // Differentiable Mip-Splatting compensation; the gate keeps vanilla exactly 1.0 with no spurious gradient.
     if (mip_enabled != 0u)
     {
         float3 s2 = scale0 * scale0;                 // pre-filter squared scale
         float3 s2f = s2 + filter_3D * filter_3D;
         float coef3d = sqrt((s2.x * s2.y * s2.z) / (s2f.x * s2f.y * s2f.z));
-        // 2D compensation, matching SADGS forward.cu (the mip-splatting original
-        // differs slightly):
-        //   det0 = max(1e-6, det(pre-dilation cov)); det1 = max(1e-6, det(dilated));
-        //   coef2d = sqrt(det0 / (det1 + 1e-6)).
+        // 2D compensation as in SADGS (the mip-splatting original differs slightly).
         float det1 = max(1e-6, cov2d_det);           // post-dilation det
         float det0 = max(1e-6, (a - kernel_size) * (c - kernel_size) - b * b);
         float coef2d = sqrt(det0 / (det1 + 1e-6));
@@ -143,11 +124,7 @@ void projectGaussian3DTo2D(
     }
 }
 
-// The Gaussian's stored geometry as an IProjectableModel (mean + log_scale +
-// rot_quat; opacity/sh0 don't affect projection). projectInto wraps the same
-// projectGaussian3DTo2D above, so projected values + their gradients are
-// UNCHANGED — bin_count + projection_backward just route through the model,
-// making the projection seam primitive-generic.
+// The Gaussian's geometry as an IProjectableModel (opacity/sh0 don't affect projection).
 struct GaussianModel : IProjectableModel
 {
     float3 mean;

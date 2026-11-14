@@ -2,39 +2,7 @@
 
 """Chart a one-axis sweep: held-out PSNR + train time per scene, plus the table.
 
-Reads the ``results.json`` written by ``scripts/running/eval_sweep.py`` and, next
-to it, writes ``psnr_sweep.png``, ``timing_sweep.png`` and
-``sweep_summary.csv``. Run by the sweep itself after every cell, so it must
-tolerate a partial result set (missing cells are simply absent bars).
-
-Design notes, following the dataviz method:
-
-FORM. Two different jobs, so two different forms:
-
-  * TIMING is "compare magnitude, low -> high" -> grouped bars from a zero
-    baseline. Seconds genuinely start at zero, so the bar lengths are honest.
-  * PSNR is "delta to a target" -> grouped bars of the CHANGE against the
-    baseline configuration, centered on zero. Absolute PSNR from a zero baseline
-    is the wrong form for it: every scene sits near 20-27 dB and the effect being
-    measured is under 1 dB, so a zero-based bar renders the entire result as
-    identical bars (verified — it does). Truncating the axis instead would
-    misstate the ratios, which is the actual anti-pattern; changing the measure
-    to a delta is the fix. Each scene's absolute baseline dB rides on its tick
-    label, and every absolute number is in the CSV.
-
-One y-axis per chart; PSNR and seconds are never put on one pair of axes.
-
-COLOR. The swept value is an ORDERED quantity, not an identity, so the series
-share a single hue and step along it (dark = the largest value) rather than taking
-categorical hues. Steps come from the reference palette's blue ramp; for an
-ordinal ramp on a light surface it documents step 250 (``#86b6ef``) as the
-lightest usable step, so the ramp runs 250..650 and never lighter. NOTE: the
-palette validator is a Node script and Node is not installed here, so these are
-the documented-validated steps used as documented — not a fresh validator run.
-
-ACCESSIBILITY. Identity is never color-alone: every chart carries a legend, every
-bar carries its value, and ``sweep_summary.csv`` is the table view. Text stays in
-ink colors, never the series color. Grid is recessive and behind the bars.
+Run by eval_sweep.py after every cell, so a partial results.json must plot; outputs go beside it.
 """
 from __future__ import annotations
 
@@ -52,19 +20,14 @@ REPO = Path(__file__).resolve().parent.parent.parent
 SCENE_ORDER = ["bicycle", "flowers", "garden", "stump", "treehill",
                "bonsai", "counter", "kitchen", "room"]
 
-# Reference-palette blue ramp, ordinal-safe steps only (>= step 250 on light).
-# Applied darkest-to-largest-value: more pixels supervised = more ink.
+# Ordinal blue ramp, palette steps 650..250 (250 is the lightest usable on white); darkest = largest value.
 RAMP = ["#104281", "#1c5cab", "#2a78d6", "#5598e7", "#86b6ef"]
 INK = "#0b0b0b"
 INK_MUTED = "#52514e"
 
 
 def _sorted_values(results: list[dict]) -> list[str]:
-    """Swept values, numerically descending when they are numbers.
-
-    Descending puts the densest / largest configuration first, which is the
-    baseline most sweeps are read against.
-    """
+    """Swept values, numerically descending when numeric, so the baseline (largest) comes first."""
     values = sorted({r["value"] for r in results})
     try:
         return sorted(values, key=float, reverse=True)
@@ -73,8 +36,7 @@ def _sorted_values(results: list[dict]) -> list[str]:
 
 
 def _ramp_for(values: list[str]) -> dict[str, str]:
-    """One hue, stepped along the ordered values. More than 5 values reuses the
-    ramp's endpoints by interpolation of INDEX, keeping order monotone."""
+    """One RAMP color per ordered value by interpolated index (monotone; colors repeat past len(RAMP))."""
     if len(values) <= len(RAMP):
         picks = np.linspace(0, len(RAMP) - 1, num=max(len(values), 1))
         return {v: RAMP[int(round(p))] for v, p in zip(values, picks)}
@@ -102,9 +64,7 @@ def _grouped_bar(results, field, ylabel, title, out_path, fmt, axis_label,
 
     tick_labels = list(scenes)
     if relative_to_baseline:
-        # Re-express every cell as its change from the baseline configuration, and
-        # drop the baseline series itself (it is the zero line). Its absolute value
-        # is what the reader needs for context, so it goes on the tick label.
+        # Sub-dB effects vanish on zero-based bars: plot change vs baseline, its absolute dB on the tick.
         absolute = dict(cell)
         cell = {}
         for scene in scenes:
@@ -120,15 +80,11 @@ def _grouped_bar(results, field, ylabel, title, out_path, fmt, axis_label,
         ]
         values = values[1:]
         if not values:
-            # Only the baseline has run so far (a sweep in flight). There is
-            # nothing to compare it against yet, so skip rather than emit an
-            # empty axis — and say so, because this used to fail silently.
             print(f"[plot] {out_path.name}: only the baseline "
                   f"({axis_label}={baseline_value}) has results; skipping")
             return
 
-    # Per-value mean over the scenes present FOR THAT VALUE, so a missing cell
-    # (sweep still running, or one scene absent) cannot bias the average.
+    # Per-value mean over only the scenes present for that value (the sweep may still be running).
     average = {}
     for value in values:
         xs = [cell[(s, value)] for s in scenes if cell.get((s, value)) is not None]
@@ -149,7 +105,6 @@ def _grouped_bar(results, field, ylabel, title, out_path, fmt, axis_label,
         for rect, v in zip(bars, column):
             if np.isnan(v):
                 continue
-            # Labels sit outside the bar on whichever side it grows.
             below = v < 0
             ax.annotate(fmt.format(v),
                         (rect.get_x() + rect.get_width() / 2, rect.get_height()),
@@ -171,16 +126,13 @@ def _grouped_bar(results, field, ylabel, title, out_path, fmt, axis_label,
 
     finite = [v for v in list(cell.values()) + list(average.values()) if v is not None]
     if finite and relative_to_baseline:
-        # Centred on zero: the baseline IS the reference, so emphasize that line
-        # and keep the range symmetric enough that a gain and a loss of the same
-        # size look the same size.
+        # Symmetric range so a gain and a loss of the same size look the same size.
         ax.axhline(0.0, color=INK, lw=1.0, zorder=4)
         span = max(abs(min(finite)), abs(max(finite))) or 1.0
         ax.set_ylim(-span * 1.28, span * 1.28)
         ax.spines["bottom"].set_visible(False)
     elif finite:
-        # Bars start at zero (a truncated bar axis misstates ratios); the rotated
-        # value labels need real headroom above the tallest bar.
+        # Bars start at zero (a truncated axis misstates ratios); 20% headroom for the rotated labels.
         ax.set_ylim(0, max(finite) * 1.20)
     ax.legend(frameon=False, ncol=max(1, min(len(values), 5)), loc="lower center",
               bbox_to_anchor=(0.5, 1.005), fontsize=8, labelcolor=INK_MUTED)
@@ -206,8 +158,7 @@ def _write_csv(results, out_path, axis_label):
                 writer.writerow([scene, value, psnr.get((scene, value)),
                                  wall.get((scene, value)),
                                  count.get((scene, value))])
-        # Averages last, and only over cells that exist, so a partial sweep's
-        # summary row is still an honest mean of what ran.
+        # Averages only over cells that exist, so a partial sweep still gets an honest mean.
         for value in values:
             ps = [psnr[(s, value)] for s in scenes if psnr.get((s, value)) is not None]
             ws = [wall[(s, value)] for s in scenes if wall.get((s, value)) is not None]

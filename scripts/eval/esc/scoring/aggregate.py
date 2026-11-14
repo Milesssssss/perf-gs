@@ -1,13 +1,8 @@
 # Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-"""The weighted geometric mean at the heart of ESC.
+"""The weighted geometric mean at the heart of ESC: 100 * C^wC * E^wE * U^wU * L^wL * T^wT * S^wS.
 
-    ESC = 100 * C^wC * E^wE * U^wU * L^wL * T^wT * S^wS
-
-A geometric mean (not a weighted sum) is used so that a single catastrophic
-dimension drags the whole score down: if any subscore is 0, ESC is 0. That is
-the property that makes "beautifully formatted but impossible to modify" score
-poorly.
+Unlike a weighted sum, a single zero subscore makes ESC zero.
 """
 
 from __future__ import annotations
@@ -26,11 +21,7 @@ def clamp01(value: float) -> float:
 
 
 def compute_esc(subscores: SubScores, weights: EscWeights | None = None) -> float:
-    """Weighted geometric mean of the six subscores, scaled to ``[0, 100]``.
-
-    Zeros are honoured exactly: a catastrophic dimension yields ESC = 0 rather
-    than being averaged away.
-    """
+    """Weighted geometric mean of the six subscores in ``[0, 100]``; any zero subscore yields 0."""
     weights = weights or EscWeights()
     weights.validate()
 
@@ -64,10 +55,9 @@ WEIGHT_KEYS: tuple[str, ...] = (
 def compute_esc_partial(
     values: dict[str, float | None], weights: EscWeights | None = None
 ) -> tuple[float, dict[str, float]]:
-    """Geometric mean over the *measured* dimensions, renormalising their
-    weights. A dimension whose value is ``None`` is treated as unmeasured and
-    dropped (rather than as a catastrophic zero), so a run that omits e.g.
-    testability still yields a meaningful ESC. Returns ``(esc, effective_weights)``.
+    """Geometric mean over the measured (non-None) dimensions with renormalised weights.
+
+    Unmeasured dimensions are dropped rather than scored as zero. Returns ``(esc, effective_weights)``.
     """
     weights = weights or EscWeights()
     weights.validate()

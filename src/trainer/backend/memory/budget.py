@@ -1,21 +1,52 @@
 # Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-"""Fit the run's GPU allocations to a VRAM budget."""
+"""The trainer's own GPU allocations, and fitting them to a VRAM budget."""
 from __future__ import annotations
 
+import dataclasses
 from collections.abc import Callable
+from typing import Any
 
-from trainer.backend.memory.vram import query_video_memory
+import slangpy as spy
+
+from trainer.backend.platform.dxgi import query_video_memory
 
 GIB = 1024 ** 3
+
+
+def _resource_bytes(resource: Any) -> int:
+    resource = getattr(resource, "storage", resource)    # NDBuffer views report their buffer
+    if isinstance(resource, (spy.Buffer, spy.Texture)):
+        return int(resource.memory_usage.device)
+    return 0
+
+
+def allocated_bytes(resources: Any) -> dict[str, int]:
+    """Device bytes slangpy reports per field of a dataclass tree of GPU resources.
+
+    Portable (any backend, any OS); a dict field is summed into one entry.
+    """
+    sizes: dict[str, int] = {}
+
+    def walk(node: Any, name: str) -> None:
+        if dataclasses.is_dataclass(node) and not isinstance(node, type):
+            for field in dataclasses.fields(node):
+                walk(getattr(node, field.name), f"{name}.{field.name}" if name else field.name)
+            return
+        size = (sum(map(_resource_bytes, node.values())) if isinstance(node, dict)
+                else _resource_bytes(node))
+        if size:
+            sizes[name] = size
+
+    walk(resources, "")
+    return sizes
 
 
 def available_bytes(budget_gib: float, adapter_name: str) -> int | None:
     """Bytes this run may still allocate, or None when no budget is known.
 
-    ``budget_gib`` > 0 overrides the DXGI budget (e.g. to emulate a smaller
-    card). A reserve is held back for driver overhead and the allocations the
-    estimate does not count (staging heaps, setup temporaries, samplers).
+    ``budget_gib`` > 0 overrides the measured (Windows-only) budget; a reserve is held
+    back for driver overhead and allocations the estimate does not count.
     """
     measured = query_video_memory(adapter_name)
     if budget_gib > 0:
@@ -25,8 +56,7 @@ def available_bytes(budget_gib: float, adapter_name: str) -> int | None:
     else:
         return None
     usage = measured[1] if measured is not None else 0
-    # shortcut: fixed 10% (bicycle SH3 run: +0.26 GiB unplanned, DXGI budget fell
-    # 1.4 GiB mid-run); re-measure if runs page or the reserve proves wasteful.
+    # Shortcut: a fixed 10% reserve; re-measure if runs page or it proves wasteful.
     return budget - usage - max(GIB // 2, budget // 10)
 
 

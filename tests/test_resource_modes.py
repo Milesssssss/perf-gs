@@ -10,7 +10,7 @@ from trainer.backend.compute.device import create_device
 from trainer.backend.memory import buffers
 from trainer.backend.render.pipeline import TrainingPipeline, _module_for_reflection
 from trainer.config.config_types import DensificationMode
-from trainer.frontend.app import TrainingApplication, StructureTextureProvider
+from trainer.frontend.app import TrainingApplication
 from trainer.frontend.cli import build_parser
 from _colmap_testkit import write_colmap_scene
 
@@ -66,26 +66,15 @@ def test_only_training_camera_targets_are_uploaded(tmp_path, monkeypatch):
     app = TrainingApplication(args)
     app.scene_context = SimpleNamespace(train_indices=[1, 3], width=8, height=8)
     app.targets = SimpleNamespace(srgb=[0, 1, 2, 3])
-    app.densify_mode = DensificationMode.SIMPLE
+    app.config = SimpleNamespace(densify_mode=DensificationMode.SIMPLE)
     uploads = []
-    app.pipeline = SimpleNamespace(
-        pack_target_texture=lambda image: image,
-        upload_target_texture=lambda image: uploads.append(image) or f"texture-{image}")
+    app.pipeline = SimpleNamespace(targets=SimpleNamespace(
+        pack=lambda image: image,
+        upload=lambda image: uploads.append(image) or f"texture-{image}"))
     app._prepare_textures()
     assert uploads == [1, 3]
     assert app.target_textures == {1: "texture-1", 3: "texture-3"}
     assert app.structure_textures == {}
-
-
-def test_structure_cache_uses_original_training_camera_indices(monkeypatch):
-    provider = StructureTextureProvider(
-        args=SimpleNamespace(), device=None, targets=[],
-        scene=SimpleNamespace(train_indices=[1, 3], camera_count=4),
-        densify_mode=DensificationMode.STRUCTURE_AWARE)
-    monkeypatch.setattr(provider, "_load_cache", lambda: np.arange(4))
-    monkeypatch.setattr(provider, "_upload", lambda field, label: (int(field), label))
-    assert provider.load() == {
-        1: (1, "structure_tensor_1"), 3: (3, "structure_tensor_3")}
 
 
 @pytest.mark.parametrize("mode", list(DensificationMode))
@@ -102,7 +91,7 @@ def test_training_loop_runs_with_mode_specific_resources(device, mode, tmp_path,
     ])
     monkeypatch.setattr("trainer.frontend.app.create_training_device", lambda _args: device)
     # Keep the real factory and training loop, with a tiny sort-pair capacity.
-    monkeypatch.setattr("trainer.frontend.app.TrainingPipeline",
+    monkeypatch.setattr("trainer.frontend.factory.TrainingPipeline",
                         lambda **kwargs: TrainingPipeline(max_sort_pairs=512, **kwargs))
     app = TrainingApplication(args)
     app.prepare_training_context()

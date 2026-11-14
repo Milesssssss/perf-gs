@@ -1,38 +1,8 @@
 # Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-"""Experiment E — what the three masks actually are, measured without training.
+"""Experiment E: the masks themselves at rho = 0.25, measured without training.
 
-This characterizes the sampling patterns themselves at rho = 0.25, so the training
-results have something mechanistic to point at. No GPU, no training: it builds the
-same rank volumes the trainer uploads, walks them the same way the trainer walks
-them, and measures the resulting 64-visit sequences.
-
-Reproducing the trainer's sequence exactly is the whole point, so each regime is
-generated from the same source as the run:
-
-    iid_white   white rank volume (64 slices of per-tile permutations), slice
-                index drawn independently per step from ``--stbn-seed``'s RNG
-    indep_blue  the NVIDIA STBN rank volume, SAME independent per-step draw
-    stbn        the same NVIDIA volume, slice index = (visit + phase) mod 64 —
-                one camera's own visit counter, which is what the trainer does
-
-That last one has a consequence worth stating plainly: over 64 consecutive visits
-the STBN walk is a cyclic permutation and touches all 64 slices exactly once,
-while 64 independent draws from 64 slices touch only ~40 distinct ones and repeat
-the rest. Part of any STBN advantage is therefore simple coverage bookkeeping
-rather than spectral magic, and separating those is what the visit-count and
-coverage statistics below are for.
-
-Two comparisons keep the numbers interpretable. Analytic references for a truly
-independent mask of density rho are computed alongside every temporal statistic
-(successive overlap rho^2, coverage 1-(1-rho)^n, mean revisit gap 1/rho), so a
-measured value can be read as "better than independent" rather than just as a
-number. And every regime is measured with identical code paths, so a difference
-cannot come from the measurement.
-
-The analysis is done on the 128x128 mask volume itself, which is what tiles the
-screen: the trainer indexes it modulo its dimensions, so screen-space statistics
-are this volume's statistics repeated. Stated rather than silently assumed.
+Sequences are built and walked exactly as the trainer does; statistics carry analytic independent-sampling references.
 """
 from __future__ import annotations
 
@@ -45,7 +15,6 @@ from . import config as cfg
 from . import figures as figs
 from . import tables
 
-# Which regimes this experiment characterizes, and how to build each sequence.
 SAMPLING_REGIMES: tuple[str, ...] = ("iid_white", "indep_blue", "stbn")
 
 MODE_COLUMNS = (
@@ -79,15 +48,11 @@ TEMPORAL_SPECTRUM_COLUMNS = ("regime", "temporal_frequency_normalized", "power")
 VISITS_COLUMNS = ("regime", "visit_count", "pixel_count", "pixel_fraction")
 
 
-# ---------------------------------------------------------------------------
-# Sequence construction — mirrors the trainer
-# ---------------------------------------------------------------------------
-
 def _rank_volume(source: str, seed: int):
-    from trainer.backend.render import stbn as stbn_module
+    from trainer.backend.render import stbn_table
 
-    spec = stbn_module.StbnMaskSpec(source=source, seed=seed)
-    return stbn_module.build_rank_volume(spec), spec
+    spec = stbn_table.StbnSpec(source=source, seed=seed)
+    return stbn_table.build_rank_volume(spec), spec
 
 
 def build_sequence(regime: str, *, fraction: float, visits: int,
@@ -95,39 +60,29 @@ def build_sequence(regime: str, *, fraction: float, visits: int,
                    select_mode: str | None = None):
     """``(visits, H, W)`` boolean masks for one camera's successive visits.
 
-    ``camera_index`` only sets the STBN phase. The volume is toroidal in t, so a
-    different phase is a cyclic shift of the same sequence and every statistic
-    below is shift-invariant — the choice does not affect any reported number,
-    and using camera 0 keeps it reproducible.
-
-    ``select_mode`` chooses between the global slice threshold and the per-tile
-    ranking. Built through the SAME ``selected_volume`` the GPU table is packed
-    from, so these diagnostics describe the mask training actually used rather
-    than a re-implementation that could drift from it.
+    Built from the same ``selected_volume`` the GPU table is packed from; ``camera_index`` only shifts the STBN phase.
     """
     import dataclasses
 
-    from trainer.backend.render import stbn as stbn_module
+    from trainer.backend.render import stbn_table
 
-    source = (stbn_module.SOURCE_WHITE if regime == "iid_white"
-              else stbn_module.SOURCE_NVIDIA)
+    source = (stbn_table.SOURCE_WHITE if regime == "iid_white"
+              else stbn_table.SOURCE_NVIDIA)
     spec = dataclasses.replace(
-        stbn_module.StbnMaskSpec(source=source, seed=stbn_seed),
+        stbn_table.StbnSpec(source=source, seed=stbn_seed),
         fraction=float(fraction),
         select_mode=(select_mode or cfg.PRIMARY_SELECT_MODE))
-    budget = stbn_module.pixels_per_tile(fraction, spec.tile_area)
-    selected = stbn_module.selected_volume(spec, budget)     # (slices, H, W)
+    budget = stbn_table.pixels_per_tile(fraction, spec.tile_area)
+    selected = stbn_table.selected_volume(spec, budget)     # (slices, H, W)
     slices = selected.shape[0]
 
     if regime == "stbn":
-        # The trainer's per-camera walk: phase from an integer mix of the camera
-        # index, then +1 per visit (app.TrainingLoop._stbn_variables).
+        # The trainer's per-camera walk (StbnSampler): hashed phase, then +1 per visit.
         phase = (int(camera_index) * 2654435761
                  + int(stbn_seed) * 40503) % slices
         indices = [(phase + visit) % slices for visit in range(visits)]
     else:
-        # --stbn-independent: a fresh random slice each step, from an RNG seeded
-        # by --stbn-seed and kept separate from the camera draw.
+        # --stbn-independent: a fresh slice per step from an RNG separate from the camera draw.
         rng = np.random.default_rng(int(stbn_seed))
         indices = [int(rng.integers(slices)) for _ in range(visits)]
 
@@ -138,17 +93,8 @@ def build_sequence(regime: str, *, fraction: float, visits: int,
                       "select_mode": spec.select_mode}
 
 
-# ---------------------------------------------------------------------------
-# Statistics
-# ---------------------------------------------------------------------------
-
 def spatial_power(sequence: np.ndarray) -> np.ndarray:
-    """Mean 2D power spectrum over slices, DC removed, fftshifted.
-
-    Each slice is centered by its OWN mean before the transform so the DC term
-    (which is just the density, identical across regimes by construction) cannot
-    dominate the picture and hide the arrangement differences that matter.
-    """
+    """Mean 2D power spectrum over slices, each centered by its own mean (DC removed), fftshifted."""
     total = None
     for frame in sequence:
         centered = frame.astype(np.float64) - frame.mean()
@@ -163,8 +109,7 @@ def radial_profile(power_shifted: np.ndarray, bins: int = 64):
     height, width = power_shifted.shape
     cy, cx = height // 2, width // 2
     yy, xx = np.mgrid[0:height, 0:width]
-    # Normalize each axis by its own Nyquist so a non-square volume still maps
-    # onto [0, ~1.41] consistently.
+    # Per-axis Nyquist normalization keeps non-square volumes on a consistent [0, ~1.41] scale.
     radius = np.sqrt(((yy - cy) / (height / 2.0)) ** 2
                      + ((xx - cx) / (width / 2.0)) ** 2)
     edges = np.linspace(0.0, radius.max(), bins + 1)
@@ -179,14 +124,7 @@ def radial_profile(power_shifted: np.ndarray, bins: int = 64):
 
 
 def temporal_autocorrelation(sequence: np.ndarray, max_lag: int | None = None):
-    """Per-pixel autocorrelation of the 0/1 selection signal, averaged.
-
-    Normalized by the lag-0 variance, so lag 0 is exactly 1 and a value near 0 at
-    lag L means "selection at distance L is uninformative" — the independent
-    baseline. Negative values mean anti-correlation: the mask actively avoids
-    re-picking a pixel at that spacing, which is the property a spatiotemporal
-    mask is built to have.
-    """
+    """Per-pixel autocorrelation of the 0/1 selection signal, normalized by lag-0 variance and averaged."""
     visits = sequence.shape[0]
     max_lag = max_lag or (visits // 2)
     signal = sequence.astype(np.float64)
@@ -216,13 +154,7 @@ def temporal_spectrum(sequence: np.ndarray):
 
 
 def revisit_gaps(sequence: np.ndarray) -> dict:
-    """Mean and maximum spacing between consecutive selections of a pixel.
-
-    Computed CYCLICALLY (the volume wraps in t, and the trainer cycles it), and
-    only over pixels selected at least twice — a gap is undefined for a pixel seen
-    once or never, and treating those as gap 0 or gap 64 would both be wrong. How
-    many pixels were excluded is reported.
-    """
+    """Cyclic mean/max spacing between a pixel's selections, over pixels selected at least twice."""
     visits, height, width = sequence.shape
     flat = sequence.reshape(visits, -1)
     gaps_mean, gaps_max = [], []
@@ -273,16 +205,12 @@ def analyze(sequence: np.ndarray, meta: dict, regime: str,
     lowband = radii <= 0.25
     total_power = float(radial.sum()) if radial.size else 0.0
 
-    from trainer.backend.render import stbn as stbn_module
-    # Fraction of spectral power below a quarter of Nyquist: blue noise pushes
-    # energy AWAY from low frequencies, so lower is bluer.
-    low_freq = float(np.mean([stbn_module.low_frequency_power(frame)
+    from trainer.backend.render import stbn_table
+    # Low-frequency power share: blue noise pushes energy away from low frequencies, so lower is bluer.
+    low_freq = float(np.mean([stbn_table.low_frequency_power(frame)
                              for frame in sequence]))
 
-    # Per-8x8-tile selected counts: THE statistic that separates the two
-    # selection modes. tile_rank pins every tile to exactly k; a global threshold
-    # constrains only the slice and lets local counts breathe, which is what keeps
-    # the point set the one the asset was optimized for.
+    # Per-8x8-tile counts separate the modes: tile_rank pins each tile to k, global lets counts vary.
     tiles = sequence.reshape(visits, meta["height"] // 8, 8,
                              meta["width"] // 8, 8)
     tile_counts_flat = tiles.transpose(0, 1, 3, 2, 4).reshape(
@@ -354,10 +282,6 @@ def coverage_curve(sequence: np.ndarray, points) -> list[dict]:
     return rows
 
 
-# ---------------------------------------------------------------------------
-# Figures
-# ---------------------------------------------------------------------------
-
 def _save_mask_images(analyses: dict, sequences: dict, out_dir: Path) -> None:
     plt = figs.pyplot()
     if plt is None:
@@ -371,8 +295,7 @@ def _save_mask_images(analyses: dict, sequences: dict, out_dir: Path) -> None:
         sequence = sequences[regime]
         for column in range(n_show):
             ax = axes[row][column]
-            # A 48x48 crop: at 128x128 the individual pixels of a 25% mask are
-            # invisible in a figure this size, and the arrangement is the point.
+            # Crop so individual mask pixels stay visible at figure size.
             ax.imshow(sequence[column][:48, :48], cmap="gray_r",
                       interpolation="nearest")
             ax.set_xticks([]); ax.set_yticks([])
@@ -514,10 +437,7 @@ def run(out: dict, *, fraction: float = cfg.PRIMARY_FRACTION,
             coverage[regime] = coverage_curve(sequence,
                                               cfg.SAMPLING_COVERAGE_POINTS)
 
-        # Both selection modes, for the stratification ablation. Cheap (no
-        # training), and it is the measurement that says whether forcing exactly
-        # k per execution tile damages the mask — the claim Experiment S then
-        # tests against trained quality.
+        # Both selection modes: does forcing k per tile damage the mask (Experiment S tests quality)?
         for mode in (cfg.SELECT_GLOBAL, cfg.SELECT_TILE_RANK):
             for regime in SAMPLING_REGIMES:
                 seq, mode_meta = build_sequence(
@@ -576,8 +496,7 @@ def run(out: dict, *, fraction: float = cfg.PRIMARY_FRACTION,
     tables.write_csv(analysis_dir / "sampling_visit_counts.csv", visit_rows,
                      VISITS_COLUMNS)
 
-    # The raw sequences, so any statistic can be recomputed without rebuilding
-    # the rank volumes (and so a reviewer can check these numbers).
+    # Raw sequences, so any statistic can be recomputed without rebuilding the rank volumes.
     np.savez_compressed(
         analysis_dir / "sampling_sequences.npz",
         **{regime: sequences[regime] for regime in SAMPLING_REGIMES},
@@ -596,9 +515,7 @@ def run(out: dict, *, fraction: float = cfg.PRIMARY_FRACTION,
                     and r["regime"] == regime), None)
         return (row or {}).get(key)
 
-    # The spectral cost of tile stratification, and — the part that was easy to
-    # miss — the same constraint making the WHITE control artificially bluer, so
-    # the blue-vs-white contrast is compressed from both ends.
+    # Tile stratification both costs blue noise its spectrum and makes the white control bluer.
     blue_global = _mode(cfg.SELECT_GLOBAL, "stbn", "low_freq_power_mean")
     blue_tiled = _mode(cfg.SELECT_TILE_RANK, "stbn", "low_freq_power_mean")
     white_global = _mode(cfg.SELECT_GLOBAL, "iid_white", "low_freq_power_mean")

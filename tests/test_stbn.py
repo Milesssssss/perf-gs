@@ -25,19 +25,32 @@ import dataclasses
 import numpy as np
 import pytest
 
-from trainer.backend.render import stbn
-from trainer.contracts.codegen import TILE_AREA, TILE_HEIGHT, TILE_WIDTH
+from trainer.backend.render import stbn_table as stbn
+from trainer.backend.compute.execution import TILE_AREA, TILE_HEIGHT, TILE_WIDTH
 
 
-def _asset_or_skip() -> stbn.StbnMaskSpec:
-    spec = stbn.StbnMaskSpec()
+def _asset_or_skip() -> stbn.StbnSpec:
+    spec = stbn.StbnSpec()
     if not spec.resolved_path().is_file():
         pytest.skip("NVIDIA STBN asset absent; run scripts/data/download_stbn.py")
     return spec
 
 
-def _white(seed: int = 0) -> stbn.StbnMaskSpec:
-    return stbn.StbnMaskSpec(source=stbn.SOURCE_WHITE, seed=seed)
+def _white(seed: int = 0) -> stbn.StbnSpec:
+    return stbn.StbnSpec(source=stbn.SOURCE_WHITE, seed=seed)
+
+
+def tile_counts(ranks: np.ndarray, budget: int, spec: stbn.StbnSpec) -> np.ndarray:
+    """Selected-pixel count per (slice, tile)."""
+    return stbn.selected_mask(ranks.reshape(-1)[stbn.block_voxel_index(spec)],
+                              budget).sum(axis=-1)
+
+
+def temporal_adjacency(ranks: np.ndarray, budget: int) -> float:
+    """Mean per-pixel count of consecutive slices both selected; an independent
+    mask of density rho scores ``(slices - 1) * rho**2``."""
+    mask = stbn.selected_mask(ranks, budget)
+    return float((mask[:-1] & mask[1:]).sum(axis=0).mean())
 
 
 # ---------------------------------------------------------------- invariants
@@ -54,17 +67,17 @@ def test_every_tile_of_every_slice_is_a_permutation(source: str) -> None:
     ranks = stbn.build_rank_volume(spec)
 
     assert ranks.shape == (spec.slices, spec.height, spec.width)
-    per_tile = ranks.reshape(-1)[stbn._block_voxel_index(spec)]
+    per_tile = ranks.reshape(-1)[stbn.block_voxel_index(spec)]
     assert (np.sort(per_tile, axis=-1) == np.arange(spec.tile_area)).all()
 
 
 @pytest.mark.parametrize("budget", [1, 6, 16, 32, 63])
 def test_selected_count_is_exactly_the_budget_in_every_tile(budget: int) -> None:
     """Not "on average k": k in EVERY tile of EVERY slice. A globally thresholded
-    mask gives 2..11 per tile at rho=0.1 (see the module docstring in stbn.py),
+    mask gives 2..11 per tile at rho=0.1 (see the module docstring in stbn_table.py),
     which is the count jitter the tile ranking exists to remove."""
     spec = _asset_or_skip()
-    counts = stbn.tile_counts(stbn.build_rank_volume(spec), budget, spec)
+    counts = tile_counts(stbn.build_rank_volume(spec), budget, spec)
     assert counts.min() == budget and counts.max() == budget
 
 
@@ -96,9 +109,9 @@ def test_packed_table_carries_the_selection_its_list_and_its_length(mode) -> Non
     assert packed.dtype == np.uint32 and packed.shape == (spec.voxels,)
     slots, compacted, counts = stbn.unpack_table(packed, spec)
 
-    block_selected = selected.reshape(-1)[stbn._block_voxel_index(spec)]
+    block_selected = selected.reshape(-1)[stbn.block_voxel_index(spec)]
     # The slot field agrees with the selection, pixel for pixel.
-    assert ((slots != stbn._SLOT_NONE) == block_selected).all()
+    assert ((slots != stbn.SLOT_NONE) == block_selected).all()
     # The count field is the number of selected pixels in the tile.
     assert (counts == block_selected.sum(axis=-1)).all()
 
@@ -125,7 +138,7 @@ def test_global_density_matches_the_weight_the_shaders_apply(fraction) -> None:
     the bug would masquerade as a result ("sparse supervision grows more
     Gaussians"). This is the guard on that.
     """
-    spec = stbn.StbnMaskSpec(select_mode=stbn.SELECT_GLOBAL, fraction=fraction)
+    spec = stbn.StbnSpec(select_mode=stbn.SELECT_GLOBAL, fraction=fraction)
     density = spec.selected_per_slice / (spec.height * spec.width)
     budget = stbn.pixels_per_tile(fraction, spec.tile_area)
     assert density == pytest.approx(budget / spec.tile_area, abs=1e-12)
@@ -137,7 +150,7 @@ def test_global_density_matches_the_weight_the_shaders_apply(fraction) -> None:
 def test_the_two_modes_select_the_same_number_of_pixels(fraction) -> None:
     """Density-matched by construction, so the ablation compares ARRANGEMENT
     rather than confounding it with a different pixel count."""
-    base = stbn.StbnMaskSpec(source=stbn.SOURCE_WHITE, seed=0, fraction=fraction)
+    base = stbn.StbnSpec(source=stbn.SOURCE_WHITE, seed=0, fraction=fraction)
     counts = set()
     for mode in (stbn.SELECT_GLOBAL, stbn.SELECT_TILE_RANK):
         volume = stbn.selected_volume(dataclasses.replace(base, select_mode=mode))
@@ -168,7 +181,7 @@ def test_global_mode_lets_per_tile_counts_vary_and_tile_rank_does_not() -> None:
     tiled = stbn.selected_volume(
         dataclasses.replace(base, select_mode=stbn.SELECT_TILE_RANK,
                             fraction=0.25))
-    index = stbn._block_voxel_index(base)
+    index = stbn.block_voxel_index(base)
     glob_counts = glob.reshape(-1)[index].sum(axis=-1)
     tile_counts = tiled.reshape(-1)[index].sum(axis=-1)
 
@@ -206,7 +219,7 @@ def test_per_tile_ranking_flatters_the_white_control() -> None:
     span roughly 5..31 — suppresses its low frequencies too, making the control
     artificially bluer and shrinking the blue-vs-white contrast from both ends.
     """
-    white = stbn.StbnMaskSpec(source=stbn.SOURCE_WHITE, seed=0, fraction=0.25)
+    white = stbn.StbnSpec(source=stbn.SOURCE_WHITE, seed=0, fraction=0.25)
     glob = stbn.selected_volume(
         dataclasses.replace(white, select_mode=stbn.SELECT_GLOBAL))
     tiled = stbn.selected_volume(
@@ -244,8 +257,8 @@ def test_a_cached_table_of_the_wrong_density_is_rejected(tmp_path) -> None:
     density, so a key collision would hand back a valid-looking, wrong mask. The
     loader must verify the count the shaders will actually read.
     """
-    spec25 = stbn.StbnMaskSpec(source=stbn.SOURCE_WHITE, seed=0,
-                               select_mode=stbn.SELECT_TILE_RANK, fraction=0.25)
+    spec25 = stbn.StbnSpec(source=stbn.SOURCE_WHITE, seed=0,
+                           select_mode=stbn.SELECT_TILE_RANK, fraction=0.25)
     spec10 = dataclasses.replace(spec25, fraction=0.10)
 
     # Plant the WRONG table under the right name, exactly as the old key
@@ -271,18 +284,17 @@ def test_pixels_per_tile_never_starves_a_tile_completely() -> None:
 
 def test_spec_rejects_layouts_the_shaders_cannot_index() -> None:
     with pytest.raises(ValueError, match="whole number"):
-        stbn.StbnMaskSpec(source=stbn.SOURCE_WHITE,
-                          width=TILE_WIDTH * 2 + 1, height=TILE_HEIGHT).validate()
+        stbn.StbnSpec(source=stbn.SOURCE_WHITE, width=TILE_WIDTH * 2 + 1, height=TILE_HEIGHT)
     with pytest.raises(ValueError, match="toroidal wrap"):
         # Cropping NVIDIA's asset would break the wrap that lets it tile.
-        stbn.StbnMaskSpec(width=64, height=64, slices=32).validate()
+        stbn.StbnSpec(width=64, height=64, slices=32)
     with pytest.raises(ValueError, match="unknown STBN source"):
-        stbn.StbnMaskSpec(source="perlin").validate()
+        stbn.StbnSpec(source="perlin")
 
 
 def test_missing_asset_names_the_fetch_script() -> None:
     """The asset is an opt-in download, so its absence has to be actionable."""
-    spec = stbn.StbnMaskSpec(path="does/not/exist.npy")
+    spec = stbn.StbnSpec(path="does/not/exist.npy")
     with pytest.raises(FileNotFoundError, match="download_stbn"):
         stbn.load_scalar_volume(spec)
 
@@ -326,8 +338,8 @@ def test_repeat_visits_of_a_pixel_are_spread_over_time() -> None:
     for budget in (6, 16):
         rho = budget / spec.tile_area
         independent = (spec.slices - 1) * rho * rho
-        blue = stbn.temporal_adjacency(ranks, budget)
-        white = stbn.temporal_adjacency(white_ranks, budget)
+        blue = temporal_adjacency(ranks, budget)
+        white = temporal_adjacency(white_ranks, budget)
         assert blue < independent / 4.0, (
             f"budget {budget}: temporal clumping {blue:.3f} vs independent "
             f"{independent:.3f}")
@@ -363,7 +375,7 @@ def test_white_control_shares_every_invariant_with_the_real_mask() -> None:
     instead of the blue noise."""
     spec = _white(seed=7)
     ranks = stbn.build_rank_volume(spec)
-    counts = stbn.tile_counts(ranks, 6, spec)
+    counts = tile_counts(ranks, 6, spec)
     assert counts.min() == counts.max() == 6
     assert (stbn.selected_mask(ranks, 6) <= stbn.selected_mask(ranks, 16)).all()
 
@@ -382,8 +394,8 @@ def test_ranking_a_scalar_volume_preserves_its_local_order() -> None:
     """Tile stratification must only REORDER within a tile — it is what makes the
     per-tile count exact, and it would be worthless if it also scrambled the
     arrangement the source volume encodes."""
-    spec = stbn.StbnMaskSpec(source=stbn.SOURCE_WHITE,
-                             width=TILE_WIDTH, height=TILE_HEIGHT, slices=2)
+    spec = stbn.StbnSpec(source=stbn.SOURCE_WHITE,
+                         width=TILE_WIDTH, height=TILE_HEIGHT, slices=2)
     rng = np.random.default_rng(0)
     volume = rng.random((2, TILE_HEIGHT, TILE_WIDTH))
     ranks = stbn.rank_volume_from_scalar(volume, spec)

@@ -1,21 +1,7 @@
 # Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-"""Turn a folder of images into a COLMAP dataset ``load_colmap`` can open.
-
-Four colmap commands, in the trainer's own process — the same sequence every 3DGS
-preprocessing script runs:
-
-  1. ``feature_extractor``   (GPU on a CUDA build, else the CPU)
-  2. ``<matcher>_matcher``   (exhaustive | sequential | vocab_tree)
-  3. mapping: ``glomap mapper`` (global SfM) if glomap resolved, else ``colmap mapper``
-  4. ``image_undistorter``   (load_colmap only supports SIMPLE_PINHOLE / PINHOLE)
-
-then the result is arranged as ``<out>/sparse/0`` + ``<out>/images``. Source images
-are never modified; everything else lands under ``<out>``.
-
-Every step prints a ``[stage] <name>`` line that the viewer turns into a progress
-fraction (see :mod:`.progress`), and streams the tool's stdout to ``progress``.
-"""
+"""Turn a folder of images into a COLMAP dataset ``load_colmap`` can open: extract, match, map
+(glomap, else colmap) and undistort to pinhole. Source images are never modified."""
 from __future__ import annotations
 
 import shutil
@@ -33,8 +19,7 @@ _IMAGE_EXTS = {".jpg", ".jpeg", ".png"}
 _MATCH_VERB = {"exhaustive": "exhaustive_matcher",
                "sequential": "sequential_matcher",
                "vocab_tree": "vocab_tree_matcher"}
-# GLOMAP links its own older COLMAP, which refuses to open a database carrying
-# these two tables as COLMAP 4.x writes them.
+# GLOMAP's bundled older COLMAP refuses these tables as COLMAP 4.x writes them.
 _GLOMAP_DROP = ("descriptors", "pose_priors")
 
 
@@ -43,11 +28,7 @@ def _has_images(d: Path) -> bool:
 
 
 def classify_dataset(path: str | Path) -> str:
-    """``"colmap"`` (a sparse model is there), ``"images"``, or ``"unknown"``.
-
-    COLMAP detection reuses the loader's own probe, so ``"colmap"`` guarantees
-    ``load_colmap`` can read it.
-    """
+    """``"colmap"`` (a sparse model ``load_colmap`` can read), ``"images"``, or ``"unknown"``."""
     p = Path(path)
     if not p.is_dir():
         return "unknown"
@@ -68,9 +49,7 @@ def _run(cmd: list[str], progress: ProgressCallable) -> int:
 
 def _run_on_gpu_else_cpu(colmap: str, verb: str, args: list[str], cuda: bool,
                          progress: ProgressCallable) -> bool:
-    """Feature extraction / matching are the only GPU-capable steps. Ask for the
-    GPU, then retry on the CPU — a no-CUDA build cannot do SIFT on the GPU at all,
-    and a CUDA one still can't if the driver is unhappy."""
+    """Ask for the GPU, then retry on the CPU (a CUDA build can still fail on a bad driver)."""
     flag = gpu_flag(colmap, verb)
     for want in (["1", "0"] if cuda else ["0"]) if flag else [None]:
         extra = [flag, want] if want is not None else []
@@ -83,12 +62,8 @@ def _run_on_gpu_else_cpu(colmap: str, verb: str, args: list[str], cuda: bool,
 
 
 def _glomap_database(database: Path, workspace: Path, progress: ProgressCallable) -> Path:
-    """A copy of ``database`` without ``_GLOMAP_DROP``, so glomap can open it.
-
-    Replays the original's own CREATE statements against a fresh file (with the
-    source ATTACHed), so column order, types and constraints stay byte-identical
-    to what colmap wrote. Falls back to the original if that fails.
-    """
+    """A copy of ``database`` without ``_GLOMAP_DROP`` (or the original if copying fails).
+    Replays colmap's own CREATE statements so the schema stays identical."""
     dst = workspace / "glomap.db"
     try:
         dst.unlink(missing_ok=True)
@@ -129,10 +104,8 @@ def _model_dir(sparse: Path) -> Path:
 def reconstruct(tools: ReconTools, dataset_dir: str | Path, out_dir: str | Path,
                 matcher: str = "exhaustive",
                 progress: ProgressCallable = lambda _m: None) -> Path | None:
-    """images -> ``<out_dir>/sparse/0`` + ``<out_dir>/images``. None on failure.
-
-    Idempotent: an ``out_dir`` that already holds a sparse model is returned as is.
-    """
+    """images -> ``<out_dir>/sparse/0`` + ``<out_dir>/images``; None on failure.
+    Idempotent: an ``out_dir`` that already holds a sparse model is returned as is."""
     out, dataset = Path(out_dir), Path(dataset_dir)
     if classify_dataset(out) == "colmap":
         progress(f"[recon] {out} already reconstructed; skipping")

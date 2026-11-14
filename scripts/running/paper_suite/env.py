@@ -1,25 +1,8 @@
 # Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-"""Provenance the suite records once, plus the device-memory poller.
+"""Session provenance recorded once per suite run, plus the device-wide GPU memory poller.
 
-Two kinds of fact live here.
-
-**Session-scoped provenance** — git commit, whether the tree was dirty, the GPU
-and its driver, the STBN asset's content hash, package versions. Collected once
-per suite invocation and stamped onto every cell record. Cheap to collect, and
-the thing you most want and least often have when a number looks wrong six weeks
-later. The dirty flag matters more than it looks: a dirty tree means the commit
-does NOT identify the code that produced the numbers, so it is recorded as a
-first-class field rather than a footnote, and the report surfaces it.
-
-**Per-cell device memory** — the trainer reports its own allocation (a constant
-of ``--max-splats``, so identical across regimes), which is not what anyone means
-by "peak GPU memory". The real figure has to be sampled from outside the process
-while it runs. On Windows/WDDM ``nvidia-smi`` cannot attribute memory per process
-(``used_gpu_memory`` reads ``[N/A]``), so what is available is the DEVICE-WIDE
-total. :class:`GpuMemoryPoller` samples it, and the baseline taken before launch
-is recorded alongside, so the delta is interpretable and its assumption — that
-nothing else is using the GPU — is checkable rather than hidden.
+The dirty flag is first-class: a dirty tree means the commit does not identify the code behind the numbers.
 """
 from __future__ import annotations
 
@@ -52,12 +35,7 @@ def utc_now() -> str:
 
 
 def git_state() -> dict:
-    """Commit, branch, dirtiness, and WHICH files are dirty.
-
-    The file list is included because "dirty" alone does not say whether the
-    change could have affected the numbers; a modified README and a modified
-    rasterizer are very different provenance.
-    """
+    """Commit, branch, dirtiness, and which files are dirty (a dirty README is not a dirty rasterizer)."""
     commit = _run(["git", "rev-parse", "HEAD"])
     status = _run(["git", "status", "--porcelain"])
     dirty_files: list[str] = []
@@ -77,18 +55,12 @@ def git_state() -> dict:
         "dirty_file_count": len(dirty_files),
         "dirty_files": sorted(dirty_files)[:100],
         "dirty_source_files": sorted(relevant)[:100],
-        # The honest statement about what the commit identifies.
         "commit_identifies_code": not bool(relevant),
     }
 
 
 def gpu_state() -> dict:
-    """GPU name, memory and driver, as the DRIVER reports it.
-
-    The trainer separately records the adapter the graphics API bound (see
-    ``run_report.device_info``); keeping both means a mismatch — two GPUs, a
-    different adapter picked than expected — is visible instead of assumed away.
-    """
+    """GPU name, memory and driver as the driver reports it; the run report separately records the bound adapter."""
     query = _run(["nvidia-smi",
                   "--query-gpu=name,memory.total,driver_version,pstate,"
                   "clocks.max.sm,clocks.max.memory,power.limit",
@@ -102,8 +74,7 @@ def gpu_state() -> dict:
                 "clocks_max_sm", "clocks_max_memory", "power_limit")
         record.update(dict(zip(keys, fields)))
         if len(rows) > 1:
-            # Multi-GPU: the trainer picks one, so record them all and let the
-            # adapter name in the run report disambiguate.
+            # Multi-GPU: the run report's adapter name disambiguates which one the trainer picked.
             record["all_devices"] = rows
     record["cuda_version_smi"] = _run(
         ["nvidia-smi", "--query", "--display=COMPUTE"]) is not None
@@ -112,9 +83,9 @@ def gpu_state() -> dict:
 
 def stbn_asset_state() -> dict:
     """Content hash of the NVIDIA STBN volume the runs will read."""
-    from trainer.backend.render import stbn as stbn_module
+    from trainer.backend.render import stbn_table
 
-    path = stbn_module.nvidia_volume_path()
+    path = stbn_table.nvidia_volume_path()
     record: dict = {"path": str(path), "name": path.name,
                     "license": "NVIDIA STBN, NON-COMMERCIAL (see .stbn/assets)"}
     try:
@@ -122,9 +93,9 @@ def stbn_asset_state() -> dict:
         record["sha256"] = hashlib.sha256(data).hexdigest()
         record["bytes"] = len(data)
         record["present"] = True
-        record["shape"] = (f"{stbn_module.NVIDIA_SLICES}x"
-                          f"{stbn_module.NVIDIA_HEIGHT}x"
-                          f"{stbn_module.NVIDIA_WIDTH}")
+        record["shape"] = (f"{stbn_table.NVIDIA_SLICES}x"
+                          f"{stbn_table.NVIDIA_HEIGHT}x"
+                          f"{stbn_table.NVIDIA_WIDTH}")
     except OSError as error:
         record["present"] = False
         record["error"] = f"{type(error).__name__}: {error}"
@@ -132,13 +103,7 @@ def stbn_asset_state() -> dict:
 
 
 def package_state() -> dict:
-    """Installed versions of the numeric/graphics stack.
-
-    Falls back to the distribution metadata when a module exposes no
-    ``__version__``: ``lpips`` does not, and reporting "unavailable" for a package
-    that is installed and in use would put a false claim in the report's
-    provenance block.
-    """
+    """Installed versions of the numeric/graphics stack, falling back to distribution metadata (e.g. ``lpips``)."""
     from importlib.metadata import PackageNotFoundError, version as dist_version
 
     # module name -> distribution name (they differ for PIL).
@@ -181,16 +146,9 @@ def collect_environment() -> dict:
 
 
 class GpuMemoryPoller:
-    """Samples DEVICE-WIDE GPU memory in a background thread.
+    """Samples device-wide GPU memory (WDDM has no per-process attribution) in a background thread.
 
-    Per-process attribution is unavailable on WDDM, so this is the whole device.
-    It is only interpretable if the GPU is otherwise idle — which is the same
-    precondition the wall-clock timings already require — and the pre-launch
-    baseline is reported next to the peak so a violated assumption shows up as a
-    large baseline rather than as a quietly inflated result.
-
-    A missing or failing ``nvidia-smi`` degrades to ``available: False``; it must
-    never be able to fail a cell.
+    The pre-launch baseline is reported so a non-idle GPU is visible; a missing nvidia-smi never fails a cell.
     """
 
     def __init__(self, interval: float = 0.5) -> None:

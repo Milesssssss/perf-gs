@@ -2,19 +2,7 @@
 
 """Compare baseline thread-per-pixel forward vs warp-per-pixel forward training time.
 
-Same-hardware A/B: for each scene we ran the pure 0->3000 training loop twice
-with identical flags + identical (flat) backward, differing ONLY in the forward
-rasterizer (--warp-per-pixel-forward). Both are read from
-outputs/train/timing_<scene>_{threadfwd,warpfwd}/log.jsonl
-(train_complete.train_wall_s) plus test_psnr.json for the quality check.
-
-The warp-per-pixel forward trades the thread-per-pixel kernel's broadcast load
-(256 threads/WG read the SAME splat) for a 32-way gather (one warp/pixel, 32
-lanes read 32 different splats). It gathers the compact 36 B BlendData record to
-keep that gather L1TEX-cheap. This plot shows whether the wave-scan latency win
-beats the extra memory traffic end-to-end.
-
-Writes outputs/timing_warpfwd_vs_baseline.{csv,png}.
+Same-GPU A/B of outputs/train/timing_<scene>_{threadfwd,warpfwd} (only --warp-per-pixel-forward differs), with test PSNR as a quality check.
 """
 from __future__ import annotations
 
@@ -108,7 +96,6 @@ def main() -> None:
                     f"{wp_ps_avg:.3f}" if wp_ps_avg is not None else "",
                     f"{wp_ps_avg - base_ps_avg:+.3f}" if (base_ps_avg is not None and wp_ps_avg is not None) else ""])
 
-    # Grouped bar chart: baseline vs warp (current hardware).
     x = np.arange(len(scenes))
     width = 0.4
     fig, ax = plt.subplots(figsize=(11, 6), dpi=140)

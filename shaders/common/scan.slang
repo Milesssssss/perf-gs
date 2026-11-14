@@ -1,43 +1,20 @@
 // Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-// Parallel exclusive prefix scan on a uint[] buffer.
-//
-// Three-kernel Blelloch scan. These SHADERS are level-agnostic: each
-// scanBlock covers up to SCAN_BLOCK_SIZE elements per workgroup, and
-// scanBlockSums covers up to SCAN_BLOCK_SIZE block_sums in ONE workgroup.
-// The Python wrapper in pipeline._scan chains them into either a 2-level
-// (n <= SCAN_BLOCK_SIZE^2 = 1,048,576) or 3-level (n <= SCAN_BLOCK_SIZE^3
-// = ~1.07 B) scan by re-dispatching scanBlock+scanBlockSums on the
-// block_sums buffer when num_blocks > SCAN_BLOCK_SIZE. Adequate for
-// max_splats up to ~1 B; beyond that a 4-level chain would be required.
-//
-// Exclusive semantics: out[i] = sum(in[0..i-1]), out[0] = 0.
-// Also returns the total sum so the caller can know the post-compaction
-// element count without a separate readback of out[N-1] + in[N-1].
-//
-// Layout:
-//   scanBlock: per-block scan, writes out[] + block_sums[]
-//   scanBlockSums: single-workgroup scan of block_sums[] in place
-//   addBlockOffsets: per-block add of block_sums[bid] to every out[] in bid
+// Exclusive prefix scan of a uint buffer (out[0] = 0) that also writes the total sum.
+// Level-agnostic: the host chains 2 levels (n <= SCAN_BLOCK_SIZE^2) or 3 (n <= SCAN_BLOCK_SIZE^3).
 
 #ifndef TRAINER_SCAN_SLANG
 #define TRAINER_SCAN_SLANG
 
-#include "generated/execution_contract.slang"
-static const uint SCAN_BLOCK_SIZE = CONTRACT_SCAN_BLOCK_SIZE;
-// scanBlockSums is a single-workgroup scan so it caps at SCAN_BLOCK_SIZE
-// inputs. When the level-2 count exceeds this, pipeline._scan does an
-// extra scanBlock+scanBlockSums pass (the 3-level branch).
+#include "common/execution.slang"
+// scanBlockSums is a single workgroup, so it scans at most SCAN_BLOCK_SIZE block sums.
 static const uint SCAN_MAX_BLOCKS = 1024;
 
 groupshared uint _scan_lds[SCAN_BLOCK_SIZE];
 
-// Single-workgroup exclusive Hillis-Steele prefix scan operating on
-// _scan_lds[0..count). Fills _scan_lds with exclusive prefix at return;
-// the return value is the total sum (inclusive of count).
+// In-place exclusive Hillis-Steele scan of _scan_lds[0..count); returns the total.
 uint _scan_lds_inplace(uint lid, uint count)
 {
-    // Hillis-Steele: inclusive scan, stride doubles each step.
     for (uint offset = 1u; offset < count; offset <<= 1u)
     {
         GroupMemoryBarrierWithGroupSync();
@@ -81,8 +58,7 @@ void scanBlock(
     if (lid == 0u) block_sums[gid.x] = total;
 }
 
-// Single workgroup. Scans block_sums[] in place for a scan of at most
-// SCAN_MAX_BLOCKS elements. ``num_blocks`` is the actual count.
+// Single workgroup: scans num_blocks <= SCAN_MAX_BLOCKS block sums in place.
 [shader("compute")]
 [numthreads(SCAN_BLOCK_SIZE, 1, 1)]
 void scanBlockSums(

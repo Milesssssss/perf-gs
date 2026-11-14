@@ -71,7 +71,7 @@ def test_tracking_populates_and_clears(backend: str) -> None:
     # and therefore zero visibility bump — that's "settled", not a bug.
     target = np.zeros((H, W, 3), dtype=np.float32)
     target[:, W // 2 :, 1] = 1.0
-    pipeline.set_target_image(target)
+    pipeline.targets.set_image(target)
 
     camera = simple_camera(
         width=W, height=H,
@@ -80,12 +80,12 @@ def test_tracking_populates_and_clears(backend: str) -> None:
     )
 
     # Clear + run forward/loss/backward.
-    pipeline.clear_tracking()
-    pipeline.clear_gradients()
+    pipeline.densify_stats.clear()
+    pipeline.optimizer.zero_grad()
     pipeline.forward_and_loss(camera)
-    pipeline.backward()
+    pipeline.run_backward()
 
-    t = pipeline.read_tracking()
+    t = pipeline.densify_stats.read()
     vis = t["visibility_count"]
     mag = t["grad_mean_2d_mag"]
 
@@ -101,8 +101,8 @@ def test_tracking_populates_and_clears(backend: str) -> None:
     assert mag[2] == 0.0, f"expected behind-camera gaussian to have mag=0, got {mag[2]}"
 
     # clear_tracking() should reset everything.
-    pipeline.clear_tracking()
-    t2 = pipeline.read_tracking()
+    pipeline.densify_stats.clear()
+    t2 = pipeline.densify_stats.read()
     assert np.all(t2["visibility_count"] == 0)
     assert np.all(t2["grad_mean_2d_mag"] == 0.0)
 
@@ -124,25 +124,25 @@ def test_tracking_accumulates_across_iters(backend: str) -> None:
     # Asymmetric target — see rationale in test_tracking_populates_and_clears.
     target = np.zeros((H, W, 3), dtype=np.float32)
     target[:, W // 2 :, 1] = 1.0
-    pipeline.set_target_image(target)
+    pipeline.targets.set_image(target)
     camera = simple_camera(
         width=W, height=H,
         eye=(0.0, 0.0, 0.0), target=(0.0, 0.0, 1.0), up=(0.0, 1.0, 0.0),
         fovy_degrees=60.0,
     )
 
-    pipeline.clear_tracking()
-    pipeline.clear_gradients()
+    pipeline.densify_stats.clear()
+    pipeline.optimizer.zero_grad()
     pipeline.forward_and_loss(camera)
-    pipeline.backward()
-    t1 = pipeline.read_tracking()
+    pipeline.run_backward()
+    t1 = pipeline.densify_stats.read()
     vis1 = int(t1["visibility_count"][0])
 
     # Second pass WITHOUT clearing tracking.
-    pipeline.clear_gradients()
+    pipeline.optimizer.zero_grad()
     pipeline.forward_and_loss(camera)
-    pipeline.backward()
-    t2 = pipeline.read_tracking()
+    pipeline.run_backward()
+    t2 = pipeline.densify_stats.read()
     vis2 = int(t2["visibility_count"][0])
 
     # One visible iter per call: vis1 == 1, vis2 == 2.
@@ -165,26 +165,26 @@ def test_untracked_step_leaves_the_screen_gradient_alone(backend: str) -> None:
     )
     target = np.zeros((H, W, 3), dtype=np.float32)
     target[:, W // 2 :, 1] = 1.0
-    pipeline.set_target_image(target)
+    pipeline.targets.set_image(target)
     camera = simple_camera(
         width=W, height=H,
         eye=(0.0, 0.0, 0.0), target=(0.0, 0.0, 1.0), up=(0.0, 1.0, 0.0),
         fovy_degrees=60.0,
     )
 
-    pipeline.clear_tracking()
-    pipeline.clear_gradients()
+    pipeline.densify_stats.clear()
+    pipeline.optimizer.zero_grad()
     pipeline.forward_and_loss(camera)
-    pipeline.backward()
-    tracked = pipeline.read_tracking()
+    pipeline.run_backward()
+    tracked = pipeline.densify_stats.read()
     assert tracked["visibility_count"][0] == 1
 
     pipeline.forward_and_loss(camera)
     pipeline.record_backward(IterationContextualVariables(
         hardness_value=1.0, sh_degree=0,
         densification_variables=DensificationProperties(track_screen_grad=False)))
-    untracked = pipeline.read_tracking()
+    untracked = pipeline.densify_stats.read()
     for name in ("visibility_count", "grad_mean_2d_mag"):
         np.testing.assert_array_equal(untracked[name], tracked[name], err_msg=name)
-    for buffer in (pipeline.buffers.grad_2d_x_iter, pipeline.buffers.grad_2d_y_iter):
+    for buffer in (pipeline.buffers.gradients.screen_x, pipeline.buffers.gradients.screen_y):
         assert not np.frombuffer(buffer.to_numpy().tobytes(), dtype=np.int64).any()

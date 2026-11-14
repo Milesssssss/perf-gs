@@ -1,19 +1,8 @@
 # Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-"""Experiment F — orchestrate the gradient probes and aggregate their results.
+"""Experiment F: launch the per-scene gradient probes and aggregate their results.
 
-The measurement itself lives in ``scripts/running/paper_gradient_probe.py`` and
-runs as its own process per scene, so it cannot share state with — or be mistaken
-for — a training cell. This module launches those processes, caches their JSON,
-and turns it into the tables and figures.
-
-What the aggregate is looking for has a built-in sanity check. At K=1 there is no
-temporal structure to exploit: a single STBN slice IS a single independent
-blue-noise slice, so ``stbn`` and ``indep_blue`` must agree at K=1 to within
-sampling noise, and any separation between them should appear only as K grows. If
-the two differ at K=1, something is wrong with the harness rather than
-interesting about the method — so that comparison is computed and reported
-explicitly instead of being left for a reader to notice.
+Sanity check: at K=1 a single STBN slice is an independent blue-noise slice, so the two must agree.
 """
 from __future__ import annotations
 
@@ -61,8 +50,7 @@ def _probe_command(scene: str, out_path: Path, *, python: str,
         "--state-iters", *[str(i) for i in state_iters],
         "--k-values", *[str(k) for k in k_values],
         "--probe-fraction", f"{fraction:.4f}",
-        # STBN compiled ON with the NVIDIA table available; the probe clears the
-        # density schedule so the advance to each state is dense regardless.
+        # STBN on with the NVIDIA table; the probe still advances to each state densely.
         "--stbn-pixel-fraction", f"{fraction:.4f}",
         "--stbn-source", "nvidia",
         "--iters", str(max(state_iters)),
@@ -80,13 +68,7 @@ def run_probes(out: dict, *, python: str, scenes=cfg.GRADIENT_SCENES,
                state_iters=cfg.GRADIENT_STATES, k_values=cfg.GRADIENT_K_VALUES,
                fraction: float = cfg.PRIMARY_FRACTION,
                force: bool = False, timeout_s: float = 5400.0) -> dict:
-    """Launch one probe per scene, reusing any already-written result.
-
-    Resumable on the same terms as the training grid: a probe whose JSON exists
-    and parses is reused unless ``--force``. A probe that fails is recorded and
-    the rest continue — the aggregate then reports over the scenes that worked
-    and names the ones that did not.
-    """
+    """Launch one probe per scene, reusing parseable results unless ``force``; failures are recorded, not fatal."""
     directory: Path = out["gradient_analysis"]
     directory.mkdir(parents=True, exist_ok=True)
     logs: Path = out["logs"]
@@ -201,12 +183,7 @@ def _summary_rows(raw: list[dict]) -> list[dict]:
 
 
 def _k1_equivalence_check(summary: list[dict]) -> list[dict]:
-    """At K=1, STBN and independent blue noise must agree.
-
-    A single slice carries no temporal information, so the two regimes are the
-    same object at K=1 and any gap is harness noise. Quantified here so the
-    report can assert the harness is sound rather than assume it.
-    """
+    """At K=1, STBN and independent blue noise are the same object, so any gap is harness noise."""
     rows: list[dict] = []
     for group in sorted({r["param_group"] for r in summary}):
         stbn = next((r for r in summary if r["regime"] == "stbn" and r["k"] == 1

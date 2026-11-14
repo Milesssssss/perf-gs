@@ -2,23 +2,8 @@
 
 """Overlay + average PSNR-vs-iteration curves from one or more runs.
 
-Consumes the ``psnr_curve.json`` files written by ``v2_train.py --psnr-curve``
-(each has aligned ``iters[]`` / ``psnr_srgb[]`` arrays), overlays every run's
-curve, and draws the mean curve across runs (averaged over the iterations the
-runs share). Use it to compare configs or to get an averaged convergence curve
-over several seeds.
-
-Requires matplotlib (`.venv/Scripts/python.exe -m pip install matplotlib`).
-
-Usage:
-    # Point at run dirs and/or psnr_curve.json files (mix freely):
-    .venv/Scripts/python.exe scripts/plot_psnr_curves.py outputs/train/RUN_A outputs/train/RUN_B
-    .venv/Scripts/python.exe scripts/plot_psnr_curves.py a/psnr_curve.json b/psnr_curve.json --out avg.png
-
-Options:
-    --out PATH     output PNG path (default: psnr_curves.png in the CWD)
-    --label-avg    also print the averaged (iter, mean_psnr) table to stdout
-    --no-average   overlay the individual curves only (skip the mean curve)
+Takes run dirs and/or psnr_curve.json files (v2_train.py --psnr-curve), e.g. to compare configs or average seeds.
+Usage: python scripts/plots/plot_psnr_curves.py outputs/train/RUN_A outputs/train/RUN_B [--out avg.png]
 """
 
 from __future__ import annotations
@@ -75,8 +60,7 @@ def main() -> None:
         ys = [series[x] for x in xs]
         ax.plot(xs, ys, "-", lw=1.2, alpha=0.6, label=f"{label} [{scene_name}]")
 
-    # Mean curve over the iterations shared by ALL runs (avoids biasing the
-    # average where only some runs have samples).
+    # Average only over iterations all runs share, so runs with extra samples don't bias it.
     if not args.no_average and len(curves) > 1:
         common = set(curves[0][2])
         for _, _, series in curves[1:]:
@@ -93,8 +77,6 @@ def main() -> None:
         else:
             print("[warn] runs share no common iterations; skipping mean curve.")
 
-    # Title reflects the dataset(s): a single scene if all runs share one, else
-    # a comma-joined set so a mixed-scene comparison is self-documenting.
     scenes = sorted({c[1] for c in curves})
     scene_str = scenes[0] if len(scenes) == 1 else ", ".join(scenes)
     ax.set_xlabel("iteration")

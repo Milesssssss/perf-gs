@@ -1,28 +1,9 @@
 # Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-"""SH3 diagnosis: is the higher-band signal NOT LEARNED or LEARNED-BUT-USELESS?
+"""SH3 diagnosis on a finished checkpoint: is the higher-band signal not learned, or learned but useless?
 
-Two cheap, decisive probes on a finished SH3 checkpoint (no extra training):
-
-  #2 INSTRUMENT the SH-rest optimizer state. adam.slang stores Adam (m, v) for the
-     rest bands as fp16 and floors v at SH_V_FLOOR=1e-6. If a typical rest gradient
-     g has g^2 << 1e-6, the floor pins sqrt(v)~1e-3 and the Adam step collapses to
-     lr*g/1e-3 instead of the intended lr*sign(g) -> ~100x suppression. We read
-     features_rest / adam_rest / features_rest_grad back to CPU and report, per
-     band, the RMS of coeff / grad / (m) / (v) and the FRACTION of v pinned at the
-     floor. fraction ~1.0 => the floor is the bug.
-
-  #1 SAME-CHECKPOINT DEGREE ABLATION. Render the eval set from the SAME trained
-     model clamped to active degree 0/1/2/3 (set_active_sh_degree), report train &
-     test PSNR. If deg0 ~ deg3, the learned higher coeffs contribute nothing
-     (useless or unlearned); a train-only gain that doesn't reach test = learned
-     but doesn't generalize. Distinguishes the failure modes the schedule A/B could
-     not.
-
-Usage:
-    .venv/Scripts/python.exe scripts/experiments/sh_diagnose.py \\
-        --densify-mode structure_aware --mip-splatting --seed 42 \\
-        --sh-degree 3 --iters 3000
+Probes the SH-rest Adam v-floor and a same-checkpoint active-degree ablation of test PSNR.
+    .venv/Scripts/python.exe scripts/experiments/sh_diagnose.py --densify-mode structure_aware --mip-splatting --seed 42 --sh-degree 3 --iters 3000
 """
 
 from __future__ import annotations
@@ -38,7 +19,7 @@ for _sub in ("running", "debug", "plots"):
 
 import numpy as np
 
-from trainer.frontend.app import TrainingApplication, TrainingLoop
+from trainer.frontend.app import TrainingApplication
 from trainer.frontend.cli import build_parser
 from trainer.frontend.evaluation.evaluation import eval_test_psnr_srgb
 from trainer.common.metrics import psnr as psnr_metric
@@ -54,8 +35,7 @@ def _build_args():
     return a
 
 
-# fp16 half unpack from packed uint (low half = scalar 0, high half = scalar 1),
-# matching common/half_pack.slang unpackHalf2x.
+# Low half = scalar 0, high half = scalar 1, matching common/half_pack.slang unpackHalf2x.
 def _unpack_half2(u32: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     lo = (u32 & 0xFFFF).astype(np.uint16)
     hi = ((u32 >> 16) & 0xFFFF).astype(np.uint16)
@@ -63,14 +43,10 @@ def _unpack_half2(u32: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
 
 
 def _band_slices(sh_degree: int):
-    """Per-band scalar index ranges within a Gaussian's rest coeffs (RGB-major:
-    the shader lays out rest_floats = 3 * per_channel_rest at max degree). Bands
-    are the SH order groups: deg1=3 coeffs, deg2=5, deg3=7 per channel -> *3.
-    Returns list of (name, start, stop) over the flat per-gaussian rest scalars."""
+    """(name, start, stop) per SH band over a Gaussian's flat rest scalars: 3/5/7 coeffs per channel, times 3."""
     per_ch = [3, 5, 7][:sh_degree]      # coeffs per channel for bands 1..sh_degree
     slices = []
-    # Layout is 3*per_channel at max degree; the shader iterates coefficient-major
-    # up to active*3. We report per band using cumulative *3 boundaries.
+    # The shader iterates coefficient-major up to active*3, so bands use cumulative *3 boundaries.
     start = 0
     for i, c in enumerate(per_ch, start=1):
         stop = start + c * 3
@@ -83,18 +59,17 @@ def instrument_sh_rest(pipeline, n: int, sh_degree: int, floor: float = 1e-15) -
     b = pipeline.buffers
     rest_floats = b.sh.rest_floats
     feat_uints = b.sh.feat_uints
-    # Read packed buffers for the live [0,n) gaussians.
-    fr = np.frombuffer(b.features_rest.storage.to_numpy().tobytes(), dtype=np.uint32)
+    fr = np.frombuffer(b.sh.features_rest.storage.to_numpy().tobytes(), dtype=np.uint32)
     fr = fr[: n * feat_uints].reshape(n, feat_uints)
     # adam_rest float32 SoA: word k of gaussian g at k*max_splats + g.
     ms = pipeline.max_splats
-    ar_flat = np.frombuffer(b.adam_rest_state.storage.to_numpy().tobytes(), dtype=np.float32)
+    ar_flat = np.frombuffer(b.sh.adam_rest.storage.to_numpy().tobytes(), dtype=np.float32)
     ar = np.empty((n, rest_floats, 2), dtype=np.float32)
     gi = np.arange(n)
     for s in range(rest_floats):
         ar[:, s, 0] = ar_flat[(2 * s) * ms + gi]
         ar[:, s, 1] = ar_flat[(2 * s + 1) * ms + gi]
-    gr = np.frombuffer(b.features_rest_grad.storage.to_numpy().tobytes(), dtype=np.uint32)
+    gr = np.frombuffer(b.sh.features_rest_grad.storage.to_numpy().tobytes(), dtype=np.uint32)
     gr = gr[: n * feat_uints].reshape(n, feat_uints)
 
     # Coeffs + grads are 2 scalars per uint (feat_uints = ceil(rest_floats/2)).
@@ -138,20 +113,12 @@ def main() -> int:
     args = _build_args()
     app = TrainingApplication(args)
     app.prepare_training_context()
-    loop = TrainingLoop(
-        args=app.args, scene=app._sceneContext, targets=app._targets,
-        runtime=app._training_runtime, densify_mode=app._densify_mode,
-        densify_config=app.densify_config, base_lrs=app._base_lrs,
-        target_textures=app.target_textures, structure_textures=app.structure_textures,
-        mean_lr=app._mean_lr, paths=app.paths,
-        extinction_hardness_schedule=app._extinction,
-        appearance_schedule=app._appearance_schedule)
+    loop = app.build_training_loop()
 
-    # Train to completion.
     loop.advance_to_capture(args.iters)
     pipeline = app._pipeline
     scene = app._sceneContext
-    n = int(pipeline.buffers.num_gaussians_counter.to_numpy().view(np.uint32)[0])
+    n = int(pipeline.buffers.primitive.active_count.to_numpy().view(np.uint32)[0])
     print(f"[sh-diag] trained to iter {args.iters}, n_gaussians={n}, sh_degree={args.sh_degree}")
 
     if not pipeline.buffers.sh_enabled:

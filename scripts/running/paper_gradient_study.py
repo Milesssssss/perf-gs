@@ -1,52 +1,9 @@
 # Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-"""Controlled gradient-fidelity study: how faithfully does a sparse backward
-reproduce the dense 3DGS gradient?
+"""Controlled gradient-fidelity study: how faithfully does a sparse backward reproduce the dense 3DGS gradient?
 
-MEASUREMENT ONLY. No optimizer step is ever taken, no parameter is ever written,
-and this script is never invoked by a training cell. It advances to a real
-mid-training state, freezes it, and then asks one question repeatedly: with the
-Gaussians, the camera, the rendered prediction and the loss all held identical,
-how close is the gradient produced by a sparse pixel mask to the dense one?
-
-WHAT IS HELD FIXED. Per (scene, checkpoint, camera): one forward pass produces the
-prediction and the raster checkpoints, and every subsequent measurement reuses
-them. Only the loss mask changes between methods. The state is reached by DENSE
-supervision so it is a property of the scene and seed alone, not of the sampling
-regime being measured — otherwise each method would be evaluated at a different
-Gaussian configuration and nothing would be comparable.
-
-NORMALIZATION. The loss weights each supervised pixel by TILE_AREA/k = 1/rho, so a
-single masked backward is already an unbiased estimate of the dense gradient
-rather than 1/rho times too small. K masks therefore combine as a MEAN of K
-unbiased estimates, never a sum. :func:`sanity_checks` verifies this empirically
-(the norm ratio must sit near 1, not near rho) before any comparison is reported.
-
-THE ACCUMULATION TRICK. The 14 scalar gradient buffers are int64 fixed-point
-atomics, so running K backwards WITHOUT clearing leaves exactly
-``sum_t g_t`` on the device. Reading only at K in {1,2,4,8,16,32,64} costs 7
-readbacks per sequence instead of 64, which is what makes K=64 affordable at all.
-Note the exception: ``features_rest_grad`` (the SH bands above DC) is OVERWRITTEN
-by its shader rather than accumulated, so it cannot ride this path; it is measured
-in the single-mask pass only, and that limitation is recorded in the output.
-
-METRICS. All three requested statistics derive from three accumulated scalars per
-parameter group — ``dot(a,b)``, ``|a|^2``, ``|b|^2`` — because for any scale s:
-
-    cosine(a/s, b)   = dot / (|a| |b|)                 (scale-invariant)
-    norm_ratio(a/s)  = |a| / (s |b|)
-    rel_err(a/s)     = sqrt(|a|^2/s^2 - 2 dot/s + |b|^2) / |b|
-
-so one pass over the buffers yields every K's metrics without materializing a
-concatenated parameter vector. Sums are accumulated in float64. The fixed-point
-scale cancels in all three (they are ratios), so the raw integer units are used
-directly.
-
-Usage (one scene; the suite driver runs the set):
-
-    .venv/Scripts/python.exe scripts/running/paper_gradient_study.py \
-        --scene datasets/360_v2/bicycle --state-iters 500 1500 3000 \
-        --out outputs/paper_stbn/gradient_analysis/study_bicycle.json
+Measurement only: no optimizer step; every method sees the same frozen, densely-reached state and prediction.
+Usage: python scripts/running/paper_gradient_study.py --scene datasets/360_v2/bicycle --state-iters 500 1500 3000 --out outputs/paper_stbn/gradient_analysis/study_bicycle.json
 """
 from __future__ import annotations
 
@@ -64,15 +21,14 @@ for _sub in ("running", "debug", "plots"):
     if _p not in sys.path:
         sys.path.append(_p)
 
-from trainer.backend.render import stbn as stbn_module
+from trainer.backend.render import stbn_table
+from trainer.backend.render.stbn_mask import StbnMask
 from trainer.config.config import (DensificationProperties, IterationContextualVariables, StbnVariables)
-from trainer.contracts.codegen import TILE_AREA
+from trainer.backend.compute.execution import TILE_AREA
 from trainer.frontend.app import TrainingApplication
 from trainer.frontend.cli import build_parser
 
-# The 14 int64 fixed-point scalar gradients, grouped as a paper reports them.
-# Names must match pipeline.GRAD_SCALAR_COMPONENTS exactly; _validate_groups
-# asserts the mapping is total so a typo cannot silently drop a group.
+# Names must exactly partition GRAD_SCALAR_COMPONENTS; _validate_groups checks this at startup.
 SCALAR_GROUPS: dict[str, tuple[str, ...]] = {
     "position": ("mean_x", "mean_y", "mean_z"),
     "scale": ("log_scale_x", "log_scale_y", "log_scale_z"),
@@ -89,18 +45,7 @@ DEFAULT_CAMERAS = 8
 DEFAULT_SINGLE_MASKS = 4          # per (camera, method), for K=1 spread
 DEFAULT_SEQUENCES = 2             # independent K-sequences per (camera, method)
 
-# The four sparse strategies. ``source`` selects the noise the mask is ranked
-# from; ``traversal`` how the slice index advances between consecutive masks.
-#
-#   iid_white      no spatial structure, no temporal structure
-#   spatial_blue   spatial blue noise, independent draws  == the trainer's
-#                  `indep_blue` regime
-#   temporal_only  white spatially, but each pixel's schedule is stratified in
-#                  time. NOT an existing training mode — defined HERE, for this
-#                  diagnostic only, to complete the 2x2. Construction documented
-#                  in :func:`build_temporal_only_volume`.
-#   stbn           spatial blue noise + the per-camera temporal walk == the
-#                  trainer's `stbn` regime
+# (name, noise source, slice traversal); temporal_only is diagnostic-only, completing the spatial x temporal 2x2.
 METHODS: tuple[tuple[str, str, str], ...] = (
     ("iid_white", "white", "independent"),
     ("spatial_blue", "nvidia", "independent"),
@@ -110,7 +55,7 @@ METHODS: tuple[tuple[str, str, str], ...] = (
 
 
 def _grad_components() -> tuple[str, ...]:
-    from trainer.backend.render.pipeline import GRAD_SCALAR_COMPONENTS
+    from trainer.backend.memory.buffers import GRAD_SCALAR_COMPONENTS
     return tuple(GRAD_SCALAR_COMPONENTS)
 
 
@@ -124,27 +69,10 @@ def _validate_groups() -> None:
             f"unmapped={sorted(missing)} unknown={sorted(extra)}")
 
 
-# ---------------------------------------------------------------------------
-# Gradient readback + metric accumulation
-# ---------------------------------------------------------------------------
-
 class StagedGradReader:
-    """Reads only the LIVE prefix of each gradient buffer, via a small staging
-    buffer on the device.
+    """Reads only the live prefix of each gradient buffer via a right-sized device staging buffer.
 
-    ``Buffer.to_numpy()`` has no range argument, so a naive read transfers the
-    whole ``--max-splats`` allocation: 14 buffers x 10M x 8 B = 1.1 GB per
-    gradient, measured at ~6 s. Early in training that is almost entirely waste —
-    at iteration 500 there are ~77k live Gaussians, so 99.2% of the bytes are
-    zeros past the live count. Copying ``count`` elements device-to-device into a
-    right-sized staging buffer first and reading THAT turns the 1.1 GB into
-    ``14 * count * 8`` bytes, which is a ~130x reduction at the early checkpoint
-    and still ~20% at the late one.
-
-    The staging buffer is allocated once per checkpoint (the live count only
-    changes when densification runs, and this study never lets it run) and sized
-    for one component at a time, so it costs ``count * 8`` bytes of VRAM rather
-    than fourteen times that.
+    ``Buffer.to_numpy()`` has no range argument, so a direct read transfers the whole ``--max-splats`` allocation.
     """
 
     def __init__(self, pipeline, count: int) -> None:
@@ -159,9 +87,9 @@ class StagedGradReader:
             | spy.BufferUsage.unordered_access)
 
     def read(self, name: str) -> np.ndarray:
-        source = self.pipeline.buffers.grad_buffers[name]
-        with self.pipeline.recording("grad_study_stage"):
-            self.pipeline._batch.encoder.copy_buffer(
+        source = self.pipeline.buffers.gradients.params[name]
+        with self.pipeline.commands.recording("grad_study_stage"):
+            self.pipeline.commands.batch.encoder.copy_buffer(
                 self.staging.storage, 0, source.storage, 0, self.nbytes)
         self.pipeline.runtime.wait_for_idle()
         raw = self.staging.to_numpy()
@@ -174,13 +102,7 @@ class StagedGradReader:
 
 
 class StagedShRestReader:
-    """The same live-prefix trick for the packed half2 SH-rest gradients.
-
-    ``features_rest_grad`` is ``uint[max_splats * feat_uints]`` — 23 uints per
-    Gaussian at SH degree 3, so 920 MB at ``--max-splats 10M``. Unstaged it
-    dominated the whole study (it alone accounted for ~46 s of a 57 s camera).
-    Returns ``None`` when the run has no SH-rest bands.
-    """
+    """The same live-prefix staging for the packed half2 SH-rest gradients; ``read`` returns None without SH-rest bands."""
 
     def __init__(self, pipeline, count: int) -> None:
         import slangpy as spy
@@ -188,13 +110,12 @@ class StagedShRestReader:
         self.pipeline = pipeline
         self.count = int(count)
         self.available = False
-        try:
-            sh = pipeline.buffers._require_sh()
-            self.rest_floats = int(sh.rest_floats)
-            self.feat_uints = int(sh.feat_uints)
-            self.source = sh.features_rest_grad
-        except Exception:                                  # noqa: BLE001
+        sh = pipeline.buffers.sh
+        if sh is None:
             return
+        self.rest_floats = int(sh.rest_floats)
+        self.feat_uints = int(sh.feat_uints)
+        self.source = sh.features_rest_grad
         if self.rest_floats <= 0 or self.count <= 0:
             return
         self.uints = self.count * self.feat_uints
@@ -208,8 +129,8 @@ class StagedShRestReader:
     def read(self) -> np.ndarray | None:
         if not self.available:
             return None
-        with self.pipeline.recording("grad_study_stage_sh"):
-            self.pipeline._batch.encoder.copy_buffer(
+        with self.pipeline.commands.recording("grad_study_stage_sh"):
+            self.pipeline.commands.batch.encoder.copy_buffer(
                 self.staging.storage, 0, self.source.storage, 0, self.nbytes)
         self.pipeline.runtime.wait_for_idle()
         raw = self.staging.to_numpy()
@@ -220,27 +141,18 @@ class StagedShRestReader:
 
 def read_sh_rest_grad(pipeline, count: int) -> np.ndarray | None:
     """``(count, rest_floats)`` float32 view of the packed half2 SH-rest grads."""
-    try:
-        sh = pipeline.buffers._require_sh()
-        rest_floats, feat_uints = int(sh.rest_floats), int(sh.feat_uints)
-        if rest_floats <= 0:
-            return None
-        raw = sh.features_rest_grad.to_numpy()
-        halves = np.frombuffer(memoryview(raw), dtype=np.float16)
-        halves = halves[:count * feat_uints * 2].reshape(count, feat_uints * 2)
-        return halves[:, :rest_floats].astype(np.float32)
-    except Exception:                                      # noqa: BLE001
+    sh = pipeline.buffers.sh
+    if sh is None or sh.rest_floats <= 0:
         return None
+    rest_floats, feat_uints = int(sh.rest_floats), int(sh.feat_uints)
+    raw = sh.features_rest_grad.to_numpy()
+    halves = np.frombuffer(memoryview(raw), dtype=np.float16)
+    halves = halves[:count * feat_uints * 2].reshape(count, feat_uints * 2)
+    return halves[:, :rest_floats].astype(np.float32)
 
 
 class GroupStats:
-    """Accumulates ``dot(a,b)``, ``|a|^2``, ``|b|^2`` per parameter group.
-
-    Three scalars per group are all that any of the three metrics need, at any
-    accumulation scale — see the module docstring. Accumulated in float64, one
-    component at a time so the peak temporary is one buffer rather than the whole
-    parameter vector.
-    """
+    """Per-group float64 ``dot(a,b)``, ``|a|^2``, ``|b|^2``: enough for every metric at any accumulation scale."""
 
     def __init__(self) -> None:
         self.dot: dict[str, float] = {}
@@ -258,11 +170,7 @@ class GroupStats:
         return list(self.dot)
 
     def metrics(self, group: str, scale: float = 1.0) -> dict:
-        """Metrics for ``a/scale`` against ``b``.
-
-        ``scale`` is the accumulation count K: the device holds the SUM of K
-        estimates and the quantity of interest is their mean.
-        """
+        """Metrics for ``a/scale`` against ``b``; ``scale`` is K, turning the device's sum of K estimates into their mean."""
         dot, aa, bb = self.dot[group], self.aa[group], self.bb[group]
         norm_a = math.sqrt(max(aa, 0.0)) / scale
         norm_b = math.sqrt(max(bb, 0.0))
@@ -281,13 +189,7 @@ class GroupStats:
 
 def compare_scalars(sparse: dict[str, np.ndarray],
                     dense: dict[str, np.ndarray]) -> GroupStats:
-    """Per-group and global stats over the 14 scalar gradients.
-
-    The global entry is SUMMED from the per-group scalars rather than accumulated
-    a second time over the same buffers: dot/|a|^2/|b|^2 are additive over a
-    partition, so recomputing them would double the dominant cost (two float64
-    casts and three dot products per component) for an identical answer.
-    """
+    """Per-group stats over the 14 scalar gradients; the global entry sums the groups (the scalars are additive)."""
     stats = GroupStats()
     for group, components in SCALAR_GROUPS.items():
         for name in components:
@@ -298,27 +200,9 @@ def compare_scalars(sparse: dict[str, np.ndarray],
     return stats
 
 
-# ---------------------------------------------------------------------------
-# Mask construction
-# ---------------------------------------------------------------------------
-
-def build_temporal_only_volume(spec: stbn_module.StbnMaskSpec,
+def build_temporal_only_volume(spec: stbn_table.StbnSpec,
                                seed: int) -> np.ndarray:
-    """A mask with TEMPORAL structure and NO spatial structure.
-
-    Newly defined for this diagnostic — the trainer has no such mode, and this
-    does not modify any existing regime.
-
-    Construction: with period ``P = round(1/rho)``, every pixel independently
-    draws a phase ``phi(x,y)`` uniform on ``0..P-1`` and is selected exactly when
-    ``t mod P == phi``. So each pixel is visited exactly once per P consecutive
-    slices — perfect temporal stratification, the strongest possible temporal
-    schedule — while the set selected at any single slice is an independent
-    random ~rho fraction, i.e. white spatially.
-
-    This isolates the temporal axis the way ``indep_blue`` isolates the spatial
-    one: it is the missing cell of the 2x2 (spatial x temporal).
-    """
+    """Diagnostic-only mask: perfectly stratified in time, white in space (the 2x2's missing cell)."""
     period = max(1, int(round(1.0 / max(spec.fraction, 1e-9))))
     rng = np.random.default_rng(seed)
     phase = rng.integers(0, period, size=(spec.height, spec.width))
@@ -328,50 +212,37 @@ def build_temporal_only_volume(spec: stbn_module.StbnMaskSpec,
 
 def upload_method_tables(pipeline, spec_fraction: float,
                          stbn_seed: int) -> dict[str, object]:
-    """One uploaded table per noise source, all resident simultaneously.
+    """One table per noise source, all resident so every method is compared at one frozen state.
 
-    Bound by swapping ``pipeline._stbn`` between measurements, which is what lets
-    a single process compare every method at ONE frozen state. ``spatial_blue``
-    and ``stbn`` deliberately share the NVIDIA table — they differ only in how the
-    slice index advances, which is exactly the temporal contrast.
+    ``spatial_blue`` and ``stbn`` share the NVIDIA table; only their slice traversal differs.
     """
     import dataclasses
 
-    cache = stbn_module.default_cache_dir() / "cache"
+    cache = stbn_table.default_cache_dir() / "cache"
     tables: dict[str, object] = {}
-    base = stbn_module.StbnMaskSpec(
+    base = stbn_table.StbnSpec(
         fraction=float(spec_fraction),
-        select_mode=stbn_module.SELECT_GLOBAL)      # global slice thresholding
+        select_mode=stbn_table.SELECT_GLOBAL)
 
-    for source in (stbn_module.SOURCE_WHITE, stbn_module.SOURCE_NVIDIA):
+    for source in (stbn_table.SOURCE_WHITE, stbn_table.SOURCE_NVIDIA):
         spec = dataclasses.replace(base, source=source, seed=int(stbn_seed))
-        tables[source] = stbn_module.upload_mask(pipeline.device, spec, cache)
+        tables[source] = StbnMask.build(pipeline.device, spec, cache)
 
-    temporal_spec = dataclasses.replace(base, source=stbn_module.SOURCE_WHITE,
+    temporal_spec = dataclasses.replace(base, source=stbn_table.SOURCE_WHITE,
                                         seed=int(stbn_seed))
-    packed = stbn_module.pack_selection(
+    packed = stbn_table.pack_selection(
         build_temporal_only_volume(temporal_spec, int(stbn_seed)), temporal_spec)
-    tables["temporal"] = stbn_module.upload_packed_table(
-        pipeline.device, packed, temporal_spec)
+    tables["temporal"] = StbnMask.from_table(pipeline.device, packed, temporal_spec)
     return tables
 
 
 def slice_sequence(traversal: str, *, slices: int, length: int, rng,
                    phase: int) -> list[int]:
-    """The slice indices a method visits, in order.
-
-    ``independent`` mirrors ``--stbn-independent`` (a fresh draw per step);
-    ``consecutive`` mirrors the trainer's per-camera visit walk, which is what
-    makes the temporal axis do anything.
-    """
+    """Slice indices in visit order: fresh draws (``independent``) or the per-camera walk (``consecutive``)."""
     if traversal == "independent":
         return [int(rng.integers(slices)) for _ in range(length)]
     return [(phase + step) % slices for step in range(length)]
 
-
-# ---------------------------------------------------------------------------
-# Frozen-state forward + backward
-# ---------------------------------------------------------------------------
 
 def _context(sh_degree: int, hardness: float,
              stbn: StbnVariables | None) -> IterationContextualVariables:
@@ -386,59 +257,36 @@ def loss_and_backward(pipeline, camera, *, sh_degree: int, hardness: float,
                       stbn: StbnVariables | None, clear: bool) -> None:
     """One masked forward + loss + backward on the frozen state.
 
-    The FORWARD IS RE-RUN every time, and that is not redundant. An earlier
-    version of this script rendered once per camera and reused the result for
-    every mask, on the reasoning that frozen Gaussians and a frozen camera give an
-    identical prediction. The prediction is indeed identical, but the backward does
-    not leave the forward's intermediate state (raster checkpoints, per-pixel
-    blend bookkeeping) reusable — so only the FIRST backward after a forward is
-    valid. The symptom was unmistakable once the normalization check was run:
-    every sparse gradient came out with norm ratio ~4.2 (i.e. 1/rho) and relative
-    error ~3.3, against ~1.06 and ~0.37 for the same measurement done with a fresh
-    forward. The dense reference, being the first backward, looked fine — which is
-    exactly how this would have slipped through as a "result".
-
-    Because the Gaussians and camera are frozen, re-rendering is deterministic and
-    every method still sees a bit-identical prediction, which is what the
-    controlled comparison requires.
-
-    ``clear=False`` is the accumulation path: the int64 gradient buffers are atomic
-    accumulators, so K forward/loss/backward rounds without a clear leave their
-    SUM. No regularization pass is run — its gradient is mask-independent, so
-    including it would add an identical constant to every method and inflate every
-    cosine toward 1. (Both reg weights are 0 by default in any case.)
+    The forward is re-run each time: only the first backward after a forward is valid (the frozen re-render is deterministic).
+    ``clear=False`` accumulates the sum in the atomic int64 buffers; regularization is skipped as mask-independent.
     """
     contextual = _context(sh_degree, hardness, stbn)
-    with pipeline.recording("grad_study_backward"):
+    with pipeline.commands.recording("grad_study_backward"):
         if clear:
-            pipeline.clear_gradients()
+            pipeline.optimizer.zero_grad()
         pipeline.record_forward(camera, contextual)
         pipeline.record_loss(contextual)
         pipeline.record_backward(contextual)
 
 
 def state_fingerprint(pipeline) -> dict:
-    """A cheap checksum of everything that must NOT change during the study."""
+    """A cheap checksum of everything that must not change during the study."""
     pipeline.runtime.wait_for_idle()
     out: dict = {}
     try:
-        count = int(pipeline.buffers.num_gaussians_counter
+        count = int(pipeline.buffers.primitive.active_count
                     .to_numpy().view(np.uint32)[0])
         out["n_gaussians"] = count
-        values = pipeline.buffers.gaussians.to_numpy()
+        values = pipeline.buffers.primitive.values.to_numpy()
         view = np.frombuffer(memoryview(values), dtype=np.uint32)
         out["gaussians_checksum"] = int(view.sum(dtype=np.uint64))
-        adam = pipeline.buffers.adam_state.to_numpy()
+        adam = pipeline.buffers.adam.state.to_numpy()
         out["adam_checksum"] = int(
             np.frombuffer(memoryview(adam), dtype=np.uint32).sum(dtype=np.uint64))
     except Exception as error:                             # noqa: BLE001
         out["error"] = f"{type(error).__name__}: {error}"
     return out
 
-
-# ---------------------------------------------------------------------------
-# Sanity checks
-# ---------------------------------------------------------------------------
 
 def sanity_checks(dense: dict[str, np.ndarray], fraction: float) -> list[dict]:
     """Verify the metric machinery and the sparse normalization before use."""
@@ -490,21 +338,15 @@ def sanity_checks(dense: dict[str, np.ndarray], fraction: float) -> list[dict]:
     return checks
 
 
-# ---------------------------------------------------------------------------
-# The study
-# ---------------------------------------------------------------------------
-
 def study_camera(pipeline, camera, cam_idx: int, *, sh_degree: int,
                  hardness: float, count: int, reader: "StagedGradReader",
                  sh_reader: "StagedShRestReader",
                  tables: dict, fraction: float,
                  budget: int, k_values, single_masks: int, sequences: int,
                  stbn_seed: int, first_camera: bool) -> tuple[list[dict], list[dict], list[dict]]:
-    """All measurements for one frozen (state, camera). Returns
-    (single-mask rows, accumulation rows, sanity rows)."""
+    """All measurements for one frozen (state, camera): (single-mask, accumulation, sanity) rows."""
     slices = pipeline.stbn_slices
 
-    # Dense reference at this exact state + camera.
     loss_and_backward(pipeline, camera, sh_degree=sh_degree, hardness=hardness,
                       stbn=None, clear=True)
     dense = reader.read_all()
@@ -519,10 +361,10 @@ def study_camera(pipeline, camera, cam_idx: int, *, sh_degree: int,
         table = tables.get(source)
         if table is None:
             continue
-        pipeline._stbn = table
+        pipeline.stbn = table
         phase = (int(cam_idx) * 2654435761 + int(stbn_seed) * 40503) % slices
 
-        # ---- Pass 1: single masks (K=1), every group INCLUDING SH-rest -----
+        # Pass 1: single masks (K=1), every group including SH-rest.
         rng = np.random.default_rng((stbn_seed, cam_idx, hash(method) % 10_000))
         indices = slice_sequence(traversal, slices=slices, length=single_masks,
                                  rng=rng, phase=phase)
@@ -551,10 +393,7 @@ def study_camera(pipeline, camera, cam_idx: int, *, sh_degree: int,
                     "parameter_group": SH_REST_GROUP,
                     **rest_stats.metrics(SH_REST_GROUP)})
 
-        # ---- Pass 2: accumulation, K = 1..max, scalar groups only ----------
-        # features_rest_grad is OVERWRITTEN per backward (its shader is the sole
-        # writer and assigns rather than accumulates), so it cannot ride the
-        # no-clear accumulation. Excluded here and recorded as such.
+        # Pass 2: accumulation over K, scalar groups only (features_rest_grad is overwritten per backward).
         for sequence in range(sequences):
             rng = np.random.default_rng(
                 (stbn_seed, cam_idx, hash(method) % 10_000, 1000 + sequence))
@@ -585,7 +424,7 @@ def study_camera(pipeline, camera, cam_idx: int, *, sh_degree: int,
 
 def _accum_rows(reader, dense, k, method, cam_idx, fraction,
                 sequence) -> list[dict]:
-    """Metrics for the running SUM of k estimates, reported as their mean."""
+    """Metrics for the running sum of k estimates, reported as their mean."""
     summed = reader.read_all()
     stats = compare_scalars(summed, dense)
     rows = []
@@ -616,9 +455,7 @@ def main() -> int:
     parser.add_argument("--out", type=str, required=True)
     args = parser.parse_args()
 
-    # Diagnostic-only configuration: this process must not write a run report,
-    # evaluate, dump renders or take a capture. Any artifact it produced would
-    # look like a training cell to the suite.
+    # No reports, evals, renders or captures: any artifact would look like a training cell to the suite.
     args.no_viewer = True
     args.profile_run = False
     args.capture_external = False
@@ -641,18 +478,16 @@ def main() -> int:
     app.prepare_training_context()
     loop = app.build_training_loop()
 
-    # DENSE advance: the frozen state must be a property of the scene and seed,
-    # not of the regime under measurement.
-    loop.stbn_density = None
+    # Dense advance, so the frozen state depends on scene and seed, not on the measured regime.
+    loop.stbn_sampler = None
     pipeline = app._pipeline
     tables = upload_method_tables(pipeline, args.probe_fraction,
                                  int(args.stbn_seed))
-    budget = stbn_module.pixels_per_tile(args.probe_fraction, TILE_AREA)
+    budget = stbn_table.pixels_per_tile(args.probe_fraction, TILE_AREA)
 
     scene_name = Path(args.scene).name
     train_indices = list(app._sceneContext.train_indices)
-    # Deterministic spread over the train set rather than the first N: adjacent
-    # cameras see nearly the same geometry and would not be 8 independent looks.
+    # Spread over the train set: adjacent cameras see nearly the same geometry.
     step = max(1, len(train_indices) // max(args.cameras, 1))
     cameras = train_indices[::step][:args.cameras]
     print(f"[grad-study] {scene_name}: states={args.state_iters} "
@@ -670,14 +505,13 @@ def main() -> int:
         hardness = context.iteration_contextual_variables.hardness_value
         before = state_fingerprint(pipeline)
         count = int(before.get("n_gaussians") or 0)
-        # Sized to THIS checkpoint's live count; densification never runs
-        # during the study, so the count is stable for its lifetime.
+        # Sized to this checkpoint's live count, which is stable since densification never runs here.
         reader = StagedGradReader(pipeline, count)
         sh_reader = StagedShRestReader(pipeline, count)
         started = time.perf_counter()
 
         for order, cam_idx in enumerate(cameras):
-            pipeline.set_target_texture(app.target_textures[cam_idx])
+            pipeline.targets.select(app.target_textures[cam_idx])
             camera = app._sceneContext.colmapScene.images[cam_idx].camera
             s_rows, a_rows, checks = study_camera(
                 pipeline, camera, cam_idx, sh_degree=sh_degree,
@@ -731,7 +565,7 @@ def main() -> int:
         "probe_fraction": float(args.probe_fraction),
         "pixels_per_tile": budget,
         "tile_area": TILE_AREA,
-        "select_mode": stbn_module.SELECT_GLOBAL,
+        "select_mode": stbn_table.SELECT_GLOBAL,
         "k_values": sorted(args.k_values),
         "cameras": [int(c) for c in cameras],
         "state_reached_with": "dense supervision (regime-independent trajectory)",

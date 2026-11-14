@@ -3,12 +3,8 @@
 #include "../common/types.slang"
 #include "../common/stbn.slang"
 
-// SSIM over an 11x11 Gaussian window (sigma 1.5) with zero padding, as in
-// 3DGS's F.conv2d. Both passes are LDS-tiled and separable: the 2D window is
-// the outer product of a 1D Gaussian, so every 121-tap window sum becomes an
-// 11-tap row sum followed by an 11-tap column sum. A 16x16 group stages its
-// tile plus a 5-texel apron (26x26), row-filters 26x16 texels, then each
-// thread column-filters its own pixel.
+// SSIM over an 11x11 Gaussian window (sigma 1.5, zero padding) as in 3DGS. Separable and LDS-tiled:
+// a 16x16 group stages its tile plus a 5-texel apron (26x26), row-filters it, then column-filters.
 
 static const int WINDOW_RADIUS = 5;
 static const int WINDOW = 2 * WINDOW_RADIUS + 1;
@@ -50,7 +46,7 @@ uint columnTap(uint3 thread, int k)
     return (thread.y + k) * TILE + thread.x;
 }
 
-// --- Pass 1: compute the three back-projection maps m1,m2,m3 (per channel) ---
+// Pass 1: the back-projection maps m1, m2, m3 per channel.
 groupshared float gs_x[3][APRON_TEXELS];        // rendered, per channel
 groupshared float gs_y[3][APRON_TEXELS];        // target, per channel
 groupshared float gs_moments[5][ROW_SUMS];      // row sums of x, y, xx, yy, xy
@@ -149,12 +145,8 @@ void ssimComputeMaps(
     float3 dS_dsx2 = -A * B / (Cc * D * D);
     float3 dS_dsxy = 2.0 * A / CcD;
 
-    // The window weights w (and inv_w) are re-applied in pass 2 via the same
-    // Gaussian convolution, so the maps store the pre-weight coefficients.
-    // sigma stats used the same inv_w-normalized window, so fold inv_w in here
-    // once: d(mu_x)/dx_q = w*inv_w, d(sigma_x2)/dx_q = 2*w*inv_w*(x_q-mu_x),
-    // d(sigma_xy)/dx_q = w*inv_w*(y_q-mu_y). The pass-2 conv supplies w; inv_w
-    // is constant across the window (uniform Gaussian) so we bake it in now.
+    // Pass 2's convolution supplies w; the window-constant inv_w is folded in here (d(mu_x)/dx_q =
+    // w*inv_w, d(sigma_x2)/dx_q = 2*w*inv_w*(x_q-mu_x), d(sigma_xy)/dx_q = w*inv_w*(y_q-mu_y)).
     float3 m1 = (dS_dmux - 2.0 * mu_x * dS_dsx2 - mu_y * dS_dsxy) * inv_w;
     float3 m2 = (2.0 * dS_dsx2) * inv_w;
     float3 m3 = (dS_dsxy) * inv_w;
@@ -164,16 +156,8 @@ void ssimComputeMaps(
     ssim_m3[p] = float4(m3, 0.0);
 }
 
-// --- Pass 2: convolve the maps, assemble SSIM grad, blend with L1 + alpha ---
-//
-// STBN sparse supervision masks THIS pass, not pass 1. Pass 1's maps describe
-// how the loss at each window CENTER responds to the local statistics, and a
-// selected pixel's window legitimately spans unselected neighbours — starving
-// pass 1 would change the SSIM gradient itself. What we subsample is the
-// chain-rule sum over pixels, dL/dtheta = sum_q (dL/dx_q)(dx_q/dtheta): keeping
-// k of TILE_AREA of its terms and scaling by TILE_AREA/k estimates the FULL
-// SSIM gradient, unbiased, with higher variance. Pass 1 therefore still runs
-// over every pixel and its cost is not reduced by the mask.
+// Pass 2: convolve the maps, assemble the SSIM gradient, blend with L1 + alpha. STBN masks only
+// this pass: a selected pixel's window spans unselected neighbours, so pass 1 needs every pixel.
 groupshared float gs_maps[9][APRON_TEXELS];     // m1.rgb, m2.rgb, m3.rgb
 groupshared float gs_map_rows[3][ROW_SUMS];     // one channel's row sums
 
@@ -217,7 +201,7 @@ void ssimGradient(
     }
     GroupMemoryBarrierWithGroupSync();
 
-    // Convolve the back-projection maps with the SAME Gaussian.
+    // Convolve the back-projection maps with the same Gaussian.
     float3 cm1, cm2, cm3;
     [unroll] for (uint c = 0; c < 3; c++)
     {
@@ -255,7 +239,6 @@ void ssimGradient(
     uint2 p = gid.xy * TILE + gtid.xy;
     if (p.x >= frame_dim.x || p.y >= frame_dim.y) return;
 
-    // Unselected pixels: zero gradient.
     if (!stbnSelected(stbn_table, p, stbn_dims, stbn_slice, stbn_tile_pixels))
     {
         dL_dC[p] = float4(0.0);

@@ -12,7 +12,7 @@ from pathlib import Path
 
 _MATCHED_FIELDS = (
     "reference_revision", "scene", "backend", "iters", "seed", "sh_degree", "capacity",
-    "resolution", "camera_count", "stbn_pixel_fraction", "stbn_source", "stbn_adaptive",
+    "resolution", "camera_count", "stbn_pixel_fraction", "stbn_source",
     "settings", "source_fingerprint",
 )
 

@@ -1,33 +1,8 @@
 # Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-"""Experiment D — where the time actually goes, per stage and per training phase.
+"""Experiment D: per-stage GPU time per training phase, from the dedicated stage-timing cells.
 
-Built from the dedicated stage-timing cells (four representative scenes, one per
-dataset family, all four regimes). They are separate runs rather than
-instrumentation on the main grid for a measured reason: reading GPU timestamps
-requires a host drain the hot path never performs, and that drain costs a few
-percent of ACTIVE training time. A few percent is small, but it is not nothing on
-a run whose timing is itself a reported result — so the instrumented runs are
-kept out of every speed table, and this experiment quotes them only for the
-BREAKDOWN (proportions between stages), never for absolute speed.
-
-The measured overhead is reported per cell so the reader can see the size of what
-was avoided, rather than taking "negligible" on trust.
-
-Two honest limits of the breakdown, both surfaced in the outputs:
-
-* **There is no GPU mask-generation stage.** The rank table is built and uploaded
-  once at startup; per-iteration mask work is a few microseconds of CPU
-  arithmetic to pick a slice index. It is reported as a host cost, and it is
-  ~0.01 ms/iteration — which is the finding, not a measurement gap.
-* **Densification is a host-timed cost**, because it runs in its own submit
-  outside ``train_step``'s marker tree and reads buffers back (so it is largely
-  synchronous anyway). It is reported separately from the GPU stage sums, never
-  folded in.
-
-Marker-to-stage grouping lives in ``trainer.frontend.profiling.stage_timing`` and
-the RAW per-marker sums are persisted per sample, so relabelling the bars for the
-paper never requires re-running anything.
+These cells are quoted only for the stage breakdown, never for absolute speed (the timestamp drain costs time).
 """
 from __future__ import annotations
 
@@ -41,8 +16,7 @@ from . import stats
 from . import tables
 from .results import ResultSet
 
-# Presentation order and labels for the stacked bars: roughly the order work
-# happens in an iteration, so the stack reads top-to-bottom as a pipeline.
+# Stacked-bar order follows the iteration pipeline.
 STAGE_ORDER: tuple[tuple[str, str], ...] = (
     ("preprocess_projection", "preprocess / projection"),
     ("tile_binning_sort", "tile binning / sort"),
@@ -61,21 +35,34 @@ BREAKDOWN_COLUMNS = (
     "iter_from", "iter_to", "samples",
     *[f"gpu_{k}_ms" for k, _ in STAGE_ORDER],
     "gpu_stage_total_ms", "gpu_forward_parent_ms", "gpu_backward_parent_ms",
-    "host_mask_sampling_ms", "host_densify_prune_ms_per_event",
-    "unmapped_markers_ms", "sample_overhead_s", "train_active_s", "cell_key",
+    "densify_ms_per_event", "unmapped_markers_ms", "sample_overhead_s",
+    "train_active_s", "cell_key",
 )
 
 AGGREGATE_COLUMNS = (
     "regime", "window", "n_scenes",
     *[f"gpu_{k}_ms" for k, _ in STAGE_ORDER],
-    "gpu_stage_total_ms", "host_mask_sampling_ms",
+    "gpu_stage_total_ms",
 )
 
 OVERHEAD_COLUMNS = (
     "scene", "regime", "sampled_iters", "total_iters", "sample_coverage",
     "sample_overhead_s", "train_active_s", "overhead_fraction_of_active",
-    "mask_sampling_total_ms", "densify_prune_total_ms", "densify_events",
+    "densify_events", "densify_ms_per_event",
 )
+
+DENSIFY_KINDS = ("structure", "filler")
+
+
+def _densify_timing(summary: dict) -> tuple[int, float | None]:
+    """Densify events and their mean completion ms, from the mutation timer."""
+    kinds = (summary.get("mutation_timings") or {}).get("by_kind") or {}
+    picked = [kinds[kind] for kind in DENSIFY_KINDS if kind in kinds]
+    events = sum(int(kind["events"]) for kind in picked)
+    if not events:
+        return 0, None
+    return events, sum(kind["events"] * kind["mean_host_complete_ms"]
+                       for kind in picked) / events
 
 
 def _window_rows(results: ResultSet, fraction: float) -> list[dict]:
@@ -92,13 +79,10 @@ def _window_rows(results: ResultSet, fraction: float) -> list[dict]:
             whole = summary.get("whole_run")
             if whole:
                 windows = windows + [whole]
-            host_totals = summary.get("host_totals_ms") or {}
-            host_counts = summary.get("host_counts") or {}
-            densify_events = int(host_counts.get("densify_prune", 0) or 0)
+            _events, densify_ms = _densify_timing(summary)
             for window in windows:
                 stage_ms = window.get("stages_ms") or {}
                 parents = window.get("parent_markers_ms") or {}
-                host = window.get("host_ms") or {}
                 row: dict = {
                     "scene": result.cell.scene,
                     "dataset_family": result.cell.family,
@@ -111,13 +95,8 @@ def _window_rows(results: ResultSet, fraction: float) -> list[dict]:
                     "gpu_stage_total_ms": window.get("stage_total_ms"),
                     "gpu_forward_parent_ms": parents.get("forward"),
                     "gpu_backward_parent_ms": parents.get("backward"),
-                    "host_mask_sampling_ms": host.get("mask_sampling"),
-                    # Per EVENT, not per iteration: densify fires ~19 times in a
-                    # 3k run, so a per-iteration average would misrepresent both
-                    # its cost and its cadence.
-                    "host_densify_prune_ms_per_event": (
-                        (host_totals.get("densify_prune") / densify_events)
-                        if densify_events else None),
+                    # Per event: densify fires rarely, so a per-iteration average would misrepresent it.
+                    "densify_ms_per_event": densify_ms,
                     "unmapped_markers_ms": round(sum(
                         (window.get("unmapped_markers_ms") or {}).values()), 6),
                     "sample_overhead_s": summary.get("sample_overhead_s"),
@@ -150,8 +129,6 @@ def _aggregate(window_rows: list[dict]) -> list[dict]:
                     [r.get(f"gpu_{key}_ms") for r in picked])["mean"]
             row["gpu_stage_total_ms"] = stats.mean_std(
                 [r.get("gpu_stage_total_ms") for r in picked])["mean"]
-            row["host_mask_sampling_ms"] = stats.mean_std(
-                [r.get("host_mask_sampling_ms") for r in picked])["mean"]
             out.append(row)
     return out
 
@@ -168,8 +145,7 @@ def _overhead_rows(results: ResultSet, fraction: float) -> list[dict]:
                 continue
             active = result.metric("train_active_s")
             overhead = summary.get("sample_overhead_s")
-            host_totals = summary.get("host_totals_ms") or {}
-            host_counts = summary.get("host_counts") or {}
+            densify_events, densify_ms = _densify_timing(summary)
             rows.append({
                 "scene": result.cell.scene,
                 "regime": regime,
@@ -180,9 +156,8 @@ def _overhead_rows(results: ResultSet, fraction: float) -> list[dict]:
                 "train_active_s": active,
                 "overhead_fraction_of_active": (
                     (overhead / active) if (overhead and active) else None),
-                "mask_sampling_total_ms": host_totals.get("mask_sampling"),
-                "densify_prune_total_ms": host_totals.get("densify_prune"),
-                "densify_events": host_counts.get("densify_prune"),
+                "densify_events": densify_events,
+                "densify_ms_per_event": densify_ms,
             })
     return rows
 
@@ -260,10 +235,10 @@ def _latex_breakdown(aggregate: list[dict], latex_dir: Path) -> None:
         column_spec="l" + "r" * (len(STAGE_ORDER) + 1),
         header=header, rows=rows, small=True,
         notes=("Mask selection is not a stage: the rank table is uploaded once "
-               "at startup and indexed inline by the kernels, so per-iteration "
-               "mask cost is host-side and below 0.01\\,ms. Densification runs "
-               "in its own submit and is reported separately, per event, in "
-               "\\texttt{tables/runtime\\_breakdown.csv}."),
+               "at startup and indexed inline by the kernels, so the only "
+               "per-iteration mask work is picking a slice index on the host. "
+               "Densification runs in its own submit and is reported separately, "
+               "per event, in \\texttt{tables/runtime\\_breakdown.csv}."),
         source="tables/runtime_breakdown_aggregate.csv")
     tables.write_latex(latex_dir / "table_runtime_breakdown.tex", body)
 
@@ -302,11 +277,7 @@ def run(results: ResultSet, out: dict, *,
     overhead_summary = stats.mean_std(
         [r["overhead_fraction_of_active"] for r in overhead])
     overhead_pct = (overhead_summary["mean"] or 0.0) * 100.0
-    # Describe the measured cost rather than asserting it is small: at one sample
-    # in ten the drain is a substantial fraction of active time, which is exactly
-    # why these are dedicated cells. The proportions between stages remain valid
-    # either way — a host drain adds host idle, not GPU execution time, and the
-    # stage numbers come from GPU timestamps.
+    # Stage proportions stay valid regardless: a host drain adds host idle, not GPU execution time.
     verdict = (
         f"Detailed timing was restricted to {len(cfg.TIMING_SCENES)} "
         f"representative scenes as DEDICATED runs. The timestamp drain costs a "

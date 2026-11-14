@@ -7,8 +7,7 @@
 #include "../../optimizers/primitive_adam.slang"
 #include "channels.slang"
 
-// Only the primitive-value mapping is Gaussian-specific. Optimizer gradients,
-// moments, learning rates, update math, and lifecycle live in AdamPlanes/AdamPass.
+// Only the primitive-value mapping is Gaussian-specific; the optimizer lives in AdamPlanes/AdamPass.
 struct GaussianParameterStorage : IPrimitiveParameterStorage<GaussianChannel::Count>
 {
     RWStructuredBuffer<Gaussian3D> primitives;

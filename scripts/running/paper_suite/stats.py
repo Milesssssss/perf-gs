@@ -2,31 +2,7 @@
 
 """Paired statistics for the ablation, deliberately conservative.
 
-Three choices here decide whether the paper's claims are defensible.
-
-**The pairing unit.** Sampling regimes are compared ON THE SAME SCENE AT THE SAME
-SEED. Scene-to-scene variation in PSNR is several dB — an order of magnitude
-larger than the effects being measured — so an unpaired comparison of two means
-would drown the signal in between-scene variance. Every difference here is
-within-(scene, seed).
-
-**The inference unit.** For confidence intervals the independent unit is the
-SCENE, not the (scene, seed) cell: three seeds of one scene are repeated measures
-of the same thing, and treating them as 39 independent observations would shrink
-the interval by ~sqrt(3) for free. So seeds are averaged within a scene first,
-and the bootstrap resamples the resulting per-scene differences. Win counts, by
-contrast, are reported per (scene, seed), because there the question is "how often
-did it help" rather than "how precisely do we know the mean".
-
-**Direction.** PSNR and SSIM are higher-better; LPIPS is lower-better. Every
-function takes the direction explicitly rather than assuming, because a sign flip
-here would invert a conclusion silently.
-
-Nothing in this module hides a negative result: :func:`paired_summary` reports the
-loss count and the worst case alongside the mean, and the interval is reported
-whether or not it excludes zero. A difference is called nothing at all — the
-report states the mean, the spread, the interval and the win count, and lets those
-speak.
+Differences are within (scene, seed); the bootstrap's inference unit is the scene, with seeds averaged first.
 """
 from __future__ import annotations
 
@@ -35,8 +11,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-# Metrics and their orientation. Used everywhere a "did it improve?" question is
-# asked, so the answer cannot depend on which function is doing the asking.
+# The single source of metric orientation for every "did it improve?" question.
 HIGHER_IS_BETTER = {
     "psnr_srgb": True,
     "ssim_srgb": True,
@@ -60,12 +35,7 @@ METRIC_LABELS = {
 
 
 def mean_std(values) -> dict:
-    """Mean, SAMPLE standard deviation (ddof=1) and n.
-
-    ddof=1 because these are samples from a larger population of seeds/scenes,
-    not the population itself; with n=3 seeds the difference from ddof=0 is 22%,
-    which is not a rounding detail in a table that reports +/- values.
-    """
+    """Mean, sample standard deviation (ddof=1: seeds/scenes are samples, not the population) and n."""
     clean = [float(v) for v in values if v is not None and np.isfinite(v)]
     if not clean:
         return {"mean": None, "std": None, "n": 0, "min": None, "max": None}
@@ -83,15 +53,9 @@ def mean_std(values) -> dict:
 
 def bootstrap_ci(values, *, alpha: float = 0.05, resamples: int = 10000,
                  seed: int = 20260818) -> dict:
-    """Percentile bootstrap CI for the MEAN of ``values``.
+    """Percentile bootstrap CI for the mean of ``values`` (BCa is too noisy with ~13 scenes).
 
-    Percentile (not BCa): with ~13 scenes the bias correction is estimated from
-    so few points that it adds noise rather than accuracy, and the percentile
-    interval is the conventional, easily-described choice. The resample count and
-    seed are recorded so the interval is reproducible to the digit.
-
-    n < 3 returns nulls rather than a nonsense interval — an interval from two
-    points would look like evidence and be none.
+    Returns nulls for n < 3 rather than an interval that would look like evidence.
     """
     clean = np.asarray([float(v) for v in values
                         if v is not None and np.isfinite(v)], dtype=float)
@@ -119,12 +83,7 @@ def bootstrap_ci(values, *, alpha: float = 0.05, resamples: int = 10000,
 
 
 def sign_test(values) -> dict:
-    """Exact two-sided sign test that the median difference is zero.
-
-    Distribution-free and appropriate for 13 paired scene differences, where a
-    normality assumption is untestable. Ties are dropped (the standard
-    treatment), which is reported because dropping them changes n.
-    """
+    """Exact two-sided sign test that the median difference is zero; ties are dropped and reported."""
     clean = [float(v) for v in values if v is not None and np.isfinite(v)]
     positive = sum(1 for v in clean if v > 0)
     negative = sum(1 for v in clean if v < 0)
@@ -200,12 +159,7 @@ def paired_summary(treatment: str, baseline: str, metric: str,
                    baseline_values: dict[tuple[str, int], float],
                    alpha: float = 0.05, resamples: int = 10000,
                    seed: int = 20260818) -> PairedResult:
-    """Build a :class:`PairedResult` from two ``{(scene, seed): value}`` maps.
-
-    Only cells present in BOTH maps contribute; the rest are recorded in
-    ``unpaired_dropped`` rather than dropped silently, because a missing cell on
-    one side is exactly how an incomplete grid turns into a biased comparison.
-    """
+    """Build a :class:`PairedResult` from two ``{(scene, seed): value}`` maps; unpaired cells are recorded, not hidden."""
     direction = HIGHER_IS_BETTER.get(metric)
     result = PairedResult(metric=metric, treatment=treatment, baseline=baseline,
                           higher_is_better=direction)
@@ -233,9 +187,7 @@ def paired_summary(treatment: str, baseline: str, metric: str,
                              resamples=resamples, seed=seed)
     result.signtest = sign_test(list(result.scene_deltas.values()))
 
-    # Wins per (scene, seed). "Better" follows the metric's direction; a delta of
-    # exactly zero is a tie, which for float metrics essentially never happens
-    # and is reported rather than assigned to either side.
+    # Wins per (scene, seed); an exact-zero delta is reported as a tie rather than assigned to a side.
     if direction is None:
         result.wins = result.losses = result.ties = 0
     else:
@@ -252,17 +204,7 @@ def paired_summary(treatment: str, baseline: str, metric: str,
 
 def time_to_target(iters, times, values, target: float, *,
                    higher_is_better: bool = True) -> dict:
-    """Interpolated time at which a trajectory first reaches ``target``.
-
-    Linear interpolation BETWEEN the bracketing checkpoints, and never beyond the
-    measured range: a trajectory that has not reached the target by its last
-    checkpoint returns ``not_reached``. Extrapolating here would invent the single
-    most quotable number in the convergence study.
-
-    Returns the FIRST crossing, not the last: "time to reach quality X" means the
-    first time it got there, even if it later dipped below again (which it can,
-    around a densification or an opacity reset).
-    """
+    """Linearly interpolated time of the first crossing of ``target``; never extrapolated past the last checkpoint."""
     points = [(float(i), float(t), float(v))
               for i, t, v in zip(iters, times, values)
               if v is not None and t is not None and np.isfinite(v)
@@ -278,15 +220,13 @@ def time_to_target(iters, times, values, target: float, *,
         if not reached(value):
             continue
         if index == 0:
-            # Already at target by the first checkpoint: report it, and say so,
-            # rather than interpolating back towards zero from nothing.
+            # Already at target: report the first checkpoint rather than interpolating back from nothing.
             return {"status": "reached_at_first_checkpoint",
                     "target": target, "seconds": seconds,
                     "iteration": iteration, "interpolated": False}
         prev_iter, prev_seconds, prev_value = points[index - 1]
         span = value - prev_value
-        # Guard a flat segment: with no change across the bracket there is no
-        # crossing point to solve for, so take the checkpoint that reached it.
+        # A flat segment has no crossing to solve for, so take the checkpoint that reached it.
         if abs(span) < 1e-12:
             fraction = 1.0
         else:
@@ -317,13 +257,7 @@ def time_to_target(iters, times, values, target: float, *,
 
 def group_aggregate(rows: list[dict], metric: str, *,
                     expected_n: int | None = None) -> dict:
-    """Aggregate one metric over a group of cells, refusing silent gaps.
-
-    ``expected_n`` is the number of cells the group SHOULD contain. When the
-    actual count differs the result is still returned — hiding it would be worse —
-    but ``complete`` is False and ``missing`` says how many are absent, so tables
-    can mark the cell rather than print a mean that looks like the others.
-    """
+    """Aggregate one metric over a group, flagging ``complete``/``missing`` against ``expected_n``."""
     values = [r.get(metric) for r in rows]
     summary = mean_std(values)
     summary["expected_n"] = expected_n

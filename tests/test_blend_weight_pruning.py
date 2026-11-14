@@ -15,7 +15,7 @@ import pytest
 from _pipeline_testkit import TestPipeline
 
 from trainer.backend.compute.device import create_device
-from trainer.backend.densify.densify import DensifyConfig, StructureConfig
+from trainer.config.config import DensifyConfig, StructureConfig
 from trainer.config.config import DensificationProperties, IterationContextualVariables
 from trainer.data.dataset import simple_camera
 
@@ -50,7 +50,7 @@ def _alpha(pipeline: TestPipeline, camera, splats: dict) -> np.ndarray:
 
 
 def _blend_weight(pipeline: TestPipeline, count: int) -> np.ndarray:
-    raw = pipeline.buffers.blend_weight_accum.to_numpy().tobytes()
+    raw = pipeline.buffers.densification.blend_weight.to_numpy().tobytes()
     return np.frombuffer(raw, dtype=np.int64)[:count] / FIXED_SCALE
 
 
@@ -58,7 +58,7 @@ def _backward(pipeline: TestPipeline, camera, track: bool) -> None:
     contextual = IterationContextualVariables(
         hardness_value=1.0, sh_degree=0,
         densification_variables=DensificationProperties(track_blend_weight=track))
-    with pipeline.recording("blend_weight"):
+    with pipeline.commands.recording("blend_weight"):
         pipeline.rasterize(camera, contextual)
         pipeline.record_backward(contextual)
     pipeline.runtime.wait_for_idle()
@@ -74,7 +74,7 @@ def test_backward_tracks_the_blend_weight(backend: str) -> None:
     back = _alpha(pipeline, camera, _splats([0.1], [3.0], [0.8]))
     pipeline.set_primitive_from_numpy(**_splats([0.0, 0.1, 50.0], [2.0, 3.0, 2.0],
                                                 [0.6, 0.8, 0.9]))
-    pipeline.clear_tracking()
+    pipeline.densify_stats.clear()
 
     _backward(pipeline, camera, track=True)
     _backward(pipeline, camera, track=True)
@@ -100,17 +100,17 @@ def test_densify_prunes_underweight_splats(backend: str, structure: bool,
     views[:4] = [4, 4, 0, 2]
     weight = np.zeros(pipeline.max_splats, np.int64)
     weight[:4] = np.array([2.0, 8.0, 0.0, 100.0]) * FIXED_SCALE
-    pipeline.buffers.visibility_count_accum.copy_from_numpy(views)
-    pipeline.buffers.blend_weight_accum.copy_from_numpy(weight)
+    pipeline.buffers.densification.visibility_count.copy_from_numpy(views)
+    pipeline.buffers.densification.blend_weight.copy_from_numpy(weight)
 
     if structure:
-        pipeline.densify_structure_aware(StructureConfig(opacity_cap=0.0), min_weight)
+        pipeline.structure_densifier.densify(StructureConfig(opacity_cap=0.0), min_weight)
     else:
-        pipeline.densify_simple(DensifyConfig(), allow_scale_prune=False,
+        pipeline.simple_densifier.run(DensifyConfig(), allow_scale_prune=False,
                                 min_blend_weight=min_weight)
 
     pipeline.runtime.wait_for_idle()
-    count = int(pipeline.buffers.num_gaussians_counter.to_numpy().view(np.uint32)[0])
-    means = np.frombuffer(pipeline.buffers.gaussians.to_numpy().tobytes(),
+    count = int(pipeline.buffers.primitive.active_count.to_numpy().view(np.uint32)[0])
+    means = np.frombuffer(pipeline.buffers.primitive.values.to_numpy().tobytes(),
                           np.float32).reshape(-1, 14)[:count, 0]
     np.testing.assert_allclose(np.sort(means), survivors, atol=1e-6)

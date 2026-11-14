@@ -3,8 +3,7 @@
 // Adam optimizer step
 #include "../common/types.slang"
 
-#include "generated/execution_contract.slang"
-static const uint CLUSTER_SIZE = CONTRACT_CLUSTER_SIZE;
+#include "common/execution.slang"
 
 static const float ADAM_BETA1 = 0.9;
 static const float ADAM_BETA2 = 0.999;
@@ -63,7 +62,6 @@ void adamStep(
     RWStructuredBuffer<Gaussian3D> gaussians,
     RWStructuredBuffer<AdamState> adam_state,
     StructuredBuffer<uint> num_gaussians_counter,
-    // Gradient accumulators (int32 fixed-point).
     RWStructuredBuffer<int64_t> grad_mean_x,
     RWStructuredBuffer<int64_t> grad_mean_y,
     RWStructuredBuffer<int64_t> grad_mean_z,
@@ -78,10 +76,8 @@ void adamStep(
     RWStructuredBuffer<int64_t> grad_color_r,
     RWStructuredBuffer<int64_t> grad_color_g,
     RWStructuredBuffer<int64_t> grad_color_b,
-    // Cluster-cull mask: seeded all-ones when disabled, so this early-out
-    // is a no-op unless the cluster_cull kernels wrote it.
+    // Cluster-cull mask; all ones when culling is disabled.
     StructuredBuffer<uint> cluster_visible,
-    // Uniforms
     uniform AdamConfig cfg,
     uniform float pixels_per_step)
 {
@@ -91,7 +87,6 @@ void adamStep(
 
     float inv_pixels = 1.0 / max(pixels_per_step, 1.0);
 
-    // Read fixed-point gradients and normalize by pixel count.
     float3 g_mean = float3(
         fromFixed(grad_mean_x[idx]), fromFixed(grad_mean_y[idx]), fromFixed(grad_mean_z[idx])
     ) * inv_pixels;
@@ -111,7 +106,6 @@ void adamStep(
         fromFixed(grad_color_r[idx]), fromFixed(grad_color_g[idx]), fromFixed(grad_color_b[idx])
     ) * inv_pixels;
 
-    // NaN/Inf guard.
     bool any_bad = any(isnan(g_mean)) || any(isinf(g_mean))
                 || any(isnan(g_log_scale)) || any(isinf(g_log_scale))
                 || any(isnan(g_rot)) || any(isinf(g_rot))
@@ -142,7 +136,6 @@ void adamStep(
     gaussians[idx] = g;
     adam_state[idx] = storeAdamMoments(s, adamRoundingSeed(idx, cfg.step));
 
-    // Zero the gradient accumulators for the next iteration.
     grad_mean_x[idx] = int64_t(0); grad_mean_y[idx] = int64_t(0); grad_mean_z[idx] = int64_t(0);
     grad_log_scale_x[idx] = int64_t(0); grad_log_scale_y[idx] = int64_t(0); grad_log_scale_z[idx] = int64_t(0);
     grad_rot_w[idx] = int64_t(0); grad_rot_x[idx] = int64_t(0); grad_rot_y[idx] = int64_t(0); grad_rot_z[idx] = int64_t(0);
@@ -150,15 +143,10 @@ void adamStep(
     grad_color_r[idx] = int64_t(0); grad_color_g[idx] = int64_t(0); grad_color_b[idx] = int64_t(0);
 }
 
-#include "generated/sh_types.slang"
+#include "primitives/gaussian/sh_layout.slang"
 #include "../common/half_pack.slang"
 
-// SH-rest Adam v-floor. Moments are FLOAT32 or BF16 (adam_precision.slang),
-// never fp16: the post-inv_pixels SH-rest gradient is tiny (~1e-6), so
-// v = g^2 ~ 1e-12 UNDERFLOWED fp16 to 0, and a 1e-6 floor then crushed the Adam
-// step ~1000x (measured: SH3 == SH0; float32 moments give +1.15 dB deg0->deg3).
-// Keep inv_pixels (step normalization / resolution-independence, same as the
-// main params). Floor only guards a literal zero.
+// Guards only a literal zero: SH-rest v is ~1e-12 (g ~ 1e-6), so a larger floor would crush the step.
 static const float SH_V_FLOOR = 1e-15;
 
 [shader("compute")]
@@ -191,8 +179,6 @@ void adamStepRest(
 
     for (uint u = 0u; u < fu; ++u)
     {
-        // One grad uint holds this uint's two scalars; unpack once (was two
-        // readHalfScalar loads of the SAME uint).
         float2 g_pair = unpackHalf2x(features_rest_grad[pbase + u]);
         float2 p_pair = unpackHalf2x(features_rest[pbase + u]);
         float p_out[2] = { p_pair.x, p_pair.y };

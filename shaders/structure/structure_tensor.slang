@@ -1,6 +1,6 @@
 // Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-static const float ST_EPS = 1e-8;   // structure_analysis.EPS
+static const float ST_EPS = 1e-8;
 
 [shader("compute")]
 [numthreads(16, 16, 1)]
@@ -56,12 +56,8 @@ void blurV(
     dst[p] = acc / wsum;
 }
 
-// ---------------------------------------------------------------------------
-// Di Zenzo multi-channel structure tensor from a pre-smoothed image.
-// Per channel: 3x3 Sobel (correlation, edge-clamped) -> (Ix, Iy); accumulate
-// Sxx += Ix^2, Sxy += Ix*Iy, Syy += Iy^2 over the 3 color channels. Matches
-// structure_analysis._sobel / _structure_tensor (pre-integration).
-// ---------------------------------------------------------------------------
+// Di Zenzo multi-channel structure tensor of the pre-smoothed image: edge-clamped 3x3 Sobel
+// per channel, summed over RGB.
 [shader("compute")]
 [numthreads(16, 16, 1)]
 void sobelTensor(
@@ -80,8 +76,6 @@ void sobelTensor(
     int yp = clamp(int(p.y) + 1, 0, H - 1);
     int xc = int(p.x), yc = int(p.y);
 
-    // Load the 8 neighbors as RGB; do all 3 channels at once with float3, then
-    // sum over channels via dot() (Di Zenzo multi-channel form).
     float3 tl = smoothed[uint2(uint(xm), uint(ym))].xyz;
     float3 tm = smoothed[uint2(uint(xc), uint(ym))].xyz;
     float3 tr = smoothed[uint2(uint(xp), uint(ym))].xyz;
@@ -99,10 +93,7 @@ void sobelTensor(
     tensorOut[p] = float4(dot(ix, ix), dot(ix, iy), dot(iy, iy), 0.0);
 }
 
-// ---------------------------------------------------------------------------
-// Max-of-trace reduction for the base-tensor batch normalization. trace >= 0,
-// so InterlockedMax on the IEEE bit pattern (asuint) gives the true max.
-// ---------------------------------------------------------------------------
+// Max-of-trace reduction; trace >= 0, so InterlockedMax on its IEEE bits (asuint) is the true max.
 [shader("compute")]
 [numthreads(1, 1, 1)]
 void clearMaxTrace(uint3 dtid: SV_DispatchThreadID, RWStructuredBuffer<uint> maxTrace)
@@ -125,7 +116,7 @@ void reduceMaxTrace(
     InterlockedMax(maxTrace[0], asuint(tr), prev);
 }
 
-// Divide the base tensor in place by (max_trace + 1e-6). SADGS batch-max norm.
+// SADGS batch-max normalization of the base tensor, in place.
 [shader("compute")]
 [numthreads(16, 16, 1)]
 void normalizeBase(
@@ -141,9 +132,7 @@ void normalizeBase(
     tensor[p] = float4(v.xyz / maxt, 0.0);
 }
 
-// ---------------------------------------------------------------------------
-// DoG band response = L2 norm over channels of (current_smooth - next_smooth).
-// ---------------------------------------------------------------------------
+// DoG band response: L2 norm over channels of (current_smooth - next_smooth).
 [shader("compute")]
 [numthreads(16, 16, 1)]
 void dogBand(
@@ -159,11 +148,8 @@ void dogBand(
     bandOut[p] = float4(sqrt(dot(d, d)), 0.0, 0.0, 0.0);
 }
 
-// ---------------------------------------------------------------------------
-// Per-level accumulation into num (xyz) / den (w). intTensor is the base tensor
-// re-integrated by rho_l; trace-normalize to orientation-only, then add
-// band^gamma * freq_sq to num and band^gamma to den (SADGS Eq. 5).
-// ---------------------------------------------------------------------------
+// Per-level accumulation (SADGS Eq. 5): num.xyz += band^gamma * freq_sq * the trace-normalized
+// base tensor re-integrated by rho_l; den.w += band^gamma.
 [shader("compute")]
 [numthreads(16, 16, 1)]
 void clearAccum(uint3 dtid: SV_DispatchThreadID, RWTexture2D<float4> accum, uniform uint2 dim)

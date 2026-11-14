@@ -6,7 +6,6 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-import numpy as np
 
 from trainer.frontend.profiling.profiler import Profiler
 from trainer.backend.compute.gpu import SubmitHandle
@@ -81,18 +80,11 @@ class _FakeWindow:
         self.events.append("close")
 
 
-class _FakeCounter:
-    def to_numpy(self):
-        return np.array([7], dtype=np.uint32)
-
-
 class _FakePipeline:
     def __init__(self, events) -> None:
         self.runtime = _FakeRuntime(events)
-        self.buffers = SimpleNamespace(
-            output_image="output_image",
-            num_gaussians_counter=_FakeCounter(),
-        )
+        self.buffers = SimpleNamespace(raster=SimpleNamespace(output_image="output_image"))
+        self.primitives = SimpleNamespace(count=lambda: 7)
         self.last_submit_id = 0
         self.train_calls = 0
 

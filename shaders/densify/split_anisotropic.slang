@@ -49,7 +49,7 @@ Gaussian3D gridChild(ChildGrid grid, uint ordinal)
     return child;
 }
 
-// Snapshot the parent BEFORE child 0 overwrites its slot; reserve only once.
+// Snapshot the parent before child 0 overwrites its slot; reserve only once.
 void prepareParent(uint i, uint lane, uint act,
     RWStructuredBuffer<Gaussian3D> gaussians,
     RWStructuredBuffer<uint> num_gaussians_counter,

@@ -1,25 +1,24 @@
 # Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-"""Phase 1 validation for the Mip-Splatting 3D smoothing filter.
+"""Mip-Splatting 3D smoothing filter: sane sizes, indirect dispatch, and gradients.
 
-Confirms shaders/mip/compute_3d_filter.slang compiles and Pipeline.compute_3d_filter
-produces sane per-gaussian filter sizes: 0 for unseen/empty slots, a small
-positive value (min_depth * sqrt(0.2) / max_focal) for gaussians a camera sees.
+Unseen/empty slots get 0; a visible gaussian gets min_depth * sqrt(0.2) / max_focal.
 """
 
 from __future__ import annotations
 
 import numpy as np
 import pytest
-
-import sys
-from pathlib import Path
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tests"))
+import slangpy as spy
 
 from _pipeline_testkit import TestPipeline
+from trainer.backend.compute.device import SHADERS_DIR, create_device
+from trainer.backend.compute.gpu import CommandRecorder, GpuRuntime
+from trainer.backend.compute.kernels import KernelLibrary
+from trainer.backend.memory.buffers import MipResources, PrimitiveStorage
+from trainer.backend.memory.layout import StructLayout
+from trainer.backend.render.mip_filter import MipFilter
 from trainer.data.dataset import simple_camera
-from trainer.backend.compute.device import create_device
 
 BACKENDS = ["vulkan", "d3d12"]
 
@@ -47,11 +46,11 @@ def test_compute_3d_filter_basic(backend: str) -> None:
     cam = simple_camera(width=64, height=64, eye=(0.0, 0.0, 0.0),
                         target=(0.0, 0.0, 3.0))
 
-    p.set_mipsplatting_cameras([cam])
-    p.compute_3d_filter()
+    p.mip_filter.set_cameras([cam])
+    p.mip_filter.compute()
     p.device.wait_for_idle()
 
-    f = np.frombuffer(p.buffers.filter_3D.to_numpy().tobytes(), dtype=np.float32)
+    f = np.frombuffer(p.buffers.primitive.filter_3d.to_numpy().tobytes(), dtype=np.float32)
     live = f[:2]
     dead = f[2:]
 
@@ -71,29 +70,47 @@ def test_filter_indirect_live_count_and_dead_tail(backend: str) -> None:
     Only filter resources are needed here; avoid allocating a complete second
     training pipeline just to exercise a large dispatch and its tail clear.
     """
-    from bench_mip_filter import MipFilterProbe
-
     try:
         device = create_device(backend=backend)
     except Exception as exc:
         pytest.skip(f"backend {backend!r} unavailable: {exc}")
     capacity, live = 100_000, 65_539
-    p = MipFilterProbe(device, capacity, live)
-    cam = simple_camera(width=64, height=64, eye=(0, 0, 0), target=(0, 0, 3))
-    p.set_mipsplatting_cameras([cam])
-    p.buffers.filter_3D.copy_from_numpy(np.full(capacity, -123.0, np.float32))
-    p.compute_3d_filter()
-    p.runtime.wait_for_submit(p.last_submit_id)
-    f = p.buffers.filter_3D.to_numpy()
+    module = spy.Module.load_from_file(device, str(SHADERS_DIR / "common/types.slang"))
+    gaussian = module.layout.find_type_by_name("Gaussian3D")
+    layout = StructLayout.of(gaussian)
+    primitive = PrimitiveStorage(
+        spy.NDBuffer(device=device, dtype=gaussian, shape=(capacity,)),
+        spy.NDBuffer(device=device, dtype="uint", shape=(1,)),
+        spy.NDBuffer(device=device, dtype="float", shape=(capacity,)), layout)
+    resources = MipResources(
+        dispatch_args=spy.NDBuffer(device=device, dtype="uint", shape=(6,), usage=(
+            spy.BufferUsage.shader_resource | spy.BufferUsage.unordered_access
+            | spy.BufferUsage.indirect_argument)),
+        previous_count=spy.NDBuffer(device=device, dtype="uint", shape=(2,)))
+    resources.previous_count.copy_from_numpy(np.array([capacity, capacity], np.uint32))
+    data = np.zeros((capacity, layout.float_count), np.float32)
+    data[:live, :3] = np.random.default_rng(42).uniform(-0.5, 0.5, (live, 3))
+    data[:live, 2] += 3.0
+    primitive.values.storage.copy_from_numpy(data)
+    primitive.active_count.copy_from_numpy(np.array([live], np.uint32))
+    commands = CommandRecorder(GpuRuntime(device))
+    mip_filter = MipFilter(device, commands, KernelLibrary(device), primitive=primitive,
+                           resources=resources, capacity=capacity)
+
+    mip_filter.set_cameras([simple_camera(width=64, height=64, eye=(0, 0, 0), target=(0, 0, 3))])
+    primitive.filter_3d.copy_from_numpy(np.full(capacity, -123.0, np.float32))
+    mip_filter.compute()
+    commands.runtime.wait_for_submit(commands.last_submit_id)
+    f = primitive.filter_3d.to_numpy()
     assert np.all(f[:live] > 0), "second dispatch row was not computed"
     assert np.all(f[live:] == 0), "dead slots were not cleared"
-    np.testing.assert_array_equal(p.buffers.mip_filter_dispatch_args.to_numpy()[:3],
+    np.testing.assert_array_equal(resources.dispatch_args.to_numpy()[:3],
                                   np.array([65535, 2, 1], np.uint32))
 
-    p.buffers.num_gaussians_counter.copy_from_numpy(np.zeros(1, np.uint32))
-    p.compute_3d_filter()
-    p.runtime.wait_for_submit(p.last_submit_id)
-    assert np.all(p.buffers.filter_3D.to_numpy() == 0), "stale filters survived shrink"
+    primitive.active_count.copy_from_numpy(np.zeros(1, np.uint32))
+    mip_filter.compute()
+    commands.runtime.wait_for_submit(commands.last_submit_id)
+    assert np.all(primitive.filter_3d.to_numpy() == 0), "stale filters survived shrink"
     device.close()
 
 
@@ -125,22 +142,22 @@ def test_mip_on_gradients_finite_difference(backend: str) -> None:
     camera = simple_camera(width=W, height=H, eye=(0.0, 0.0, 0.0),
                            target=(0.0, 0.0, 1.0), up=(0.0, 1.0, 0.0),
                            fovy_degrees=60.0)
-    pipeline.set_target_image(_target(H, W))
+    pipeline.targets.set_image(_target(H, W))
 
     scene = _scene()
     n = scene["means"].shape[0]
 
     # Upload base params, then compute the 3D filter ONCE and freeze it.
     pipeline.set_primitive_from_numpy(**scene)
-    pipeline.set_mipsplatting_cameras([camera])
-    pipeline.compute_3d_filter()
-    f = np.frombuffer(pipeline.buffers.filter_3D.to_numpy().tobytes(), dtype=np.float32)[:n]
+    pipeline.mip_filter.set_cameras([camera])
+    pipeline.mip_filter.compute()
+    f = np.frombuffer(pipeline.buffers.primitive.filter_3d.to_numpy().tobytes(), dtype=np.float32)[:n]
     assert np.any(f > 0.0), f"mip filter should be non-zero for the test gaussians: {f}"
 
     # Analytic gradients (mip on, fixed filter, default per-splat backward).
     pipeline.forward_and_loss(camera)
-    pipeline.clear_gradients()
-    pipeline.backward()
+    pipeline.optimizer.zero_grad()
+    pipeline.run_backward()
     analytic = pipeline.read_gradients()
 
     def _loss(scn: dict) -> float:

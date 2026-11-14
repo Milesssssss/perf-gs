@@ -1,16 +1,9 @@
 # Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-"""Run the unmodified SADGS reference ``train.py`` and time only its training loop.
+"""Run the unmodified SADGS reference ``train.py`` and time only its training loop (the ``train_wall_s`` span).
 
-The loop starts when train.py reports its structure-tensor precompute and ends
-when the progress bar closes on the last iteration, before the PLY save: the same
-span as the Slang trainer's ``train_wall_s``. ``REF_PIN_SH0=1`` keeps the active
-SH degree at 0. ``REF_ST_BATCH`` (default 16) caps the views per structure-tensor
-call. Writes ``REF_TIMING_OUT`` (JSON) with the loop time, the final splat count
-and PyTorch's peak reserved memory.
-
-    SADGS_ROOT=/path/to/SADGS REF_TIMING_OUT=out/timing.json \
-        python timed_train.py -s <scene> -i images_4 --eval ...
+Env: REF_PIN_SH0=1 pins SH degree 0; REF_ST_BATCH caps views per structure-tensor call; REF_TIMING_OUT gets the JSON.
+    SADGS_ROOT=/path/to/SADGS REF_TIMING_OUT=out/timing.json python timed_train.py -s <scene> -i images_4 --eval ...
 """
 from __future__ import annotations
 
@@ -53,9 +46,7 @@ def _close_hook(bar) -> None:
 
 
 def _chunked(function, chunk: int):
-    """train.py stacks 100 views per structure-tensor call, which overruns VRAM at
-    1237x822 (WSL reports 'device not ready'). The tensor is computed per image,
-    so smaller batches give the same result."""
+    """train.py's 100-view structure-tensor call overruns VRAM; the tensor is per image, so ``chunk``-view batches match."""
     def run(images, *args, **kwargs):
         return torch.cat([function(images[i:i + chunk], *args, **kwargs)
                           for i in range(0, images.shape[0], chunk)])

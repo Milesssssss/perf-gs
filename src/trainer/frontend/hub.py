@@ -22,12 +22,7 @@ if TYPE_CHECKING:
 
 
 def _progress_relay(state: Session, parser):
-    """Adapt a subprocess line stream to the session state.
-
-    Every line lands in the log (wrapped, never clipped, by the panel) and is
-    ALSO fed to a stage parser that turns it into a determinate fraction — which
-    is what the viewer's progress bar shows for setup/reconstruction.
-    """
+    """Relay subprocess lines to the session log and, via ``parser``, to the progress bar."""
     def relay(line: str) -> None:
         state.log(line)
         parsed = parser.feed(line)
@@ -40,28 +35,17 @@ class TrainingHub:
         self.app = app
 
     def run(self) -> None:
-        """Interactive hub: bring up a scene-less viewer, let the user drag-drop a
-        dataset and choose Reconstruct (images -> GLOMAP/COLMAP) or Train (a
-        COLMAP dataset) from the panel, then train the chosen dataset in-process
-        feeding the same viewer. CLI training (start_training) is unaffected.
-
-        The session OUTLIVES a run: when training finishes the result stays on
-        screen and in memory, and the panel offers Export .ply, Train again (with
-        the TRAINING SETUP values it now holds), another dataset, or Clear session.
-        Only closing the window ends it.
-
-        The viewer and this method communicate ONLY through ``session.state``: the
-        panel produces one-shot commands, this loop consumes them and publishes
-        phase/progress/log back (see :mod:`trainer.frontend.viewer.state`)."""
+        """Run the interactive hub until the window closes; a session outlives its runs.
+        The viewer and this loop communicate only through ``session.state``: the panel posts
+        one-shot commands, this loop consumes them and publishes phase/progress/log back."""
         from trainer.frontend.reconstruction import ReconTools
         from trainer.frontend.settings import TrainingSetup
 
-        self.app.args.no_viewer = False  # the hub IS the viewer
+        self.app.args.no_viewer = False  # the hub is the viewer
         self.app.profiling_enabled = apply_profile_session_overrides(self.app.args)
         self.app._create_device()
 
-        # The panel's TRAINING SETUP edits this store; it is seeded from the CLI
-        # args and applied back onto them when the user presses Train.
+        # Seeded from the CLI args; the panel edits it and it is applied back on Train.
         setup = TrainingSetup.from_args(self.app.args)
         self.app.viewer = ViewerSession.create_hub(
             device=self.app.device,
@@ -87,10 +71,6 @@ class TrainingHub:
         state.notify("Viewer ready - drop a dataset folder", OK)
         print("[hub] viewer up — drag a dataset folder onto the window.")
 
-        # ONE session, MANY runs: a finished run no longer ends the hub. Control
-        # goes straight back to the panel, where the result can be exported, the
-        # same scene re-trained with different parameters, another dataset dropped,
-        # or the whole session cleared. Only closing the window ends this.
         while True:
             scene_dir = self._hub_choose_scene(tools)
             if scene_dir is None:
@@ -99,13 +79,8 @@ class TrainingHub:
             self._hub_train_scene(scene_dir, setup)
 
     def _hub_choose_scene(self, tools) -> "str | None":
-        """Service panel requests until a scene is ready to train.
-
-        Returns the scene dir to train, or ``None`` if the window closed. The panel
-        owns *when* (every button's ``enabled`` is a ``can_*`` property); this owns
-        *how*, and every branch here publishes a state transition so the UI reacts
-        on the same frame the request lands.
-        """
+        """Service panel requests until a scene is ready; ``None`` once the window closes.
+        Every branch publishes a state transition so the UI reacts on the same frame."""
         state = self.app._viewer.state
         while self.app._viewer.is_alive():
             dropped = state.take_dropped()
@@ -117,10 +92,7 @@ class TrainingHub:
                 command = state.take_confirm(accept=True,
                                              alt=command == "confirm_alt")
                 if command == "export" and getattr(self, "_pending_drop", None):
-                    # "Export first" rescues the result; it does NOT then destroy it
-                    # by continuing with the load. The drop is forgotten and the
-                    # user is told, rather than being applied behind an export that
-                    # might itself fail.
+                    # "Export first" must not then destroy the result by continuing the load.
                     self.app._pending_drop = None
                     state.notify("Exporting first - drop the dataset again after",
                                  WARN)
@@ -155,12 +127,7 @@ class TrainingHub:
         return None
 
     def _hub_dropped(self, path: str) -> None:
-        """A folder was dropped. Acknowledge it BEFORE reading anything.
-
-        Replacing a live reconstruction is consequential, so an unexported result
-        asks first — and offers to export instead of losing it. Anything else loads
-        straight away: a confirmation for a harmless action is just a click.
-        """
+        """Load a dropped folder, asking first if it would replace an existing result."""
         state = self.app._viewer.state
         if state.snapshot().has_result:
             self.app._pending_drop = path
@@ -239,17 +206,11 @@ class TrainingHub:
         self._hub_clear_session()
 
     def _hub_train_scene(self, scene_dir: str, setup) -> None:
-        """Build and train ONE run on ``scene_dir``, feeding the running viewer.
-
-        Heavy GPU setup runs with the render thread suspended to avoid queue races.
-        The run is also SURVIVABLE: a failure leaves the hub usable (error phase,
-        commands served again) instead of taking the process down with it, because
-        the end of a run is no longer the end of the session.
-        """
+        """Build and train one run on ``scene_dir``, feeding the running viewer.
+        Setup runs with rendering suspended (queue races); a failure leaves the hub usable."""
         state = self.app._viewer.state
         print(f"[hub] training on {scene_dir}")
-        # Acknowledge the click before the slowest part of a short run: the scene
-        # load, pipeline build and texture upload all happen before iteration 1.
+        # Acknowledge the click first: scene load, pipeline build and uploads precede iteration 1.
         state.reset_for_new_run()
         state.training_initializing(self.app.args.iters)
         state.begin_activity("Loading scene and building the pipeline")
@@ -258,8 +219,7 @@ class TrainingHub:
         self.app.viewer.suspend_rendering()
         try:
             self.app._begin_repeat_run()
-            # The panel's settings become the run's args HERE — before anything
-            # reads them — and the viewer's own pipeline is re-shaped to match.
+            # The panel's settings must become the run's args before anything reads them.
             self._apply_hub_setup(setup)
             self.app._prepare_scene(scene_dir)
             self.app._create_pipeline_for_scene(self.app._sceneContext)
@@ -279,8 +239,7 @@ class TrainingHub:
         except Exception as error:                     # noqa: BLE001
             self._hub_run_failed("training", error)
             return
-        # The pipeline stays alive and on screen: that is what Export writes out,
-        # and what the viewer keeps showing while the user decides what is next.
+        # The pipeline stays alive: Export writes it and the viewer keeps showing it.
         stats = state.snapshot().stats
         stopped = self.app.viewer.stop_requested()
         state.training_completed(ResultInfo(
@@ -301,13 +260,7 @@ class TrainingHub:
         report_exception(f"[hub] {what} failed", error, state)
 
     def _hub_export_ply(self) -> None:
-        """Write the trained gaussians to ``<run>/output.ply`` from the panel.
-
-        Same file the automatic post-training export writes under
-        ``--compute-final-metrics``; this is the on-demand path, so a run made
-        without that flag is not lost. The absolute path goes to the log, since the
-        panel has no file dialog to show one.
-        """
+        """Write the trained gaussians to ``<run>/output.ply`` from the panel."""
         from trainer.backend.export import save_ply
 
         state = self.app._viewer.state
@@ -318,8 +271,7 @@ class TrainingHub:
         path = self.app.paths.root / (state.export_name or "output.ply")
         state.begin_activity(f"Exporting {path.name}")
         state.log(f"exporting {path.name} …")
-        # save_ply READS BACK the gaussian buffers, so the render thread has to be
-        # off the queue (and off the GIL) for it — see suspend_rendering.
+        # save_ply reads back the gaussian buffers, so the render thread must be off the queue.
         self.app.viewer.suspend_rendering()
         try:
             save_ply(self.app._pipeline, path)
@@ -338,11 +290,7 @@ class TrainingHub:
 
     def _hub_reveal_export(self) -> None:
         """Open the exported file's folder in the OS file manager.
-
-        Windows-only on purpose: ``os.startfile`` is the one platform-appropriate
-        call available without adding a dependency, and a button that silently does
-        nothing elsewhere would be worse than not offering it.
-        """
+        Windows-only on purpose: ``os.startfile`` needs no extra dependency."""
         state = self.app._viewer.state
         exported = state.snapshot().result.exported_path
         if not exported:
@@ -357,12 +305,7 @@ class TrainingHub:
 
     def _hub_clear_session(self, *, notify: bool = True) -> None:
         """Forget the dataset and the finished run so the hub can start over.
-
-        The 'work on something else' path: the window, the device and the installed
-        tools stay, everything a run allocated goes, and the panel is back to
-        "drag a dataset folder onto the window". The log survives — it is the record
-        of what just happened, and losing it is worse than a busy panel.
-        """
+        The window, device, installed tools and log survive."""
         state = self.app._viewer.state
         self.app.viewer.suspend_rendering()
         try:
@@ -377,14 +320,9 @@ class TrainingHub:
         print("[hub] session cleared")
 
     def _apply_hub_setup(self, setup) -> None:
-        """Fold the panel's TRAINING SETUP into this run's args.
-
-        Called with rendering suspended, immediately before anything reads the
-        args, so every option the panel offers takes effect for real. The viewer's
-        own pipeline is rebuilt here too: its SH buffers / Mip raster path are
-        fixed at construction, so a changed model needs a new one
-        (no-op when the user left those alone).
-        """
+        """Fold the panel's training setup into this run's args; call with rendering suspended.
+        Also rebuilds the viewer's pipeline, whose SH buffers and Mip raster path are fixed at
+        construction."""
         state = self.app._viewer.state
         for change in setup.apply_to(self.app.args):
             state.log(f"[setup] {change}")
@@ -436,27 +374,13 @@ class TrainingHub:
         self._hub_preview_scene(str(result))
 
     def _hub_preview_scene(self, scene_dir: str) -> None:
-        """Put the dataset's SfM point cloud on screen before Train is pressed.
-
-        The same points training initializes from, shown as gaussians in the
-        viewer's own pipeline — so a bad reconstruction (wrong scale, split into
-        two halves, half the views dropped) is visible BEFORE paying for a run,
-        which is the whole point of doing it here rather than after Train.
-
-        Best-effort by design: a scene the loader rejects must leave the hub usable
-        (drop another folder, reconstruct again), not kill the process. Train will
-        surface the same failure with a real traceback if the user insists.
-        """
+        """Show the dataset's SfM points before Train so a bad reconstruction is visible early.
+        Best-effort: a scene the loader rejects leaves the hub usable."""
         state = self.app._viewer.state
         state.dataset_loading("Reading the COLMAP model")
         state.log("loading the SfM point cloud …")
         started = time.time()
-        # Rendering is suspended for the WHOLE thing, load included — not just the
-        # buffer upload. ``load_colmap``'s binary parsers are per-record Python
-        # loops, and the render thread holds the GIL for most of every frame (it
-        # blocks in wait_for_submit and re-evaluates every panel binding), so the
-        # same 0.6s parse takes over 40s next to a live viewer. This is the CPU
-        # sibling of the queue-race reason the training setup path suspends.
+        # Suspend during the load too: the render thread holds the GIL and starves the parsers.
         self.app.viewer.suspend_rendering()
         try:
             dataset = load_colmap(
@@ -475,14 +399,10 @@ class TrainingHub:
         finally:
             self.app.viewer.resume_rendering()
 
-        # EVERY camera here, not the eval split _attach_scene_to_viewer installs
-        # once training starts: before a run you want to fly the whole capture and
-        # see which views the reconstruction actually placed.
+        # Every camera, not the eval split, so the whole capture can be inspected before a run.
         self.app.viewer.attach_scene(
             [(entry.image_name, entry.camera) for entry in dataset.images],
             snap=True)
-        # What was detected, in numbers: the panel says "148 images · 1920x1080 ·
-        # 1.7M points" instead of leaving the user to trust the word "colmap".
         first = dataset.images[0].camera if dataset.images else None
         info = state.snapshot().dataset
         state.dataset_ready(DatasetInfo(

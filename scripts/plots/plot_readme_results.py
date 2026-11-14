@@ -1,32 +1,9 @@
 # Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-"""Regenerate the README's Results figures and tables from the benchmark runs.
+"""Regenerate the README's Results figures and tables from the benchmark runs (missing runs are left blank).
 
-Inputs:
-  * ``scripts/running/eval_sweep.py`` runs named ``readme_sh{0,3}_{fp32,bf16}``,
-    swept over ``--stbn-pixel-fraction`` on the 13 scenes, plus ``readme_conv``
-    (held-out PSNR every 100 iterations, test renders saved).
-  * ``scripts/shell/_sadgs_run/run_counterparts.sh``: the SADGS reference on the
-    same GPU (``outputs/sadgs_counterparts/sh<D>/<scene>``; indoor scenes only).
-  * The earlier SADGS SH0 runs on all nine Mip-NeRF 360 scenes
-    (``outputs/SADGS_ref_sh0_<scene>``, ``outputs/sadgs_timing/<scene>``): same
-    images and holdout, another GPU, so only their quality and splat counts are used.
-
-Outputs: figures in ``assets/``, every cell in ``docs/benchmark_results.csv``, and
-draft Markdown tables in ``outputs/readme_results/tables.md``. Missing runs are left
-blank, so this can be re-run while the benchmark is going.
-
-The grid, per SH degree and Adam precision (cells are cached, so a rerun resumes)::
-
-    python scripts/running/eval_sweep.py --axis stbn-pixel-fraction \
-        --values 1.0,0.5,0.25,0.1,0.02 --name readme_sh0_fp32 --no-plot --extra \
-        --sh-degree 0 --adam-moments fp32 --eval-every 0 --preview-every 0 \
-        --no-write-ground-truths
-
-Mip-NeRF 360 uses the default ``--downsample 4``, Tanks & Temples ``2`` and Deep
-Blending ``1`` (``--scenes`` per group). Dense fp32 cells add ``--run-report
---eval-lpips``; ``readme_conv`` adds ``--run-report --save-test-renders --eval-iters
-100 200 ... 3000``.
+Ours: grid below (dense fp32 adds --run-report --eval-lpips; readme_conv adds --run-report --save-test-renders --eval-iters 100 200 ... 3000); SADGS: run_counterparts.sh.
+    python scripts/running/eval_sweep.py --axis stbn-pixel-fraction --values 1.0,0.5,0.25,0.1,0.02 --name readme_sh0_fp32 --no-plot --extra --sh-degree 0 --adam-moments fp32 --eval-every 0 --preview-every 0 --no-write-ground-truths
 """
 from __future__ import annotations
 
@@ -64,8 +41,7 @@ CONVERGENCE_SCENES = ("bicycle", "kitchen", "train", "drjohnson")
 QUALITATIVE_SCENE = "bicycle"
 # The whole bicycle in that view, in render pixels (left, top, right, bottom).
 QUALITATIVE_BOX = (290, 145, 950, 585)
-# The scheduled opacity reset briefly hides most splats (up to -14 dB for one sample);
-# the curves skip the samples taken while it recovers.
+# The opacity reset briefly hides most splats (up to -14 dB), so curves skip samples while it recovers.
 OPACITY_RESET_ITERS = range(1200, 1400)
 
 # Okabe-Ito hues: SH0 blue, SH3 orange.
@@ -86,8 +62,6 @@ class Result:
     splats: int | None
     vram_gib: float | None
 
-
-# ---------------------------------------------------------------- loading
 
 def _read_json(path: Path) -> dict | None:
     return json.loads(path.read_text()) if path.is_file() else None
@@ -134,6 +108,7 @@ def load_sadgs_reference(scene: str) -> Result | None:
     if metrics is None:
         return None
     timing = _read_json(root / "sadgs_timing" / scene / "timing.json") or {}
+    # Measured on another GPU, so only quality and splat count are comparable.
     return Result(psnr=metrics["PSNR"], ssim=metrics["SSIM"], lpips=metrics["LPIPS"],
                   seconds=None, splats=timing.get("num_gaussians"), vram_gib=None)
 
@@ -175,15 +150,12 @@ class Grid:
 
 
 def mean_of(results: list[Result | None], field: str) -> float | None:
-    """Mean of ``field`` over every result, or None if any is missing: a mean over
-    a partial scene set would not be comparable to a complete one."""
+    """Mean of ``field`` over every result, or None if any is missing (a partial mean is not comparable)."""
     values = [None if r is None else getattr(r, field) for r in results]
     if not values or any(v is None for v in values):
         return None
     return float(np.mean(values))
 
-
-# ---------------------------------------------------------------- figures
 
 def _style(ax) -> None:
     ax.grid(axis="y", alpha=0.25, zorder=0)
@@ -200,8 +172,7 @@ def _series(grid: Grid) -> list[tuple[str, str, dict[str, Result | None]]]:
 
 def plot_scene_bars(grid: Grid, field: str, ylabel: str, title: str, fmt: str, out: Path,
                     from_zero: bool = True) -> None:
-    """Labelled per-scene bars, each dataset followed by its average: Mip-NeRF 360 on
-    the first row, the other two datasets (and the legend) on the second."""
+    """Per-scene bars plus dataset averages: Mip-NeRF 360 on the first row, the other datasets on the second."""
     series = _series(grid)
     rows = [("Mip-NeRF 360",), ("Tanks & Temples", "Deep Blending")]
     groups = []
@@ -334,8 +305,7 @@ def _ground_truth(scene: str, image_name: str, size: tuple[int, int]) -> Image.I
 
 
 def plot_qualitative(out: Path) -> None:
-    """One held-out view of QUALITATIVE_SCENE, every panel cropped to QUALITATIVE_BOX:
-    ground truth on top, then the final render at each supervised-pixel fraction."""
+    """Contact sheet of one cropped held-out view: ground truth on top, the four pixel-fraction renders 2x2 below."""
     panels = []
     for fraction in ("1.0", "0.25", "0.1", "0.02"):
         run = run_dir("readme_conv", QUALITATIVE_SCENE, fraction)
@@ -351,7 +321,6 @@ def plot_qualitative(out: Path) -> None:
     tile_w, tile_h = tiles[0][1].size
     gap, caption = 12, 40
     step_x, step_y = tile_w + gap, caption + tile_h + gap
-    # Ground truth centered on the first row, the four renders in a 2x2 grid below.
     origins = [(step_x // 2, 0)] + [(col * step_x, (row + 1) * step_y)
                                     for row in range(2) for col in range(2)]
     sheet = Image.new("RGB", (2 * tile_w + gap, 3 * step_y - gap), "white")
@@ -365,8 +334,6 @@ def plot_qualitative(out: Path) -> None:
         sheet.paste(tile, (x, y + caption))
     sheet.save(out, quality=92)
 
-
-# ---------------------------------------------------------------- tables
 
 def _cell(value: float | None, fmt: str) -> str:
     return "" if value is None else fmt.format(value)
@@ -443,7 +410,7 @@ def precision_table(grid: Grid) -> str:
 
 
 def precision_spread(grid: Grid) -> str:
-    """Largest |bf16 - fp32| PSNR gap over every paired cell of the grid."""
+    """Mean and max |bf16 - fp32| PSNR gap over every paired cell of the grid."""
     gaps = [abs(grid.ours[(sh, "bf16", s, f)].psnr - grid.ours[(sh, "fp32", s, f)].psnr)
             for sh in SH_DEGREES for s in SCENES for f in FRACTIONS
             if (sh, "bf16", s, f) in grid.ours and (sh, "fp32", s, f) in grid.ours]
@@ -471,8 +438,6 @@ def write_summary_csv(grid: Grid, out: Path) -> None:
         for scene, result in sorted(grid.reference.items()):
             writer.writerow(["sadgs", "RTX 3090", 0, "fp32", scene, DENSE, *_csv_values(result)])
 
-
-# ---------------------------------------------------------------- main
 
 def main() -> int:
     grid = Grid.load()

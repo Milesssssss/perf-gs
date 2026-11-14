@@ -1,15 +1,8 @@
 # Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-"""Static structural quality ``S`` — conventional metrics as supporting evidence.
+"""Static structural quality ``S``: conventional metrics as 5%-weight supporting evidence.
 
-Weighted only 5%: these are local code metrics (cyclomatic/cognitive complexity,
-size, fan-out, duplication, import cycles), not a measure of whether a real
-repository change is easy. They corroborate the behavioural dimensions rather
-than drive the score. Each raw metric is mapped through a linear decreasing
-curve between a "good" and a "bad" anchor, then weighted into ``S``.
-
-Python is analysed via the ``ast`` module; other source files contribute their
-size only.
+Each raw metric maps linearly from a "good" to a "bad" anchor; only Python is AST-analysed.
 """
 
 from __future__ import annotations
@@ -43,8 +36,6 @@ def percentile(values: list[float], q: float) -> float:
     return ordered[rank]
 
 
-# --- Per-function complexity ------------------------------------------------
-
 @dataclass
 class FunctionMetrics:
     name: str
@@ -54,8 +45,7 @@ class FunctionMetrics:
 
 
 class _FunctionAnalyzer:
-    """Computes cyclomatic and (approximate SonarSource) cognitive complexity
-    for a single function body."""
+    """Cyclomatic and approximate SonarSource cognitive complexity of one function body."""
 
     _BRANCHING = (ast.If, ast.For, ast.AsyncFor, ast.While)
 
@@ -151,8 +141,6 @@ def _import_targets(node: ast.AST) -> Iterable[str]:
     return []
 
 
-# --- Duplication ------------------------------------------------------------
-
 def _significant_lines(text: str) -> list[str]:
     lines: list[str] = []
     for raw in text.splitlines():
@@ -164,8 +152,7 @@ def _significant_lines(text: str) -> list[str]:
 
 
 def duplication_ratio(files: Iterable[SourceFile], window: int = 5) -> float:
-    """Fraction of ``window``-line blocks that recur verbatim somewhere in the
-    corpus. A cheap, honest proxy for copy-paste."""
+    """Fraction of ``window``-line blocks recurring verbatim in the corpus (a cheap copy-paste proxy)."""
     seen: dict[int, int] = {}
     total = 0
     for source in files:
@@ -181,10 +168,8 @@ def duplication_ratio(files: Iterable[SourceFile], window: int = 5) -> float:
     return duplicated / total
 
 
-# --- Import-cycle detection (Tarjan SCC) ------------------------------------
-
 def count_import_cycles(graph: dict[str, set[str]]) -> tuple[int, list[list[str]]]:
-    """Return (number of non-trivial strongly-connected components, the SCCs)."""
+    """Tarjan SCC: return (number of non-trivial strongly-connected components, the SCCs)."""
     index_counter = [0]
     stack: list[str] = []
     on_stack: set[str] = set()
@@ -219,8 +204,6 @@ def count_import_cycles(graph: dict[str, set[str]]) -> tuple[int, list[list[str]
             strongconnect(node)
     return len(result), result
 
-
-# --- Orchestration ----------------------------------------------------------
 
 def _module_id(rel: str) -> str:
     dotted = rel.rsplit(".", 1)[0].replace("/", ".")
@@ -263,7 +246,6 @@ def score_static_quality(root: Path, config: EscConfig) -> tuple[float, dict]:
     module_lens = [f.line_count for f in all_files]
     fan_outs = [len(m.internal_imports) for m in modules]
 
-    # Import graph for cycle detection.
     graph: dict[str, set[str]] = {mid: set() for mid in module_ids.values()}
     for source, metrics in zip(py_files, modules):
         src_id = module_ids[source.rel]

@@ -6,21 +6,13 @@
 #ifndef TRAINER_RASTER_CHECKPOINT_SLANG
 #define TRAINER_RASTER_CHECKPOINT_SLANG
 
-// Splats per bucket. Tied to a 32-lane wave: the transposed backward
-// processes one bucket as one 32-lane warp, using a single WavePrefixProduct
-// / WavePrefixSum across the bucket to reconstruct (T, C). P MUST equal the
-// wave width (32) — the backward's `local_splat = bucket*P + lane` with
-// lane in [0,32) only covers 32 splats per bucket, so P>32 would silently
-// drop the rest. Shrinking the checkpoint buffer must be done by capping
-// max_sort_pairs, NOT by raising P.
-// MUST match _RASTER_BUCKET_SIZE in src/trainer/buffers.py.
-#include "generated/execution_contract.slang"
-static const uint RASTER_BUCKET_SIZE = CONTRACT_RASTER_BUCKET_SIZE;
+// Splats per bucket P (RASTER_BUCKET_SIZE) must equal the 32-lane wave width: the backward maps
+// local_splat = bucket*P + lane, so P > 32 silently drops splats. Shrink checkpoints via max_sort_pairs.
+#include "common/execution.slang"
 
-// Pixels per tile = the per-bucket checkpoint stride (one (T,C) entry per pixel
-// per bucket). = TILE_WIDTH*TILE_HEIGHT (non-square tiles allowed). Must stay in
-// lockstep with buffers.py's raster_checkpoints allocation (max_buckets*TILE_AREA).
-static const uint CHECKPOINT_TILE_AREA = CONTRACT_TILE_AREA;
+// Per-bucket checkpoint stride, one (T, C) entry per tile pixel; must match buffers.py's
+// raster_checkpoints allocation (max_buckets * TILE_AREA).
+static const uint CHECKPOINT_TILE_AREA = TILE_AREA;
 
 // Pack (a, b) two floats into one uint as two fp16 halves (a low, b high).
 uint packHalf2(float a, float b)
@@ -47,8 +39,7 @@ void unpackCheckpoint(uint2 e, out float T, out float3 rgb)
     rgb = float3(tr.y, gb.x, gb.y);
 }
 
-// Flat index of the (global_bucket, pixel_in_tile) entry in the ragged
-// checkpoint buffer. global_bucket = bucket_offsets[tile] + local_bucket.
+// Ragged checkpoint buffer index; global_bucket = bucket_offsets[tile] + local_bucket.
 uint checkpointIndex(uint global_bucket, uint pixel_in_tile)
 {
     return global_bucket * CHECKPOINT_TILE_AREA + pixel_in_tile;

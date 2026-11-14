@@ -2,7 +2,7 @@
 
 """GPU Morton-order sort of the gaussian + adam-state buffers.
 
-Verifies that after one ``pipeline.morton_sort(world_min, world_max)``:
+Verifies that after one ``pipeline.morton.reorder(world_min, world_max)``:
 
 - Every input gaussian appears exactly once in the output (permutation,
   not lossy filter).
@@ -20,6 +20,7 @@ import pytest
 
 from _pipeline_testkit import TestPipeline
 from trainer.backend.compute.device import create_device
+from trainer.backend.densify.morton import morton_bounds
 
 
 BACKENDS = ["vulkan", "d3d12"]
@@ -90,15 +91,15 @@ def test_morton_sort_permutes_gaussians(backend: str) -> None:
     adam_raw = np.zeros((max_splats, 28), dtype=np.float32)
     # Encode slot index in adam_state.mean_m.x for later cross-check.
     adam_raw[:, 0] = np.arange(max_splats, dtype=np.float32)
-    pipeline.buffers.adam_state.copy_from_numpy(adam_raw)
+    pipeline.buffers.adam.state.copy_from_numpy(adam_raw)
 
     world_min = means.min(axis=0) - 1.0
     world_max = means.max(axis=0) + 1.0
-    pipeline.morton_sort(world_min, world_max)
+    pipeline.morton.reorder(world_min, world_max)
     pipeline.device.wait_for_idle()
 
     # Read back post-sort state.
-    raw = pipeline.buffers.gaussians.to_numpy()
+    raw = pipeline.buffers.primitive.values.to_numpy()
     floats = np.frombuffer(raw.tobytes(), dtype=np.float32).reshape(-1, 14)
     sorted_means = floats[:n, 0:3]
     sorted_sh0 = floats[:n, 11:14]
@@ -118,7 +119,7 @@ def test_morton_sort_permutes_gaussians(backend: str) -> None:
     # (3) adam_state permutation matches gaussians permutation. We stamped
     #     mean_m.x = slot_index; sh0.r = slot_index (color_logits[..., 0]).
     #     After sort, each output slot i must have mean_m.x == sh0.r.
-    adam_out = pipeline.buffers.adam_state.to_numpy()
+    adam_out = pipeline.buffers.adam.state.to_numpy()
     adam_floats = np.frombuffer(adam_out.tobytes(), dtype=np.float32).reshape(-1, 28)
     sorted_mean_m_x = adam_floats[:n, 0]
     sorted_sh0_r = sorted_sh0[:, 0]
@@ -127,7 +128,7 @@ def test_morton_sort_permutes_gaussians(backend: str) -> None:
         f"first mismatch idx {int(np.argmax(sorted_mean_m_x != sorted_sh0_r))}")
 
     # (4) num_gaussians_counter is unchanged (permutation, not resize).
-    counter = pipeline.buffers.num_gaussians_counter.to_numpy().view(np.uint32)[0]
+    counter = pipeline.buffers.primitive.active_count.to_numpy().view(np.uint32)[0]
     assert int(counter) == n, f"counter changed after Morton: {counter} != {n}"
 
 
@@ -137,7 +138,24 @@ def test_morton_sort_empty_scene_is_noop(backend: str) -> None:
     pipeline = _setup(backend, max_splats=32)
     world_min = np.array([-1.0, -1.0, -1.0], dtype=np.float32)
     world_max = np.array([1.0, 1.0, 1.0], dtype=np.float32)
-    pipeline.morton_sort(world_min, world_max)
+    pipeline.morton.reorder(world_min, world_max)
     pipeline.device.wait_for_idle()
-    counter = pipeline.buffers.num_gaussians_counter.to_numpy().view(np.uint32)[0]
+    counter = pipeline.buffers.primitive.active_count.to_numpy().view(np.uint32)[0]
     assert int(counter) == 0
+
+
+def test_morton_bounds_pad_20pct() -> None:
+    means = np.array([[0.0, 0.0, 0.0], [10.0, 10.0, 10.0]], dtype=np.float32)
+    lo, hi = morton_bounds(means)
+    # extent = 10 per axis; padded 20% -> [-2, 12].
+    assert np.allclose(lo, [-2.0, -2.0, -2.0])
+    assert np.allclose(hi, [12.0, 12.0, 12.0])
+
+
+def test_morton_bounds_degenerate_axis() -> None:
+    # All points share a coordinate on one axis -> extent floored to 1e-6.
+    means = np.array([[0.0, 1.0, 0.0], [0.0, 3.0, 0.0]], dtype=np.float32)
+    lo, hi = morton_bounds(means)
+    assert hi[0] - lo[0] > 0.0  # never collapses to a zero-width box
+    assert np.isclose(lo[1], 1.0 - 0.2 * 2.0)
+    assert np.isclose(hi[1], 3.0 + 0.2 * 2.0)

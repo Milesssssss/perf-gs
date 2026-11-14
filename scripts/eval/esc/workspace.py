@@ -1,13 +1,8 @@
 # Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-"""Ephemeral sandboxes for candidate evaluation.
+"""Ephemeral sandboxes: each run edits a fresh copy of the champion, never the real workspace.
 
-Every change-task run gets a fresh, isolated copy of the champion codebase so an
-agent can edit freely without touching the real workspace, and so ``git diff``
-inside the sandbox yields an honest patch footprint. Heavy/generated/vendored
-directories are excluded from the copy, and a throwaway git repo is initialised
-so the subprocess agent runner can measure diffs even though the copy carries no
-history from the source ``.git``.
+Each copy gets a throwaway git repo so ``git diff`` yields an honest patch footprint.
 """
 
 from __future__ import annotations
@@ -50,8 +45,7 @@ def _git_available() -> bool:
 
 
 def git_baseline(root: Path) -> None:
-    """Initialise a throwaway git repo and commit the current tree as a baseline
-    so later diffs measure exactly what an agent changed."""
+    """Commit the current tree into a throwaway git repo so later diffs measure exactly what an agent changed."""
     _git(root, "init", "-q")
     _git(root, "config", "user.email", "esc@harness.local")
     _git(root, "config", "user.name", "ESC Harness")

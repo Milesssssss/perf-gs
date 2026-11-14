@@ -23,9 +23,6 @@ dependencies = [
     "scipy",
 ]
 
-[project.scripts]
-generate-contracts = "trainer.contracts.codegen:main"
-
 [project.optional-dependencies]
 dev = [
     "pytest",

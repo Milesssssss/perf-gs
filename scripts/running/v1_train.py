@@ -1,30 +1,9 @@
 # Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-"""v1.1 training entry.
+"""v1.1 training entry: overfit all 20 Suzanne views at half-res.
 
-Overfit all 20 Suzanne views at half-res. No densification, no pruning,
-no SH. Loss = L2 in linear space.
-
-Usage:
-    .venv/Scripts/python.exe scripts/v1_train.py [--iters 3000]
-                                                 [--scene datasets/synthetic/suzanne_blender]
-                                                 [--width 960] [--height 540]
-                                                 [--run-name my_run]
-
-Output layout (per run):
-    outputs/train/<run_name>/
-      config.json                   # run parameters
-      log.txt                       # human-readable per-iter log
-      log.jsonl                     # one JSON per log line, for plotting
-      final_psnr.json               # post-training avg PSNR across all cams
-      cams/
-        cam_00/
-          gt.png                    # ground-truth target (sRGB)
-          iter_000000.png           # render at this camera before any step
-          iter_000100.png
-          ...
-        cam_01/
-          ...
+No densification, pruning or SH; loss is L2 in linear space.
+Usage: python scripts/running/v1_train.py --iters 3000 --scene datasets/synthetic/suzanne_blender
 """
 
 from __future__ import annotations
@@ -43,7 +22,8 @@ from trainer.common.color import srgb_to_linear
 from trainer.data.colmap import load_colmap, load_colmap_image
 from trainer.backend.compute.device import create_device
 from trainer.backend.export import render_to_png
-from trainer.backend.render.pipeline import AdamLRs, TrainingPipeline
+from trainer.backend.render.pipeline import TrainingPipeline
+from trainer.config.config import AdamLRs
 
 
 def _srgb_to_linear(c: np.ndarray) -> np.ndarray:
@@ -58,8 +38,7 @@ def _psnr_linear(linear_rendered: np.ndarray, linear_target: np.ndarray) -> floa
 
 
 def _save_srgb_png(rgb_linear: np.ndarray, path: Path) -> None:
-    """Save a linear-RGB float array as an 8-bit sRGB PNG, matching
-    :func:`trainer.export.render_to_png`'s display gamma."""
+    """Save linear RGB as an 8-bit PNG with the same display gamma as ``render_to_png``."""
     rgb = np.clip(rgb_linear, 0.0, 1.0)
     rgb_srgb = np.power(rgb, 1.0 / 2.2)
     rgba = np.concatenate([rgb_srgb, np.ones_like(rgb[..., :1])], axis=-1)
@@ -68,7 +47,6 @@ def _save_srgb_png(rgb_linear: np.ndarray, path: Path) -> None:
 
 
 def _render_all_cameras(pipeline: TrainingPipeline, scene, iter_idx: int, cams_dir: Path) -> None:
-    """Render every camera at current gaussian state, save to that cam's folder."""
     for cam_i, entry in enumerate(scene.images):
         pipeline.render(entry.camera)
         img = pipeline.read_output_image()[..., :3]
@@ -116,7 +94,6 @@ def main() -> None:
         "n_init_points": n_init,
     }, indent=2))
 
-    # Pre-cache target images + ground-truth PNGs per camera.
     targets_srgb = [load_colmap_image(e, scene.image_dir, args.width, args.height)
                     for e in scene.images]
     targets_linear = [_srgb_to_linear(t) for t in targets_srgb]
@@ -135,7 +112,6 @@ def main() -> None:
         initial_state=scene.initial_points,
     )
 
-    # Iter-0 preview: render all cams before any training step runs.
     _render_all_cameras(pipeline, scene, 0, cams_dir)
 
     log_txt = (run_dir / "log.txt").open("w", buffering=1)
@@ -145,7 +121,7 @@ def main() -> None:
 
     rng = np.random.default_rng(args.seed)
 
-    # LR decay on lr_mean only (PLAN.md v1 D3).
+    # LR decay on lr_mean only.
     lr_mean_init = 1.6e-4
     lr_mean_final = lr_mean_init * 1e-2
     decay = (lr_mean_final / lr_mean_init) ** (1.0 / max(args.iters, 1))
@@ -156,7 +132,7 @@ def main() -> None:
     for it in range(1, args.iters + 1):
         cam_idx = int(rng.integers(0, n_cams))
         entry = scene.images[cam_idx]
-        pipeline.set_target_image(targets_srgb[cam_idx])
+        pipeline.targets.set_image(targets_srgb[cam_idx])
 
         lrs = AdamLRs(mean=lr_mean_init * (decay ** (it - 1)))
         pipeline.train_step(entry.camera, lrs=lrs)
@@ -191,7 +167,6 @@ def main() -> None:
     log_txt.close()
     log_json.close()
 
-    # Post-training clean PSNR: render every camera once, avg.
     print("computing final per-camera PSNR...")
     per_cam: list[dict] = []
     total_mse = 0.0

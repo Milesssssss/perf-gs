@@ -1,25 +1,8 @@
 # Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-"""The panel's sections: one per concept, in lifecycle order.
+"""The panel's sections: one per concept, in lifecycle order, built once and pulling state each frame.
 
-    header            what state am I in, what just happened, what next
-    DATASET           what am I working on          (drop target when empty)
-    TRAINING          what is happening right now   (run status + controls)
-    RESULT            what exists now               (export / train again)
-    CONFIGURATION     what the NEXT run will use
-    VIEWER            camera
-    CONTROLS          keys
-    DIAGNOSTICS       the log, off by default
-
-Status, configuration and result are deliberately three sections rather than one
-mixed list: "327 it/s" and "iterations: 30,000" answer different questions, and the
-old panel put them a line apart. Every readout comes from
-:class:`~trainer.frontend.viewer.session.Snapshot`, so no section derives policy of
-its own — a button's ``enabled`` is a ``can_*`` property, never a local conjunction
-of booleans.
-
-Sections are built once and PULL from getters each frame (see the panel module), so
-the render loop contains no UI code and a state transition needs no rebuild.
+No section derives policy: a button's ``enabled`` is a ``can_*`` property, never a local conjunction of booleans.
 """
 from __future__ import annotations
 
@@ -78,10 +61,7 @@ from trainer.frontend.viewer.ui.panel import ELIDE_START, Panel, bullets
 class Actions:
     """Everything the panel can ask the orchestrator to do.
 
-    One dataclass rather than one per section: this IS the application's command
-    surface, and keeping it in a single place makes it obvious when a state has no
-    action attached to it. Every callback is one-shot — it posts intent and returns
-    immediately, so the render thread never waits on the orchestrator.
+    Callbacks only post intent and return immediately, so the render thread never waits on the orchestrator.
     """
 
     # dataset
@@ -106,8 +86,7 @@ class Actions:
     confirm: Callable[[], None] = lambda: None
     confirm_alt: Callable[[], None] = lambda: None
     cancel: Callable[[], None] = lambda: None
-    # configuration: an edit invalidates the match between the on-screen result
-    # and what the next run would produce (drives the "parameters changed" hint).
+    # configuration: an edit marks the on-screen result stale (drives the "parameters changed" hint).
     on_config_change: Callable[[], None] = lambda: None
     # diagnostics
     toggle_log: Callable[[bool], None] = lambda _v: None
@@ -126,28 +105,14 @@ class CameraControls:
     fovy: Callable[[], float]
 
 
-# --------------------------------------------------------------------------
-# header: the answer to "what state am I in" and "what did my last action do"
-# --------------------------------------------------------------------------
-
 def header(panel: Panel, view: View) -> None:
-    """Always-visible state header (deliberately NOT collapsible).
-
-    Three things, in priority order: the state badge, the one-line state, and what
-    to do next. Then the current long operation and any transient acknowledgements
-    — which is where "did my click do anything" gets answered for every action that
-    does not have a section of its own.
-    """
+    """Always-visible, non-collapsible state header: badge, state, next step, activity, acknowledgements."""
     panel.text(lambda: f"{badge(view.status_badge)}  {view.state_label}", lines=2)
     note(panel, lambda: view.next_step(), lines=3)
     activity_block(panel, lambda: view.activity)
     toasts(panel, view)
     panel.spacer()
 
-
-# --------------------------------------------------------------------------
-# DATASET
-# --------------------------------------------------------------------------
 
 def dataset_section(panel: Panel, view: View, actions: Actions) -> None:
     """What am I working on — and, when nothing is loaded, the way to begin."""
@@ -184,8 +149,7 @@ def _dataset_empty(panel: Panel, view: View, actions: Actions) -> None:
 
 
 def _dataset_working(panel: Panel, view: View) -> None:
-    """INSPECTING / LOADING / RECONSTRUCTING — the drop is acknowledged here, on the
-    frame it lands, before anything has been read from disk."""
+    """INSPECTING / LOADING / RECONSTRUCTING: acknowledges a drop on the frame it lands, before any disk read."""
     def working() -> bool:
         return view.dataset_state in (DatasetState.INSPECTING, DatasetState.LOADING,
                                       DatasetState.RECONSTRUCTING)
@@ -201,8 +165,7 @@ def _dataset_ready(panel: Panel, view: View, actions: Actions) -> None:
         return view.dataset_state == DatasetState.READY
 
     def needs_recon() -> bool:
-        # Images not yet reconstructed: the only case where the COLMAP controls
-        # mean anything, so the only case that shows them.
+        # COLMAP controls only mean anything for images not yet reconstructed.
         return (ready() and view.dataset.kind == KIND_IMAGES
                 and not view.dataset.scene_dir)
 
@@ -212,7 +175,6 @@ def _dataset_ready(panel: Panel, view: View, actions: Actions) -> None:
          visible=lambda: ready() and bool(view.dataset.summary()))
     path_row(panel, "  folder", lambda: view.dataset.path, visible=ready)
 
-    # -- images that still need a reconstruction -------------------------
     metric(panel, "  tools", lambda: str(view.tools_state), visible=needs_recon)
     panel.combo("  feature matcher", list(MATCHERS),
                 lambda: MATCHERS.index(view.matcher) if view.matcher in MATCHERS else 0,
@@ -228,7 +190,7 @@ def _dataset_ready(panel: Panel, view: View, actions: Actions) -> None:
     panel.button("Reconstruct to COLMAP", actions.reconstruct,
                  enabled=lambda: view.can_reconstruct, visible=needs_recon)
 
-    # -- a derived scene: say so, so "148 images" and the trained scene agree --
+    # Name the derived scene, so "148 images" and the trained scene agree.
     path_row(panel, "  reconstructed scene", lambda: view.dataset.scene_dir,
              visible=lambda: ready() and bool(view.dataset.scene_dir)
              and view.dataset.kind == KIND_IMAGES)
@@ -245,10 +207,6 @@ def _dataset_error(panel: Panel, view: View, actions: Actions) -> None:
         panel.button("Try another folder", actions.browse,
                      enabled=lambda: view.can_drop, visible=failed)
 
-
-# --------------------------------------------------------------------------
-# TRAINING
-# --------------------------------------------------------------------------
 
 def training_section(panel: Panel, view: View, actions: Actions) -> None:
     """What is happening right now: one coherent run status, then its controls."""
@@ -287,17 +245,11 @@ def _training_idle(panel: Panel, view: View, actions: Actions) -> None:
 
 
 def _training_live(panel: Panel, view: View, actions: Actions) -> None:
-    """INITIALIZING through FINALIZING: the complete run status in one block.
-
-    Iteration, progress, rate, elapsed, ETA, splats and quality all live here —
-    the numbers a run is judged by should not be spread across the panel.
-    """
+    """INITIALIZING through FINALIZING: the complete run status in one block."""
     def live() -> bool:
         return view.training_live
 
-    # An activity outranks the iteration counter: the eval sweep lands on the last
-    # iteration whenever --eval-every divides --iters, so the iteration bar would
-    # otherwise sit pinned at 100% for as long as the sweep and the finalize take.
+    # An activity outranks the iteration bar, which would otherwise sit at 100% through the final eval sweep.
     def stepping() -> bool:
         return live() and not view.activity.active
 
@@ -346,19 +298,13 @@ def _timing_text(view: View) -> str:
 
 
 def _model_text(view: View) -> str:
-    """What the panel knows EXACTLY: the live splat count."""
+    """What the panel knows exactly: the live splat count."""
     stats = view.stats
     return f"{format_count(stats.gaussians)} splats" if stats.gaussians else "--"
 
 
 def _sampled_cam_text(view: View) -> str:
-    """PSNR/loss for the ONE camera this iteration drew, labelled as such.
-
-    The reporter gets these by re-rendering that single camera, so they are a live
-    signal and not the run's score. Shown under their own label rather than beside
-    the splat count, where they read as a dataset-wide metric — an honest average
-    needs a sweep over every held-out view (``--evaluation``).
-    """
+    """PSNR/loss for the one camera this iteration drew: a live signal, not the run's score."""
     stats = view.stats
     parts = []
     if stats.psnr is not None:
@@ -379,13 +325,8 @@ def _appearance_text(view: View) -> str:
     return f"   {GLYPHS['bullet']} ".join(parts)
 
 
-# --------------------------------------------------------------------------
-# RESULT
-# --------------------------------------------------------------------------
-
 def result_section(panel: Panel, view: View, actions: Actions) -> None:
-    """What exists now. After a run this is the important object, so its actions
-    (export, train again, move on) live here rather than under DATASET."""
+    """What exists now; after a run its actions (export, train again, move on) live here, not under DATASET."""
     def summary() -> str:
         if view.result_state == ResultState.NONE:
             return "none"
@@ -448,10 +389,6 @@ def _result_body(panel: Panel, view: View, actions: Actions) -> None:
          visible=got)
 
 
-# --------------------------------------------------------------------------
-# CONFIGURATION
-# --------------------------------------------------------------------------
-
 # The knobs shown as the section's own summary, in the order a user reads them.
 SUMMARY_KEYS = ("iters", "densify_mode", "sh_degree", "lambda_ssim")
 
@@ -460,12 +397,9 @@ def configuration_section(panel: Panel, view: View, setup: TrainingSetup,
                           actions: Actions, *,
                           show_all: Callable[[], bool],
                           toggle_all: Callable[[bool], None]) -> None:
-    """What the NEXT run will use — never mixed with what the current one is doing.
+    """What the next run will use: the common knobs, then the full grouped table behind one toggle.
 
-    Progressive disclosure: the four knobs most runs change are always visible; the
-    full grouped table is behind one toggle. (This toolkit cannot open or close a
-    Group programmatically, so the toggle gates VISIBILITY rather than relying on a
-    default-collapsed header.)
+    The toggle gates visibility because this toolkit cannot open or close a Group programmatically.
     """
     def summary() -> str:
         return section_summary(*(_setting_text(setup, key) for key in SUMMARY_KEYS[:3]))
@@ -510,8 +444,7 @@ def _setting_widget(panel: Panel, view: View, setup: TrainingSetup,
                     setting: Setting, actions: Actions) -> None:
     """One parameter row, chosen by the setting's kind.
 
-    Note the ``s=setting`` default arguments: these lambdas outlive the loop that
-    builds them, so the loop variable must be captured by value.
+    The ``s=setting`` defaults capture by value, since these lambdas outlive the loop that builds them.
     """
     def editable() -> bool:
         return False if setting.launch_only else view.can_configure
@@ -525,8 +458,7 @@ def _setting_widget(panel: Panel, view: View, setup: TrainingSetup,
         actions.on_config_change()
 
     if setting.launch_only:
-        # Fixed when the device was created: show the value, do not pretend to
-        # offer it. Saying WHY beats a mysteriously greyed-out control.
+        # Fixed at device creation: show the value and why, rather than a greyed-out control.
         panel.text(lambda s=setting: row(f"  {s.caption}",
                                          s.display(setup.get(s.setting_name))))
         note(panel, f"launch-only: {setting.note}", lines=2)
@@ -554,31 +486,16 @@ def _setting_widget(panel: Panel, view: View, setup: TrainingSetup,
 
 
 def _caption(panel: Panel, setting: Setting) -> None:
-    """The caption row above a control (sgl's hard-coded item width pushes a real
-    widget label off the panel — see the panel module docstring)."""
+    """The caption row above a control, since sgl's fixed item width pushes real labels off the panel."""
     label = (f"  {setting.caption}   ({setting.note})" if setting.note
              else f"  {setting.caption}")
     panel.text(label, lines=2)
 
 
-# --------------------------------------------------------------------------
-# VIEWER / CONTROLS / DIAGNOSTICS
-# --------------------------------------------------------------------------
-
 def loss_section(panel: Panel, view: View, *, rows: int = 10) -> None:
-    """The loss curve, as far as the panel can honestly draw one.
+    """The reporter's rolling MSE of the sampled camera as window-scaled bars: a convergence shape, not a metric.
 
-    Two things this deliberately does NOT do. It does not sample the loss itself:
-    the only publisher is the reporter's ``report_iteration``, which re-renders the
-    camera and reads the whole image back to the host, so its cadence is
-    ``--log-every`` and adding a second one would put a GPU sync in the hot loop for
-    a decoration. And it does not pretend a zero-based axis: bars are scaled to the
-    window (see :func:`~.components.bars`), with the range printed underneath.
-
-    What is plotted is the reporter's ROLLING MSE of a re-render of the ONE camera
-    that iteration sampled — neither the L1 + SSIM objective the optimizer descends
-    nor an average over the dataset. Good for reading the SHAPE of convergence,
-    which is what a curve is for; the caption says so rather than calling it "loss".
+    Never samples the loss itself (a GPU sync in the hot loop), so its cadence is the reporter's ``--log-every``.
     """
     def values() -> list[float]:
         return [value for _step, value in view.loss_history]
@@ -637,12 +554,7 @@ def controls_section(panel: Panel, entries: Sequence[tuple[str, str]]) -> None:
 
 def diagnostics_section(panel: Panel, view: View, actions: Actions, *,
                         show: Callable[[], bool], lines: int = 12) -> None:
-    """The log — secondary by default.
-
-    It stopped being the feedback channel: every state, acknowledgement and failure
-    now surfaces in the section it belongs to. What is left here is a developer
-    trail, so it is off until asked for.
-    """
+    """The log: a developer trail, off until asked for, since user feedback surfaces in each section."""
     with panel.section("DIAGNOSTICS", label=titled(
             "DIAGNOSTICS", lambda: f"{len(view.log)} lines")):
         panel.checkbox("  show log", show, actions.toggle_log)

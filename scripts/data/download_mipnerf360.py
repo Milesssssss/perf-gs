@@ -1,31 +1,8 @@
 # Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-"""Download the Mip-NeRF 360 dataset into the repo's ``datasets/`` folder.
+"""Download the Mip-NeRF 360 dataset into the repo's ``datasets/`` folder (stdlib only).
 
-Source: https://jonbarron.info/mipnerf360/ (Barron et al., Mip-NeRF 360). The
-scenes ship as two public Google Research archives:
-
-  * ``360_v2.zip``           - the seven publicly redistributable scenes
-                               (bicycle, bonsai, counter, garden, kitchen,
-                               room, stump).
-  * ``360_extra_scenes.zip`` - the two extra scenes (flowers, treehill), which
-                               carry a redistribution caveat from the authors;
-                               see the notice printed by ``--set extra``/``all``.
-
-The archives are large (several GB). The download streams to disk with a
-progress readout and uses only the Python standard library, so it adds no pip
-dependencies.
-
-Examples
---------
-    # the seven public scenes -> datasets/360_v2/
-    python scripts/data/download_mipnerf360.py
-
-    # everything, including the extra scenes -> datasets/360_extra_scenes/
     python scripts/data/download_mipnerf360.py --set all
-
-    # custom location, keep the downloaded .zip archives
-    python scripts/data/download_mipnerf360.py --dest D:/data/mipnerf360 --keep-zip
 """
 from __future__ import annotations
 
@@ -42,27 +19,23 @@ from _dataset_fetch import (
 )
 
 # Public Google Research archives linked from https://jonbarron.info/mipnerf360/.
-# Centralized so a URL change is a one-line fix.
 DATASET_URLS: dict[str, str] = {
     "360_v2": "https://storage.googleapis.com/gresearch/refraw360/360_v2.zip",
     "360_extra_scenes": "https://storage.googleapis.com/gresearch/refraw360/360_extra_scenes.zip",
 }
 
-# Scene folders each archive is expected to yield, used for the idempotent
-# "already downloaded" skip check.
+# Scene folders each archive yields, used for the "already downloaded" skip check.
 SET_SCENES: dict[str, tuple[str, ...]] = {
     "360_v2": ("bicycle", "bonsai", "counter", "garden", "kitchen", "room", "stump"),
     "360_extra_scenes": ("flowers", "treehill"),
 }
 
-# ``--set`` value -> the archive keys it pulls.
 SET_ARCHIVES: dict[str, tuple[str, ...]] = {
     "v2": ("360_v2",),
     "extra": ("360_extra_scenes",),
     "all": ("360_v2", "360_extra_scenes"),
 }
 
-# Printed before fetching the extra scenes (mirrors datasets/360_v2/flowers.txt).
 EXTRA_SCENES_NOTICE = (
     "NOTE: the extra scenes (flowers, treehill) carry a redistribution caveat "
     "from the Mip-NeRF 360 authors. Only download them if your use complies "

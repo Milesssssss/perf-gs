@@ -29,8 +29,7 @@ void resetOpacity(
         float logit_cap = log(p / (1.0 - p));
         gaussians[i].opacity = min(gaussians[i].opacity, logit_cap);
     }
-    // Reset opacity Adam moments (match SADGS replace_tensor_to_optimizer).
-    // Re-storing the other, already-representable moments is exact.
+    // Reset opacity Adam moments as SADGS does; re-storing the already-representable others is exact.
     AdamMoments s = loadAdamMoments(adam_state[i]);
     s.opacity_m = 0.0;
     s.opacity_v = 0.0;

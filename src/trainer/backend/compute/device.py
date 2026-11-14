@@ -1,11 +1,7 @@
 # Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-"""Device creation for the trainer.
-
-Thin wrapper around ``slangpy.create_device`` that fixes the shader include
-path to the packaged or source ``shaders/`` directory and restricts backend selection to
-the two we care about in v0: Vulkan (primary) and D3D12 (cross-check).
-"""
+"""Device creation: a SlangPy device (Vulkan primary, D3D12 cross-check) with the
+packaged or source ``shaders/`` directory on the Slang include path."""
 
 from __future__ import annotations
 
@@ -34,26 +30,10 @@ def create_device(
     shader_debug_info: bool = False,
     defines: dict[str, str] | None = None,
 ) -> spy.Device:
-    """Create a SlangPy device for the requested backend.
+    """Create a SlangPy device with ``shaders/`` on the include path.
 
-    :param backend: ``"vulkan"`` or ``"d3d12"``.
-    :param enable_debug: turn on backend debug layers (Vulkan validation, D3D12
-        debug layer). Useful during development; off by default because the
-        layer-enabled path can pull in extra loader work.
-    :param shader_debug_info: compile shaders with source-level debug info so
-        Nsight Graphics can correlate counters/SASS back to Slang source lines.
-        On Vulkan there are no PDB files (a D3D concept); the equivalent is
-        ``NonSemantic.Shader.DebugInfo`` embedded in the SPIR-V, which Slang
-        emits when the ``debug_info`` compiler option is set. Optimization is
-        left at the default level so the profiled code is still the real,
-        optimized code — only source-line mapping is added. Off by default
-        because it enlarges shader binaries and is only useful under a profiler.
-    :param defines: preprocessor macros injected into every shader compile
-        (e.g. ``{"BACKWARD_PIXEL_STRIDE": "2"}``). Compile-time knobs the host
-        wants to sweep without editing shader source. Forces the
-        ``compiler_options`` path (like ``shader_debug_info``).
-    :return: a configured :class:`slangpy.Device` with ``shaders/`` on the
-        Slang include path.
+    ``shader_debug_info`` adds source-line mapping for Nsight without lowering optimization;
+    ``defines`` are preprocessor macros injected into every shader compile.
     """
     if backend not in _BACKEND_MAP:
         raise ValueError(f"unknown backend {backend!r}; expected one of {list(_BACKEND_MAP)}")
@@ -65,10 +45,7 @@ def create_device(
             include_paths=[SHADERS_DIR],
         )
 
-    # spy.create_device() doesn't expose compiler_options, so drop to the
-    # underlying spy.Device to inject debug_info / defines while replicating the
-    # convenience wrapper's include-path setup (slangpy's builtin SHADER_PATH
-    # first, then our shaders/). Hot reload stays on to match the normal path.
+    # spy.create_device() hides compiler_options; replicate its include paths and hot reload.
     compiler_options: dict = {
         "include_paths": [spy.SHADER_PATH, str(SHADERS_DIR)],
     }

@@ -2,21 +2,11 @@
 
 """Text metrics for the panel font: measure, wrap, elide.
 
-``slangpy.ui.Text`` renders with ``ImGui::TextUnformatted`` and sgl exposes
-neither ``PushTextWrapPos`` nor ``CalcTextSize``, so a long line is silently
-CLIPPED at the panel edge (the "messages break down" symptom: half a path, half
-a status line). Everything the panel shows is therefore wrapped/elided here,
-before it reaches a widget.
-
-:data:`ADVANCES` holds the per-character advance in pixels for the bundled panel
-font at its default size, measured offscreen: each glyph was rendered n and 2n
-times and the advance taken as ``(width(2n) - width(n)) / n``, which cancels the
-left/right bearings exactly. The font is PROPORTIONAL (``l`` 3.3px, ``m`` 13.0px)
-so a character count is not a usable proxy for width.
+sgl exposes neither ``PushTextWrapPos`` nor ``CalcTextSize``, so panel text is fitted here or it clips at the edge.
 """
 from __future__ import annotations
 
-# Measured advance in pixels per character (see module docstring).
+# Per-glyph advance in px of the bundled proportional panel font at its default size, measured offscreen.
 ADVANCES: dict[str, float] = {
     ' ': 3.21, '!': 3.21, '"': 4.58, '#': 8.54, '$': 7.58, '%': 10.21,
     '&': 8.21, "'": 2.50, '(': 4.04, ')': 4.08, '*': 4.75, '+': 7.08,
@@ -39,15 +29,12 @@ ADVANCES: dict[str, float] = {
     '{': 4.08, '|': 3.62, '}': 4.12, '~': 7.08,
 }
 
-# Unmeasured (non-ASCII) glyphs: assume slightly wider than the mean lowercase
-# advance (7.06) so an unusual character makes us wrap EARLY, never late.
+# Unmeasured glyphs: a bit wider than the mean lowercase advance (7.06), so we wrap early, never late.
 DEFAULT_ADVANCE = 8.0
 
 ELLIPSIS = "..."
 
-# Break points inside an unbreakable-looking token (paths, flags, numbers). A
-# break is taken AFTER these, so "datasets/360_v2/bicycle" splits at the
-# separators instead of mid-word.
+# Long tokens (paths, flags, numbers) break after these separators rather than mid-word.
 _SOFT_BREAK_AFTER = "/\\-_,;:=&"
 
 
@@ -76,7 +63,7 @@ def truncate(text: str, max_width: float) -> str:
 
 
 def elide_end(text: str, max_width: float) -> str:
-    """Drop the TAIL, ending with ``...`` — for text whose start identifies it."""
+    """Drop the tail, ending with ``...`` — for text whose start identifies it."""
     if fits(text, max_width):
         return text
     keep = truncate(text, max_width - width(ELLIPSIS))
@@ -84,8 +71,7 @@ def elide_end(text: str, max_width: float) -> str:
 
 
 def elide_start(text: str, max_width: float) -> str:
-    """Drop the HEAD, starting with ``...`` — for paths, where the leaf matters
-    (``...datasets/360_v2/bicycle``)."""
+    """Drop the head, starting with ``...`` — for paths, where the leaf matters."""
     if fits(text, max_width):
         return text
     budget = max_width - width(ELLIPSIS)
@@ -107,8 +93,7 @@ def elide_middle(text: str, max_width: float) -> str:
     if budget <= 0.0:
         return ELLIPSIS
     head, tail, used = 0, 0, 0.0
-    # Grow from both ends alternately, biasing the tail (it usually carries the
-    # distinguishing part, e.g. a filename).
+    # Grow both ends alternately, biased to the tail, which usually carries the distinguishing part.
     while head + tail < len(text):
         take_tail = tail <= head
         ch = text[len(text) - 1 - tail] if take_tail else text[head]
@@ -123,12 +108,9 @@ def elide_middle(text: str, max_width: float) -> str:
 
 
 def wrap(text: str, max_width: float, max_lines: int | None = None) -> list[str]:
-    """Word-wrap ``text`` to ``max_width`` pixels.
+    """Word-wrap ``text`` to ``max_width`` pixels: on spaces, then separators, then characters.
 
-    Wraps on spaces first, then inside over-long tokens at path/flag separators,
-    then character-by-character, so a 300px panel can never clip a line. When
-    ``max_lines`` is given the result is truncated to that many lines and the
-    last one is elided with ``...`` so nothing is dropped SILENTLY.
+    With ``max_lines``, the last kept line is elided with ``...`` so overflow is never dropped silently.
     """
     if max_width <= 0.0:
         return [""]
@@ -159,12 +141,11 @@ def _wrap_one(text: str, max_width: float) -> list[str]:
         if current:
             lines.append(current)
             current = ""
-        # The word alone must be split (long path, long command line).
         if fits(word, max_width):
             current = word
             continue
         chunks = _split_token(word, max_width)
-        lines.extend(chunks[:-1])          # full lines
+        lines.extend(chunks[:-1])
         current = chunks[-1] if chunks else ""   # remainder continues this line
     if current:
         lines.append(current)
@@ -172,8 +153,7 @@ def _wrap_one(text: str, max_width: float) -> list[str]:
 
 
 def _split_token(token: str, max_width: float) -> list[str]:
-    """Split one over-long token into <= max_width pieces, preferring a break
-    after a path/flag separator and falling back to a hard character break."""
+    """Split an over-long token into <= max_width pieces, preferring breaks after separators."""
     pieces: list[str] = []
     start, last_break, total = 0, -1, 0.0
     for i, ch in enumerate(token):

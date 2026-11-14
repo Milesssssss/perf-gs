@@ -5,10 +5,8 @@
 
 #include "../common/fixed_point.slang"
 
-// A splat whose blend weight (alpha * T summed over a view's pixels), averaged
-// over the views it appeared in during the densify window, stays under
-// min_blend_weight pixels barely changes any image. A splat the window never
-// showed is kept: no evidence either way. min_blend_weight <= 0 disables.
+// True when the per-view average blend weight (alpha * T summed over pixels) is under min_blend_weight;
+// splats never seen in the window are kept (no evidence), and min_blend_weight <= 0 disables.
 bool isUnderweight(int64_t blend_weight, uint views, float min_blend_weight)
 {
     return min_blend_weight > 0.0 && views > 0u

@@ -50,16 +50,6 @@ KERNEL_SPECS: tuple[tuple[str, str, str], ...] = (
     ("ssim_maps",            "losses/ssim_loss.slang",                         "ssimComputeMaps"),
     ("ssim_grad",            "losses/ssim_loss.slang",                         "ssimGradient"),
     ("regularization",       "losses/regularization.slang",                    "addRegularization"),
-    # losses / importance-guided sparse sampling (adaptive STBN). Runs between
-    # the dense loss and the backward; see adaptive_sampler.py for the order.
-    ("importance_reduce",    "losses/adaptive_importance.slang",               "importanceReduce"),
-    ("importance_blur_x",    "losses/adaptive_importance.slang",               "importanceBlurX"),
-    ("importance_blur_y",    "losses/adaptive_importance.slang",               "importanceBlurY"),
-    ("importance_stats",     "losses/adaptive_importance.slang",               "importanceStats"),
-    ("importance_resolve",   "losses/adaptive_importance.slang",               "importanceResolve"),
-    ("importance_histogram", "losses/adaptive_importance.slang",               "importanceHistogram"),
-    ("solve_lambda",         "losses/adaptive_importance.slang",               "solveLambda"),
-    ("apply_adaptive",       "losses/adaptive_importance.slang",               "applyAdaptive"),
     # sort
     ("radix_init_global_hist", "sort/device_radix_sort.slang",                 "initGlobalHist"),
     ("radix_prepare_dispatch", "sort/device_radix_sort.slang",                 "prepareDispatchArgs"),

@@ -1,10 +1,7 @@
 # Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-"""Cooperative run boundaries shared by training and evaluation.
-
-Work checks its caller's checkpoint between cameras, frames, and phases. Stop
-unwinds optional work without treating the already-trained model as a failure.
-"""
+"""Cooperative run boundaries: work calls its checkpoint between cameras, frames and phases,
+and Stop unwinds optional work without failing the already-trained model."""
 from __future__ import annotations
 
 from typing import Callable

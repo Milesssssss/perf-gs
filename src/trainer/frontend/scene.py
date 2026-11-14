@@ -1,0 +1,80 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
+"""The loaded scene of a run: COLMAP data, resolution, and the train/test split."""
+
+from __future__ import annotations
+
+import argparse
+from dataclasses import dataclass
+
+import numpy as np
+
+from trainer.backend.densify.morton import morton_bounds
+from trainer.data.colmap import ColmapDataset, load_colmap
+
+
+@dataclass(frozen=True)
+class SceneContext:
+    colmapScene: ColmapDataset
+    width: int
+    height: int
+    camera_count: int
+    initial_gaussian_count: int
+    extent: float
+    train_indices: list[int]
+    test_indices: list[int]
+    holdout_stride: int
+    morton_min: np.ndarray
+    morton_max: np.ndarray
+
+
+def holdout_split(camera_count: int, stride: int,
+                  holdout: bool) -> tuple[list[int], list[int]]:
+    """``(test, train)`` indices: every ``stride``-th camera is held out (3DGS
+    llffhold); without holdout every camera is both trained and evaluated."""
+    if not holdout:
+        return list(range(camera_count)), list(range(camera_count))
+    return ([i for i in range(camera_count) if i % stride == 0],
+            [i for i in range(camera_count) if i % stride != 0])
+
+
+def load_scene_context(args: argparse.Namespace) -> SceneContext:
+    colmap_scene = load_colmap(
+        args.scene,
+        width=args.width,
+        height=args.height,
+        downsample=args.downsample,
+        init_opacity=args.init_opacity,
+    )
+    camera_count = len(colmap_scene.images)
+    initial_count = colmap_scene.initial_points["means"].shape[0]
+    width, height = colmap_scene.images[0].camera.image_size
+    print(f"loaded {camera_count} cameras, {initial_count} init points, "
+          f"scene_extent={colmap_scene.scene_extent:.3f}")
+
+    stride = max(args.eval_holdout_stride, 1)
+    test_indices, train_indices = holdout_split(camera_count, stride, bool(args.eval_holdout))
+    if args.eval_holdout:
+        print(f"[eval] holdout protocol ON (stride={stride}): "
+              f"{len(train_indices)} train / {len(test_indices)} test cameras. "
+              f"Training samples train views only; PSNR reported on test views "
+              f"as mean-of-per-image dB (paper metric).")
+    else:
+        print(f"[eval] holdout protocol OFF: training on all {camera_count} cameras, "
+              f"reporting over all cameras (internal metric).")
+    morton_min, morton_max = morton_bounds(colmap_scene.initial_points["means"])
+    print(f"schedule: densify [{args.densify_from}, {args.densify_to}] every {args.densify_every}")
+
+    return SceneContext(
+        colmapScene=colmap_scene,
+        width=width,
+        height=height,
+        camera_count=camera_count,
+        initial_gaussian_count=initial_count,
+        extent=colmap_scene.scene_extent,
+        train_indices=train_indices,
+        test_indices=test_indices,
+        holdout_stride=stride,
+        morton_min=morton_min,
+        morton_max=morton_max,
+    )

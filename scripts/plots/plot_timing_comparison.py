@@ -2,12 +2,7 @@
 
 """Grouped bar chart comparing per-scene training time: Slang trainer vs SADGS.
 
-Both series are PURE training-loop wall time (iter 0 -> 3000), excluding data
-load and structure-tensor precompute, so they are apples-to-apples:
-  * Slang : outputs/train/timing_<scene>/log.jsonl -> train_complete.train_wall_s
-  * SADGS : outputs/sadgs_timing/<scene>/timing.json -> loop_wall_s
-
-Writes outputs/timing_comparison.{png,csv}.
+Both are loop-only wall time (iter 0 -> 3000, no data load or structure-tensor precompute); writes outputs/timing_comparison.{png,csv}.
 """
 from __future__ import annotations
 
@@ -71,7 +66,6 @@ def main() -> None:
     slang_avg = float(np.mean([v for v in slang if v is not None])) if any(v is not None for v in slang) else float("nan")
     sadgs_avg = float(np.mean([v for v in sadgs if v is not None])) if any(v is not None for v in sadgs) else float("nan")
 
-    # CSV
     Path("outputs").mkdir(exist_ok=True)
     with (Path("outputs") / "timing_comparison.csv").open("w", newline="") as fh:
         w = csv.writer(fh)
@@ -82,7 +76,6 @@ def main() -> None:
         w.writerow(["AVERAGE", f"{slang_avg:.1f}", f"{sadgs_avg:.1f}",
                     f"{sadgs_avg / slang_avg:.2f}x" if slang_avg else ""])
 
-    # Grouped bar chart
     x = np.arange(len(scenes))
     width = 0.4
     fig, ax = plt.subplots(figsize=(11, 6), dpi=140)

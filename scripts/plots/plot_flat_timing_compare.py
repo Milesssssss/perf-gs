@@ -2,16 +2,7 @@
 
 """Compare per-tile vs flat (warp-per-bucket) backward training time.
 
-Same-hardware A/B: for each scene we ran the pure 0->3000 training loop twice
-with identical flags, differing ONLY in the backward kernel
-(--flat-bucket-backward). Both are read from
-outputs/train/timing_<scene>_{pertile,flat}/log.jsonl (train_complete.train_wall_s).
-
-The historical outputs/slang_timings.csv (measured on the PREVIOUS machine,
-per-tile backward) is included as a reference column only — the headline
-comparison is pertile vs flat on the CURRENT hardware.
-
-Writes outputs/timing_flat_vs_baseline.{csv,png}.
+Same-GPU A/B of outputs/train/timing_<scene>_{pertile,flat} (only --flat-bucket-backward differs); slang_timings.csv is another machine, reference only.
 """
 from __future__ import annotations
 
@@ -120,7 +111,6 @@ def main() -> None:
                     f"{fl_ps_avg:.3f}" if fl_ps_avg is not None else "",
                     f"{fl_ps_avg - pt_ps_avg:+.3f}" if (pt_ps_avg is not None and fl_ps_avg is not None) else ""])
 
-    # Grouped bar chart: per-tile vs flat (current hardware).
     x = np.arange(len(scenes))
     width = 0.4
     fig, ax = plt.subplots(figsize=(11, 6), dpi=140)

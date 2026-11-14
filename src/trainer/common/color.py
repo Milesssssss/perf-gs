@@ -13,8 +13,7 @@ def srgb_to_linear(c: np.ndarray) -> np.ndarray:
 
 
 def linear_to_srgb(c: np.ndarray) -> np.ndarray:
-    """Linear → sRGB. Pure transfer function; does not clamp the input range
-    (see module docstring). Preserves the input dtype."""
+    """Linear → sRGB; does not clamp the input range and preserves its dtype."""
     low = c * 12.92
     high = 1.055 * np.power(np.clip(c, 1e-7, None), 1.0 / 2.4) - 0.055
     return np.where(c <= 0.0031308, low, high)

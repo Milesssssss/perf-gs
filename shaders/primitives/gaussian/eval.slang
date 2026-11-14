@@ -1,55 +1,35 @@
 // Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-// Evaluate a 2D gaussian at a pixel, given its screen-space mean,
-// packed (cov_00, cov_01, cov_11) covariance, and pre-sigmoid opacity
-// logit. Returns the splat's alpha there; SPLAT_KERNEL (below) picks how the
-// footprint F = opacity_compensation * exp(power) becomes alpha.
-//
-// Opacity is parameterized as an unbounded logit (like gsplat): this
-// stops runaway prune when Adam's opacity LR is applied directly to a
-// near-zero probability, and puts effective gradient magnitude for
-// opacity into the same regime as the other parameters.
-//
-// `max(det, 1e-20)` is kept as a true div-by-zero guard at the numerical
-// floor — not a "safe magnitude" clamp.
+// Alpha of a 2D gaussian at a pixel from its screen-space mean, packed (cov_00, cov_01, cov_11)
+// covariance and pre-sigmoid opacity logit; SPLAT_KERNEL picks how the footprint becomes alpha.
 
 #ifndef TRAINER_GAUSSIAN_EVAL_SLANG
 #define TRAINER_GAUSSIAN_EVAL_SLANG
 
 #include "../../common/math.slang"
 
-// Compile-time splat kernel (CLI --splat-kernel):
+// Compile-time splat kernel (CLI --splat-kernel); F = opacity_compensation * exp(power):
 //   0 gaussian:    alpha = sigmoid(l) * F.
-//   1 density:     F scales an optical depth: alpha = 1 - exp(-softplus(l) * F)
-//                  = 1 - (1 - sigmoid(l))^F. Same peak alpha and the same
-//                  translucent splats, but an opaque splat saturates over a
-//                  core that widens as l grows.
-//   2 log_density: alpha = 1 - exp(-exp(l) * F); each unit of l pushes the
-//                  opaque core's edge out by the same amount.
-//   3 opaque_core: log_density whose falloff power rises from 1 toward
-//                  SPLAT_PROFILE_POWER with sigmoid(l): translucent splats stay
-//                  gaussian, opaque ones learn into flat, hard-edged disks.
+//   1 density:     alpha = 1 - exp(-softplus(l) * F) = 1 - (1 - sigmoid(l))^F.
+//   2 log_density: alpha = 1 - exp(-exp(l) * F).
+//   3 opaque_core: log_density whose falloff power rises from 1 toward SPLAT_PROFILE_POWER with sigmoid(l).
 #ifndef SPLAT_KERNEL
 #define SPLAT_KERNEL 0
 #endif
 
-// SPLAT_PROFILE_POWER p (CLI --splat-profile-power, defined only when != 1)
-// reshapes the falloff to F = comp * exp(-m^p), m = d^T Sigma^-1 d / 2: p > 1
-// flattens the top and steepens the edge, so cores end in a short rim.
+// SPLAT_PROFILE_POWER p (defined only when != 1): F = comp * exp(-m^p), m = d^T Sigma^-1 d / 2.
 #ifdef SPLAT_PROFILE_POWER
 static const float SPLAT_PROFILE_MAX = SPLAT_PROFILE_POWER;
 #else
 static const float SPLAT_PROFILE_MAX = 1.0;
 #endif
 
-// SPLAT_PROFILE_ONSET (CLI --splat-profile-onset): opaque_core's power ramps
-// with sigmoid(l - onset), so a splat sharpens only once it is that opaque.
+// opaque_core's power ramps with sigmoid(l - SPLAT_PROFILE_ONSET): a splat sharpens only once that opaque.
 #ifndef SPLAT_PROFILE_ONSET
 #define SPLAT_PROFILE_ONSET 0.0
 #endif
 
-// exp(20) = 4.9e8 already gives an opaque core ~6 sigma wide; the cap keeps the
-// depth (and its gradient) finite however far Adam pushes the logit.
+// Keeps the optical depth and its gradient finite; exp(20) already gives a ~6 sigma opaque core.
 static const float LOG_DENSITY_MAX = 20.0;
 // Optical depth at which alpha reaches the blend loop's 1/255 floor.
 static const float BLEND_MIN_OPTICAL_DEPTH = 0.0039292783;   // -log(1 - 1/255)
@@ -75,9 +55,8 @@ float splatFalloffExponent(float m, float opacity_logit)
 #endif
 }
 
-// Mahalanobis bound q = d^T Sigma^-1 d inside which the splat can reach the
-// 1/255 blend floor. Ignores the Mip compensation (<= 1), so it is
-// conservative; <= 0 means the splat never reaches the floor.
+// Conservative Mahalanobis bound q = d^T Sigma^-1 d within which alpha can reach the 1/255 floor
+// (ignores the Mip compensation <= 1); <= 0 means the splat never reaches it.
 float splatCutoffQ(float opacity_logit)
 {
     // The value of m^p at which alpha falls to the floor.
@@ -96,7 +75,6 @@ float splatCutoffQ(float opacity_logit)
 #endif
 }
 
-//[PreferRecompute]
 [Differentiable]
 float evalGaussian2DFromCov_out(
     no_diff float2 pixel,
@@ -123,10 +101,7 @@ float evalGaussian2DFromCov_out(
     if (power > 0.0)
         return 0.0;
 
-    // Mip-Splatting: alpha = sigmoid(opacity) * (coef3d*coef2d) * exp(power).
-    // opacity_compensation is DIFFERENTIABLE: bwd_diff yields dL/dcomp (routed
-    // back to scale/cov by projection_backward) AND scales dL/dopacity,
-    // dL/dcov2d by comp — matching mip-splatting's backward. 1.0 when off.
+    // Mip-Splatting alpha; comp stays differentiable so dL/dcomp reaches scale/cov via projection_backward.
     return sigmoid(opacity_logit) * opacity_compensation * exp(power);
 }
 

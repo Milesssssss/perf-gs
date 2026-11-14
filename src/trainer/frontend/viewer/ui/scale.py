@@ -1,25 +1,8 @@
 # Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-"""Display (HiDPI) scale of the panel font.
+"""Display (HiDPI) scale of the panel font, which sgl rasterizes at the monitor's content scale.
 
-WHY THIS EXISTS: sgl builds the ImGui font atlas at the monitor's content scale,
-so on a 150% display every glyph is drawn ~1.5x wider than the advances measured
-in :mod:`.text` — but ImGui's style metrics (window padding, scrollbar) and sgl's
-hard-coded ``PushItemWidth(300)`` stay in raw pixels. Text fitted with the raw
-table therefore overflows the panel by the display scale, which is what clipped
-the messages mid-word in the real viewer while an offscreen render of the same
-panel (font atlas at 1.0x, because no window existed) looked perfect.
-
-The atlas is rasterized at an INTEGER pixel size, so the effective scale is not
-exactly the dpi ratio: measured live on a 144 dpi display, a row fitted with the
-table's advances came out 1.538x wider, and 20/13 = 1.5385 — ImGui's 13px base
-font scaled by 1.5 is 19.5px, rasterized as 20. :func:`font_scale` therefore
-rounds the atlas size UP: over-measuring wraps a line one word early, which is
-invisible, while under-measuring clips it, which is the bug being fixed.
-
-Note the process is DPI-UNAWARE until an ``sgl.Window`` exists (the query then
-returns a flat 96 dpi), so :func:`display_scale` is only meaningful once the
-viewer window has been created — call it when building the panel, not at import.
+Only meaningful once an ``sgl.Window`` exists: before that the process is DPI-unaware and reports 96 dpi.
 """
 from __future__ import annotations
 
@@ -46,19 +29,13 @@ def normalize(dpi: float) -> float:
 def font_scale(dpi_scale: float) -> float:
     """How much wider the live font is than :mod:`.text`'s measured advances.
 
-    Rounds the rasterized atlas size up to the next whole pixel (see module
-    docstring): never under-measure, because that is what clips text.
+    The atlas is rasterized at a whole-pixel size, so round up: under-measuring clips text.
     """
     return math.ceil(BASE_FONT_PX * float(dpi_scale)) / BASE_FONT_PX
 
 
 def query_dpi() -> float | None:
-    """The primary monitor's effective dpi, or None if it can't be determined.
-
-    Mirrors what GLFW (and therefore sgl's font atlas) uses: the per-monitor
-    effective dpi, falling back to the system dpi and then to the legacy device
-    caps. Any failure returns None so the caller can keep the 1.0 default.
-    """
+    """The primary monitor's effective dpi as GLFW (and so sgl's font atlas) sees it, or None if unknown."""
     if sys.platform != "win32":
         return None
     try:

@@ -1,17 +1,8 @@
 # Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-"""Experiment F2 — orchestrate the gradient-fidelity study and aggregate it.
+"""Experiment F2: launch the per-scene gradient-fidelity studies and aggregate them.
 
-The measurement lives in ``scripts/running/paper_gradient_study.py``, one process
-per scene, so it can neither share state with nor be mistaken for a training cell.
-This module launches those processes, then turns their JSON into the raw and
-summary CSVs and the figures.
-
-Priority is on RAW DATA, per the brief: every individual observation is written
-before any aggregate, so figures can be rebuilt later without touching the GPU.
-Aggregates keep scene and checkpoint separate rather than collapsing everything
-into one number — the whole question is whether the effect depends on training
-stage, and averaging over stages would answer it by construction.
+Every raw observation is written before any aggregate, so figures can be rebuilt without the GPU.
 """
 from __future__ import annotations
 
@@ -28,7 +19,7 @@ from . import tables
 
 STUDY_SCRIPT = cfg.REPO / "scripts" / "running" / "paper_gradient_study.py"
 
-# Scenes for the first pass, per the brief: not the full benchmark yet.
+# A first-pass scene subset, not the full benchmark.
 STUDY_SCENES: tuple[str, ...] = ("bicycle", "bonsai", "counter")
 STUDY_STATES: tuple[int, ...] = (500, 1500, 3000)
 STUDY_K: tuple[int, ...] = (1, 2, 4, 8, 16, 32, 64)
@@ -117,8 +108,7 @@ def run_studies(out: dict, *, python: str, scenes=STUDY_SCENES,
             "--single-masks", str(single_masks),
             "--sequences", str(sequences),
             "--probe-fraction", f"{fraction:.4f}",
-            # STBN compiled in, NVIDIA table available, GLOBAL thresholding.
-            # The study clears the density schedule so the advance is dense.
+            # STBN on with the NVIDIA table and global thresholding; the study still advances densely.
             "--stbn-pixel-fraction", f"{fraction:.4f}",
             "--stbn-source", "nvidia",
             "--stbn-select-mode", cfg.SELECT_GLOBAL,
@@ -155,16 +145,10 @@ def run_studies(out: dict, *, python: str, scenes=STUDY_SCENES,
     return status
 
 
-# int64 is what the fixed-point gradient accumulators are, and on some views a
-# single backward saturates them. A wrapped accumulator converts to a float64 of
-# magnitude ~9.2e18, which turns every ratio built from it into garbage (norm
-# ratios of 1e9 were what exposed this). Such an observation is a FAILED
-# MEASUREMENT, not a bad method, so it is flagged, excluded from every statistic,
-# and counted in the output rather than quietly averaged in.
+# Saturated int64 accumulators are failed measurements: flagged, counted and excluded from statistics.
 INT64_MAX = 9.223372036854775807e18
 OVERFLOW_NORM_LIMIT = 0.5 * INT64_MAX
-# A relative error this large cannot be a real sparse estimate at rho=0.25; it is
-# the accumulation-path symptom of the same saturation.
+# A relative error this large is the accumulation-path symptom of the same saturation.
 OVERFLOW_RATIO_LIMIT = 50.0
 
 
@@ -214,11 +198,7 @@ def _load(out: dict, scenes) -> list[dict]:
 
 def _summarize(rows: list[dict], keys: tuple[str, ...],
                metrics: tuple[str, ...]) -> list[dict]:
-    """mean / std / median / min / max / n, grouped by ``keys``.
-
-    ``n`` is reported for every row because a mean of 4 observations and a mean of
-    96 are not interchangeable, and the group sizes here differ by method.
-    """
+    """mean / std / median / min / max / n, grouped by ``keys`` (group sizes differ by method)."""
     buckets: dict[tuple, list[dict]] = {}
     for row in rows:
         buckets.setdefault(tuple(row.get(k) for k in keys), []).append(row)
@@ -242,10 +222,6 @@ def _summarize(rows: list[dict], keys: tuple[str, ...],
             })
     return out
 
-
-# ---------------------------------------------------------------------------
-# Figures
-# ---------------------------------------------------------------------------
 
 def _fig_by_method(single: list[dict], directory: Path, checkpoints) -> None:
     """Figures 1 and 2: error and cosine by method, one panel per checkpoint."""
@@ -277,8 +253,7 @@ def _fig_by_method(single: list[dict], directory: Path, checkpoints) -> None:
                        yerr=[float(np.std(values, ddof=1)) if len(values) > 1 else 0.0],
                        capsize=2, color=style["color"], label=style["label"],
                        error_kw={"linewidth": 0.7})
-                # Every observation as a dot: a mean without its spread would
-                # hide that the methods overlap.
+                # Every observation as a dot, so overlapping methods stay visible.
                 jitter = np.random.default_rng(index).normal(0, 0.06, len(values))
                 ax.scatter(np.full(len(values), index) + jitter, values, s=3,
                            color="#333333", alpha=0.35, zorder=3,
@@ -298,11 +273,7 @@ def _fig_by_method(single: list[dict], directory: Path, checkpoints) -> None:
 
 
 def _fig_by_group(single: list[dict], directory: Path) -> None:
-    """Figure 3: relative error per parameter group.
-
-    Per-group is the point: one large group can dominate the global norm, so a
-    single number would hide which parameters actually suffer.
-    """
+    """Figure 3: relative error per parameter group (one large group can dominate the global norm)."""
     plt = figs.pyplot()
     if plt is None:
         return
@@ -341,11 +312,7 @@ def _fig_by_group(single: list[dict], directory: Path) -> None:
 
 def _fig_accumulation(accum: list[dict], directory: Path, checkpoints,
                       k_values) -> None:
-    """Figures 4 and 5: cumulative error and cosine against K.
-
-    The central hypothesis lives here — at equal total sample budget, does the
-    accumulated STBN gradient approach dense faster than IID?
-    """
+    """Figures 4 and 5: cumulative error and cosine against K (does STBN approach dense faster than IID?)."""
     plt = figs.pyplot()
     if plt is None:
         return
@@ -414,10 +381,6 @@ def _fig_accumulation(accum: list[dict], directory: Path, checkpoints,
         figs.save(fig, directory, stem)
 
 
-# ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
-
 def run(out: dict, *, python: str, scenes=STUDY_SCENES, states=STUDY_STATES,
         k_values=STUDY_K, cameras: int = 8, single_masks: int = 4,
         sequences: int = 2, fraction: float = cfg.PRIMARY_FRACTION,
@@ -441,8 +404,7 @@ def run(out: dict, *, python: str, scenes=STUDY_SCENES, states=STUDY_STATES,
         for fingerprint in payload.get("state_fingerprints") or []:
             fingerprints.append({"scene": payload.get("scene"), **fingerprint})
 
-    # Raw CSVs keep EVERY observation, overflowed ones included and flagged, so
-    # the exclusion is auditable rather than invisible.
+    # Raw CSVs keep every observation, overflowed ones flagged, so the exclusion is auditable.
     single_clean, single_bad = _flag_overflow(single)
     accum_clean, accum_bad = _flag_overflow(accum)
     tables.write_csv(directory / "study_single_mask_raw.csv", single,
@@ -469,7 +431,7 @@ def run(out: dict, *, python: str, scenes=STUDY_SCENES, states=STUDY_STATES,
     tables.write_csv(directory / "study_sanity_checks.csv", sanity,
                      SANITY_COLUMNS)
 
-    # Summaries keep scene and checkpoint separate on purpose.
+    # Scene and checkpoint stay separate: the question is whether the effect depends on training stage.
     tables.write_csv(
         directory / "study_single_mask_summary.csv",
         _summarize(single, ("scene", "checkpoint", "sampling_method",
@@ -508,9 +470,7 @@ def run(out: dict, *, python: str, scenes=STUDY_SCENES, states=STUDY_STATES,
                 len(values))
 
     def accum_metric(method: str, k: int, metric: str):
-        # MEDIAN, not mean: even after excluding saturated observations the
-        # distribution over cameras is heavy-tailed, and a mean would be steered
-        # by whichever camera happened to have the noisiest single view.
+        # Median, not mean: the distribution over cameras is heavy-tailed.
         values = [v for v in (_finite(r.get(metric)) for r in accum
                               if r["sampling_method"] == method
                               and r["K"] == k

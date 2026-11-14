@@ -15,7 +15,8 @@ from typing import Any
 
 import slangpy as spy
 
-from trainer.backend.memory.buffers import SCAN_BLOCK_SIZE, ScanResources
+from trainer.backend.compute.execution import SCAN_BLOCK_SIZE
+from trainer.backend.memory.buffers import ScanResources
 from trainer.backend.compute.gpu import CommandBatch, GpuRuntime
 
 

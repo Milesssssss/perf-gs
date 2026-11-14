@@ -23,7 +23,7 @@ class ColmapImageEntry:
 class ColmapDataset:
     images: list[ColmapImageEntry]
     image_dir: Path
-    initial_points: dict[str, np.ndarray]  # matches write_gaussians signature
+    initial_points: dict[str, np.ndarray]
     scene_extent: float = 1.0              # bounding sphere radius
 
 
@@ -129,28 +129,19 @@ def _srgb_colors_to_sh0(srgb: np.ndarray) -> np.ndarray:
 
 
 def _find_sparse_dir(scene_dir: Path) -> tuple[Path | None, str]:
-    """
-    Tries in order:
-      sparse/0/text/cameras.txt
-      sparse/0/cameras.txt
-      sparse/0/cameras.bin
-    """
-    # sparse/0/text/*.txt
+    """Tries sparse/0/text/*.txt, then sparse/0/*.txt, then sparse/0/*.bin."""
     d = scene_dir / "sparse" / "0" / "text"
     if (d / "cameras.txt").exists():
         return d, "text"
-    # sparse/0/*.txt
     d = scene_dir / "sparse" / "0"
     if (d / "cameras.txt").exists():
         return d, "text"
-    # sparse/0/*.bin
     if (d / "cameras.bin").exists():
         return d, "bin"
     return None, ""
 
 
 def _parse_cameras_bin(path: Path) -> dict[int, dict]:
-    """Parse COLMAP binary cameras.bin."""
     import struct
     cameras: dict[int, dict] = {}
     with path.open("rb") as f:
@@ -158,12 +149,12 @@ def _parse_cameras_bin(path: Path) -> dict[int, dict]:
         for _ in range(num_cameras):
             cam_id, model_id, w, h = struct.unpack("<iIQQ", f.read(24))
             # Model IDs: 0=SIMPLE_PINHOLE(3), 1=PINHOLE(4), ...
-            if model_id == 0:  # SIMPLE_PINHOLE
+            if model_id == 0:
                 params = struct.unpack("<3d", f.read(24))
                 fx = fy = params[0]
                 cx, cy = params[1], params[2]
                 model = "SIMPLE_PINHOLE"
-            elif model_id == 1:  # PINHOLE
+            elif model_id == 1:
                 params = struct.unpack("<4d", f.read(32))
                 fx, fy, cx, cy = params
                 model = "PINHOLE"
@@ -180,7 +171,6 @@ def _parse_cameras_bin(path: Path) -> dict[int, dict]:
 
 
 def _parse_images_bin(path: Path) -> list[dict]:
-    """Parse COLMAP binary images.bin."""
     import struct
     entries: list[dict] = []
     with path.open("rb") as f:
@@ -240,7 +230,6 @@ def load_colmap(
 ) -> ColmapDataset:
     scene_dir = Path(scene_dir)
 
-    # Choose image directory: images_N if it exists, else images.
     if downsample > 1 and (scene_dir / f"images_{downsample}").exists():
         img_dir = scene_dir / f"images_{downsample}"
     else:
@@ -282,16 +271,7 @@ def load_colmap(
               f"resampled on load and keep their own intrinsics.")
 
     if width is None or height is None:
-        # When a pre-downsampled images_N directory is used, adopt its ACTUAL
-        # on-disk pixel size as the render target. The COLMAP downsampler
-        # rounds (e.g. 4946//4 = 1236 but the tool wrote 1237), so computing
-        # native // downsample here disagrees with the files by ~1px, which
-        # made load_image LANCZOS-resize every image on load (~110ms each,
-        # ~21s over 194 cams) for nothing. Reading the real size skips that
-        # resize entirely and keeps the projection intrinsics exact.
-        # Only when the model agrees on one size: with mixed sizes the first file
-        # on disk is an arbitrary one of them, while the camera records are exactly
-        # what each view was undistorted to.
+        # Prefer images_N's real size (the downsampler rounds); mixed-size models use the records.
         disk_w = disk_h = None
         if uniform and img_dir != scene_dir / "images":
             try:
@@ -309,10 +289,7 @@ def load_colmap(
     image_entries: list[ColmapImageEntry] = []
     for rec in imgs:
         cam = cams[rec["camera_id"]]
-        # Per-camera scale, not one global factor: a view whose native size
-        # differs from the target is stretched to it by load_colmap_image, so its
-        # focal length and principal point must follow ITS OWN size or the
-        # projection silently disagrees with the pixels by a fraction of a pixel.
+        # Per-camera scale: load_colmap_image stretches each view to the target from its own size.
         sx = width / cam["width"]
         sy = height / cam["height"]
         view = _view_matrix(
@@ -333,18 +310,9 @@ def load_colmap(
             image_id=rec["image_id"], image_name=rec["name"], camera=camera,
         ))
 
-    # Initial-points dict that matches write_gaussians signature.
     n = pts3d.shape[0]
 
-    # gsplat-style k-NN scale init: each point's initial scale is the mean
-    # distance to its k nearest neighbours. Lone points in sparse regions
-    # get larger gaussians; points in dense clusters get smaller ones.
-    # This is critical for SfM-initialized scenes where point density
-    # varies dramatically — a uniform init wastes capacity on either
-    # over-covered dense regions or leaves gaps in sparse regions.
-    #
-    # For k=3: query 4 neighbours (the closest is the point itself at
-    # distance 0), average the next 3.
+    # gsplat-style k-NN scale init: SfM point density varies too much for a uniform scale.
     from scipy.spatial import cKDTree
     k = 3
     init_scale = 1.0
@@ -360,22 +328,15 @@ def load_colmap(
 
     initial_points = {
         "means": pts3d,
-        # Isotropic, per-point kNN-derived scale.
         "log_scales": np.repeat(log_scale_per_point[:, None], 3, axis=1).astype(np.float32),
-        # Identity quaternion.
         "rot_quats": np.tile(np.array([1, 0, 0, 0], dtype=np.float32), (n, 1)),
-        # Initial opacity 0.1 (probability; converted to logit by
-        # write_gaussians before upload).
+        # Probabilities; converted to logits on upload.
         "opacities": np.full(n, init_opacity, dtype=np.float32),
-        # SH band-0 (DC) color coeff from SfM point colors (sRGB -> sh0 directly).
-        # Dict key stays "color_logits" as the buffers.write_gaussians plumbing name.
+        # SH band-0 (DC) coefficients from the sRGB point colors, despite the key's name.
         "color_logits": _srgb_colors_to_sh0(pts_colors),
     }
 
-    # Scene extent: radius of the camera bounding sphere * 1.1 (gsplat/3DGS
-    # convention — getNerfppNorm). Used by densification scale thresholds:
-    #   split/clone boundary = 0.01 * scene_extent
-    #   big-scale prune      = 0.1  * scene_extent
+    # Camera bounding-sphere radius * 1.1 (the 3DGS convention); scales densify thresholds.
     cam_positions = []
     for rec in imgs:
         R = _quat_wxyz_to_rotmat(np.array([rec["qw"], rec["qx"], rec["qy"], rec["qz"]]))
@@ -395,35 +356,19 @@ def load_colmap(
 
 def load_colmap_image(entry: ColmapImageEntry, image_dir: Path, width: int, height: int,
                load_alpha: bool = False) -> np.ndarray:
-    """Read a PNG/JPG from disk and downsample to float32.
+    """Read a PNG/JPG as float32 sRGB in [0, 1] at (width, height).
 
-    Returns sRGB values in [0, 1]. If ``load_alpha`` is True and the image
-    has an alpha channel, returns (H, W, 4); otherwise (H, W, 3).
-
-    OpenCV, not PIL: decoding a full dataset is startup's long pole (a 195-view
-    360_v2 scene is ~200 JPEG decodes before the first iteration), and
-    ``cv2.imread`` is several times faster than ``Image.open`` + ``convert`` for
-    the same pixels. Two deliberate differences from the PIL version:
-
-      * ``INTER_AREA`` replaces ``LANCZOS``. This path only ever DOWNsamples
-        (a render target is never bigger than the source), where area averaging
-        is the correct box filter and far cheaper; on the pre-downsampled
-        ``images_N`` directories the resize is skipped entirely anyway.
-      * EXIF orientation is explicitly IGNORED (``IMREAD_IGNORE_ORIENTATION``).
-        PIL's ``Image.open`` never auto-rotates, and rotating here would silently
-        disagree with the COLMAP intrinsics for the same view.
+    (H, W, 4) when ``load_alpha`` and the image has alpha, else (H, W, 3). EXIF
+    orientation is ignored: rotating would disagree with the COLMAP intrinsics.
     """
     import cv2
     path = image_dir / entry.image_name
-    # IMREAD_COLOR already collapses grayscale/alpha sources to 3-channel 8-bit
-    # BGR, which is exactly what the PIL ``convert("RGB")`` branch did.
+    # IMREAD_COLOR collapses grayscale/alpha sources to 3-channel 8-bit BGR.
     flags = cv2.IMREAD_IGNORE_ORIENTATION | (
         cv2.IMREAD_UNCHANGED if load_alpha else cv2.IMREAD_COLOR)
     array = cv2.imread(str(path), flags)
     if array is None and path.exists():
-        # cv2.imread() opens through the NARROW (ANSI) file API on Windows, so a
-        # path outside the active code page fails even though the file is right
-        # there. Decoding the bytes ourselves is the documented way around it.
+        # cv2.imread uses the ANSI file API on Windows; decode the bytes for non-code-page paths.
         array = cv2.imdecode(np.fromfile(path, dtype=np.uint8), flags)
     if array is None:
         if not path.exists():
@@ -443,23 +388,12 @@ def load_colmap_image(entry: ColmapImageEntry, image_dir: Path, width: int, heig
         raise OSError(f"unsupported {channels}-channel image: {path}")
 
     if (array.shape[1], array.shape[0]) != (width, height):
-        # INTER_AREA degenerates to nearest-neighbour when asked to ENLARGE, and
-        # an undistorted model's off-size views (a pixel or two under the common
-        # target) do enlarge. Shrinking still takes the area path.
+        # INTER_AREA degenerates to nearest-neighbour when enlarging (off-size undistorted views).
         shrinking = width <= array.shape[1] and height <= array.shape[0]
         array = cv2.resize(array, (width, height),
                            interpolation=cv2.INTER_AREA if shrinking
                            else cv2.INTER_LINEAR)
-    # Resize in the source's own integer precision (as the PIL path did), then
-    # normalize by the dtype's full scale — 8-bit sources divide by 255, and a
-    # 16-bit PNG read through IMREAD_UNCHANGED keeps its extra bits instead of
-    # being silently truncated to 8.
-    #
-    # cv2.multiply, not ``astype(np.float32) / max``: the results are bit-for-bit
-    # identical (checked across 1/3/4 channels and uint8/uint16) but numpy's cast
-    # is one single-threaded pass that HOLDS THE GIL, which is what otherwise caps
-    # the threaded dataset load in TargetDataset. The 4-element scale sidesteps
-    # OpenCV's scalar-broadcast rule (a bare number can mean "channel 0 only").
+    # cv2.multiply frees the GIL numpy's cast holds; a bare scalar would only scale channel 0.
     if array.dtype.kind in "ui":
         scale = 1.0 / float(np.iinfo(array.dtype).max)
         array = cv2.multiply(array, (scale,) * 4, dtype=cv2.CV_32F)

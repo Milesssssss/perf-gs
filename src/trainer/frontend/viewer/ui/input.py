@@ -1,13 +1,6 @@
 # Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-"""Keyboard bindings for the viewer: hold keys and press keys.
-
-``hold(key, tag)`` keeps ``tag`` in :attr:`InputMap.held` while the key is down
-(continuous actions like WASD movement); ``press(key, fn)`` fires ``fn`` once per
-key-down (discrete commands). Extending the controls is one line, and
-:meth:`describe` feeds the panel's help block from the SAME bindings, so the
-on-screen help can never drift from what the keys actually do.
-"""
+"""Keyboard bindings for the viewer: hold keys and press keys."""
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable

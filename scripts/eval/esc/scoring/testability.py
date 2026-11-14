@@ -1,12 +1,8 @@
 # Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-"""Testability and regression safety ``T``.
+"""Testability and regression safety ``T``: mutation/fault detection scaled by test hygiene.
 
-Combines regression-detecting power (mutation score, seeded-fault detection)
-with test hygiene (determinism, flakiness, runtime) and an explicit penalty for
-the failure mode where an agent *weakens tests* to force a patch through. A
-refactor that makes behaviour harder to verify must lose points even if it looks
-cleaner.
+Agents that weaken tests to force a patch through are explicitly penalised.
 """
 
 from __future__ import annotations

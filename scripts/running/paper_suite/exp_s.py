@@ -1,36 +1,8 @@
 # Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-"""Experiment S — does forcing exactly k pixels per 8x8 execution tile matter?
+"""Experiment S: does forcing exactly k pixels per 8x8 execution tile matter for trained quality?
 
-The sparse mask can be built two ways, and they are not the same sampling
-process:
-
-    global      threshold the WHOLE 128x128 slice, keep its lowest rho fraction.
-                One threshold, so the surviving points are the blue-noise point
-                set NVIDIA's spatial energy function was optimized for. Per-tile
-                counts are then free to vary (measured 16 +/- 1.4 at rho=0.25).
-
-    tile_rank   rank within each 8x8 tile and keep exactly k per tile. Uniform
-                per-tile work, but the effective threshold now varies from tile to
-                tile, which lets pixels on either side of a tile boundary both
-                survive and clump — the clustering the global ranking avoids.
-
-The execution tiling is an implementation detail of how GPU threads process
-pixels; making the sampling DISTRIBUTION respect those boundaries imposes a
-stratification constraint that was not in the asset. Measured on the mask alone
-(Experiment E), per-tile ranking costs ~30% of the blue mask's low-frequency
-suppression AND makes the white-noise control ~24% bluer than true white, so it
-compresses the blue-vs-white contrast from both ends.
-
-This experiment asks whether that spectral damage shows up in trained quality.
-It is a paired comparison on identical (scene, seed, rho) cells where the ONLY
-difference is the selection mode, so the answer is attributable. The dense
-baseline is shared — a selection mode does not apply to dense supervision.
-
-Reported for all three sparse regimes, because the prediction is not uniform: the
-white control should IMPROVE under tile_rank (it is being stratified for free),
-while the two blue conditions should DEGRADE. If that pattern holds, it is direct
-evidence that the per-tile constraint was flattering the control.
+Paired global-vs-tile_rank comparison on identical (scene, seed, rho) cells; the dense baseline is shared.
 """
 from __future__ import annotations
 
@@ -124,8 +96,7 @@ def _figure(delta_rows: list[dict], figures_dir: Path) -> None:
     panels = [("psnr_srgb", "$\\Delta$ PSNR (dB)"),
               ("lpips", "$\\Delta$ LPIPS"),
               ("train_active_s", "$\\Delta$ active train (s)")]
-    # Rotated tick labels on three panels each with its own y-label; the extra
-    # width is what lets tight_layout resolve the decorations instead of warning.
+    # Extra width so tight_layout can fit three panels with rotated, independent labels.
     fig, axes = plt.subplots(1, len(panels),
                              figsize=(figs.FIG_WIDTH_DOUBLE * 1.15, 2.6))
     regimes = list(cfg.SPARSE_REGIMES)
@@ -239,9 +210,7 @@ def run(results: ResultSet, out: dict, *, scenes=cfg.SCENES,
     _figure(delta_rows, figures_dir)
     _latex(summary_rows, delta_rows, out["latex"], fraction)
 
-    # The predicted pattern: the blue conditions should IMPROVE under a global
-    # threshold, while the white control should get WORSE (per-tile ranking was
-    # stratifying it for free). Stated as a checkable claim, not an assumption.
+    # Predicted: a global threshold helps both blue conditions and hurts the white control.
     psnr = {r["regime"]: r for r in delta_rows if r["metric"] == "psnr_srgb"}
     pattern = {
         regime: {

@@ -15,8 +15,7 @@ void clearGradBuffer(
     grad_buffer[i] = int64_t(0);
 }
 
-// Zero a plain float buffer (SH features_rest / adam_rest init). count is the
-// TOTAL scalar length, not a gaussian count.
+// `count` is the total scalar length, not a gaussian count.
 [shader("compute")]
 [numthreads(256, 1, 1)]
 void clearFloatBuffer(
@@ -29,8 +28,7 @@ void clearFloatBuffer(
     buffer[i] = 0.0;
 }
 
-// Zero a plain uint buffer (fp16-packed SH features_rest / adam_rest init). A
-// zero uint unpacks to two 0.0 fp16 halves. count is the TOTAL uint length.
+// `count` is the total uint length; a zero uint unpacks to two 0.0 fp16 halves.
 [shader("compute")]
 [numthreads(256, 1, 1)]
 void clearUintBuffer(
@@ -43,10 +41,7 @@ void clearUintBuffer(
     buffer[i] = 0u;
 }
 
-// Zero all per-gaussian Adam first/second moments device-side. Replaces a host
-// round-trip (readback-to-size + host zero upload) at set-gaussians time. Uses
-// Slang's zero-init cast so it never enumerates AdamState's fields (which are
-// generated from the contract) — a new moment field needs no edit here.
+// Zero-init cast, so new AdamState fields need no edit here.
 [shader("compute")]
 [numthreads(256, 1, 1)]
 void clearAdamState(

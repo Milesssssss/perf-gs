@@ -8,11 +8,6 @@ from dataclasses import dataclass
 
 from esc.tasks.adjacent import add_densify_mode_task, adjacent_comprehension_tasks
 from esc.tasks.base import ChangeTask, ComprehensionTask
-from esc.tasks.gaussian_fields import (
-    add_optimizable_parameter_task,
-    add_serialized_property_task,
-    gaussian_field_comprehension_tasks,
-)
 
 
 @dataclass(frozen=True)
@@ -25,14 +20,7 @@ class TaskFamily:
 
 
 def default_families() -> tuple[TaskFamily, ...]:
-    """The task suite. The anchor `gaussian_field` family carries the headline
-    metric; `densification` widens the probe to a second extension point."""
     return (
-        TaskFamily(
-            name="gaussian_field",
-            change_tasks=(add_optimizable_parameter_task(), add_serialized_property_task()),
-            comprehension_tasks=gaussian_field_comprehension_tasks(),
-        ),
         TaskFamily(
             name="densification",
             change_tasks=(add_densify_mode_task(),),

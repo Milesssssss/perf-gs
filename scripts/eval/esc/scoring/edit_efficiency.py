@@ -1,14 +1,8 @@
 # Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-"""Edit efficiency ``E`` — how cheaply successful changes are made.
+"""Edit efficiency ``E = exp(-median_t sum_k w_k r_{t,k})`` over successful runs only.
 
-    E = exp( -median_t [ w_tokens r_tokens + w_time r_time
-                          + w_retries r_retries + w_patch r_patch ] )
-
-Each ``r`` is a non-negative cost normalised against a fixed baseline version of
-the codebase, so ``E`` answers: *relative to the reference design, how much
-effort did the agent spend to succeed?* Only successful runs are measured — the
-cost of failure is already captured by ``C``.
+Each ``r`` is a non-negative cost relative to a fixed baseline; the cost of failure is already in ``C``.
 """
 
 from __future__ import annotations

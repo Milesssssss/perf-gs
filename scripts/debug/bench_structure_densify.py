@@ -2,9 +2,7 @@
 
 """Dataset-free GPU benchmark for SAD scoring, densification, and Morton sort.
 
-Each sample restores the same device-local population before timing. Uploads,
-restoration, and shader warmup are excluded; GPU timestamps separate kernels
-from arena copies, while wall time includes the production readback overhead.
+Each sample restores the same device-local population; uploads, restoration and warmup are untimed.
 """
 
 from __future__ import annotations
@@ -20,29 +18,35 @@ import numpy as np
 import slangpy as spy
 
 from trainer.backend.compute.device import SHADERS_DIR, create_device
+from trainer.backend.compute.gpu import CommandRecorder
 from trainer.backend.compute.timing import StepTimer
-from trainer.backend.densify.densify import StructureConfig, accumulate_structure_scores
+from trainer.config.config import StructureConfig
+from trainer.backend.densify.structure_densifier import StructureDensifier
 from trainer.backend.render.pipeline import TrainingPipeline
 from trainer.config.config import AppearanceConfig
 from trainer.config.config_types import DensificationMode
 from trainer.data.dataset import simple_camera
 
 
-class TimedPipeline(TrainingPipeline):
-    """Add per-dispatch timestamps locally, without changing production timing."""
+class TimedRecorder(CommandRecorder):
+    """Wraps every dispatch in its own (timed) marker group."""
 
-    def _dispatch(self, kernel, marker: str, **kwargs) -> None:
+    def dispatch(self, kernel, marker: str, **kwargs) -> None:
         with self.marker_group(marker):
-            super()._dispatch(kernel, marker, **kwargs)
+            super().dispatch(kernel, marker, **kwargs)
 
-    def _dispatch_indirect(self, kernel, marker: str, args_buf,
+    def dispatch_indirect(self, kernel, marker: str, args_buf,
                           offset: int = 0, **kwargs) -> None:
         with self.marker_group(marker):
-            super()._dispatch_indirect(kernel, marker, args_buf, offset, **kwargs)
+            super().dispatch_indirect(kernel, marker, args_buf, offset, **kwargs)
 
-    def copy_arena_back(self, arena, dst, nbytes: int, **kwargs) -> None:
-        with self.marker_group("arena_copy"):
-            super().copy_arena_back(arena, dst, nbytes, **kwargs)
+
+class TimedPipeline(TrainingPipeline):
+    """Per-dispatch timestamps for this benchmark only."""
+
+    def _build_components(self) -> None:
+        self.commands = TimedRecorder(self.runtime)
+        super()._build_components()
 
 
 class FrozenPopulation:
@@ -51,14 +55,18 @@ class FrozenPopulation:
     def __init__(self, pipeline: TrainingPipeline) -> None:
         self.pipeline = pipeline
         b = pipeline.buffers
-        names = ["gaussians", "adam_state", "num_gaussians_counter",
-                 "grad_mean_2d_mag_accum", "visibility_count_accum",
-                 "tile_count_per_gaussian", "eta_n_total", "valid_mask_buffer", "scan_total",
-                 "densify_pre_count", "action_buffer", "split_factor_x", "split_factor_y", "split_factor_z"]
+        fixed = [b.primitive.values, b.adam.state, b.primitive.active_count,
+                 b.densification.grad_mean_2d_mag, b.densification.visibility_count,
+                 b.raster.tile_count_per_gaussian, b.densification.valid_mask, b.scan.total,
+                 b.densification.pre_count, b.densification.actions,
+                 b.structure.split_factor_x, b.structure.split_factor_y,
+                 b.structure.split_factor_z]
         if b.sh_enabled:
-            names.extend(["features_rest", "adam_rest_state"])
-        resources = [partial(getattr, b, name) for name in names]
-        resources.extend(partial(_eta_component, b, name) for name in b.eta_buffers)
+            fixed.extend([b.sh.features_rest, b.sh.adam_rest])
+        # Eta swaps primary/scratch on a carry, so resolve it at restore time.
+        resources = [lambda buffer=buffer: buffer for buffer in fixed]
+        resources.append(lambda: b.eta.n_total)
+        resources.extend(partial(_eta_component, b, name) for name in b.eta.components)
         self.copies = []
         batch = pipeline.runtime.command_batch("benchmark_freeze")
         for index, resource in enumerate(resources):
@@ -82,7 +90,7 @@ class FrozenPopulation:
 
 
 def _eta_component(buffers, name):
-    return buffers.eta_buffers[name]
+    return buffers.eta.components[name]
 
 
 def initial_population(n: int) -> dict[str, np.ndarray]:
@@ -106,44 +114,44 @@ def seed_decisions(pipeline: TrainingPipeline, n: int, factor: int) -> None:
     capacity = pipeline.max_splats
     total = np.zeros(capacity, np.uint32)
     total[:n] = 10
-    b.eta_n_total.copy_from_numpy(total)
+    b.eta.n_total.copy_from_numpy(total)
     high = np.zeros(capacity, np.uint32)
     high[:n:10] = high[1:n:10] = 10
-    b.eta_buffers["n_high"].copy_from_numpy(high)
+    b.eta.components["n_high"].copy_from_numpy(high)
     low = np.zeros(capacity, np.uint32)
     low[2:n:10] = 10
-    b.eta_buffers["n_low"].copy_from_numpy(low)
+    b.eta.components["n_low"].copy_from_numpy(low)
     eta = np.zeros(capacity, np.uint32)
     eta[:n:10] = eta[1:n:10] = factor * factor * 65536
     for axis in ("max_x", "max_y", "max_z"):
-        b.eta_buffers[axis].copy_from_numpy(eta)
+        b.eta.components[axis].copy_from_numpy(eta)
     visible = np.zeros(capacity, np.uint32)
     visible[:n] = 1
-    b.visibility_count_accum.copy_from_numpy(visible)
+    b.densification.visibility_count.copy_from_numpy(visible)
     gradients = np.zeros(capacity, np.int64)
     gradients[:n] = 65536
-    b.grad_mean_2d_mag_accum.copy_from_numpy(gradients)
-    b.tile_count_per_gaussian.copy_from_numpy(visible)
+    b.densification.grad_mean_2d_mag.copy_from_numpy(gradients)
+    b.raster.tile_count_per_gaussian.copy_from_numpy(visible)
     actions = np.zeros(capacity, np.uint32)
     actions[:n:10], actions[1:n:10], actions[2:n:10] = 1, 2, 3
-    b.action_buffer.copy_from_numpy(actions)
+    b.densification.actions.copy_from_numpy(actions)
     factors = np.ones(capacity, np.uint32)
     factors[:n:10] = factor
-    for buffer in (b.split_factor_x, b.split_factor_y, b.split_factor_z):
+    for buffer in (b.structure.split_factor_x, b.structure.split_factor_y, b.structure.split_factor_z):
         buffer.copy_from_numpy(factors)
     selected = np.flatnonzero((actions == 1) | (actions == 2)).astype(np.uint32)
     parents = np.zeros(capacity, np.uint32)
     parents[:len(selected)] = selected
-    b.valid_mask_buffer.copy_from_numpy(parents)
-    b.scan_total.copy_from_numpy(np.array([len(selected)], np.uint32))
-    b.densify_pre_count.copy_from_numpy(np.array([n], np.uint32))
+    b.densification.valid_mask.copy_from_numpy(parents)
+    b.scan.total.copy_from_numpy(np.array([len(selected)], np.uint32))
+    b.densification.pre_count.copy_from_numpy(np.array([n], np.uint32))
 
 
 def sample_operation(pipeline: TimedPipeline, frozen: FrozenPopulation,
                      timer: StepTimer, operation) -> dict:
     frozen.restore()
     timer.begin_step()
-    pipeline._step_timer = timer
+    pipeline.commands.timer = timer
     started = time.perf_counter()
     try:
         operation()
@@ -151,7 +159,7 @@ def sample_operation(pipeline: TimedPipeline, frozen: FrozenPopulation,
         wall_ms = (time.perf_counter() - started) * 1000
         return {"wall_ms": wall_ms, "markers_ms": timer.read().markers_ms}
     finally:
-        pipeline._step_timer = None
+        pipeline.commands.timer = None
 
 
 def summarize(samples: list[dict]) -> dict:
@@ -170,40 +178,44 @@ def summarize(samples: list[dict]) -> dict:
 
 
 def score_view(pipeline: TrainingPipeline, structure) -> None:
-    with pipeline.recording("benchmark_score"):
-        accumulate_structure_scores(pipeline, structure, pass_idx=1)
+    with pipeline.commands.recording("benchmark_score"):
+        pipeline.structure_densifier.accumulate_scores(
+            structure, pipeline.rasterizer.camera_buffer, pass_idx=1)
 
 
 def split_only(pipeline: TrainingPipeline, cfg: StructureConfig, reference=None) -> None:
     b = pipeline.buffers
     params = dict(
-        gaussians=b.gaussians.storage, adam_state=b.adam_state.storage,
-        num_gaussians_counter=b.num_gaussians_counter.storage,
-        action=b.action_buffer.storage, split_factor_x=b.split_factor_x.storage,
-        split_factor_y=b.split_factor_y.storage, split_factor_z=b.split_factor_z.storage,
-        pre_count_buf=b.densify_pre_count.storage, ks_scale_power=cfg.ks_scale_power,
+        gaussians=b.primitive.values.storage, adam_state=b.adam.state.storage,
+        num_gaussians_counter=b.primitive.active_count.storage,
+        action=b.densification.actions.storage, split_factor_x=b.structure.split_factor_x.storage,
+        split_factor_y=b.structure.split_factor_y.storage, split_factor_z=b.structure.split_factor_z.storage,
+        pre_count_buf=b.densification.pre_count.storage, ks_scale_power=cfg.ks_scale_power,
         max_splats=pipeline.max_splats)
     if b.sh_enabled:
-        params.update(features_rest=b.features_rest.storage, adam_rest=b.adam_rest_state.storage,
+        params.update(features_rest=b.sh.features_rest.storage, adam_rest=b.sh.adam_rest.storage,
                       rest_floats=b.sh.rest_floats)
-    with pipeline.recording("split_probe"), pipeline.marker_group("split_probe"):
-        pipeline.dispatch(pipeline.k_densify_prepare_args if reference else
-                          pipeline.k_structure_split_prepare_args, "prepare_split",
-                          thread_count=[1, 1, 1],
-                          count_buf=b.densify_pre_count.storage if reference else b.scan_total.storage,
-                          dispatch_args=b.densify_dispatch_args.storage, max_splats=pipeline.max_splats)
+    def kernel(name):
+        return pipeline.kernels.kernel(*StructureDensifier.KERNELS[name])
+
+    commands = pipeline.commands
+    with commands.recording("split_probe"), commands.marker_group("split_probe"):
+        commands.dispatch(kernel("prepare_dispatch" if reference else "prepare_split"),
+                          "prepare_split", thread_count=[1, 1, 1],
+                          count_buf=b.densification.pre_count.storage if reference else b.scan.total.storage,
+                          dispatch_args=b.densification.dispatch_args.storage, max_splats=pipeline.max_splats)
         if reference is None:
-            params.update(selected_parents=b.valid_mask_buffer.storage,
-                          selected_count=b.scan_total.storage)
-        kernel = reference if reference is not None else (
-            pipeline.k_split_anisotropic_sh if b.sh_enabled else pipeline.k_split_anisotropic)
-        pipeline.dispatch_indirect(kernel, "split_kernel", b.densify_dispatch_args, **params)
+            params.update(selected_parents=b.densification.valid_mask.storage,
+                          selected_count=b.scan.total.storage)
+        split = reference if reference is not None else kernel(
+            "split_sh" if b.sh_enabled else "split")
+        commands.dispatch_indirect(split, "split_kernel", b.densification.dispatch_args, **params)
 
 
 def _canonical_children(pipeline: TrainingPipeline) -> np.ndarray:
-    count = int(pipeline.buffers.num_gaussians_counter.to_numpy()[0])
-    from trainer.contracts.codegen import GAUSSIAN_FLOAT_COUNT
-    g = pipeline.buffers.gaussians.to_numpy().view(np.float32).reshape(-1, GAUSSIAN_FLOAT_COUNT)[:count]
+    count = int(pipeline.buffers.primitive.active_count.to_numpy()[0])
+    floats = pipeline.buffers.primitive.layout.float_count
+    g = pipeline.buffers.primitive.values.to_numpy().view(np.float32).reshape(-1, floats)[:count]
     # Tail reservations are intentionally unordered on both implementations.
     return g[np.lexsort((g[:, 2], g[:, 1], g[:, 0]))].copy()
 
@@ -232,8 +244,8 @@ def run_benchmark(args: argparse.Namespace) -> dict:
     cfg = StructureConfig(dense_scale=0.01, max_split_factor=args.split_factor)
     operations = {
         "score": partial(score_view, pipeline, structure),
-        "structure": partial(pipeline.densify_structure_aware, cfg),
-        "morton": partial(pipeline.morton_sort,
+        "structure": partial(pipeline.structure_densifier.densify, cfg),
+        "morton": partial(pipeline.morton.reorder,
                           np.array([-1, -1, 2], np.float32),
                           np.array([1, 1, 4], np.float32), carry_eta=True),
     }

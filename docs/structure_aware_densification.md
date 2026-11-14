@@ -60,10 +60,11 @@ isolated small-population result does not establish the duration of a full tick.
 
 ### Full-training A/B result (2026-10-08)
 
-The full-loop launcher `scripts/debug/bench_training_densify.py` restores only the
+The full-loop launcher `scripts/debug/bench_training_densify.py` (since removed
+along with the reference densifier; see git history) restored only the
 old densification paths from source snapshots at commit `1a904565`. Both variants
-use the current renderer, optimizer, sampling code, and identical allocations;
-no working-tree files are reverted. `summarize_training_densify.py` checks the
+used the current renderer, optimizer, sampling code, and identical allocations;
+no working-tree files were reverted. `summarize_training_densify.py` checked the
 recorded settings and source fingerprints before computing the comparison.
 
 Completed four full **3,000-iteration** bicycle runs in before/after/after/before
@@ -286,6 +287,8 @@ sad_carry_eta = (mode == STRUCTURE_AWARE and not do_structure_step)
 | `shaders/densify/decide_actions_structure.slang` | votes → `action` + `split_factor_*` (Pass1/Threshold/Pass2) |
 | `shaders/densify/split_anisotropic.slang` | materialize the child grid |
 | `shaders/common/fixed_point.slang` | `FIXED_SCALE = 65536.0`, `toFixed`/`fromFixed` (`int64`) |
-| `src/trainer/backend/densify/densify.py` | host `densify_structure_aware` (P0–P10), configs, carry |
+| `src/trainer/backend/densify/structure_tensor.py` | GPU builder of the `structure_tensor` field |
+| `src/trainer/backend/densify/structure_densifier.py` | host `StructureDensifier`: score accumulation + densify pass |
+| `src/trainer/config/config.py` | `DensifyConfig`, `StructureConfig` |
 | `src/trainer/backend/memory/buffers.py` | `EtaResources` allocation + `swap()` |
 | `src/trainer/frontend/densification.py` | controller: cadence + `sad_carry_eta` rule |

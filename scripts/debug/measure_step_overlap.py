@@ -1,20 +1,9 @@
 # Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-"""Does the GPU ever wait for the host during training?
+"""Does the GPU ever wait for the host during training? Timestamps each frozen-LR train_step.
 
-Trains with the normal protocol up to ``--probe-iter``, then runs frozen-LR
-steps through the real queue limiter and stamps every train_step command buffer
-with GPU timestamps at its first and last command. Reported per step:
-  * host: wall-clock ms the CPU spends recording + submitting a train_step;
-  * wall: pipelined wall-clock ms per step (what training pays);
-  * busy: GPU ms from the first to the last command of the step;
-  * idle: GPU ms between the end of one step and the start of the next.
 idle ~ 0 means the GPU never starves; idle ~ wall - busy means it waits on the host.
-
-Usage (any v2_train.py flag is accepted):
-    .venv/Scripts/python.exe scripts/debug/measure_step_overlap.py \\
-        --scene datasets/360_v2/bicycle --probe-iter 560 --steps 100 \\
-        --densify-mode structure_aware --mip-splatting --seed 42 --sh-degree 0
+    .venv/Scripts/python.exe scripts/debug/measure_step_overlap.py --scene datasets/360_v2/bicycle --probe-iter 560 --steps 100
 """
 
 from __future__ import annotations
@@ -91,7 +80,7 @@ def run_steps(app, steps: int) -> tuple[float, float]:
     started = time.perf_counter()
     for step in range(steps):
         index = scene.train_indices[step % len(scene.train_indices)]
-        pipeline.set_target_texture(app.target_textures[index])
+        pipeline.targets.select(app.target_textures[index])
         limiter.before_submit()
         recorded = time.perf_counter()
         pipeline.train_step(scene.colmapScene.images[index].camera, lrs=FROZEN)
@@ -106,7 +95,7 @@ def main() -> int:
     app = TrainingApplication(args)
     app.prepare_training_context()
     app.build_training_loop().advance_to_capture(args.probe_iter)
-    count = int(app.pipeline.buffers.num_gaussians_counter.to_numpy().view(np.uint32)[0])
+    count = int(app.pipeline.buffers.primitive.active_count.to_numpy().view(np.uint32)[0])
 
     run_steps(app, 20)
     with stamped_train_steps(app.pipeline.device, args.steps) as read_stamps:

@@ -1,19 +1,8 @@
 # Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-"""Change locality ``L`` — does touching A force edits in B, C, D, and E?
+"""Change locality ``L``: static concept localisation (1 - H_c) blended with measured patch spread.
 
-``L`` blends two views of the same property:
-
-    static   1 - H_c averaged over the codebase's cross-cutting concepts
-             (are responsibilities localised?)
-    dynamic  the measured spread of the agents' patches (files/modules changed,
-             unrelated components touched, duplicate declarations updated,
-             parallel implementations introduced, extension points used)
-
-The static term alone is gameable (a god file scores perfectly), so it is capped
-at half the weight and the dynamic term reflects what real edits actually cost.
-When no change runs are available (static-only ``analyze``), ``L`` falls back to
-the concept-entropy term.
+The static term alone is gameable (a god file scores perfectly), so it is used alone only without change runs.
 """
 
 from __future__ import annotations

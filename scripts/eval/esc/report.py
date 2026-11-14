@@ -1,10 +1,8 @@
 # Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-"""Diagnostic dashboard rendering.
+"""Render an :class:`EscResult`, static analysis or loop history as terminal tables or JSON.
 
-ESC is one scalar, but the design insists the subscore dashboard is never
-discarded. These renderers turn an :class:`EscResult` (or a static-only analysis,
-or a loop history) into plain-text tables for the terminal and JSON for storage.
+The subscore dashboard is never discarded in favour of the single ESC scalar.
 """
 
 from __future__ import annotations

@@ -143,7 +143,7 @@ def test_ssim_grad_matches_reference(backend: str, size: tuple[int, int]):
     )
     pipeline.set_primitive_from_numpy(**_scene())
     target = _target(H, W)
-    pipeline.set_target_image(target)
+    pipeline.targets.set_image(target)
     camera = simple_camera(
         width=W, height=H, eye=(0.0, 0.0, 0.0), target=(0.0, 0.0, 1.0),
         up=(0.0, 1.0, 0.0), fovy_degrees=60.0,
@@ -153,12 +153,12 @@ def test_ssim_grad_matches_reference(backend: str, size: tuple[int, int]):
     device.wait_for_idle()
 
     # Rendered image the shader saw (sRGB in .rgb).
-    x = pipeline.buffers.output_image.to_numpy()[..., :3].astype(np.float64)
+    x = pipeline.buffers.raster.output_image.to_numpy()[..., :3].astype(np.float64)
     # target_image is rgba8_unorm: the shader reads the uint8-quantized target
     # (round/255), so the reference uses that same quantized value.
     y = np.rint(target.astype(np.float64) * 255.0).clip(0, 255) / 255.0
 
-    dL_dC_gpu = pipeline.buffers.dL_dC_texture.to_numpy()[..., :3].astype(np.float64)
+    dL_dC_gpu = pipeline.buffers.loss.image_gradient.to_numpy()[..., :3].astype(np.float64)
     dL_dC_ref = _ssim_grad_reference(x, y)
 
     # SSIM stats blow up near flat regions (D -> C2), so use a rel tolerance

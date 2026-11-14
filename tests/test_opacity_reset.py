@@ -8,7 +8,6 @@ import numpy as np
 import pytest
 
 from _pipeline_testkit import TestPipeline
-from trainer.contracts.codegen import gaussian_numpy_dtype
 from trainer.backend.compute.device import create_device
 
 
@@ -32,8 +31,8 @@ def test_opacity_cap_clamps_only_values_above_cap(backend: str) -> None:
     cap = 0.05
     pipeline.cap_opacity(cap)
     pipeline.runtime.wait_for_idle()
-    raw = pipeline.buffers.gaussians.to_numpy()
-    gaussians = np.frombuffer(raw.tobytes(), dtype=gaussian_numpy_dtype())[:3]
+    raw = pipeline.buffers.primitive.values.to_numpy()
+    gaussians = np.frombuffer(raw.tobytes(), dtype=pipeline.buffers.primitive.layout.dtype)[:3]
 
     def logit(values):
         clipped = np.clip(values, 1e-5, 1.0 - 1e-5)

@@ -16,15 +16,15 @@ from trainer.backend.densify.simple_densifier import SimpleDensifier
 ROOT = Path(__file__).resolve().parent.parent
 
 
-def test_densify_module_does_not_reach_into_pipeline_privates() -> None:
-    path = ROOT / "src/trainer/backend/densify/densify.py"
-    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+def test_densify_modules_do_not_reach_into_pipeline_privates() -> None:
     private_uses = []
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Attribute) or not node.attr.startswith("_"):
-            continue
-        if isinstance(node.value, ast.Name) and node.value.id == "pipeline":
-            private_uses.append((node.lineno, node.attr))
+    for path in (ROOT / "src/trainer/backend/densify").glob("*.py"):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Attribute) or not node.attr.startswith("_"):
+                continue
+            if isinstance(node.value, ast.Name) and node.value.id == "pipeline":
+                private_uses.append((path.name, node.lineno, node.attr))
     assert private_uses == []
 
 
@@ -113,10 +113,10 @@ def test_backend_never_imports_frontend() -> None:
 
 
 def test_shared_layers_do_not_import_frontend_or_backend() -> None:
-    """contracts/config/data/common are the shared kernel: they must not reach
+    """config/data/common are the shared kernel: they must not reach
     up into either the frontend or the backend."""
     offenders = []
-    for layer in ("contracts", "config", "data", "common"):
+    for layer in ("config", "data", "common"):
         for path in (ROOT / "src" / "trainer" / layer).rglob("*.py"):
             for lineno, module in _imported_modules(path):
                 if module.startswith(("trainer.frontend", "trainer.backend")):

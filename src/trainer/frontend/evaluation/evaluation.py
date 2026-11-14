@@ -1,19 +1,7 @@
 # Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-"""Evaluation renders and metrics for the training frontend.
-
-Groups the "measure the model" responsibility into one place: full-scene camera
-dumps and the held-out TEST-split sRGB PSNR used by the ``--psnr-curve`` capture.
-
-These were previously a module-level helper plus a closure inside ``app.main()``
-that implicitly captured ``pipeline``/``scene``/``test_indices``/``targets_srgb``
-from the enclosing scope; here they take those as explicit parameters so the
-evaluation path is self-contained and testable in isolation.
-"""
+"""Evaluation renders and metrics: full-scene camera dumps, held-out sRGB PSNR, eval sweeps."""
 from __future__ import annotations
-
-import numpy as np
-import random
 
 import json
 import time
@@ -29,35 +17,6 @@ from trainer.frontend.run_control import Checkpoint, uninterrupted
 
 if TYPE_CHECKING:
     from trainer.backend.render.pipeline import TrainingPipeline
-
-
-class CameraSampler:
-
-    def __init__(self, mode: str, train_indices, test_indices, seed: int,
-                 rng: np.random.Generator) -> None:
-        self.mode = mode
-        self._rng = rng
-        self._train_arr = np.asarray(train_indices, dtype=np.int64)
-        if mode == "sadgs":
-            self._py = random.Random(seed)
-            train = list(train_indices)   # name-sorted ascending, minus holdout
-            test = list(test_indices)
-            self._py.shuffle(train)       # Scene load-time shuffle (train)
-            self._py.shuffle(test)        # Scene load-time shuffle (test) — consumes stream
-            self._base = list(train)      # getTrainCameras() order
-            self._stack = list(self._base)
-            print(f"[sample-mode=sadgs] replicating SADGS random-shuffle sampling "
-                  f"(seed={seed}, {len(self._base)} train cams, batch_size=1, "
-                  f"first epoch in load-shuffled order, reshuffle on refill)")
-
-    def next(self) -> int:
-        """Return the train-camera index to optimize this iteration."""
-        if self.mode == "sadgs":
-            if not self._stack:
-                self._stack.extend(self._base)
-                self._py.shuffle(self._stack)
-            return self._stack.pop(0)
-        return int(self._train_arr[self._rng.integers(0, self._train_arr.shape[0])])
 
 
 def render_all_cameras(pipeline: "TrainingPipeline", scene, iter_idx: int,
@@ -82,7 +41,7 @@ def eval_test_psnr_srgb(pipeline: "TrainingPipeline", scene,
                         checkpoint: Checkpoint = uninterrupted) -> tuple[float, int]:
     checkpoint()
     pipeline.runtime.wait_for_idle()
-    n_g = int(pipeline.buffers.num_gaussians_counter.to_numpy().view(np.uint32)[0])
+    n_g = pipeline.primitives.count()
     frames = []
     for cam_i in test_indices:
         checkpoint()
@@ -115,7 +74,7 @@ def run_eval_sweep(
     eval_t0 = time.time()
 
     pipeline.runtime.wait_for_idle()
-    eval_n_g = int(pipeline.buffers.num_gaussians_counter.to_numpy().view(np.uint32)[0])
+    eval_n_g = pipeline.primitives.count()
 
     psnr_srgb_frames = []
     psnr_lin_frames = []
@@ -172,8 +131,7 @@ def run_eval_sweep(
         "ssim_srgb": ssim_srgb,
         "psnr_linear": psnr_lin,
         "psnr_srgb_masked": psnr_srgb_mask,
-        # null rather than 0.0 when unavailable: 0.0 is a PERFECT LPIPS score and
-        # would read as the best possible result instead of a missing one.
+        # null when unavailable: 0.0 would read as a perfect LPIPS score.
         "lpips": (float(np.mean(lpips_frames)) if lpips_frames else None),
         "n_lpips_views": len(lpips_frames),
         "eval_dt_s": eval_dt,

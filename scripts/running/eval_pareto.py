@@ -2,20 +2,8 @@
 
 """Speed/quality frontier over the knobs that trade PSNR for training time.
 
-Trains every named configuration on each scene and charts held-out PSNR against
-train time, marking the configurations no other one beats on both axes. The
-knobs: sparse STBN supervision, bf16 optimizer state, blend-weight pruning and
-the opaque-core splat kernel, alone and combined.
-
-    .venv/Scripts/python.exe scripts/running/eval_pareto.py
-    .venv/Scripts/python.exe scripts/running/eval_pareto.py --configs baseline,bf16 --scenes room
-
-Every run is a fresh trainer subprocess, cached per run like eval_sweep.py, so an
-interrupted sweep resumes for free. RUN IT ON AN IDLE GPU: the time axis is
-wall-clock (see eval_sweep.py).
-
-Outputs, under ``outputs/eval_sweep/<name>/``: results.json (one record per run),
-pareto_summary.csv and pareto.png (written by scripts/plots/plot_pareto.py).
+Cached per-run results go to ``outputs/eval_sweep/<name>/``; run on an idle GPU since the time axis is wall-clock.
+Usage: python scripts/running/eval_pareto.py --configs baseline,bf16 --scenes room
 """
 from __future__ import annotations
 

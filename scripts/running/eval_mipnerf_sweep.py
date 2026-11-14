@@ -2,20 +2,8 @@
 
 """Train every Mip-NeRF 360 scene at SH degree 0 and 3, collect PSNR + wall time.
 
-Runs the standard eval config (quarter res, 3000 iters, structure-aware densify,
-mip-splatting, held-out paper protocol) for each scene under both --sh-degree 0
-and --sh-degree 3, using --final-test-psnr so each run writes a lightweight
-test_psnr.json (held-out sRGB PSNR + n_gaussians + timed train_wall_s, eval
-excluded). Aggregates all runs into outputs/eval_sweep/results.json, which
-plot_eval_sweep.py turns into PSNR + timing bar charts.
-
-Each run is a fresh subprocess (isolated GPU device / clean densification state),
-matching how the README numbers were produced. Idempotent: a scene+sh whose
-test_psnr.json already exists is skipped unless --force.
-
-Usage:
-    .venv/Scripts/python.exe scripts/running/eval_mipnerf_sweep.py
-    .venv/Scripts/python.exe scripts/running/eval_mipnerf_sweep.py --scenes bicycle,garden --sh 0,3
+Each run is a fresh subprocess aggregated into outputs/eval_sweep/results.json; cached runs are skipped unless --force.
+Usage: python scripts/running/eval_mipnerf_sweep.py --scenes bicycle,garden --sh 0,3
 """
 from __future__ import annotations
 
@@ -26,8 +14,7 @@ import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent.parent
-# Public Mip-NeRF 360 "released 7" (flowers/treehill are the extra scenes and are
-# not present locally). Canonical outdoor-then-indoor order.
+# Public Mip-NeRF 360 "released 7" (flowers/treehill are extra), outdoor-then-indoor order.
 DEFAULT_SCENES = ["bicycle", "garden", "stump", "bonsai", "counter", "kitchen", "room"]
 OUT_ROOT = REPO / "outputs" / "eval_sweep"
 

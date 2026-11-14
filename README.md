@@ -29,13 +29,13 @@ By writing the kernels in Slang and having the whole system driven by slangpy, w
 
 **Modular codebase.** Most 3DGS trainer usually live on a performance-readability spectrum, we aimed to have both, while also having flexible portability.
 
-**Built to be extended.** Primitives, losses, and densification strategies are separate shader units behind small interfaces, so adding a new primitive kind or a new loss should be a rather local change rather than surgery across the whole pipeline.
+**Built to be extended.** Primitives, losses, and densification strategies are separate shader units behind small interfaces.
 
 
 ## Features
 
-- Full training from COLMAP [[3]](#ref-colmap) scenes: tile-binned forward rasterization, a hand-written backward pass, Adam [[4]](#ref-adam), and a held-out evaluation split.
-- Densification you choose per run: a gradient (AbsGS-style [[5]](#ref-absgs)) path, and a structure-aware (SAD-GS-style [[6]](#ref-sadgs)) path that grid-splits gaussians which under-resolve local image structure.
+- Full training from COLMAP [[3]](#ref-colmap) scenes: tile-binned forward rasterization, optimized per-splat backward pass, Adam [[4]](#ref-adam), and a held-out evaluation split.
+- Densifications: a gradient (AbsGS-style [[5]](#ref-absgs)) path, and a structure-aware (SAD-GS-style [[6]](#ref-sadgs)) path that grid-splits gaussians which under-resolve local image structure.
 - Mip-Splatting [[7]](#ref-mipsplatting) 3D smoothing filter for scale-correct, anti-aliased rendering.
 - Deterministic Nsight GPU Trace capture hooks for profiling the real, optimized kernels (this is Nvidia specific, but we want to allow integrating profiling also on AMD Radeon GPU Profiler (RGP)).
 
@@ -46,7 +46,7 @@ By writing the kernels in Slang and having the whole system driven by slangpy, w
 
 ## Results
 
-**On an RTX 4080, a Mip-NeRF 360 scene trains in 25.2 seconds on average at SH0 (26.50 dB) and 36.0 seconds at SH3 (26.82 dB),** supervising every pixel; with 50% sparse supervision it takes 23.5 and 34.5 seconds (26.42 and 26.73 dB). The indoor scenes take 13.7–18.8 seconds at SH0. Stacking pruning, bf16 optimizer state and 50% sparse supervision trains bicycle in 22.9 seconds and room in 11.6 for under 0.1 dB of PSNR, and the fastest combination we tried in 15.7 and 8.5 seconds for 0.4 and 1.0 dB (see [Speed/quality trade-offs](#speedquality-trade-offs)).
+**On an RTX 4080, a Mip-NeRF 360 scene trains in 25.2 seconds on average at SH0 (26.50 dB) and 36.0 seconds at SH3 (26.82 dB),** supervising every pixel; with 50% sparse supervision it takes 23.5 and 34.5 seconds (26.42 and 26.73 dB). The indoor scenes take 13.7–18.8 seconds at SH0. Stacking pruning, bf16 optimizer state and 50% sparse supervision trains bicycle in 22.9 seconds and room in 11.6 trading only ~0.1 dB of PSNR, and the fastest combination we tried does so in 15.7 and 8.5 seconds for respectively 0.4 and 1.0 dB (see [Speed/quality trade-offs](#speedquality-trade-offs)).
 
 All runs: 3000 iterations, structure-aware densification with Mip-Splatting, every 8th view held out, one run each. Mip-NeRF 360 trains at quarter resolution, Tanks & Temples [[8]](#ref-tandt) at 980×545 and Deep Blending [[9]](#ref-deepblending) at native resolution. Times cover the training loop only. Every configuration is in [docs/benchmark_results.csv](docs/benchmark_results.csv), and [scripts/plots/plot_readme_results.py](scripts/plots/plot_readme_results.py) regenerates the figures.
 
@@ -56,12 +56,12 @@ Averages over each dataset's scenes, every pixel supervised. PSNR, SSIM [[10]](#
 
 | Dataset | SH | PSNR | SSIM | LPIPS | Time (seconds) |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| Mip-NeRF 360 | SH0 | 26.50 | 0.809 | 0.216 | 25.2 |
-| Mip-NeRF 360 | SH3 | 26.82 | 0.817 | 0.207 | 36.0 |
-| Tanks & Temples | SH0 | 22.59 | 0.839 | 0.222 | 26.5 |
-| Tanks & Temples | SH3 | 22.87 | 0.847 | 0.209 | 38.4 |
-| Deep Blending | SH0 | 29.13 | 0.903 | 0.328 | 22.7 |
-| Deep Blending | SH3 | 29.40 | 0.905 | 0.321 | 30.8 |
+| Mip-NeRF 360 | SH0 | 26.50 | 0.809 | 0.216 | 25.2 s |
+| Mip-NeRF 360 | SH3 | 26.82 | 0.817 | 0.207 | 36.0 s |
+| Tanks & Temples | SH0 | 22.59 | 0.839 | 0.222 | 26.5 s |
+| Tanks & Temples | SH3 | 22.87 | 0.847 | 0.209 | 38.4 s |
+| Deep Blending | SH0 | 29.13 | 0.903 | 0.328 | 22.7 s |
+| Deep Blending | SH3 | 29.40 | 0.905 | 0.321 | 30.8 s |
 
 SH3 adds about 0.3 dB on every dataset (0.27–0.32 dB) for 36–45% more training time.
 
@@ -77,12 +77,12 @@ Averages per dataset, every pixel supervised:
 
 | Dataset | SH | Time (seconds) | Splats (millions) | VRAM (GiB) |
 | --- | ---: | ---: | ---: | ---: |
-| Mip-NeRF 360 | SH0 | 25.2 | 3.82 | 5.4 |
-| Mip-NeRF 360 | SH3 | 36.0 | 3.84 | 9.0 |
-| Tanks & Temples | SH0 | 26.5 | 3.14 | 5.4 |
-| Tanks & Temples | SH3 | 38.4 | 3.15 | 8.9 |
-| Deep Blending | SH0 | 22.7 | 4.76 | 5.5 |
-| Deep Blending | SH3 | 30.8 | 4.80 | 9.0 |
+| Mip-NeRF 360 | SH0 | 25.2 s | 3.82 | 5.4 |
+| Mip-NeRF 360 | SH3 | 36.0 s | 3.84 | 9.0 |
+| Tanks & Temples | SH0 | 26.5 s | 3.14 | 5.4 |
+| Tanks & Temples | SH3 | 38.4 s | 3.15 | 8.9 |
+| Deep Blending | SH0 | 22.7 s | 4.76 | 5.5 |
+| Deep Blending | SH3 | 30.8 s | 4.80 | 9.0 |
 
 <p align="center">
   <img src="assets/vram.png" alt="GPU memory while training with fp32 and bf16 optimizer state, SH0 and SH3" width="60%">
@@ -92,27 +92,27 @@ Memory is reserved up front for up to 7 million splats (`--max-splats`), so it i
 
 ### Sparse supervision (STBN)
 
-`--stbn-pixel-fraction` supervises only a spatiotemporal blue-noise (STBN [[12]](#ref-stbn)) subset of the pixels at each step. At 50% it costs under 0.1 dB and trains 2–7% faster, at 25% it costs 0.1–0.2 dB and trains 6–14% faster; at 2% quality drops sharply.
+`--stbn-pixel-fraction` supervises only a spatiotemporal blue-noise (STBN [[12]](#ref-stbn)) subset of the pixels at each step. At 50% it costs under 0.1 dB and trains 2-7% faster, at 25% it costs 0.1-0.2 dB and trains 6-14% faster; at 2% quality drops sharply.
 
 SH0:
 
 | Pixels / step | M360 PSNR | M360 time (seconds) | T&T PSNR | T&T time (seconds) | DB PSNR | DB time (seconds) |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| 100% | 26.50 | 25.2 | 22.59 | 26.5 | 29.13 | 22.7 |
-| 50% | 26.42 | 23.5 | 22.52 | 25.4 | 29.24 | 21.4 |
-| 25% | 26.27 | 21.6 | 22.42 | 24.0 | 29.02 | 19.6 |
-| 10% | 25.85 | 20.7 | 22.13 | 24.1 | 29.03 | 18.6 |
-| 2% | 23.39 | 22.6 | 19.82 | 27.5 | 26.96 | 18.0 |
+| 100% | 26.50 | 25.2 s | 22.59 | 26.5 s | 29.13 | 22.7 s |
+| 50% | 26.42 | 23.5 s| 22.52 | 25.4 s | 29.24 | 21.4 s |
+| 25% | 26.27 | 21.6 s | 22.42 | 24.0 s | 29.02 | 19.6 s |
+| 10% | 25.85 | 20.7 s | 22.13 | 24.1 s | 29.03 | 18.6 s |
+| 2% | 23.39 | 22.6 s | 19.82 | 27.5 s | 26.96 | 18.0 s |
 
 SH3:
 
 | Pixels / step | M360 PSNR | M360 time (seconds) | T&T PSNR | T&T time (seconds) | DB PSNR | DB time (seconds) |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| 100% | 26.82 | 36.0 | 22.87 | 38.4 | 29.40 | 30.8 |
-| 50% | 26.73 | 34.5 | 22.79 | 37.5 | 29.38 | 29.1 |
-| 25% | 26.64 | 32.1 | 22.68 | 36.2 | 29.22 | 26.9 |
-| 10% | 26.22 | 31.3 | 22.45 | 36.7 | 29.36 | 26.4 |
-| 2% | 23.65 | 35.5 | 19.97 | 43.6 | 27.40 | 26.1 |
+| 100% | 26.82 | 36.0 s | 22.87 | 38.4 s | 29.40 | 30.8 s |
+| 50% | 26.73 | 34.5 s | 22.79 | 37.5 s | 29.38 | 29.1 s |
+| 25% | 26.64 | 32.1 s | 22.68 | 36.2 s | 29.22 | 26.9 s |
+| 10% | 26.22 | 31.3 s | 22.45 | 36.7 s | 29.36 | 26.4 s |
+| 2% | 23.65 | 35.5 s | 19.97 | 43.6 s | 27.40 | 26.1 s |
 
 <p align="center">
   <img src="assets/stbn_convergence.png" alt="Held-out PSNR against training time at 100, 25, 10 and 2 percent of pixels" width="95%">

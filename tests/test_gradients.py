@@ -114,7 +114,7 @@ def _analytic_grads(backend: str) -> tuple[np.ndarray, dict[str, np.ndarray], fl
     scene = _scene()
     pipeline.set_primitive_from_numpy(**scene)
     target = _target(H, W)
-    pipeline.set_target_image(target)
+    pipeline.targets.set_image(target)
 
     camera = simple_camera(
         width=W, height=H,
@@ -123,8 +123,8 @@ def _analytic_grads(backend: str) -> tuple[np.ndarray, dict[str, np.ndarray], fl
     )
 
     pipeline.forward_and_loss(camera)
-    pipeline.clear_gradients()
-    pipeline.backward()
+    pipeline.optimizer.zero_grad()
+    pipeline.run_backward()
     ref_loss = pipeline.read_loss()
 
     grads = pipeline.read_gradients()
@@ -147,7 +147,7 @@ def test_gradients_finite_difference(backend: str) -> None:
         eye=(0.0, 0.0, 0.0), target=(0.0, 0.0, 1.0), up=(0.0, 1.0, 0.0),
         fovy_degrees=60.0,
     )
-    pipeline.set_target_image(_target(H, W))
+    pipeline.targets.set_image(_target(H, W))
 
     mismatches = finite_difference_mismatches(pipeline, camera, _scene())
     if mismatches:
@@ -164,8 +164,8 @@ def finite_difference_mismatches(pipeline: TestPipeline, camera, scene: dict,
     # Analytic grads from backward.
     pipeline.set_primitive_from_numpy(**scene)
     pipeline.forward_and_loss(camera)
-    pipeline.clear_gradients()
-    pipeline.backward()
+    pipeline.optimizer.zero_grad()
+    pipeline.run_backward()
     analytic = pipeline.read_gradients()
 
     mismatches: list[str] = []

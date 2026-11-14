@@ -1,13 +1,7 @@
 // Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-// Per-tile bucket count for the ragged (CSR) checkpoint buffer.
-//
-// bucket_count[t] = ceil( (tile_end[t] - tile_start[t]) / RASTER_BUCKET_SIZE )
-//
-// An exclusive prefix scan of this array yields bucket_offsets[t] (the base
-// bucket index of tile t in the flat checkpoint buffer), and the scan total
-// is the number of buckets actually used this frame. Runs after
-// identifyTileRanges (needs tile_start/end).
+// Per-tile bucket count for the ragged (CSR) checkpoint buffer; its exclusive scan gives
+// bucket_offsets[t] and the frame's bucket total. Runs after identifyTileRanges.
 
 #include "checkpoint.slang"
 

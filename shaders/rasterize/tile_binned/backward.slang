@@ -1,23 +1,14 @@
 // Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-// Backward rasterizer — tile-cooperative reduction + single projection backward.
-//
-// Per gaussian per tile: all 256 threads compute the cheap eval backward
-// independently, then a parallel reduction sums the per-pixel gradients.
-// Thread 0 runs the expensive projection backward ONCE with the summed
-// gradient and issues 16 global atomics — eliminating 255/256 of the
-// projection compute and 4080/4096 of the global atomic traffic.
+// Per-pixel backward rasterizer: per gaussian, the tile reduces its per-pixel eval gradients and
+// thread 0 runs the projection backward once on the sum.
 
 #include "../../common/types.slang"
 #include "../../common/math.slang"
 #include "../../primitives/gaussian/project.slang"
 #include "../../primitives/gaussian/eval.slang"
 
-#include "generated/execution_contract.slang"
-// Non-square tiles: WIDTH across, HEIGHT down; pixel-in-tile row stride = WIDTH.
-static const uint TILE_WIDTH  = CONTRACT_TILE_WIDTH;
-static const uint TILE_HEIGHT = CONTRACT_TILE_HEIGHT;
-static const uint TILE_AREA   = CONTRACT_TILE_AREA;
+#include "common/execution.slang"
 
 static const float ALPHA_MAX = 0.99;
 static const float ALPHA_MIN_TRACK = 1.0 / 255.0;
@@ -35,28 +26,11 @@ static const uint CH_ITER_X    = 9;
 static const uint CH_ITER_Y    = 10;
 static const uint NUM_CHANNELS = 11;
 
-// Warp-partial reduction slots. TILE_AREA threads / 32-lane wave = TILE_AREA/32
-// warps (8 at 16x16, 2 at 8x8). WGE16-only path; matches every desktop GPU we
-// target — same assumption the radix sort makes. Each warp writes ONE partial
-// sum per channel via WaveActiveSum; a single cross-warp step sums the slots
-// into a per-channel total. Derived from TILE_AREA so a tile-size change is one
-// knob (was a hardcoded 8).
+// One partial sum per (channel, warp); assumes 32-lane waves, as the radix sort does.
 static const uint MAX_WARPS = TILE_AREA / 32u;
 groupshared float gs_warp[NUM_CHANNELS * MAX_WARPS];
 
-// Sixteen final atomic operands, populated then consumed in parallel by
-// threads 0..15 (one InterlockedAdd each) instead of 16 serial atomics on
-// thread 0:
-//   [0]     opacity
-//   [1..3]  color_r/g/b
-//   [4..5]  iter_x/iter_y (2D-gradient magnitude for densification)
-//   [6..8]  mean_x/y/z             (projection backward outputs)
-//   [9..11] log_scale_x/y/z
-//   [12..15] rot_w/x/y/z
-// Slots 0..5 come straight from the eval reduction; slots 6..15 come from
-// the projection backward, which takes the reduced mean2d/cov2d gradients
-// as inputs and is still run by thread 0 (small serial compute, does not
-// parallelise cleanly across channels).
+// Final atomic operands, one InterlockedAdd per thread 0..15 in the slot order used below.
 static const uint NUM_ATOMICS = 16u;
 groupshared float gs_atomic[NUM_ATOMICS];
 
@@ -134,7 +108,6 @@ void backwardRasterize(
 
     for (int i = int(max_processed) - 1; i >= 0; --i)
     {
-        // --- Phase 1: Cooperative load ---, we could try moving from 16x16 tiles with all in GS mem to 32x8 with 8 in GS mem and 8 in registers via wave-intr
         if (tid == 0)
         {
             uint idx = sorted_gaussian_ids[t_start + uint(i)];
@@ -148,7 +121,6 @@ void backwardRasterize(
         Gaussian3D g = gs_gauss;
         Projected2DGaussian proj = gs_proj;
 
-        // --- Phase 2: Per-pixel eval backward ---
         bool contributes = valid_pixel && (uint(i) < processed);
 
         float2 local_dp_mean_2d = float2(0.0);
@@ -164,11 +136,7 @@ void backwardRasterize(
             float alpha = min(alpha_raw, ALPHA_MAX);
             float alpha_grad_scale = (alpha_raw <= ALPHA_MAX) ? 1.0 : 0.0;
 
-            // Alpha-min skip — bit-identical to forward.slang (ALPHA_MIN =
-            // 1/255 == ALPHA_MIN_TRACK). The forward did not blend this splat,
-            // so here it's a full no-op: alpha=0 -> denom=1 -> T_i=T_post
-            // (unchanged) and zero gradient. Keeps the T_post/denom back-to-
-            // front reconstruction in lockstep with the forward.
+            // Must match the forward's alpha-min skip: a skipped splat is a no-op (denom = 1, zero gradient).
             if (alpha < ALPHA_MIN_TRACK)
             {
                 alpha = 0.0;
@@ -212,12 +180,6 @@ void backwardRasterize(
             T_post = T_i;
         }
 
-        // --- Phase 3a: Warp-level reduction ---
-        // Each warp collapses its 32 lanes' contributions to a single sum
-        // per channel with WaveActiveSum (one hardware shuffle instruction,
-        // no barrier). Lane 0 of each warp writes the partial into a small
-        // shared array indexed by (channel, warp_idx). This replaces 8
-        // barrier'd LDS rounds with a single WaveActiveSum + one barrier.
         uint lane = WaveGetLaneIndex();
         uint warp_idx = tid / WaveGetLaneCount();
 
@@ -249,16 +211,7 @@ void backwardRasterize(
         }
         GroupMemoryBarrierWithGroupSync();
 
-        // --- Phase 3b: Cross-warp reduction ---
-        // 11 channels × 8 warp partials → 11 totals. Assign channel to
-        // thread `tid == channel_idx`; each of threads 0..10 sequentially
-        // sums 8 values (fully in registers, no LDS conflict). Stores the
-        // 6 direct-atomic totals (opacity/color_rgb/iter_xy) into gs_atomic;
-        // stashes the 5 projection-inputs (mean2d + cov2d) in a small
-        // scratch that thread 0 will pick up next.
-        //
-        // Two extra shared floats to pass mean2d/cov2d to thread 0's
-        // projection. Cheap.
+        // Cross-warp reduction: thread c sums channel c's warp partials.
         float total = 0.0;
         if (tid < NUM_CHANNELS)
         {
@@ -266,7 +219,6 @@ void backwardRasterize(
             for (uint w = 0u; w < MAX_WARPS; ++w)
                 total += gs_warp[tid * MAX_WARPS + w];
         }
-        // Write the 6 straight-through totals directly to gs_atomic[0..5].
         // Slot mapping matches the InterlockedAdd order below.
         if (tid == CH_OPACITY) gs_atomic[0] = total;
         if (tid == CH_COLOR_R) gs_atomic[1] = total;
@@ -274,8 +226,7 @@ void backwardRasterize(
         if (tid == CH_COLOR_B) gs_atomic[3] = total;
         if (tid == CH_ITER_X)  gs_atomic[4] = total;
         if (tid == CH_ITER_Y)  gs_atomic[5] = total;
-        // The 5 projection-input totals go into gs_warp[0..4] (reusing the
-        // buffer, safe because Phase 3a's writes are behind us).
+        // Projection-input totals reuse gs_warp[0..4]; the per-warp partial writes are already complete.
         if (tid == CH_MEAN2D_X) gs_warp[0] = total;
         if (tid == CH_MEAN2D_Y) gs_warp[1] = total;
         if (tid == CH_COV2D_0)  gs_warp[2] = total;
@@ -283,11 +234,7 @@ void backwardRasterize(
         if (tid == CH_COV2D_2)  gs_warp[4] = total;
         GroupMemoryBarrierWithGroupSync();
 
-        // --- Phase 4a: Projection backward (thread 0) ---
-        // The projection backward is small serial compute (< 100 flops of
-        // matmuls) that doesn't parallelise cleanly across its 10 outputs,
-        // so it stays on thread 0. It writes to gs_atomic[6..15] where
-        // threads 6..15 will pick each output up for their atomic.
+        // The projection backward is small serial compute that doesn't parallelize, so thread 0 runs it.
         if (tid == 0)
         {
             float2 sum_dp_mean_2d = float2(gs_warp[0], gs_warp[1]);
@@ -296,12 +243,7 @@ void backwardRasterize(
             var dp_mean      = diffPair(g.mean);
             var dp_log_scale = diffPair(g.log_scale);
             var dp_rot_quat  = diffPair(g.rot_quat);
-            // NOTE: this per-pixel fallback backward supports ONLY the vanilla
-            // projection (filter_3D=0, kernel_size=0.3). Mip-Splatting runs use
-            // the default per-splat path (backward_persplat + projection_backward),
-            // which threads the real filter_3D/kernel_size. Toggling
-            // use_persplat_backward=False with --mip-splatting on would give
-            // wrong scale gradients — don't.
+            // Vanilla projection only (filter_3D = 0, kernel_size = 0.3): Mip-Splatting needs the per-splat backward.
             bwd_diff(projectGaussian3DTo2D)(
                 dp_mean, dp_log_scale, dp_rot_quat,
                 world_to_view, view_to_clip, frame_dim,
@@ -321,12 +263,6 @@ void backwardRasterize(
         }
         GroupMemoryBarrierWithGroupSync();
 
-        // --- Phase 4b: Parallel atomics (threads 0..15) ---
-        // 16 InterlockedAdds go out in one wave instead of 16 sequential
-        // atomics on thread 0. Each thread picks the slot matching its
-        // tid and issues its own atomic to the corresponding grad_* buffer.
-        // Since all writes target *different* buffers, there's no contention
-        // between the 16 threads.
         if (tid < NUM_ATOMICS)
         {
             float v = gs_atomic[tid];

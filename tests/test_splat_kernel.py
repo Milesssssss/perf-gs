@@ -21,7 +21,8 @@ from trainer.backend.compute.device import SHADERS_DIR, create_device
 from trainer.config.config import LossConfig
 from trainer.config.config_types import SplatKernel
 from trainer.data.dataset import simple_camera
-from trainer.frontend.app import ShaderSpecialization
+from trainer.config.config import ShaderSpecialization
+from trainer.frontend.factory import shader_defines
 
 BACKENDS = ["vulkan", "d3d12"]
 # (kernel, profile power): the default, each density kernel, and a flat-top profile
@@ -34,9 +35,9 @@ BLEND_FLOOR = 1.0 / 255.0
 
 
 def _device(backend: str, kernel: SplatKernel, power: float = 1.0, onset: float = 0.0):
-    defines = ShaderSpecialization(backward_pixel_stride=1, splat_kernel=kernel,
-                                   splat_profile_power=power,
-                                   splat_profile_onset=onset).compiler_defines()
+    defines = shader_defines(ShaderSpecialization(splat_kernel=kernel,
+                                                  splat_profile_power=power,
+                                                  splat_profile_onset=onset))
     try:
         return create_device(backend=backend, defines=defines)
     except Exception as exc:  # pragma: no cover - backend availability
@@ -150,7 +151,7 @@ def test_gradients_finite_difference(backend: str, kernel: SplatKernel,
     pipeline = TestPipeline(device=_device(backend, kernel, power), width=16, height=16,
                             max_splats=16,
                             loss_config=LossConfig(ssim_weight=0.0, alpha_weight=0.0))
-    pipeline.set_target_image(_target(16, 16))
+    pipeline.targets.set_image(_target(16, 16))
     mismatches = finite_difference_mismatches(pipeline, _camera(16), _large_splat_scene(),
                                               eps=1e-2)
     assert not mismatches, "\n".join(mismatches)

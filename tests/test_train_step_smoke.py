@@ -1,14 +1,6 @@
 # Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-"""Smoke test for Pipeline.train_step after the GpuRuntime/CommandBatch extraction.
-
-The GPU parity subset drives the forward/backward via TestPipeline.forward_and_loss
-(immediate-dispatch + transient indirect paths) and densify (the batch-active path via
-the _encoder compat property), but nothing else exercises the FULL train_step batch
-lifecycle: runtime.command_batch -> marker groups -> per-stage _dispatch -> runtime.submit.
-This runs one real train_step and checks it records + submits exactly one batch, clears
-the active batch afterward, and updates parameters.
-"""
+"""One real train_step records and submits exactly one batch, then updates parameters."""
 
 from __future__ import annotations
 
@@ -43,7 +35,7 @@ def _setup(backend: str) -> TestPipeline:
                                opacities=opacities, color_logits=color_logits)
     target = np.zeros((16, 16, 3), np.float32)
     target[..., 0] = 0.5   # non-matching target => non-zero gradients
-    p.set_target_image(target)
+    p.targets.set_image(target)
     return p
 
 
@@ -54,10 +46,10 @@ def test_train_step_records_one_batch_and_updates(backend: str) -> None:
                         target=(0.0, 0.0, 1.0), up=(0.0, 1.0, 0.0),
                         fovy_degrees=60.0)
     # Seed the "scalar grads are zero at start-of-iter" invariant train_step assumes.
-    p.clear_gradients()
+    p.optimizer.zero_grad()
     p.device.wait_for_idle()
 
-    before = p.buffers.gaussians.to_numpy().copy()
+    before = p.buffers.primitive.values.to_numpy().copy()
     prev_submit = p.last_submit_id
 
     p.train_step(cam, lrs=AdamLRs(mean=1e-2, scale=1e-2, rot=1e-3,
@@ -66,9 +58,9 @@ def test_train_step_records_one_batch_and_updates(backend: str) -> None:
 
     # A single batch was recorded + submitted (submit id advanced) and cleared.
     assert p.last_submit_id != prev_submit
-    assert p._batch is None
+    assert p.commands.batch is None
     # Adam moved parameters (non-matching target => non-zero grads => update).
-    after = p.buffers.gaussians.to_numpy()
+    after = p.buffers.primitive.values.to_numpy()
     assert not np.array_equal(before, after)
 
 
@@ -113,12 +105,12 @@ def test_construction_with_initial_state_primes_pipeline(backend: str) -> None:
     # seeded the scalar-grad-zero invariant train_step relies on).
     target = np.zeros((16, 16, 3), np.float32)
     target[..., 0] = 0.5
-    p.set_target_image(target)
-    before = p.buffers.gaussians.to_numpy().copy()
+    p.targets.set_image(target)
+    before = p.buffers.primitive.values.to_numpy().copy()
     p.train_step(cam, lrs=AdamLRs(mean=1e-2, scale=1e-2, rot=1e-3,
                                   opacity=1e-2, color=1e-2))
     p.device.wait_for_idle()
-    assert not np.array_equal(before, p.buffers.gaussians.to_numpy())
+    assert not np.array_equal(before, p.buffers.primitive.values.to_numpy())
 
 
 @pytest.mark.parametrize("backend", BACKENDS)
@@ -127,10 +119,10 @@ def test_two_train_steps_advance_submit(backend: str) -> None:
     cam = simple_camera(width=16, height=16, eye=(0.0, 0.0, 0.0),
                         target=(0.0, 0.0, 1.0), up=(0.0, 1.0, 0.0),
                         fovy_degrees=60.0)
-    p.clear_gradients()
+    p.optimizer.zero_grad()
     p.train_step(cam, lrs=AdamLRs())
     first = p.last_submit_id
     p.train_step(cam, lrs=AdamLRs())
     p.device.wait_for_idle()
     assert p.last_submit_id != first
-    assert p._batch is None
+    assert p.commands.batch is None

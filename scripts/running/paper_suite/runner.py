@@ -2,23 +2,7 @@
 
 """Execute one cell in a fresh subprocess and fold its outputs into the manifest.
 
-Every cell is its own process, as the original ablation script did, and for the
-same reasons: a clean GPU device, clean densification state, and no chance that
-250 sequential runs accumulate leaked memory or a poisoned RNG. It also means a
-cell that hard-crashes the driver costs exactly one cell.
-
-Unattended means never dying on one bad cell. Anything a cell can do wrong — a
-missing scene, a non-zero exit, a driver hang, an output file that never
-appeared, a JSON file that will not parse — is caught, recorded with its reason
-and the path to the captured stderr, and the suite moves on. Aggregation later
-refuses to average incomplete groups, so a swallowed failure cannot become a
-silently-thinner mean.
-
-Timing is measured from the parent, so ``process_wall_s`` is the honest total:
-scene load, shader compilation, training, the post-loop metrics pass, and
-interpreter teardown. The trainer's own ``train_active_s`` is the training-only
-figure, and both are recorded — a paper that quotes one without the other is
-easy to misread.
+A failing cell is recorded (reason + stderr path) and skipped; ``process_wall_s`` is measured by the parent.
 """
 from __future__ import annotations
 
@@ -33,8 +17,7 @@ from .env import GpuMemoryPoller, utc_now
 from .manifest import (STATUS_FAILED, STATUS_MISSING_SCENE, STATUS_OK, CellRecord,
                        Manifest)
 
-# A 3k-iteration cell at quarter resolution takes minutes; an hour means it hung
-# (a driver stall, a lost fence) and the suite should reclaim the GPU and move on.
+# A cell takes minutes; an hour means it hung (driver stall, lost fence).
 DEFAULT_CELL_TIMEOUT_S = 3600.0
 
 
@@ -59,13 +42,7 @@ def _stamp_environment(record: CellRecord, environment: dict) -> None:
 
 
 def _fold_run_report(record: CellRecord, report: dict) -> None:
-    """Copy the trainer's report into the manifest row.
-
-    Deliberately a flat projection of a handful of fields: the manifest is the
-    index every table is built from, and it should stay readable by eye. The full
-    nested report (per-view metrics, per-marker timings, the device feature list)
-    stays in the run directory and is loaded on demand.
-    """
+    """Flat projection of a few run-report fields into the manifest row; the full report stays on disk."""
     timing = report.get("timing") or {}
     quality = report.get("quality") or {}
     render = report.get("render") or {}
@@ -114,8 +91,7 @@ def run_cell(cell: cfg.Cell, manifest: Manifest, *, python: str,
     if not force:
         reuse, reason = manifest.reuse_decision(cell, python)
         if reuse:
-            # Re-fold the outputs even when cached: the manifest row is derived
-            # data, and re-deriving it keeps a hand-edited or older row honest.
+            # Re-fold even when cached: the row is derived data and must not drift from the outputs.
             report = _read_json(cell.run_dir / "run_report.json")
             if report is not None:
                 _fold_run_report(record, report)
@@ -214,8 +190,7 @@ def run_cell(cell: cfg.Cell, manifest: Manifest, *, python: str,
 
 
 def _tail(path: Path, lines: int = 3, width: int = 400) -> str:
-    """Last few stderr lines, for a failure message that is actionable without
-    opening the log."""
+    """Last few stderr lines, so a failure message is actionable without opening the log."""
     try:
         text = path.read_text(encoding="utf-8", errors="replace").strip()
     except OSError:
@@ -230,13 +205,7 @@ def run_plan(cells: list[cfg.Cell], manifest: Manifest, *, python: str,
              timeout_s: float = DEFAULT_CELL_TIMEOUT_S,
              dry_run: bool = False,
              save_every: int = 1) -> dict:
-    """Run every cell, persisting the manifest as it goes.
-
-    The manifest is saved after each cell so an interrupted suite resumes from
-    the last completed one rather than from the beginning. Progress lines carry a
-    running ETA from the cells already measured, which is the only honest source
-    for one (scene sizes vary by 2.5x).
-    """
+    """Run every cell, saving the manifest after each so an interrupted suite resumes where it stopped."""
     total = len(cells)
     completed_durations: list[float] = []
     counts = {"ok": 0, "cached": 0, "failed": 0, "skipped": 0}

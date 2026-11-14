@@ -15,11 +15,12 @@ from trainer.config.config import (
     LossConfig,
     RasterConfig,
     RegularizationConfig,
+    ShaderSpecialization,
 )
+from trainer.config.resolve import RunConfig, shader_specialization
 from _colmap_testkit import write_colmap_scene
 
 from trainer.frontend.evaluation.evaluation import render_all_cameras
-from trainer.frontend import app as app_module
 from trainer.frontend import hub as hub_module
 from trainer.frontend.hub import TrainingHub
 from trainer.config.config_types import DensificationMode
@@ -29,59 +30,54 @@ from trainer.frontend.viewer.session import (
     ResultState,
     Session,
 )
-from trainer.frontend.app import (
-    ShaderSpecialization,
-    TargetDataset,
-    TrainingApplication,
-    TrainingLoop,
-    _resolve_position_lr_max_steps,
-    create_pipeline,
-    create_training_device,
-)
+from trainer.data.targets import TargetDataset
+from trainer.frontend.app import TrainingApplication, TrainingLoop
+from trainer.frontend.cli import build_parser
+from trainer.frontend.factory import create_pipeline, create_training_device, shader_defines
+
+
+def _parse(*flags: str):
+    return build_parser().parse_args(["--scene", "unused", *flags])
 
 
 def test_default_shader_specialization_uses_shader_default() -> None:
     # No stride override and hardness NOT specialized (default) => no defines.
-    specialization = ShaderSpecialization(backward_pixel_stride=1)
-    assert specialization.compiler_defines() is None
+    assert shader_defines(ShaderSpecialization()) is None
 
 
 def test_strided_backward_specialization_emits_slang_uint_define() -> None:
-    specialization = ShaderSpecialization(backward_pixel_stride=4)
-    assert specialization.compiler_defines() == {
+    assert shader_defines(ShaderSpecialization(backward_pixel_stride=4)) == {
         "BACKWARD_PIXEL_STRIDE": "4u",
     }
 
 
 def test_hardness_one_specialization_emits_define() -> None:
-    spec = ShaderSpecialization(backward_pixel_stride=1, hardness_is_one=True)
-    assert spec.compiler_defines() == {"COMPOSITOR_HARDNESS_ONE": "1"}
+    assert shader_defines(ShaderSpecialization(hardness_is_one=True)) == {
+        "COMPOSITOR_HARDNESS_ONE": "1"}
 
 
-def test_from_args_specializes_hardness_when_target_le_one() -> None:
-    on = ShaderSpecialization.from_args(
-        Namespace(backward_pixel_stride=1, extinction_hardness=1.0))
-    assert on.compiler_defines() == {"COMPOSITOR_HARDNESS_ONE": "1"}
-    off = ShaderSpecialization.from_args(
-        Namespace(backward_pixel_stride=1, extinction_hardness=2.0))
-    assert off.compiler_defines() is None
+def test_specialization_compiles_hardness_away_only_when_target_le_one() -> None:
+    on = shader_specialization(_parse("--extinction-hardness", "1"))
+    assert shader_defines(on) == {"COMPOSITOR_HARDNESS_ONE": "1"}
+    off = shader_specialization(_parse("--extinction-hardness", "2"))
+    assert shader_defines(off) is None
 
 
 def test_hub_never_compiles_the_hardness_away() -> None:
-    """The define lands in ``compiler_options`` when the DEVICE is created, which
-    in hub mode happens before the TRAINING SETUP panel exists. Specializing on
-    the launch value there would silently pin a panel-set k > 1 to alpha-over."""
-    hub = ShaderSpecialization.from_args(
-        Namespace(backward_pixel_stride=1, extinction_hardness=1.0, hub=True))
-    assert hub.compiler_defines() is None
+    """The hub creates its device before the TRAINING SETUP panel exists, so
+    specializing on the launch value would pin a panel-set k > 1 to alpha-over."""
+    hub = shader_specialization(_parse("--extinction-hardness", "1", "--hub"))
+    assert shader_defines(hub) is None
 
 
 def test_position_lr_horizon_follows_iters_unless_overridden() -> None:
-    """``--position-lr-max-steps`` defaults to 0 == follow ``--iters``; it used to
-    be a hard 3000 that silently disagreed with any other ``--iters``."""
-    assert _resolve_position_lr_max_steps(0, 7000) == 7000
-    assert _resolve_position_lr_max_steps(-1, 7000) == 7000
-    assert _resolve_position_lr_max_steps(1500, 7000) == 1500
+    """``--position-lr-max-steps`` 0 (default) follows ``--iters``."""
+    def horizon(*flags):
+        return RunConfig.from_args(_parse("--iters", "7000", *flags), 1.0).position_lr_max_steps
+
+    assert horizon() == 7000
+    assert horizon("--position-lr-max-steps", "-1") == 7000
+    assert horizon("--position-lr-max-steps", "1500") == 1500
 
 
 def test_device_factory_passes_resolved_specialization(monkeypatch) -> None:
@@ -92,19 +88,14 @@ def test_device_factory_passes_resolved_specialization(monkeypatch) -> None:
         captured.update(kwargs)
         return sentinel
 
-    monkeypatch.setattr("trainer.frontend.app.create_device", fake_create_device)
-    args = Namespace(
-        backend="vulkan",
-        profile_run=False,
-        backward_pixel_stride=2,
-        extinction_hardness=2.0,   # > 1 => hardness path NOT specialized
-    )
+    monkeypatch.setattr("trainer.frontend.factory.create_device", fake_create_device)
+    # Hardness > 1 keeps the compositor's runtime path, so only the stride is defined.
+    args = _parse("--backward-pixel-stride", "2", "--extinction-hardness", "2")
 
     assert create_training_device(args) is sentinel
     assert captured == {
         "backend": "vulkan",
-        # Resolved from --nsight-debug-names (default None -> off unless
-        # --capture-external); absent on this bare Namespace so it's False.
+        # --nsight-debug-names defaults to off unless --capture-external.
         "enable_debug": False,
         "shader_debug_info": False,
         "defines": {"BACKWARD_PIXEL_STRIDE": "2u"},
@@ -119,25 +110,18 @@ def test_pipeline_factory_separates_configuration_ownership(monkeypatch) -> None
         captured.update(kwargs)
         return sentinel
 
-    monkeypatch.setattr("trainer.frontend.app.TrainingPipeline", fake_pipeline)
-    args = app_module.build_parser().parse_args([
-        "--scene", "unused", "--max-splats", "123", "--z-near-cull", "0.25",
+    monkeypatch.setattr("trainer.frontend.factory.TrainingPipeline", fake_pipeline)
+    args = _parse(
+        "--max-splats", "123", "--z-near-cull", "0.25",
         "--no-cluster-cull", "--mip-splatting", "--mip-kernel-size", "0.1",
         "--sh-degree", "0", "--sh-band-interval", "1000", "--extinction-hardness", "2",
         "--w-alpha", "0.4", "--opacity-reg", "0.03", "--scale-reg", "0.07",
-        "--densify-mode", "structure_aware",
-    ])
+        "--densify-mode", "structure_aware", "--sad-lambda-l2", "1.5",
+    )
     scene = Namespace(width=64, height=32)
 
-    result = create_pipeline(
-        args=args,
-        device="device",
-        gpu_lock="lock",
-        scene=scene,
-        max_splats=123,
-        lambda_l2=1.5,
-        lambda_ssim=0.2,
-    )
+    result = create_pipeline(device="device", gpu_lock="lock", scene=scene,
+                             max_splats=123, config=RunConfig.from_args(args, 1.0))
 
     assert result is sentinel
     assert captured["max_splats"] == 123
@@ -163,7 +147,9 @@ def test_training_loop_presents_after_full_iteration() -> None:
     context = SimpleNamespace(step_number=1)
     loop.args = Namespace(iters=3)
     from trainer.frontend.viewer.viewer_control import ViewerSession
-    loop.runtime = SimpleNamespace(viewer=ViewerSession(None))
+    loop.runtime = SimpleNamespace(viewer=ViewerSession(None), pipeline=None)
+    loop.instrumentation = SimpleNamespace(
+        end_iteration=lambda _pipeline: events.append("present"))
     loop.observation_seconds = 0.0
     loop.observation_in_wall_seconds = 0.0
 
@@ -171,16 +157,14 @@ def test_training_loop_presents_after_full_iteration() -> None:
     loop._should_continue = lambda: next(states)
     loop._next_iteration = lambda: events.append("next") or context
     loop._prepare_iteration = lambda ctx: events.append("prepare")
-    loop._capture_if_requested = lambda ctx: events.append("capture")
     loop._execute_training_step = lambda ctx: events.append("train")
     loop._apply_mutations = lambda ctx: events.append("mutations")
     loop._produce_observations = lambda ctx: events.append("observations") or True
-    loop._present_profile_frame_if_enabled = lambda: events.append("present")
     loop._complete_training_loop = lambda: events.append("complete") or "result"
 
     assert TrainingLoop.launch_training_loop(loop) == "result"
     assert events == [
-        "begin", "next", "prepare", "capture", "train",
+        "begin", "next", "prepare", "train",
         "mutations", "observations", "present", "complete",
     ]
 
@@ -344,111 +328,11 @@ def test_a_dataset_the_loader_rejects_leaves_the_hub_alive(tmp_path) -> None:
     assert snap.can_drop, "the hub must still accept another folder"
 
 
-# --- STBN: the mask's temporal axis is per-CAMERA, not per-iteration ----------
-
-def _stbn_loop(target_fraction=0.1, warmup=0, slices=64, seed=0, independent=False):
-    """A TrainingLoop carrying only what ``_stbn_variables`` reads."""
-    import numpy as np
-    from trainer.frontend.schedule import StbnDensitySchedule
-
-    loop = object.__new__(TrainingLoop)
-    loop.args = SimpleNamespace(stbn_seed=seed)
-    loop.stbn_density = StbnDensitySchedule(target_fraction=target_fraction,
-                                            warmup=warmup)
-    loop.stbn_slices = slices
-    loop.stbn_visits = {}
-    loop.stbn_phase = {}
-    loop.stbn_independent = independent
-    loop._stbn_rng = np.random.default_rng(seed)
-    loop._stbn_sample_rng = np.random.default_rng(seed + 0x5EED)
-    loop.training_step = 1
-    return loop
-
-
-def test_stbn_slice_advances_per_camera_visit_not_per_iteration() -> None:
-    """The mask distributes a pixel's samples along its TEMPORAL axis, and the
-    sequence that axis is meant to track is "successive evaluations of the same
-    image". So drawing A, B, A, C, A must walk A's slices 0,1,2 while B and C
-    each stay on their own first slice — indexing by iteration instead would hand
-    each camera an essentially arbitrary slice per visit and throw the property
-    away."""
-    loop = _stbn_loop()
-    draws = [7, 3, 7, 9, 7, 3]
-    slices = [loop._stbn_variables(cam).slice_index for cam in draws]
-
-    phase = {cam: loop.stbn_phase[cam] for cam in (7, 3, 9)}
-    assert slices == [
-        phase[7] + 0, phase[3] + 0, phase[7] + 1,
-        phase[9] + 0, phase[7] + 2, phase[3] + 1,
-    ]
-    assert loop.stbn_visits == {7: 3, 3: 2, 9: 1}
-
-
-def test_stbn_independent_draws_random_slices_decoupled_from_visits() -> None:
-    """--stbn-independent replaces the per-visit temporal walk with a fresh
-    random slice each step: the same camera no longer marches 0,1,2 through its
-    slices, the visit bookkeeping is left untouched, and two runs with the same
-    seed agree (the slice RNG is separate from the camera draw, so it cannot move
-    the sampling order)."""
-    loop = _stbn_loop(slices=64, seed=7, independent=True)
-    drawn = [loop._stbn_variables(5).slice_index for _ in range(8)]
-    assert all(0 <= s < 64 for s in drawn)
-    assert len(set(drawn)) > 1               # not a fixed or per-visit sequence
-    assert loop.stbn_visits == {} and loop.stbn_phase == {}
-
-    again = _stbn_loop(slices=64, seed=7, independent=True)
-    assert [again._stbn_variables(5).slice_index for _ in range(8)] == drawn
-
-
-def test_stbn_phases_differ_across_cameras_and_wrap_into_range() -> None:
-    """A shared start would couple the whole dataset to one sequence: every view
-    would sample slice 0's pixels on its first visit, slice 1's on its second,
-    and so on."""
-    loop = _stbn_loop(slices=64)
-    for cam in range(40):
-        loop._stbn_variables(cam)
-    phases = [loop.stbn_phase[cam] for cam in range(40)]
-    assert all(0 <= p < 64 for p in phases)
-    assert len(set(phases)) > 20          # spread out, not all-equal
-
-
-def test_stbn_slice_wraps_at_the_masks_temporal_period() -> None:
-    loop = _stbn_loop(slices=4)
-    slices = [loop._stbn_variables(2).slice_index for _ in range(9)]
-    assert all(0 <= s < 4 for s in slices)
-    assert slices[:4] == slices[4:8]       # one full cycle, then repeat
-
-
-def test_stbn_phase_is_reproducible_and_independent_of_the_camera_draw() -> None:
-    """Phases come from mixing the camera index, NOT from the run's RNG: drawing
-    from that stream would shift every subsequent camera draw and break the
-    sampling order frozen by test_camera_sampling.py."""
-    first = _stbn_loop(seed=5)
-    second = _stbn_loop(seed=5)
-    for cam in (0, 1, 2, 3):
-        assert first._stbn_variables(cam).slice_index == \
-               second._stbn_variables(cam).slice_index
-    reseeded = _stbn_loop(seed=6)
-    assert [reseeded.stbn_phase.get(c) for c in ()] == []      # no eager fill
-    assert any(reseeded._stbn_variables(cam).slice_index
-               != first.stbn_phase[cam] for cam in (0, 1, 2, 3))
-
+# --- STBN --------------------------------------------------------------------
 
 def test_stbn_variables_absent_when_the_feature_is_off() -> None:
     """A run without STBN must hand the pipeline None, so every kernel resolves
     to the full-pixel budget rather than a silently sparse gradient."""
-    loop = _stbn_loop()
-    loop.stbn_density = None
+    loop = object.__new__(TrainingLoop)
+    loop.stbn_sampler = None
     assert loop._stbn_variables(0) is None
-
-
-def test_stbn_budget_follows_the_density_ramp() -> None:
-    """The per-tile budget is what the shaders act on, so the ramp has to land in
-    integers: full tile during warmup, then the steady-state count."""
-    from trainer.contracts.codegen import TILE_AREA
-
-    loop = _stbn_loop(target_fraction=0.1, warmup=1000)
-    loop.training_step = 1
-    assert loop._stbn_variables(0).pixels_per_tile == TILE_AREA
-    loop.training_step = 2000
-    assert loop._stbn_variables(0).pixels_per_tile == round(0.1 * TILE_AREA)

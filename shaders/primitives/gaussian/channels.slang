@@ -5,13 +5,9 @@
 
 #include "../../common/types.slang"   // toFixed / fromFixed fixed-point gradients
 
-// GaussianChannel is generated with Gaussian3D in gaussian_types.slang,
-// included transitively through common/types.slang above. This file owns only
-// the typed writer behavior, not channel offsets or counts.
+// GaussianChannel offsets/counts are generated with Gaussian3D (gaussian_types.slang via common/types.slang).
 
-// Typed semantic writer used by every Gaussian backward/regularization pass.
-// Physical storage is channel-major SoA:
-//     gradients[channel * channel_stride + primitive_index].
+// Typed gradient writer; storage is channel-major SoA: gradients[channel * channel_stride + index].
 struct GaussianGradientWriter
 {
     RWStructuredBuffer<int64_t> gradients;

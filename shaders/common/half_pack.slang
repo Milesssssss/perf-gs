@@ -1,12 +1,7 @@
 // Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-// fp16-into-uint32 packing for the optional SH buffers. Native 16-bit storage
-// buffers aren't relied on here (mirrors checkpoint.slang, which packs T/RGB the
-// same way with f32tof16), so this works without the 16-bit-storage extension.
-//
-// Two coefficients per uint. features_rest / features_rest_grad pack the flat
-// scalar stream 2-per-uint ((rest_floats+1)/2 uints per gaussian). adam_rest
-// packs (m, v) of ONE scalar per uint (rest_floats uints per gaussian).
+// fp16 pairs packed into uint32 for the SH buffers, so no 16-bit-storage extension is needed.
+// features_rest / features_rest_grad pack each gaussian's scalar stream two per uint.
 
 #ifndef TRAINER_HALF_PACK_SLANG
 #define TRAINER_HALF_PACK_SLANG
@@ -27,8 +22,7 @@ uint halfFeatUints(uint rest_floats)
     return (rest_floats + 1u) / 2u;
 }
 
-// Read scalar `s` (0..rest_floats-1) from a 2-per-uint packed buffer whose
-// gaussian block starts at uint `base`.
+// Scalar `s` of the packed gaussian block starting at uint `base`.
 float readHalfScalar(StructuredBuffer<uint> buf, uint base, uint s)
 {
     uint u = buf[base + s / 2u];

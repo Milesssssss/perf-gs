@@ -1,21 +1,7 @@
 # Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-"""Pure per-iteration training schedule.
-
-Extracts the v2 loop's inline modulo timing into one tested, side-effect-free
-object. ``TrainingSchedule.events_at(it)`` returns an :class:`IterationEvents`
-describing which events fire at iteration ``it``. Being pure (no GPU, no I/O)
-makes the tricky invariants unit-testable and frozen against the characterization
-goldens:
-
-  * opacity reset WINS over densify on a colliding iter,
-  * structure-densify fires on ABSOLUTE multiples of ``sad_structure_every``
-    (only on densify ticks that are not resets),
-  * preview is buffered after densify/reset (+50, or +350 on a reset iter),
-  * the two distinct Mip-recompute sites (inside the densify block vs. the
-    standalone periodic recompute past ``densify_to``) are modelled separately
-    so the loop keeps exactly one recompute per site.
-"""
+"""Pure per-iteration training schedule: ``TrainingSchedule.events_at(it)`` says which
+events fire at iteration ``it``, with no GPU or I/O so its invariants are unit-testable."""
 
 from __future__ import annotations
 
@@ -26,7 +12,8 @@ import numpy as np
 from trainer.config.config import (
     AdamLRs, AppearanceConfig, IterationContextualVariables, IterationEvents,
 )
-from trainer.config.config_types import DensificationMode, ScheduleConfig
+from trainer.config.config import ScheduleConfig
+from trainer.config.config_types import DensificationMode
 from trainer.data.colmap import ColmapImageEntry
 
 
@@ -57,7 +44,7 @@ class TrainingSchedule:
                       and (it - c.densify_from) % c.densify_every == 0)
         do_opacity_reset = (c.reset_every > 0 and it % c.reset_every == 0
                             and c.densify_from <= it <= c.densify_to)
-        # Reset WINS: a reset iter never also densifies.
+        # Reset wins: a reset iter never also densifies.
         if do_densify and do_opacity_reset:
             do_densify = False
         do_structure = (c.densify_mode == DensificationMode.STRUCTURE_AWARE
@@ -78,9 +65,6 @@ class TrainingSchedule:
 
         do_log = (c.log_every > 0
                   and ((it % c.log_every == 0) or (it == 1) or (it == c.iterations)))
-        # Union of the periodic cadence and the explicit checkpoint ladder, so
-        # --eval-iters can add irregular points without --eval-every having to
-        # divide them all (and without firing on every common multiple).
         do_eval = ((c.eval_every > 0 and (it % c.eval_every == 0))
                    or (it in c.eval_iters))
         do_psnr = (c.psnr_curve_enabled
@@ -184,4 +168,4 @@ class AppearanceSchedule:
     def at(self, step: int) -> int:
         if self.appearanceConfig.sh_degree <= 0:
             return 0
-        return min(self.appearanceConfig.sh_degree, step // self.appearanceConfig.band_interval) # one deg up every band_interval steps, capped at sh_degree
+        return min(self.appearanceConfig.sh_degree, step // self.appearanceConfig.band_interval)

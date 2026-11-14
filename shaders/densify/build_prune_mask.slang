@@ -1,23 +1,7 @@
 // Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-// Phase C of densification: build a valid-mask over the POST-split gaussian
-// range (i.e. including children appended in Phase B).
-//
-// valid[i] = 1 if this gaussian should survive the compaction pass.
-//          = 0 if it should be dropped (or if i >= post_count — beyond
-//              the live range, so the subsequent max_splats-wide scan
-//              contributes 0 for those slots).
-//
-// Rules for i < post_count:
-// - i >= pre_count  -> newly-appended child, always valid.
-// - i <  pre_count and action[i] == PRUNE -> drop.
-// - otherwise -> keep (includes KEEP, SPLIT (slot was overwritten with
-//   child-1), and CLONE (parent survives)).
-//
-// Dispatched over [max_splats] so we can also zero the tail
-// [post_count, max_splats) without a separate memset — this lets
-// scatterCompact and _scan both run at max_splats too, keeping the
-// full densify_simple wait-free path free of CPU readbacks.
+// Densify phase C: valid mask over the post-split range (children appended in phase B always survive);
+// dispatched over max_splats so the tail is zeroed and the scan/scatter need no CPU readback.
 
 static const uint ACTION_KEEP  = 0;
 static const uint ACTION_SPLIT = 1;
@@ -41,8 +25,7 @@ void buildPruneMask(
     uint post_count = post_count_buf[0];
     if (i >= post_count)
     {
-        // Zero the tail so the following max_splats-wide scan doesn't
-        // pick up stale values from the previous frame.
+        // Zero the tail so the max_splats-wide scan never sees stale values.
         valid_mask[i] = 0u;
         return;
     }

@@ -4,29 +4,10 @@
 # SSIM origin identified by INRIA: Copyright Evan Su, 2017 (MIT).
 # Third-party portions retain their own terms; see NOTICE.md.
 
-"""Image quality metrics (PSNR, SSIM) + a run evaluator.
+"""Image quality metrics (PSNR, SSIM) + a run evaluator, comparable to the SAD-GS / 3DGS paper tables.
 
-The `psnr` and `ssim` functions below are VENDORED VERBATIM from the INRIA
-3D Gaussian Splatting codebase, which SAD-GS builds on and evaluates with:
-  - psnr:        SADGS/SADGS/utils/image_utils.py  (INRIA GRAPHDECO, 2023)
-  - ssim/_ssim/create_window/gaussian:
-                 SADGS/SADGS/utils/loss_utils.py   (INRIA GRAPHDECO, 2023)
-Copied here (rather than imported from that tree) so this file is
-self-contained and the numbers are provably the same code the paper's
-metrics.py uses. Do not "improve" these — bit-for-bit fidelity to the
-reference is the whole point; that is what makes our PSNR/SSIM directly
-comparable to the SAD-GS / 3DGS tables.
-
-Aggregation also matches the paper's SADGS/SADGS/metrics.py::evaluate:
-per-image metric, then `torch.tensor(list).mean()` (mean-of-per-image PSNR,
-NOT dB-of-mean-MSE). Images are scored as 8-bit sRGB PNGs read off disk via
-`torchvision.transforms.functional.to_tensor(PIL.Image.open(...))`, identical
-to their `readImages`.
-
-Requires torch + torchvision + PIL. The project .venv is slangpy-only and has
-no torch, so run this with the system Python that does:
-
-    python scripts/image_metrics.py -m outputs/train/<run_dir> --stride 8
+psnr/ssim are vendored verbatim (do not modify) and aggregated like SADGS metrics.py; needs torch + torchvision, which the .venv lacks.
+    python scripts/plots/image_metrics.py -m outputs/train/<run_dir> --stride 8
 """
 import sys
 from pathlib import Path
@@ -103,12 +84,8 @@ def load_png(path: Path) -> torch.Tensor:
 
 
 def evaluate_run(model_path: Path, stride: int = 8, score_all: bool = False):
-    """Score a v2_train run's per-camera PNGs with the vendored metrics.
-
-    Returns (mean_psnr, mean_ssim, names, per_view_psnr). Test split = every
-    `stride`-th camera (paper llffhold=8), matching the split v2_train trains
-    with; `score_all` scores every camera instead.
-    """
+    """Score a run's test-split cams (every ``stride``-th, or all with ``score_all``) with the vendored metrics.
+    Returns (mean_psnr, mean_ssim, names, per_view_psnr, skipped)."""
     cams_dir = Path(model_path) / "cams"
     cam_dirs = sorted(cams_dir.glob("cam_*"),
                       key=lambda p: int(p.name.split("_")[1]))
@@ -139,7 +116,7 @@ def evaluate_run(model_path: Path, stride: int = 8, score_all: bool = False):
     if not psnrs:
         raise SystemExit("no comparable render/gt pairs found")
 
-    # EXACT paper aggregation (metrics.py::evaluate): torch.tensor(list).mean()
+    # Paper aggregation (metrics.py::evaluate): mean of per-image values, not dB of mean MSE.
     mean_psnr = torch.tensor(psnrs).mean().item()
     mean_ssim = torch.tensor(ssims).mean().item()
     return mean_psnr, mean_ssim, names, [p.item() for p in psnrs], skipped

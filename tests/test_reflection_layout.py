@@ -71,3 +71,13 @@ def test_types_matches_adam_reflection(backend: str) -> None:
         a = m_adam.layout.find_type_by_name(name).buffer_layout
         t = m_types.layout.find_type_by_name(name).buffer_layout
         assert (t.size, t.stride, t.alignment) == (a.size, a.stride, a.alignment), name
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_gaussian_layout_dtype_matches_reflection(backend: str) -> None:
+    layout = _reflect_types(_types_module(_device(backend))).gaussian_layout
+    assert layout.float_count == 14
+    assert layout.dtype.names == ("mean", "log_scale", "rot_quat", "opacity", "sh0")
+    fields = layout.dtype.fields
+    assert [(fields[name][1], fields[name][0].shape) for name in layout.dtype.names] == [
+        (0, (3,)), (12, (3,)), (24, (4,)), (40, ()), (44, (3,))]

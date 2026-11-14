@@ -102,17 +102,16 @@ class _Runtime:
         pass
 
 
-def _buffers(*, count: int, capacity: int = CAPACITY, sh: bool = False):
-    """A stand-in for GaussianBuffers: the four per-splat buffers + the counter."""
-    counter = SimpleNamespace(storage=_Buffer(4),
-                              to_numpy=lambda: np.array([count], dtype=np.uint32))
+def _buffers(*, capacity: int = CAPACITY, sh: bool = False):
+    """A stand-in for GaussianBuffers: the per-splat buffers + the counter."""
     return SimpleNamespace(
         max_splats=capacity,
         sh_enabled=sh,
-        gaussians=SimpleNamespace(storage=_Buffer(capacity * GAUSSIAN_STRIDE)),
-        features_rest=SimpleNamespace(storage=_Buffer(capacity * 92)),
-        filter_3D=SimpleNamespace(storage=_Buffer(capacity * 4)),
-        num_gaussians_counter=counter,
+        primitive=SimpleNamespace(
+            values=SimpleNamespace(storage=_Buffer(capacity * GAUSSIAN_STRIDE)),
+            filter_3d=SimpleNamespace(storage=_Buffer(capacity * 4)),
+            active_count=SimpleNamespace(storage=_Buffer(4))),
+        sh=SimpleNamespace(features_rest=SimpleNamespace(storage=_Buffer(capacity * 92))),
     )
 
 
@@ -121,12 +120,12 @@ def _snapshot(*, live: int, viewer_capacity: int = CAPACITY, sh: bool = False,
     """Run the real ``update_gaussians`` against fakes; return (encoder, viewer)."""
     encoder = _Encoder()
     pipeline = SimpleNamespace(
-        buffers=_buffers(count=0, capacity=viewer_capacity, sh=sh),
+        buffers=_buffers(capacity=viewer_capacity, sh=sh),
         raster_config=SimpleNamespace(mip_enabled=mip),
         set_active_sh_degree=lambda degree: None,
         set_extinction_hardness=lambda value: setattr(pipeline, "hardness", value),
         resize=lambda capacity, _pairs: setattr(
-            pipeline, "buffers", _buffers(count=0, capacity=capacity, sh=sh)),
+            pipeline, "buffers", _buffers(capacity=capacity, sh=sh)),
     )
     invalidations: list[int] = []
     viewer = SimpleNamespace(
@@ -146,8 +145,9 @@ def _snapshot(*, live: int, viewer_capacity: int = CAPACITY, sh: bool = False,
         invalidations=invalidations,
     )
     view_buffers = pipeline.buffers
-    train = SimpleNamespace(buffers=_buffers(count=live, sh=sh), max_splats=CAPACITY,
-                            _active_sh_degree=active_sh_degree, _extinction_hardness=hardness)
+    train = SimpleNamespace(buffers=_buffers(sh=sh), max_splats=CAPACITY,
+                            primitives=SimpleNamespace(count=lambda: live),
+                            active_sh_degree=active_sh_degree, extinction_hardness=hardness)
     Viewer.update_gaussians(viewer, train)
     return encoder, viewer, view_buffers
 
@@ -156,9 +156,9 @@ def test_the_count_the_viewer_is_given_is_the_count_that_was_copied() -> None:
     """NOT the trainer's counter: the readback can be a densify behind by the time
     the batch is recorded, and a larger count would render uninitialized memory."""
     encoder, viewer, view_buffers = _snapshot(live=150_000)
-    assert encoder.uploads == [(view_buffers.num_gaussians_counter.storage,
+    assert encoder.uploads == [(view_buffers.primitive.active_count.storage,
                                 np.array([150_000], dtype=np.uint32))]
-    copied_bytes = dict(encoder.copies)[view_buffers.gaussians.storage]
+    copied_bytes = dict(encoder.copies)[view_buffers.primitive.values.storage]
     assert copied_bytes == 150_000 * GAUSSIAN_STRIDE
     assert viewer._has_data is True
 
@@ -175,16 +175,16 @@ def test_a_count_beyond_the_viewers_capacity_grows_the_viewer() -> None:
     encoder, viewer, _ = _snapshot(live=5_000_000, viewer_capacity=1_000_000)
     assert viewer.max_splats == 5_000_000
     assert encoder.uploads[0][1].tolist() == [5_000_000]
-    assert dict(encoder.copies)[viewer._pipeline.buffers.gaussians.storage] == \
+    assert dict(encoder.copies)[viewer._pipeline.buffers.primitive.values.storage] == \
         5_000_000 * GAUSSIAN_STRIDE
 
 
 def test_sh_and_mip_buffers_follow_the_same_count() -> None:
     encoder, _, view_buffers = _snapshot(live=2_000, sh=True, mip=True)
     sizes = dict(encoder.copies)
-    assert sizes[view_buffers.gaussians.storage] == 2_000 * GAUSSIAN_STRIDE
-    assert sizes[view_buffers.features_rest.storage] == 2_000 * 92
-    assert sizes[view_buffers.filter_3D.storage] == 2_000 * 4
+    assert sizes[view_buffers.primitive.values.storage] == 2_000 * GAUSSIAN_STRIDE
+    assert sizes[view_buffers.sh.features_rest.storage] == 2_000 * 92
+    assert sizes[view_buffers.primitive.filter_3d.storage] == 2_000 * 4
 
 
 def test_nothing_is_copied_before_the_first_splat_exists() -> None:

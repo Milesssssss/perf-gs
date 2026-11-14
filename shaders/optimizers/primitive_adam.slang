@@ -5,28 +5,16 @@
 
 #include "../common/fixed_point.slang"
 
-// Generic Adam over an arbitrary primitive's flat scalar parameter vector.
-//
-// A primitive exposes its optimizable scalars as a flat PrimitiveValues<N>
-// (packed via ChannelCursor) behind IPrimitiveParameterStorage<N>; its Adam
-// state lives in channel-major PLANES (AdamPlanes<N>) indexed
-// [channel * stride + primitive]. AdamPass.step is the ONE monomorphized
-// update loop — swapping the primitive only means supplying a new storage
-// conformer, never touching the Adam math.
+// Generic Adam over the flat scalars a primitive exposes through IPrimitiveParameterStorage<N>;
+// a new primitive only supplies a storage conformer, never touching the Adam math.
 
-// --- Flat parameter vector -------------------------------------------------
-
-// The primitive's optimizable scalars, laid out contiguously. `data[c]` is the
-// value of channel c; a primitive packs/unpacks it through ChannelCursor so the
-// per-field layout is declared in exactly one place.
+// `data[c]` is channel c's value, packed through ChannelCursor.
 struct PrimitiveValues<let N : int>
 {
     float data[N];
 }
 
-// Sequential reader/writer over a PrimitiveValues<N> data array. `offset`
-// advances as fields are consumed, so a primitive lists its fields once
-// (write3 mean, write4 quat, ...) and the channel indices follow structurally.
+// Sequential field reader/writer: channel indices follow from the order fields are listed.
 struct ChannelCursor<let N : int>
 {
     uint offset;
@@ -85,37 +73,28 @@ struct ChannelCursor<let N : int>
     }
 }
 
-// The parameter STORAGE seam: map a primitive index <-> its flat value vector.
-// The conformer owns the concrete buffer(s) (e.g. RWStructuredBuffer<Gaussian3D>)
-// and preserves any non-optimized fields across a load/store round-trip.
+// Conformers own the concrete buffers and must preserve non-optimized fields across load/store.
 interface IPrimitiveParameterStorage<let N : int>
 {
     PrimitiveValues<N> loadValues(uint index);
     void storeValues(uint index, PrimitiveValues<N> values);
 }
 
-// --- Optimizer state + config ---------------------------------------------
-
-// Adam hyperparameters shared by every channel. The bias-correction
-// denominators are precomputed on the host (they depend only on the step count).
+// Bias-correction denominators, precomputed on the host from the step count.
 struct AdamConfig
 {
     float bias_correction1;
     float bias_correction2;
 }
 
-// Per-channel learning rates, supplied as a uniform. The host expands a
-// primitive's grouped LRs (e.g. one LR per gaussian field) into this flat
-// per-channel vector so the generic step stays primitive-agnostic.
+// The host expands per-field learning rates into this per-channel vector.
 struct ChannelLearningRates<let N : int>
 {
     float rates[N];
 }
 
-// Channel-major Adam state PLANES: gradients (int64 fixed-point, atomically
-// summed by the backward pass), first and second moments, all indexed
-// [channel * channel_stride + primitive_index]. One buffer per quantity keeps
-// each channel's column contiguous across primitives.
+// Channel-major planes indexed [channel * channel_stride + index]; gradients are int64
+// fixed-point, atomically summed by the backward pass.
 struct AdamPlanes<let N : int>
 {
     RWStructuredBuffer<int64_t> gradients;
@@ -133,24 +112,17 @@ struct AdamPlanes<let N : int>
     }
 }
 
-// --- The Adam update -------------------------------------------------------
-
 static const float ADAM_BETA1   = 0.9;
 static const float ADAM_BETA2   = 0.999;
 static const float ADAM_EPSILON = 1e-8;
 
-// One monomorphized Adam step for one primitive, generic over its parameter
-// storage. Reads the flat values + per-channel gradients, runs the standard
-// Adam recurrence per channel, writes the values back and clears the gradients.
-// A single NaN/Inf in any channel skips the whole primitive.
+// Adam step for one primitive that also clears its gradients; a NaN/Inf in any channel skips it.
 struct AdamPass
 {
     static void step<let N : int, P : IPrimitiveParameterStorage<N>>(
         P storage, AdamPlanes<N> planes, ChannelLearningRates<N> lrs,
         uint index, AdamConfig cfg, float inv_pixels)
     {
-        // Guard first: bail before touching any moment if a gradient is
-        // non-finite (matches the reference kernel's all-or-nothing skip).
         [unroll]
         for (uint c = 0u; c < uint(N); ++c)
         {

@@ -41,10 +41,9 @@ class _Pipeline:
         self.on_render = lambda _count: None
         self.runtime = SimpleNamespace(wait_for_idle=lambda: None)
         self.max_splats, self.max_sort_pairs = 7, 64
-        self.buffers = SimpleNamespace(
-            num_gaussians_counter=SimpleNamespace(
-                to_numpy=lambda: np.array([7], dtype=np.uint32)),
-            sort_stats=SimpleNamespace(to_numpy=lambda: np.array([9, 0], dtype=np.uint32)))
+        self.primitives = SimpleNamespace(count=lambda: 7)
+        self.buffers = SimpleNamespace(sort=SimpleNamespace(
+            stats=SimpleNamespace(to_numpy=lambda: np.array([9, 0], dtype=np.uint32))))
 
     def render(self, camera) -> None:
         self.rendered.append(camera)

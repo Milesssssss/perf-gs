@@ -1,34 +1,8 @@
 # Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-"""Lifecycle wrapper for the optional in-process live viewer.
+"""Lifecycle of the optional in-process live viewer (a render thread sharing the device under ``gpu_lock``).
 
-Live viewing is IN-PROCESS: a background-thread :class:`~trainer.viewer.Viewer`
-shares the trainer's GPU device (serialized by a shared ``gpu_lock``). Its
-lifecycle used to be scattered across ``app.main()`` as five separate
-``if viewer is not None`` blocks that also reached into the viewer's private
-``_thread`` attribute.
-
-:class:`ViewerSession` owns that lifecycle so the training frontend never has to
-null-check the viewer or touch its thread state:
-
-  * :meth:`create`             — build + push the initial snapshot (render
-                                 thread deferred until setup submits are done)
-  * :meth:`start`              — start the render thread
-  * :meth:`wait_for_start`     — the ``--wait-for-viewer`` gate
-  * :meth:`set_training_active`
-  * :meth:`push_snapshot`      — per-iteration zero-copy GPU->GPU snapshot
-  * :meth:`finish_training`    — publish the end of a run (non-blocking)
-  * :meth:`hold_after_training`— keep the window open until closed
-
-When live viewing is disabled (``--no-viewer``) the session wraps ``None`` and
-every method is a no-op. :meth:`is_alive` replaces direct ``viewer._thread``
-access.
-
-The session ALWAYS owns a :class:`~trainer.frontend.viewer.session.Session`,
-even under ``--no-viewer``: producers (the reporter, the hub orchestrator) publish
-progress/log/stats into ``session.state`` unconditionally and never null-check a
-viewer. With no viewer attached nothing reads it, which costs a lock and a dataclass
-copy per publish.
+Methods are no-ops under ``--no-viewer``, but a :class:`~trainer.frontend.viewer.session.Session` always exists.
 """
 from __future__ import annotations
 
@@ -55,7 +29,7 @@ class ViewerSession:
     def __init__(self, viewer: Viewer | None,
                  state: Session | None = None) -> None:
         self._viewer = viewer
-        # One state object shared with the viewer's panel (see module docstring).
+        # One state object shared with the viewer's panel.
         if state is None:
             state = viewer.state if viewer is not None else Session(MODE_TRAIN)
         self.state = state
@@ -77,12 +51,9 @@ class ViewerSession:
         pipeline: TrainingPipeline,
         test_cameras: list[tuple[str, Camera]] | None = None,
     ) -> ViewerSession:
-        """Build the viewer and push the initialized gaussians, but DO NOT start
-        the render thread yet.
+        """Build the viewer and push the initialized gaussians without starting the render thread.
 
-        The remaining setup submits ~200 texture uploads on the trainer thread
-        WITHOUT ``gpu_lock``; a running render thread would race those on the
-        shared VkQueue. The caller must invoke :meth:`start` once setup is done.
+        Setup uploads still run without ``gpu_lock`` (a queue race), so call :meth:`start` once setup is done.
         """
         from trainer.frontend.viewer.viewer import Viewer
 
@@ -96,7 +67,7 @@ class ViewerSession:
             test_cameras=test_cameras,
             state=state,
         )
-        viewer.update_gaussians(pipeline)  # show the initialized gaussians
+        viewer.update_gaussians(pipeline)
         print("[viewer] created (render thread starts after setup completes).")
         return cls(viewer, state)
 
@@ -114,17 +85,9 @@ class ViewerSession:
         mip_kernel_size: float,
         setup: TrainingSetup | None = None,
     ) -> ViewerSession:
-        """Build a SCENE-LESS hub viewer (no pipeline/scene yet).
+        """Build a scene-less hub viewer; the orchestrator later feeds it gaussians and cameras.
 
-        The user picks a dataset via drag-drop and drives reconstruct/train from
-        the panel; the orchestrator reads those requests off ``session.state``,
-        publishes progress back into it, and later feeds gaussians via
-        :meth:`push_snapshot` and cameras via :meth:`attach_scene`.
-
-        Model hyperparameters start from the CLI args at launch and stay EDITABLE
-        until Train: ``setup`` is the shared store the panel's TRAINING SETUP
-        section writes into (see :mod:`trainer.frontend.settings`), which the
-        orchestrator applies to its args when it builds the run.
+        ``setup`` is the shared store the panel edits until Train (see :mod:`trainer.frontend.settings`).
         """
         from trainer.frontend.viewer.viewer import Viewer
 
@@ -140,22 +103,19 @@ class ViewerSession:
         return cls(viewer, state)
 
     def attach_scene(self, test_cameras, snap: bool = False) -> None:
-        """Populate the camera dropdown once a dataset/scene is available.
-        ``snap`` also parks on the first camera (see Viewer.attach_scene)."""
+        """Populate the camera dropdown once a scene is available; ``snap`` also parks on the first camera."""
         if self._viewer is not None:
             self._viewer.attach_scene(test_cameras, snap=snap)
 
     def preview_points(self, initial_points: dict) -> int:
-        """Display a COLMAP point cloud before training starts. Returns the number
-        of points shown (0 with no viewer)."""
+        """Display a COLMAP point cloud before training; returns the number of points shown (0 with no viewer)."""
         if self._viewer is None:
             return 0
         return self._viewer.preview_points(initial_points)
 
     def reconfigure_model(self, *, sh_degree: int,
                           mip_enabled: bool, mip_kernel_size: float) -> bool:
-        """Re-shape the viewer's own pipeline after the hub's TRAINING
-        SETUP changed the model (no-op when unchanged or with no viewer)."""
+        """Re-shape the viewer's pipeline after the hub's setup changed the model (no-op if unchanged/no viewer)."""
         if self._viewer is None:
             return False
         return self._viewer.reconfigure_model(
@@ -165,12 +125,8 @@ class ViewerSession:
     def suspend_rendering(self) -> None:
         """Park the render thread (no GPU work, no frames) until :meth:`resume_rendering`.
 
-        Needed for two different reasons, and the second one is easy to miss:
-          * GPU — uploads/pipeline swaps must not race the render thread on the
-            shared queue;
-          * CPU — the render thread holds the GIL for most of every frame, so any
-            heavy pure-Python work on another thread (e.g. the COLMAP binary
-            parsers) runs 50-100x slower next to a live viewer.
+        Uploads/pipeline swaps must not race it on the shared queue, and it holds the GIL for most
+        of every frame, starving heavy pure-Python work (e.g. COLMAP parsing) on other threads.
         """
         if self._viewer is not None:
             self._viewer.suspend_rendering()
@@ -194,11 +150,7 @@ class ViewerSession:
         return thread is not None and thread.is_alive()
 
     def wait_for_start(self) -> None:
-        """Hold before training so the viewer can inspect the initialized
-        gaussians, then block until the viewer's 'Start Training' button, an
-        ``Enter`` in this terminal (headless escape hatch), or the viewer window
-        closing.
-        """
+        """Block until the viewer's 'Start Training' button, Enter in this terminal, or the window closing."""
         if self._viewer is None:
             return
         print("[wait-for-viewer] showing initialized gaussians. Waiting for the "
@@ -223,9 +175,8 @@ class ViewerSession:
     def set_training_active(self, active: bool = True) -> None:
         """Flag optimizer stepping so the viewport can ration its GPU work.
 
-        Pause/Stop availability follows the session phase, not this flag: camera
-        sweeps remain controllable after optimizer stepping ends. With no viewer
-        attached the RUNNING transition is still published here."""
+        Pause/Stop follow the session phase, not this flag; with no viewer it still publishes RUNNING.
+        """
         if self._viewer is not None:
             self._viewer.set_training_active(active)
         elif active:
@@ -233,14 +184,7 @@ class ViewerSession:
 
     @contextlib.contextmanager
     def unthrottled(self):
-        """Render at full rate for the duration: the trainer is not stepping.
-
-        The viewer rations scene renders while training steps compete for the queue
-        (see ``Viewer._scene_due``). An eval sweep or a render-all dump is NOT that
-        situation — the loop is blocked on it — so the ration is pure loss there,
-        and those phases are exactly when someone is watching the window because
-        nothing else is happening. No-op with ``--no-viewer``.
-        """
+        """Render at full rate for the duration: the trainer is not stepping (eval sweep, render-all)."""
         if self._viewer is None:
             yield
             return
@@ -264,8 +208,7 @@ class ViewerSession:
             self._viewer.clear_stop_request()
 
     def wait_while_paused(self) -> None:
-        """Block run work while the viewer's Pause button is engaged (no-op
-        when live viewing is disabled)."""
+        """Block run work while the viewer's Pause button is engaged."""
         if self._viewer is not None:
             self._viewer.wait_while_paused()
 
@@ -278,8 +221,7 @@ class ViewerSession:
             raise RunStopped()
 
     def push_snapshot(self, pipeline: TrainingPipeline) -> None:
-        """Push a gaussian snapshot to the viewer (GPU->GPU copy of the ACTIVE
-        splat range, plus a 4-byte count readback — see ``update_gaussians``)."""
+        """Push a gaussian snapshot: a GPU->GPU copy of the active splat range plus a 4-byte count readback."""
         if self._viewer is not None:
             self._viewer.update_gaussians(pipeline)
 
@@ -289,19 +231,9 @@ class ViewerSession:
             self._viewer.clear_view()
 
     def finish_training(self, pipeline: TrainingPipeline) -> None:
-        """Publish the end of the training LOOP and push its final gaussians —
-        WITHOUT blocking.
+        """Publish the end of the training loop and push its final gaussians, without blocking.
 
-        Split out of :meth:`hold_after_training` for the hub, where the end of a run
-        is not the end of the session: the orchestrator goes back to serving the
-        panel (export, re-train, another dataset), so it must not be parked in a
-        thread join. Retires the "running" state of the TRAINING section, which
-        otherwise reads as if the trainer were still going.
-
-        The PHASE is deliberately NOT set here: the loop finishing is not the run
-        finishing — the metrics pass and the .ply export still have to run, and the
-        orchestrator publishes ``PHASE_FINALIZE`` for that and ``PHASE_DONE`` when
-        it is genuinely over (see ``TrainingApplication._run_training_and_post``).
+        The phase is left alone: metrics and export still run before the orchestrator publishes ``PHASE_DONE``.
         """
         if self._viewer is not None:
             self._viewer.set_training_active(False)
@@ -311,8 +243,7 @@ class ViewerSession:
                 pass
 
     def hold_after_training(self, pipeline: TrainingPipeline) -> None:
-        """Push the final state and leave the window live until the user closes
-        it (or Ctrl-C, which stops the viewer)."""
+        """Push the final state and keep the window live until the user closes it (Ctrl-C stops the viewer)."""
         self.finish_training(pipeline)
         self.state.notify("Training complete", OK)
         self.state.log("training complete — close the viewer window to exit")
@@ -322,7 +253,6 @@ class ViewerSession:
         try:
             thread = self._viewer._thread
             if thread is not None:
-                # We just wait until the user closes/kills the window 
                 thread.join()
         except KeyboardInterrupt:
             self._viewer.stop()

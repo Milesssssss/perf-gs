@@ -1,21 +1,12 @@
 // Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-// Optional view-dependent SH forward (per-gaussian; runs only when sh_degree>0).
-//
-// bin_count already packed each visible gaussian's BlendData with its SH0 DC
-// color. When SH is enabled this kernel OVERWRITES BlendData.sh0 with the
-// view-dependent color, evaluated once per gaussian (INRIA-style, not per
-// pixel). The value stored is the "effective DC" e = (clamp(rgb,0)-0.5)/C0 so
-// that the generic blend loop's shDC(e) reproduces the clamped RGB exactly —
-// the tile blend, its per-pixel backward, and the SH-off path are all unchanged.
-//
-// One thread per gaussian. bin_count stays byte-identical (no new bindings), so
-// the SH-off pipeline pays nothing.
+// Optional view-dependent SH forward (sh_degree > 0): once per gaussian, overwrites bin_count's
+// BlendData.sh0 with the effective DC e = (clamp(rgb, 0) - 0.5) / C0, so the blend is unchanged.
 
 #include "../../common/types.slang"
 #include "../../primitives/gaussian/sh.slang"
 
-#include "generated/execution_contract.slang"
+#include "common/execution.slang"
 
 [shader("compute")]
 [numthreads(256, 1, 1)]

@@ -1,19 +1,8 @@
 # Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-"""Compare forwardRasterize BEFORE vs AFTER the blend_data change.
+"""Compare forwardRasterize before vs after the blend_data change.
 
-Same-hardware, same-everything A/B of the thread-per-pixel forward rasterizer:
-  timing_<scene>_threadfwd = forwardRasterize gathering the FAT Gaussian3D
-      (~56 B) + Projected2DGaussian (~32 B) per splat (the old kernel).
-  timing_<scene>_blendfwd  = forwardRasterize gathering the compact 36 B
-      BlendData record (the new kernel).
-Both are pure 0->3000 loop wall time (train_complete.train_wall_s), warp forward
-OFF, flat backward, seed 0. Only the forward gather differs.
-
-slang_timings.csv is shown as a reference column ONLY -- it was measured on a
-DIFFERENT machine, so it is not a valid delta for this kernel change.
-
-Writes outputs/timing_blendfwd_vs_threadfwd.{csv,png}.
+Same-GPU A/B of outputs/train/timing_<scene>_{threadfwd,blendfwd} (only the forward gather differs); slang_timings.csv is another machine, reference only.
 """
 from __future__ import annotations
 

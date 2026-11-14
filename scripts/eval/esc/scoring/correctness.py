@@ -1,13 +1,8 @@
 # Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-"""Correctness ``C`` — the 40%-weight dimension.
+"""Correctness ``C`` = successful agent runs / total runs (the 40%-weight dimension).
 
-    C = successful agent runs / total agent runs
-
-A run counts as successful only if it cleared every hard gate *and* the
-task-specific hidden tests (both already folded into ``TaskRunResult.success``).
-This is the dimension that most directly measures "can unseen change be made
-without breaking things", which is why it carries the largest weight.
+Success requires every hard gate and the task's hidden tests (folded into ``TaskRunResult.success``).
 """
 
 from __future__ import annotations

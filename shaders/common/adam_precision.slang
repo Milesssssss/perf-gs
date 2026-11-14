@@ -1,11 +1,7 @@
 // Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-// Storage precision of the Adam moments: float32 by default, bf16 under
-// ADAM_MOMENTS_BF16 (one uint packs a scalar's m in its low half, v in its
-// high half). bf16 keeps float32's exponent range, so the ~1e-12 SH-rest v that
-// underflowed fp16 stays representable. Rounding is stochastic: v's per-step
-// EMA change (1 - beta2 = 0.1%) is below half a bf16 ulp (0.4%), so
-// round-to-nearest would freeze v.
+// Adam moment storage: float32, or bf16 under ADAM_MOMENTS_BF16 (one uint: m low half, v high half).
+// bf16 keeps float32's exponent range, so the ~1e-12 SH-rest v stays representable (fp16 underflows).
 
 #ifndef TRAINER_ADAM_PRECISION_SLANG
 #define TRAINER_ADAM_PRECISION_SLANG
@@ -16,14 +12,12 @@ static const uint SH_MOMENT_WORDS = 1u;
 static const uint SH_MOMENT_WORDS = 2u;
 #endif
 
-// One SH-rest coefficient's stored moments. The host sizes adam_rest from this
-// struct's reflected stride.
+// One SH-rest coefficient's moments; the host sizes adam_rest from this struct's reflected stride.
 struct ShRestMoments
 {
     uint words[SH_MOMENT_WORDS];
 };
 
-// Rounding-noise seed for one gaussian at one optimizer step.
 uint adamRoundingSeed(uint idx, uint step)
 {
     return (idx * 0x9E3779B9u) ^ (step * 0x85EBCA6Bu);
@@ -44,8 +38,8 @@ float  bf16Hi(uint  p) { return asfloat(p & 0xFFFF0000u); }
 float3 bf16Hi(uint3 p) { return asfloat(p & 0xFFFF0000u); }
 float4 bf16Hi(uint4 p) { return asfloat(p & 0xFFFF0000u); }
 
-// Round lo/hi to bf16 by adding 16 random bits below the kept mantissa, then
-// truncating. Values already representable in bf16 pass through unchanged.
+// Stochastic rounding: add 16 random bits below the kept mantissa, then truncate (exact bf16 is kept).
+// Round-to-nearest would freeze v: its per-step EMA change (0.1%) is below half a bf16 ulp (0.4%).
 uint packBf16(float lo, float hi, inout uint rng)
 {
     uint noise = nextRoundingNoise(rng);

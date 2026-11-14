@@ -4,18 +4,14 @@
 #include "../common/math.slang"
 #include "../primitives/gaussian/eval.slang"
 
-#include "generated/execution_contract.slang"
-static const uint CLUSTER_SIZE = CONTRACT_CLUSTER_SIZE;
-static const float K_SIGMA = 3.0;  // 3-sigma ellipsoid extent
+#include "common/execution.slang"
+static const float K_SIGMA = 3.0;
 
 // Per-cluster reduction scratch (min/max across 128 gaussian AABBs).
 groupshared float3 g_bmin[CLUSTER_SIZE];
 groupshared float3 g_bmax[CLUSTER_SIZE];
 
-// Compute the world-space AABB of a single gaussian's k-sigma ellipsoid:
-//   |R * diag(scale) * x| for |x| <= k  is bounded axis-wise by
-//   row-sum-of-absolute-values of (R * diag(scale)) * k. This is exact-
-//   conservative (a tight enclosing AABB of the ellipsoid).
+// Tight world-space AABB of a gaussian's k-sigma ellipsoid.
 void splatAABB(Gaussian3D g, float k, out float3 bmin, out float3 bmax)
 {
     float3x3 R = matrixFromQuaternion(g.rot_quat);
@@ -58,8 +54,7 @@ void buildClusterAABB(
 #endif
         splatAABB(gaussians[slot], k, bmin, bmax);
     } else {
-        // Neutral element for min/max reduce — never contributes to the
-        // cluster AABB, so tail-of-last-cluster threads are inert.
+        // Min/max identity, so tail threads of the last cluster are inert.
         bmin = float3( 1e30,  1e30,  1e30);
         bmax = float3(-1e30, -1e30, -1e30);
     }
@@ -67,8 +62,7 @@ void buildClusterAABB(
     g_bmax[t] = bmax;
     GroupMemoryBarrierWithGroupSync();
 
-    // Tree reduction across the 128-thread workgroup. Halving stride each
-    // step: 128 -> 64 -> 32 -> ... -> 1. Thread 0 holds the final AABB.
+    // Tree reduction across the workgroup; thread 0 ends with the cluster AABB.
     for (uint stride = CLUSTER_SIZE / 2; stride > 0; stride >>= 1) {
         if (t < stride) {
             g_bmin[t] = min(g_bmin[t], g_bmin[t + stride]);
@@ -83,14 +77,8 @@ void buildClusterAABB(
     }
 }
 
-// Extract the 6 frustum planes from mvp = proj * view in Gribb/Hartmann
-// form. planes[i].xyz is the (unnormalized) plane normal pointing INTO
-// the frustum, planes[i].w is the offset; a point p is inside plane i iff
-// dot(planes[i].xyz, p) + planes[i].w >= 0.
-//
-// Row indexing convention: Slang float4x4 default is row-major; MVP row i
-// is float4(mvp[i][0], mvp[i][1], mvp[i][2], mvp[i][3]). We store planes
-// packed as row3 +/- row_k.
+// Gribb/Hartmann frustum planes of the row-major mvp, unnormalized with inward normals:
+// p is inside plane i iff dot(planes[i].xyz, p) + planes[i].w >= 0.
 void extractFrustumPlanes(float4x4 mvp, out float4 planes[6])
 {
     float4 r0 = float4(mvp[0][0], mvp[0][1], mvp[0][2], mvp[0][3]);
@@ -107,15 +95,11 @@ void extractFrustumPlanes(float4x4 mvp, out float4 planes[6])
     planes[5] = r3 - r2;
 }
 
-// Conservative AABB-vs-frustum test. Returns true if AABB is at least
-// partially inside all 6 half-spaces (i.e. might be visible). Never
-// returns false for a visible box.
+// Conservative: never returns false for a visible box.
 bool aabbInFrustum(float3 bmin, float3 bmax, float4 planes[6])
 {
     for (uint i = 0; i < 6; ++i) {
-        // "Positive-vertex" (aka p-vertex): the AABB corner farthest along
-        // the plane normal. If even THAT corner is behind the plane, every
-        // corner is behind -> AABB fully outside -> cull.
+        // p-vertex test: if the corner farthest along the normal is behind the plane, all corners are.
         float3 pv;
         pv.x = (planes[i].x >= 0.0) ? bmax.x : bmin.x;
         pv.y = (planes[i].y >= 0.0) ? bmax.y : bmin.y;
@@ -138,8 +122,7 @@ void cullClustersFrustum(
     uint c = dtid.x;
     if (c >= num_clusters) return;
 
-    // mvp = proj * view. Slang uses row-major matrices and mul(A, B)
-    // returns A*B, so this composes correctly for world -> clip.
+    // Row-major matrices: mul(proj, view) maps world -> clip.
     float4x4 mvp = mul(camera[0].proj_matrix, camera[0].view_matrix);
     float4 planes[6];
     extractFrustumPlanes(mvp, planes);

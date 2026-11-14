@@ -1,10 +1,8 @@
 # Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-"""Shared repository scanning.
+"""Dependency-free repository scanning shared by the static-quality and locality analysers.
 
-A tiny, dependency-free file enumerator used by the static-quality and locality
-analysers. Honours the configured excludes and source suffixes and reads text
-defensively so a single undecodable file never breaks a scan.
+Undecodable files are skipped so a single bad file never breaks a scan.
 """
 
 from __future__ import annotations

@@ -223,9 +223,7 @@ def _main_results(exp_a: dict, suite: dict) -> list[str]:
     if not exp_a:
         return ["## 3. Main result (Experiment A)", "", "Not run.", ""]
     aggregate = exp_a.get("aggregate_all_scenes") or {}
-    # Scene/iteration counts come from what actually ran, never from the module
-    # defaults: a report that says "13 scenes" after two of them failed would be
-    # exactly the silent averaging this suite is built to prevent.
+    # Counts come from what actually ran, so failed scenes are never silently averaged in.
     n_scenes = len(suite.get("scenes") or [])
     iters = suite.get("iters", cfg.ITERS)
     lines = [
@@ -427,12 +425,11 @@ def _runtime(exp_d: dict) -> list[str]:
         "",
         "- **There is no GPU mask-generation stage.** The rank table is built and "
         "uploaded once at startup and indexed inline by the kernels, so "
-        "per-iteration mask work is a few microseconds of host arithmetic. It is "
-        "reported as a host cost, not omitted.",
-        "- **Densification is host-timed**, because it runs in its own submit "
-        "outside the step's marker tree and reads buffers back. It is reported "
-        "per densify event in `tables/runtime_breakdown.csv`, never folded into "
-        "a GPU stage total.",
+        "per-iteration mask work is host arithmetic to pick a slice index, too "
+        "small to time.",
+        "- **Densification is timed per event**, because it runs in its own submit "
+        "outside the step's marker tree. It is reported per densify event in "
+        "`tables/runtime_breakdown.csv`, never folded into a GPU stage total.",
         "",
     ]
     return lines
@@ -467,9 +464,7 @@ def _sampling(exp_e: dict) -> list[str]:
             "successive_overlap_expected_iid"),
         row("visit-count CoV after 64 (lower = more uniform)",
             "visit_count_cov", 4),
-        # No analytic reference on the MAX gap: 1/rho is the expectation of the
-        # mean gap, and printing it beside a maximum would invite reading it as
-        # the independent-sampling max, which it is not.
+        # No reference for the max gap: 1/rho is the expected mean gap, not the max.
         row("max revisit gap", "revisit_gap_max", 1),
         row("mean revisit gap", "revisit_gap_mean", 3,
             "revisit_gap_expected_iid"),

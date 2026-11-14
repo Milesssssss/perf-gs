@@ -7,6 +7,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from trainer.config.config_types import DensificationMode, SplatKernel
+
 
 @dataclass(frozen=True)
 class RasterConfig:
@@ -63,14 +65,10 @@ class RegularizationConfig:
 
 @dataclass(frozen=True)
 class StbnConfig:
-    """Spatiotemporal-blue-noise pixel subsampling policy (OFF at 1.0).
+    """Spatiotemporal-blue-noise pixel subsampling policy (off at 1.0).
 
-    ``backward_compacted`` records whether STBN_ENABLED was actually injected,
-    rather than deriving it: the shader defines are fixed when the device is
-    created, which in hub mode is before the panel that sets the rest exists, and
-    a config disagreeing with the define would bind parameters the kernel never
-    declared. With the mask on and this off the loss still zeroes unsampled
-    pixels, so the gradient is the sparse one without the pixel-loop savings.
+    ``backward_compacted`` records whether STBN_ENABLED was compiled in (defines are fixed
+    at device creation); when off, the loss still zeroes unsampled pixels.
     """
 
     # Steady-state fraction rho of pixels each backward supervises.
@@ -81,58 +79,14 @@ class StbnConfig:
     source: str = "nvidia"
     file_path: str = ""
     seed: int = 0
-    # Draw a random slice each step (--stbn-independent) instead of the per-visit
-    # temporal walk — the independent-per-step baseline for the temporal ablation.
+    # Random slice per step instead of the per-visit temporal walk (the ablation baseline).
     independent: bool = False
-    # How a density picks pixels: "global" thresholds the whole slice (the
-    # NVIDIA point set; per-tile counts vary), "tile_rank" keeps exactly k per
-    # 8x8 tile (uniform work, but a different sampling process that measurably
-    # degrades the blue mask AND flatters the white control). See
-    # trainer.backend.render.stbn for the measured difference.
+    # "global" (NVIDIA's point set) or "tile_rank" (k per 8x8 tile; degrades the blue mask).
     select_mode: str = "global"
 
     @property
     def enabled(self) -> bool:
         return self.pixel_fraction < 1.0
-
-
-@dataclass(frozen=True)
-class AdaptiveStbnConfig:
-    """Importance-guided sparse sampling policy (OFF by default).
-
-    Strictly additive: with ``enabled=False`` nothing in this feature runs and
-    every pre-existing regime (``full``, ``iid_white``, ``indep_blue``, ``stbn``)
-    behaves exactly as before — the uniform STBN path remains the reference
-    baseline. When it IS on, the run's density comes from a per-pixel probability
-    map instead of a fixed rho, the loss runs DENSE and a separate pass applies
-    the mask, and the backward reads a screen-sized table built each iteration.
-
-    ``rho`` is not stored here: the budget is the sibling
-    :class:`StbnConfig.pixel_fraction`, so an adaptive run and its uniform
-    control are guaranteed to be density-matched by construction.
-
-    See :mod:`trainer.backend.render.adaptive_stbn` for the math.
-    """
-
-    enabled: bool = False
-    # Mixture weight between uniform exploration and gradient importance.
-    # 0 = exactly uniform (and provably reduces to the existing mask), ->1 =
-    # strongly importance-driven. Must stay < 1: alpha=1 admits p_i=0 pixels,
-    # whose inverse-probability weight is undefined.
-    alpha: float = 0.75
-    # Smoothing scale of the importance field, in OUTPUT-IMAGE pixels. Not tied
-    # to the 8x8 rasterizer tile or to the 128x128 STBN texture.
-    sigma: float = 8.0
-    # Resolution divisor the field is evaluated at (cost only; the Gaussian sigma
-    # is compensated so the effective smoothing stays `sigma` full-res pixels).
-    downsample: int = 4
-    # Which uniform sequence the per-pixel threshold is compared against:
-    # "iid" | "blue_independent" | "blue_temporal". See adaptive_stbn.UNIFORM_*.
-    uniform: str = "blue_temporal"
-    # False = the labelled DIAGNOSTIC control (adaptive_stbn_biased): sample from
-    # p_i but omit the 1/p_i weight, i.e. deliberately optimize an error-weighted
-    # objective. Never the proposed method.
-    unbiased: bool = True
 
 
 @dataclass(frozen=True)
@@ -147,33 +101,19 @@ class IterationEvents:
     eval: bool
     psnr_curve: bool
     morton: bool
-    mip_after_densify: bool   # recompute the 3D filter INSIDE the densify block
+    mip_after_densify: bool   # recompute the 3D filter inside the densify block
     mip_periodic: bool         # standalone periodic recompute past densify_to
     blend_prune: bool = False  # this densify tick also prunes by blend weight
 
 @dataclass(frozen=True)
 class StbnVariables:
-    """The per-iteration half of STBN sampling: WHICH mask slice this step uses
-    and HOW MANY pixels per tile it samples.
+    """This step's STBN mask slice and per-tile pixel budget.
 
-    ``slice_index`` is the drawn camera's VISIT count plus that camera's fixed
-    phase — deliberately not the training iteration. The mask is built so that
-    the values at one pixel are well distributed along its temporal axis, and
-    the sequence that axis should track is "successive evaluations of the same
-    image"; indexing it by iteration instead would hand a given camera an
-    essentially arbitrary slice every time. The per-camera phase then keeps every
-    camera from marching through the same slices in lockstep.
-
-    ``pixels_per_tile`` == TILE_AREA means "sample everything", i.e. disabled.
+    ``slice_index`` is the camera's visit count plus a per-camera phase, not the iteration:
+    the mask's temporal axis tracks successive evaluations of the same image.
     """
     slice_index: int = 0
     pixels_per_tile: int = 0    # 0 => resolved to TILE_AREA (disabled) downstream
-    # Per-step entropy for the adaptive path's ``iid`` uniform mode, which needs a
-    # FRESH independent field each visit rather than a slice of a fixed volume.
-    # Drawn from the same --stbn-seed stream as slice_index, so the mask stays
-    # reproducible and is still decoupled from the camera draw order. Ignored by
-    # every other mode, including all four pre-existing regimes.
-    sample_seed: int = 0
 
 
 @dataclass(frozen=True)
@@ -190,5 +130,88 @@ class AdamLRs:
     scale: float = 5e-3
     rot: float = 1e-3
     opacity: float = 2.5e-2
-    color: float = 2.5e-3  # in reality this is the SH0 LR
-    sh_rest: float = 0.0025 / 20.0 #TODO play around more with a more optimal LR value for the sh rests
+    color: float = 2.5e-3  # the SH0 learning rate
+    sh_rest: float = 0.0025 / 20.0  # TODO: tune the SH-rest learning rate.
+
+
+@dataclass(frozen=True)
+class ShaderSpecialization:
+    """Compile-time shader policy, fixed when the device is created.
+
+    The hub's device predates the run's settings, so hub runs keep the runtime
+    compositor and the non-compacted STBN backward.
+    """
+
+    backward_pixel_stride: int = 1
+    # Alpha-over-only compositor when the run's hardness stays <= 1.
+    hardness_is_one: bool = False
+    # The backward's compacted-visit loop over the STBN-selected pixels.
+    stbn_enabled: bool = False
+    # Diagnostic (--stbn-max-fraction): staged arrays sized to this tile fraction; 0 = full tile.
+    stbn_staged_fraction: float = 0.0
+    adam_bf16: bool = False
+    splat_kernel: SplatKernel = SplatKernel.GAUSSIAN
+    splat_profile_power: float = 1.0
+    splat_profile_onset: float = 0.0
+
+
+@dataclass(frozen=True)
+class ScheduleConfig:
+    """The per-iteration schedule knobs ``TrainingSchedule`` turns into events."""
+
+    iterations: int
+    densify_from: int
+    densify_to: int
+    densify_every: int
+    reset_every: int
+    densify_mode: DensificationMode
+    sad_structure_every: int
+    sad_accum_every: int
+    preview_every: int
+    log_every: int
+    render_all_every: int
+    eval_every: int
+    psnr_curve_enabled: bool
+    psnr_curve_every: int
+    morton_every: int
+    stream_every: int
+    mip_enabled: bool
+    # Extra eval checkpoints, union-ed with the eval_every cadence.
+    eval_iters: tuple[int, ...] = ()
+    # Blend-weight pruning on densify ticks (--prune-blend-weight); 0 = off.
+    prune_blend_weight: float = 0.0
+    prune_blend_from: int = 0
+
+
+@dataclass
+class DensifyConfig:
+    """Shared simple-densify and opacity-reset thresholds."""
+    # Prune floor; must stay below t_opacity_reset_value or a reset prunes every splat.
+    t_opacity: float = 0.005
+    t_big_scale: float = 0.1        # prune if max_scale > this (world-space floater removal)
+    t_opacity_reset_value: float = 0.01  # reset opacity to this value (clamp mode)
+    # True: scale opacity by reset_decay (SADGS, keeps the ordering); False: clamp (gsplat).
+    reset_relative: bool = False
+    reset_decay: float = 0.1
+
+
+@dataclass
+class StructureConfig:
+    """Structure-aware densification (SAD-GS, arXiv 2604.28016), with SADGS's gates.
+
+    split = high_ratio > tau_split and the gradient is high; prune = low_ratio >
+    tau_prune; per-axis split factor n_k = ceil(eta_max_k ** split_power).
+    """
+    n_scoring_views: int = 10        # views sampled per offline scoring step
+    tau_split: float = 0.8
+    tau_prune: float = 0.8
+    grad_threshold: float = 1e-5     # SADGS is_grad_high floor
+    split_power: float = 0.5         # 0.5 = sqrt (paper)
+    max_split_factor: int = 8        # SADGS max_clones_per_axis
+    # Child scale sigma_k / n_k**power: 1.0 for Mip-NeRF 360, 1.2 for T&T / Deep Blending (SADGS).
+    ks_scale_power: float = 1.0
+    t_opacity: float = 0.005
+    opacity_cap: float = 0.8         # post-densify cap on every survivor (SADGS)
+    # Clone (max scale <= this) vs anisotropic split, in world units (SADGS dense * extent).
+    dense_scale: float = 0.0
+    detailed_diagnostics: bool = False  # full eta readback only when requested

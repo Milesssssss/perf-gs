@@ -2,27 +2,13 @@
 
 """Figure helpers: one consistent style, PDF for the paper and PNG for review.
 
-Every figure is saved twice — vector PDF (what goes in the paper) and a
-raster PNG at moderate DPI (what a human flips through in a folder). Both come
-from the same call so they cannot drift.
-
-Matplotlib is imported lazily and every save is wrapped, because a broken
-matplotlib must never cost the numbers: the CSVs and JSON are already on disk by
-the time any figure is drawn, and the suite is expected to run unattended for
-hours. A figure that fails logs and is skipped.
-
-Colour and marker assignments are FIXED per regime in one place, so "the blue line"
-means the same thing in every figure of the paper. The palette is colour-blind
-safe (Okabe-Ito) and each regime also gets a distinct marker and dash pattern, so
-the figures survive greyscale printing.
+A failing matplotlib logs and skips the figure, never costing the numbers already on disk.
 """
 from __future__ import annotations
 
 from pathlib import Path
 
-# Okabe-Ito: distinguishable under the common colour-vision deficiencies, and
-# each regime additionally carries its own marker + dash so the encoding is not
-# colour-only (greyscale printing, and accessibility).
+# Okabe-Ito colour-blind-safe palette, plus a marker and dash per regime so greyscale prints survive.
 REGIME_STYLE: dict[str, dict] = {
     "full":       {"color": "#000000", "marker": "o", "linestyle": "-",
                    "label": "Dense (100%)"},
@@ -106,11 +92,7 @@ def style_for(regime: str) -> dict:
 
 
 def annotate_empty(ax, message: str = "no data") -> None:
-    """Mark an axis that has nothing to show.
-
-    An empty panel in a multi-panel figure is ambiguous — it could mean zero, or
-    could mean the run is missing. Saying so removes the ambiguity.
-    """
+    """Mark an axis that has nothing to show, so an empty panel cannot be read as zero."""
     ax.text(0.5, 0.5, message, transform=ax.transAxes, ha="center",
             va="center", fontsize=7, color="#999999")
     ax.set_xticks([])
@@ -119,13 +101,7 @@ def annotate_empty(ax, message: str = "no data") -> None:
 
 def zoom_to_data(ax, values, *, pad_fraction: float = 0.08,
                  min_pad: float = 0.05) -> None:
-    """Fit the y-axis to the data with a little padding.
-
-    The regimes differ by tenths of a dB; a zero-based axis flattens the entire
-    result into one indistinguishable band. Padding is relative to the observed
-    spread so a genuinely tiny difference still LOOKS tiny (the axis labels carry
-    the scale) rather than being stretched to fill the panel.
-    """
+    """Fit the y-axis to the data with spread-relative padding (regimes differ by tenths of a dB)."""
     finite = [v for v in values if v is not None and v == v]
     if not finite:
         return

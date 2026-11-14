@@ -32,7 +32,7 @@ python scripts\eval\run_esc.py analyze
 python scripts\eval\run_esc.py score -c 0.72 -e 0.61 -u 0.80 -l 0.15 -t 0.55 -s 0.88
 
 # full evaluation with a real agent (see "Wiring an agent")
-python scripts\eval\run_esc.py evaluate --family gaussian_field --seeds 0,1,2 `
+python scripts\eval\run_esc.py evaluate --family densification --seeds 0,1,2 `
     --agent-cmd "my-agent --prompt-file {prompt_file}" --mutation-json mutation.json
 
 # champion/candidate iteration loop
@@ -42,14 +42,11 @@ python scripts\eval\run_esc.py loop --iterations 5 `
 
 Self-tests: `.venv\Scripts\python.exe -m pytest scripts\eval\tests -q`
 
-## The anchor task
+## Task families
 
-The headline metric is the **median success-adjusted cost of adding a new
-optimizable Gaussian parameter** — the edit that exposes whether fields, layouts,
-optimizer state, Python↔Slang sync, initialization, serialization, gradients and
-config are centralised or scattered. It lives in
-[esc/tasks/gaussian_fields.py](esc/tasks/gaussian_fields.py) and is verified
-CPU-only against the sandbox's own `trainer.contract_schema`.
+The suite lives in [esc/tasks/registry.py](esc/tasks/registry.py). The
+`densification` family asks the agent to add a densification mode
+([esc/tasks/adjacent.py](esc/tasks/adjacent.py)).
 
 ## Wiring an agent
 

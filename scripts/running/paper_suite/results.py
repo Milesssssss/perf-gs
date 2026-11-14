@@ -2,20 +2,7 @@
 
 """Load run artifacts and index them the way the experiments ask questions.
 
-The manifest holds one flat row per cell — enough for the headline tables. The
-detail (every held-out view's own metrics, the convergence ladder, the per-marker
-GPU timings) stays in the run directories and is loaded here on demand, because
-250 cells x 25 views of nested JSON has no business being resident just to compute
-a mean.
-
-:class:`ResultSet` exists to make the paired comparisons safe. Every experiment
-needs maps of the form ``{(scene, seed): value}`` restricted to one regime and one
-pixel fraction, and it needs them to contain ONLY usable cells — a failed run must
-not enter a comparison as a zero or as a missing key that silently unpairs a
-scene. Selection therefore goes through one method, which filters on
-``record.usable`` and, crucially, on the instrumentation profile: cells whose
-wall-clock contains convergence sweeps are not interchangeable with cells whose
-does not, so a timing comparison must be able to demand one or the other.
+Selection goes through one filter so failed or differently-instrumented cells never enter a paired comparison.
 """
 from __future__ import annotations
 
@@ -29,11 +16,7 @@ from .manifest import CellRecord, Manifest
 
 
 def read_jsonl(path: Path) -> list[dict]:
-    """Parse a JSONL file, skipping unparsable lines.
-
-    Streamed artifacts can end mid-line if a run was killed, and one truncated
-    tail line should not discard the checkpoints before it.
-    """
+    """Parse a JSONL file, skipping unparsable lines (a killed run can truncate the tail)."""
     rows: list[dict] = []
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
@@ -83,12 +66,7 @@ class CellResult:
 
     @property
     def curve(self) -> list[dict]:
-        """Convergence checkpoints, ascending by iteration.
-
-        ``elapsed_s`` in these rows is already the eval-EXCLUDED training clock
-        (the trainer subtracts each sweep's cost as it goes), which is exactly the
-        "accumulated active training seconds" the convergence study needs.
-        """
+        """Convergence checkpoints by iteration; their ``elapsed_s`` already excludes eval sweeps."""
         if self._curve is None:
             rows = read_jsonl(self.cell.run_dir / "eval_curve.jsonl")
             self._curve = sorted(rows, key=lambda r: r.get("iter", 0))
@@ -133,20 +111,8 @@ class ResultSet:
                usable_only: bool = True) -> list[CellResult]:
         """Cells matching every supplied constraint.
 
-        ``stage_timing`` defaults to EXCLUDING the dedicated timing cells: they
-        are duplicates of the main grid at the same (scene, regime, seed, rho) and
-        would double-count every scene in a quality aggregate. A caller that wants
-        them must ask.
-
-        ``select_mode`` defaults to the PRIMARY mode for the same reason: the
-        stratification-ablation cells are a second measurement of the same
-        (scene, regime, seed, rho) under a different sampling process, and letting
-        them fall into a quality aggregate would both double-count scenes and
-        average two deliberately-different conditions. Pass ``None`` to get every
-        mode (Experiment S does), or a specific mode to isolate one arm.
-
-        Dense cells are exempt: they carry no mask, so one run serves every mode
-        and filtering them by mode would drop the baseline.
+        Timing and stratification-ablation cells are excluded by default so quality aggregates never double-count scenes.
+        Dense cells ignore ``select_mode``: one dense run serves every mode.
         """
         out: list[CellResult] = []
         for result in self.results.values():
@@ -178,13 +144,7 @@ class ResultSet:
                    convergence: bool | None = None,
                    select_mode: str | None = cfg.PRIMARY_SELECT_MODE,
                    ) -> dict[tuple[str, int], float]:
-        """``{(scene, seed): value}`` for one regime at one fraction.
-
-        The map only contains cells that both succeeded AND have the metric, so a
-        paired comparison built from two of these automatically drops any scene
-        that is incomplete on either side — and :func:`stats.paired_summary`
-        records which ones it dropped.
-        """
+        """``{(scene, seed): value}`` for one regime at one fraction, usable cells with the metric only."""
         seed_filter = set(seeds) if seeds is not None else None
         scene_filter = set(scenes) if scenes is not None else None
         out: dict[tuple[str, int], float] = {}
@@ -203,11 +163,7 @@ class ResultSet:
         return out
 
     def dense_fraction(self) -> float:
-        """The fraction the dense cells are recorded under (1.0 by construction).
-
-        Read from the plan rather than hard-coded, so the dense baseline is found
-        even if the convention changes.
-        """
+        """The fraction the dense cells are recorded under (1.0 by construction), read from the plan."""
         for result in self.results.values():
             if result.cell.regime == "full":
                 return result.cell.fraction

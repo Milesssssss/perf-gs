@@ -1,12 +1,7 @@
 // Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-// Naive one-thread-per-pixel forward rasterizer used for M1 + M2.
-//
-// For each pixel: loop over every active gaussian, project it, evaluate its
-// alpha at the pixel center, and accumulate front-to-back with
-// transmittance. No tiling, no sorting. Correct only when gaussians are
-// single or non-overlapping — M3 replaces this with the tile-binned sorted
-// pipeline.
+// Naive one-thread-per-pixel forward rasterizer over every gaussian (no tiling, no sorting).
+// Correct only when gaussians are single or non-overlapping.
 
 #include "../common/types.slang"
 #include "../common/math.slang"
@@ -48,9 +43,7 @@ void naiveForward(
             0.0, 0.3, 0u,
             mean_2d, cov2d, depth_vs, cov2d_det, comp_unused);
 
-        // Behind-camera cull. Not a defensive clamp — points with
-        // non-positive view-space depth do not project to meaningful
-        // screen coordinates and must be dropped.
+        // Non-positive view depth does not project to meaningful screen coordinates.
         if (depth_vs <= 0.0)
             continue;
 

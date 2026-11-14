@@ -1,27 +1,12 @@
 // Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-// Optional view-dependent SH backward (per-gaussian; runs only when sh_degree>0).
-//
-// The per-pixel blend backward already accumulated the color gradient into
-// grad_color_{r,g,b}. With the effective-DC forward that equals SH_C0 *
-// dL/d(rgb_clamped) = dL/d(effective DC) for the CLAMPED view-dependent color.
-// This kernel (one thread per gaussian, INRIA's preprocess_backward) turns that
-// per-gaussian dL/dRGB into gradients for the higher-band coefficients and,
-// through the view direction, the mean:
-//
-//   dL/d(rgb_raw) = (grad_color / SH_C0) * clamp_mask
-//   autodiff shColorFromMean(sh0, rest, mean, ...) with that seed gives
-//     dp_rest.d = dL/d(features_rest),  dp_mean.d = dL/d(mean) via the direction.
-//
-// The DC (sh0) gradient is already grad_color for unclamped channels; we only
-// zero the channels the forward clamped. The mean term is ADDED on top of the
-// geometry mean gradient projection_backward wrote (this kernel runs after it).
+// Optional view-dependent SH backward (sh_degree > 0), one thread per gaussian: turns the blend's
+// grad_color (SH_C0 * dL/d(clamped rgb)) into higher-band and view-direction mean gradients.
 
 #include "../../common/types.slang"
 #include "../../primitives/gaussian/sh.slang"
 
-#include "generated/execution_contract.slang"
-static const uint CLUSTER_SIZE = CONTRACT_CLUSTER_SIZE;
+#include "common/execution.slang"
 
 [shader("compute")]
 [numthreads(256, 1, 1)]
@@ -36,8 +21,7 @@ void shBackward(
     RWStructuredBuffer<int64_t> grad_color_r,
     RWStructuredBuffer<int64_t> grad_color_g,
     RWStructuredBuffer<int64_t> grad_color_b,
-    // 3D mean gradient: projection_backward is the geometry writer; this ADDS
-    // the direction->mean term (runs after, single writer per gid).
+    // Adds the direction->mean term after projection_backward's write (single writer per gid).
     RWStructuredBuffer<int64_t> grad_mean_x,
     RWStructuredBuffer<int64_t> grad_mean_y,
     RWStructuredBuffer<int64_t> grad_mean_z,
@@ -49,9 +33,7 @@ void shBackward(
     uint gid = dtid.x;
     if (gid >= max_splats) return;
     if (gid >= num_gaussians_counter[0]) return;
-    // Culled cluster: the blend backward never scattered grad_color to this
-    // slot (0 tile pairs), and the rest-Adam early-outs the same way, so the
-    // stale features_rest_grad is never read. Matches adam.slang.
+    // Culled clusters get no grad_color and the rest-Adam skips them too, so stale grads stay unread.
     if (cluster_visible[gid / CLUSTER_SIZE] == 0u) return;
 
     Gaussian3D g = gaussians[gid];
@@ -62,9 +44,7 @@ void shBackward(
                        fromFixed(grad_color_g[gid]),
                        fromFixed(grad_color_b[gid]));
 
-    // Load only the active bands: shColorFromMean + its bwd_diff ignore coeffs
-    // beyond `deg`, so inactive higher-band gathers are dead work (those coeffs
-    // are zero in storage and get zero gradient). active_coeffs excludes DC.
+    // Only the active bands (excluding DC): coeffs beyond deg are ignored and get zero gradient.
     uint active_coeffs = uint((deg + 1) * (deg + 1) - 1);
     float3 rest[SH_REST_COEFFS] = loadSHRestActive(features_rest, gid, rest_floats,
                                                    active_coeffs);
@@ -82,8 +62,7 @@ void shBackward(
     var dp_mean = diffPair(g.mean);
     bwd_diff(shColorFromMean)(g.sh0, dp_rest, dp_mean, cam, deg, seed);
 
-    // Higher-band coefficient gradients, packed fp16 (2 scalars per uint) into
-    // features_rest_grad (sole writer). dp_rest.d beyond the active degree is 0.
+    // Higher-band gradients packed fp16, 2 scalars per uint, into features_rest_grad (sole writer).
     uint fu = halfFeatUints(rest_floats);
     uint gbase = gid * fu;
     [ForceUnroll]
@@ -97,9 +76,7 @@ void shBackward(
         float b = 0.0;
         if (s1 < rest_floats)
         {
-            // min() bounds the static index for the unrolled loop (s1==45 would
-            // give k1==15, OOB for the size-15 array); the branch only runs for
-            // real coeffs (k1 <= 14) so it is a no-op at runtime.
+            // min() keeps the unrolled static index in bounds (s1 == 45 -> k1 == 15); no-op at runtime.
             uint k1 = min(s1 / 3u, uint(SH_REST_COEFFS) - 1u), c1 = s1 % 3u;
             float3 v1 = dp_rest.d[k1];
             b = (c1 == 0u) ? v1.x : (c1 == 1u ? v1.y : v1.z);
@@ -107,13 +84,11 @@ void shBackward(
         features_rest_grad[gbase + u] = packHalf2x(a, b);
     }
 
-    // DC (sh0) gradient == grad_color for unclamped channels; zero the ones the
-    // forward clamped (leaves unclamped values bit-exact for Adam).
+    // DC gradient is grad_color for unclamped channels; zero the clamped ones.
     if (mask.x == 0.0) grad_color_r[gid] = int64_t(0);
     if (mask.y == 0.0) grad_color_g[gid] = int64_t(0);
     if (mask.z == 0.0) grad_color_b[gid] = int64_t(0);
 
-    // Direction->mean term, added on top of the geometry mean gradient.
     grad_mean_x[gid] = grad_mean_x[gid] + toFixed(dp_mean.d.x);
     grad_mean_y[gid] = grad_mean_y[gid] + toFixed(dp_mean.d.y);
     grad_mean_z[gid] = grad_mean_z[gid] + toFixed(dp_mean.d.z);

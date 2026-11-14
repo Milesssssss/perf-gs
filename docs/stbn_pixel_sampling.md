@@ -227,8 +227,8 @@ slice_index = (visit_count[camera] + phase[camera]) % slices
   deliberately *not* a draw from the run's RNG, which would shift the camera
   sampling order frozen by `tests/test_camera_sampling.py`.
 
-Lives in `TrainingLoop._stbn_variables` (called exactly once per iteration — it
-mutates the visit counter).
+Lives in `StbnSampler.variables` (`src/trainer/frontend/sampling.py`; called exactly
+once per iteration — it mutates the visit counter).
 
 ## The density schedule
 
@@ -290,14 +290,16 @@ arrangement is most of the point.
 
 | file | role |
 |---|---|
-| `src/trainer/backend/render/stbn.py` | mask spec, ranking, packing, disk cache, upload, quality metrics |
+| `src/trainer/backend/render/stbn_table.py` | mask spec, ranking, packing, disk cache, quality metrics |
+| `src/trainer/backend/render/stbn_mask.py` | table upload + per-step kernel parameters |
 | `shaders/common/stbn.slang` | table layout + selection helpers, `STBN_ENABLED` / `STBN_MAX_TILE_PIXELS` |
 | `shaders/losses/*.slang` | where the mask is applied (zero + `TILE_AREA/k`) |
 | `shaders/rasterize/tile_binned/backward_persplat.slang` | compacted visit loop |
 | `shaders/rasterize/tile_binned/live_buckets.slang` | live-bucket reduction over sampled pixels |
-| `src/trainer/config/config.py` | `StbnConfig`, `StbnVariables` |
+| `src/trainer/config/config.py` | `StbnConfig`, `StbnVariables`, `ShaderSpecialization` |
+| `src/trainer/config/resolve.py` | CLI args -> `StbnConfig` and the shader specialization |
 | `src/trainer/frontend/schedule.py` | `StbnDensitySchedule` |
-| `src/trainer/frontend/app.py` | `resolve_stbn_config`, `ShaderSpecialization`, `_stbn_variables` |
+| `src/trainer/frontend/sampling.py` | `StbnSampler`: per-camera slice walk + density schedule |
 | `scripts/data/download_stbn.py` | asset fetch + license handling |
 | `tests/test_stbn.py` | mask invariants + blue-noise quality |
 | `tests/test_stbn_gradients.py` | reference-vs-compacted equivalence, unbiasedness |
@@ -336,14 +338,3 @@ arrangement is most of the point.
   10%, foliage 30%) at a fixed average — combining TurboGS-style error-guided
   effort with STBN's coverage. A lower flat `rho` is not one of the levers: the
   sweep shows it buys no time.
-
-## Follow-up: variable-density STBN
-
-The last lever above is now implemented and measured — as a smooth per-PIXEL
-marginal rather than a per-tile budget, since a per-tile allocation would be a
-different sampling process for the same reasons `tile_rank` is. See
-[Importance-guided STBN sparse backward sampling](adaptive_stbn_importance_sampling.md)
-for the construction, the flags and the results, including the negative ones. It is
-strictly additive: every regime described on this page behaves exactly as it did
-before, and at `alpha = 0` the adaptive path reproduces this page's mask and
-gradient bit for bit.

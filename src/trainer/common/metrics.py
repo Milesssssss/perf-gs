@@ -1,12 +1,7 @@
 # Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-"""Image-quality metrics (PSNR / SSIM), numpy-only.
-
-The paper metric (3DGS / SAD-GS) is the MEAN of per-image PSNR/SSIM over the
-held-out views. These primitives are shared by the trainer and the plotting /
-inspection scripts; keeping them here gives a single validated implementation
-(the torch reference lives in scripts/image_metrics.py).
-"""
+"""Numpy-only image-quality metrics (PSNR / SSIM); the paper metric (3DGS / SAD-GS) is the
+mean of per-image values over the held-out views."""
 
 from __future__ import annotations
 
@@ -18,11 +13,7 @@ import numpy as np
 def psnr(rendered: np.ndarray, target: np.ndarray) -> float:
     """Per-image PSNR for data in [0, 1].
 
-    Algebraically identical to INRIA 3DGS / SAD-GS ``image_utils.psnr``
-    (20*log10(1/sqrt(mse)) == -10*log10(mse)). Compute per image, then average
-    the dB across frames (mean-of-per-image PSNR) — do NOT pool MSE across
-    frames and log once (dB-of-mean-MSE is a different, more-pessimistic number
-    the paper never reports).
+    Average the dB across frames; pooling MSE first gives a different, more pessimistic number.
     """
     mse = float(np.mean((rendered - target) ** 2))
     if mse <= 1e-12:
@@ -31,38 +22,22 @@ def psnr(rendered: np.ndarray, target: np.ndarray) -> float:
 
 
 def ssim_gaussian_window(window_size: int = 11, sigma: float = 1.5) -> np.ndarray:
-    """1D Gaussian window, matching INRIA 3DGS/SAD-GS loss_utils.gaussian."""
+    """Normalized 1D Gaussian window, matching the 3DGS / SAD-GS SSIM."""
     coords = np.arange(window_size) - window_size // 2
     g = np.exp(-(coords ** 2) / (2.0 * sigma ** 2))
     return (g / g.sum()).astype(np.float64)
 
 
-# Separable 2D window (11x11, sigma=1.5) == reference create_window(11, ...).
-# _WIN_1D is the factor actually applied (once per axis); _WIN_2D remains the
-# literal 11x11 kernel the equivalence test correlates against.
+# _WIN_1D is applied once per axis; _WIN_2D is the equivalent literal 11x11 window.
 _WIN_1D = ssim_gaussian_window(11, 1.5)
 _WIN_2D = np.outer(_WIN_1D, _WIN_1D)
 
 
 def ssim(rendered: np.ndarray, target: np.ndarray) -> float:
-    """Per-image SSIM for HxWxC data in [0, 1].
+    """Per-image SSIM for HxWxC data in [0, 1], faithful to the 3DGS / SAD-GS reference.
 
-    NumPy port of INRIA 3DGS / SAD-GS ``loss_utils.ssim`` (torch reference in
-    scripts/image_metrics.py). Matches it faithfully: 11x11 Gaussian window
-    (sigma=1.5), 'same' convolution with ZERO padding (torch conv2d padding=5),
-    C1=0.01^2, C2=0.03^2, per-channel SSIM map, then the GLOBAL mean over all
-    pixels & channels (size_average=True). Validated against the torch
-    reference to ~1e-6. Do NOT "optimize" the padding/window — fidelity to the
-    reference is what makes it comparable to the SAD-GS / 3DGS SSIM column.
-
-    The window IS applied separably (two 1D passes instead of one 11x11 pass),
-    which is NOT such an optimization: ``_WIN_2D`` is by construction
-    ``outer(g, g)``, and zero-extension factorizes across axes the same way, so
-    the two forms are the same linear operator. Measured agreement is 1e-15 —
-    float64 round-off — for a 5x speedup, and SSIM at ~1 MP dominates the cost
-    of every evaluation sweep. tests/test_metrics_ssim_separable.py pins the
-    equivalence against the literal 11x11 correlation, so a future edit that
-    breaks it fails loudly rather than quietly moving every SSIM column.
+    Keep its 11x11 sigma=1.5 window and zero padding so results stay comparable; the
+    separable application is the same operator, since zero padding factorizes per axis.
     """
     from scipy.ndimage import correlate1d  # scipy is always present
 
@@ -77,8 +52,7 @@ def ssim(rendered: np.ndarray, target: np.ndarray) -> float:
     w1d = _WIN_1D
 
     def filt(img2d: np.ndarray) -> np.ndarray:
-        # 'constant' mode with cval=0 == torch conv2d zero-padding=5, applied
-        # once per axis (see the docstring: same operator as the 11x11 window).
+        # cval=0 'constant' mode == the reference's torch conv2d zero padding, once per axis.
         rows = correlate1d(img2d, w1d, axis=0, mode="constant", cval=0.0)
         return correlate1d(rows, w1d, axis=1, mode="constant", cval=0.0)
 

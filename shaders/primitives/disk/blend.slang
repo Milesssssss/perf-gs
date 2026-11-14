@@ -51,8 +51,7 @@ struct DiskSource : IPrimitiveSource
     }
 }
 
-// Scalar objective that exercises both generic primitive methods in one reverse
-// pass. Seeds are no_diff inputs; the final scalar seed is supplied to bwd_diff.
+// Scalar objective that exercises both generic primitive methods in one reverse pass.
 [Differentiable]
 float primitiveLinearObjective<P : IBlendablePrimitive>(
     P primitive,

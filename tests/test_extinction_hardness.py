@@ -71,14 +71,14 @@ def test_hardened_gradients_finite_difference(backend: str) -> None:
     W = H = 16
     pipeline = _setup(backend, W, H, K)
     camera = _camera(W, H)
-    pipeline.set_target_image(_target(H, W))
+    pipeline.targets.set_image(_target(H, W))
     scene = _scene()
     n = scene["means"].shape[0]
 
     pipeline.set_primitive_from_numpy(**scene)
     pipeline.forward_and_loss(camera)
-    pipeline.clear_gradients()
-    pipeline.backward()
+    pipeline.optimizer.zero_grad()
+    pipeline.run_backward()
     analytic = pipeline.read_gradients()
 
     eps = 1e-3
@@ -128,18 +128,18 @@ def test_hardness_increases_extinction(backend: str) -> None:
     target = _target(H, W)
 
     base = _setup(backend, W, H, 1.0)
-    base.set_target_image(target)
+    base.targets.set_image(target)
     base.set_primitive_from_numpy(**scene)
     base.forward_and_loss(camera)
     base.device.wait_for_idle()
-    a_base = base.buffers.output_image.to_numpy()[..., 3].astype(np.float64)
+    a_base = base.buffers.raster.output_image.to_numpy()[..., 3].astype(np.float64)
 
     hard = _setup(backend, W, H, K)
-    hard.set_target_image(target)
+    hard.targets.set_image(target)
     hard.set_primitive_from_numpy(**scene)
     hard.forward_and_loss(camera)
     hard.device.wait_for_idle()
-    a_hard = hard.buffers.output_image.to_numpy()[..., 3].astype(np.float64)
+    a_hard = hard.buffers.raster.output_image.to_numpy()[..., 3].astype(np.float64)
 
     assert np.all(a_hard >= a_base - 2e-3), \
         "hardened extinction reduced coverage somewhere (should be >= default)"

@@ -1,18 +1,6 @@
 # Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-"""Per-run output-file lifecycle for the training frontend.
-
-Every training run writes a fixed set of JSONL/text streams (plus the optional
-SADGS-schema population-trajectory writer). Opening and closing them used to be
-spread across ``app.main()`` as nine ``open(...)`` calls and two divergent
-teardown blocks (the Nsight capture-exit path closed a different subset than the
-normal teardown).
-
-:class:`RunArtifacts` owns that lifecycle: :meth:`create` opens every stream
-(gating optional ones by their CLI flag and emitting the same console notices as
-before) and :meth:`close_all` closes whatever is open. Optional streams are
-``None`` when their flag is off; callers guard with the usual ``is not None``.
-"""
+"""Per-run output-file lifecycle; optional streams are ``None`` when their CLI flag is off."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -50,30 +38,17 @@ class RunArtifacts:
         def _stream(name: str) -> TextIO:
             return (run_dir / name).open("w", buffering=1)
 
-        # Always-on streams.
         log_txt = _stream("log.txt")
         log_json = _stream("log.jsonl")
         densify_json = _stream("densify_log.jsonl")
 
-        # Per-frame profile records, opened only under --profile-every.
         profile_json = _stream("profile_log.jsonl") if args.profile_every > 0 else None
 
-        # Full-dataset average-PSNR curve, opened only when --eval-every > 0 and
-        # evaluation is not vetoed. One JSON line per eval sweep, for post-hoc
-        # convergence plotting. This stream is ALSO the loop's gate: no stream, no
-        # sweep (see TrainingLoop._run_evaluation_if_due), so --no-evaluation stops
-        # the whole-camera-set render here rather than in the hot path.
-        # --eval-iters counts as asking for sweeps too: this stream IS the loop's
-        # gate, so an explicit checkpoint ladder with --eval-every 0 would
-        # otherwise be silently dropped.
+        # This stream also gates the loop's eval sweeps: no stream, no sweep.
         do_eval = ((args.eval_every > 0 or bool(getattr(args, "eval_iters", None)))
                    and args.evaluation)
         eval_curve_json = _stream("eval_curve.jsonl") if do_eval else None
-        # Pre-densify PSNR curve (--psnr-curve): a focused TEST-set PSNR sample
-        # taken one iter before each densify step, streamed to psnr_curve.jsonl.
         psnr_curve_json = _stream("psnr_curve.jsonl") if args.psnr_curve else None
-        # Binning/overlap debug viz (--debug-bin-viz): one JSONL line per
-        # rendered eval view. Only when both the flag and --eval-every are on.
         bin_viz_json = _stream("binviz.jsonl") if (args.debug_bin_viz and do_eval) else None
         if args.debug_bin_viz and not do_eval:
             print("[debug-bin-viz] ignored: it records eval views, which need "

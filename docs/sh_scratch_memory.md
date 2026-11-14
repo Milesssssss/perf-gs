@@ -34,7 +34,7 @@ Coefficients, gradients, the viewer, and the Gaussian growth limit are unchanged
 ## Implementation
 
 - [Allocation and arena ownership](../src/trainer/backend/memory/buffers.py)
-- [Shared plane-batch command orchestration](../src/trainer/backend/memory/reorder.py)
+- [Shared plane-batch command orchestration](../src/trainer/backend/memory/arena.py)
 - [Offset GPU-counted commits](../shaders/densify/copy_active.slang)
 - [Compaction kernels](../shaders/densify/scatter_compact.slang)
 - [Morton kernels](../shaders/densify/morton_sort.slang)

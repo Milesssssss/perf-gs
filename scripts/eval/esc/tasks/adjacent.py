@@ -2,12 +2,7 @@
 
 """Adjacent change families that stress different extension points.
 
-The anchor family covers the field/optimizer seam; these widen the probe so a
-design cannot look clean after one edit yet collapse on the next. Only the
-densification-mode change is verified as a CPU-only functional task here; the
-loss/optimizer/primitive families contribute comprehension probes plus prompts,
-and can be promoted to functional change tasks by adding hidden tests via
-:class:`~esc.tasks.base.CommandChangeTask` (the framework already supports it).
+Only the densification-mode change is a functional CPU-only task; the other families are comprehension probes.
 """
 
 from __future__ import annotations

@@ -2,24 +2,8 @@
 
 """Deterministic per-phase (fwd/bwd/adam) GPU-ms benchmark at a pinned iter.
 
-Reproduces the "Nsight GPU Trace capture @ iter 1560" launch config's workload
-WITHOUT Nsight: it trains normally up to --capture-iter (so densify / morton /
-mip / opacity-reset all fire exactly as in a real run), pins that iteration's
-camera, freezes all LRs to 0, and times the forward / backward / adam phases of
-the frozen train_step with GPU timestamp queries.
-
-This is the repeatable timing yardstick the kernel-optimization goal tracks:
-run it before and after a change to see whether fwd/bwd/adam ms improved, on the
-identical frozen state the profiler captures.
-
-Usage (matches the launch config):
-    .venv/Scripts/python.exe scripts/running/bench_iter.py \\
-        --capture-iter 1560 --densify-mode structure_aware \\
-        --sh-degree 3 --mip-splatting --seed 42
-
-Everything build_parser() accepts is accepted here; only the benchmark controls
-(--capture-iter reused as the pin point, --bench-warmup, --bench-iters,
---bench-json) are added on top. Writes a JSON summary if --bench-json is given.
+Trains normally to --capture-iter, then times the frozen train_step (pinned camera, LRs 0) without Nsight.
+Usage: python scripts/running/bench_iter.py --capture-iter 1560 --densify-mode structure_aware --sh-degree 3 --mip-splatting --seed 42
 """
 
 from __future__ import annotations
@@ -28,7 +12,7 @@ import json
 import sys
 from pathlib import Path
 
-_SCRIPTS = Path(__file__).resolve().parent.parent  # scripts/
+_SCRIPTS = Path(__file__).resolve().parent.parent
 for _sub in ("running", "debug", "plots"):
     _p = str(_SCRIPTS / _sub)
     if _p not in sys.path:
@@ -49,9 +33,7 @@ def _build_args():
                         help="write the timing summary JSON to this path")
     args = parser.parse_args()
 
-    # Force the headless, viewer-free, non-profiling configuration the timing
-    # run needs. --capture-iter is reused as the pin point; default it to the
-    # launch-config value so a bare invocation matches the capture.
+    # Force a headless, non-profiling run; --capture-iter is the pin point, defaulting to the launch-config capture.
     args.no_viewer = True
     args.profile_run = False
     args.capture_external = False
@@ -83,17 +65,14 @@ def main() -> int:
     pipeline = app._pipeline
     try:
         n_gaussians = int(
-            pipeline.buffers.num_gaussians_counter.to_numpy().view("uint32")[0])
+            pipeline.buffers.primitive.active_count.to_numpy().view("uint32")[0])
     except Exception as exc:  # informational readback only; never abort timing
         print(f"[bench] warning: n_gaussians readback failed ({exc}); continuing")
         n_gaussians = -1
     print(f"[bench] frozen state @ iter {capture_step}: "
           f"cam_idx={context.camera_index}  n_gaussians={n_gaussians}")
 
-    # PSNR/state fingerprint: render the pinned camera and hash the output. With
-    # a fixed seed the trajectory is deterministic, so a bit-identical optimization
-    # must reproduce this fingerprint EXACTLY vs a baseline run — the PSNR-parity
-    # guard the goal requires. Cheap (one render), off the timed path.
+    # Fixed-seed runs are deterministic, so a bit-identical optimization must reproduce this fingerprint exactly.
     import numpy as _np
     pipeline.render(context.camera_entry.camera)
     img = pipeline.read_output_image()[..., :3]
@@ -133,8 +112,7 @@ def main() -> int:
               f"{s['min']:>10.4f}{s['max']:>10.4f}")
     print(f"{'TOTAL(median)':<22}{result['total_ms']:>10.4f}")
 
-    # Fine-grained nested markers (kernels within phases), sorted by cost, so a
-    # regression / hotspot is pinpointed to the exact dispatch.
+    # Nested markers are per-kernel, so this ranking pinpoints a hotspot to its dispatch.
     print()
     print(f"=== ALL markers by median cost @ iter {capture_step} ===")
     print(f"{'marker':<26}{'median':>10}{'mean':>10}{'max':>10}   (ms)")

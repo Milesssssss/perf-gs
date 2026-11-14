@@ -1,12 +1,8 @@
 # Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-"""Grading for comprehension tasks.
+"""Grade comprehension runs: answer keyword coverage and cited vs ground-truth files.
 
-Turns an agent's raw :class:`~esc.agents.base.ComprehensionResult` into a
-scored :class:`~esc.model.ComprehensionRunResult` by comparing the free-text
-answer against a keyword key and the cited files against the ground-truth files.
-File matching is suffix-based so an agent may cite either a repo-relative path or
-a bare filename.
+File matching is suffix-based, so agents may cite a repo-relative path or a bare filename.
 """
 
 from __future__ import annotations

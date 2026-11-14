@@ -1,23 +1,9 @@
 # Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-"""Aggregate per-scene psnr_curve.json files into a paper-style summary.
+"""Aggregate per-scene psnr_curve.json files (v2_train.py --psnr-curve) into a mean curve and final-PSNR table.
 
-Given a folder whose subdirectories each hold a ``psnr_curve.json`` (as written
-by ``v2_train.py --psnr-curve``), this produces, in that same folder:
-  - psnr_avg_curve.png  paper-style PSNR-vs-iteration plot: faint per-scene
-                        curves + a bold mean-over-scenes curve.
-  - final_summary.csv   per-scene final (last-iter) PSNR + #Gaussians, plus the
-                        average row.
-  - final_summary.png   the same table rendered as an image.
-
-The average (both the bold curve and the table AVERAGE row) is taken over the
-INCLUDED scenes only; scenes passed via --exclude are still plotted/listed for
-context but left out of the average (e.g. the Mip-NeRF 360 released-7 protocol
-drops flowers + treehill).
-
-Usage:
-    .venv/Scripts/python.exe scripts/plot_mipnerf_summary.py [FOLDER] [--exclude flowers,treehill]
-    (FOLDER defaults to outputs/train/mipnerf360_runs)
+Scenes in --exclude stay plotted and listed but leave the average (the released-7 protocol drops flowers, treehill).
+Usage: python scripts/plots/plot_mipnerf_summary.py [FOLDER] [--exclude flowers,treehill]
 """
 
 from __future__ import annotations
@@ -70,14 +56,13 @@ def main() -> None:
     if not scenes:
         raise SystemExit(f"no scene psnr_curve.json files under {root}")
 
-    # Order: canonical first, then any extras alphabetically.
     names = [s for s in SCENE_ORDER if s in scenes]
     names += [s for s in sorted(scenes) if s not in names]
     included = [n for n in names if n not in excluded]
     if not included:
         raise SystemExit("every scene was excluded — nothing to average")
 
-    # ---- Averaged PSNR-vs-iteration curve (mean over INCLUDED shared iters). ----
+    # Average only over iterations every included scene has, so partial curves don't bias it.
     common = set(scenes[included[0]]["iters"])
     for n in included[1:]:
         common &= set(scenes[n]["iters"])
@@ -108,7 +93,6 @@ def main() -> None:
     fig.savefig(curve_path)
     plt.close(fig)
 
-    # ---- Final-metrics table (last-iter PSNR + #Gaussians). ----
     rows = []
     for n in names:
         rows.append((n, int(scenes[n]["iters"][-1]),
@@ -118,7 +102,6 @@ def main() -> None:
     avg_psnr = float(np.mean([r[2] for r in inc_rows]))
     avg_ng = float(np.mean([r[3] for r in inc_rows]))
 
-    # CSV.
     csv_path = root / "final_summary.csv"
     with csv_path.open("w", newline="") as fh:
         w = csv.writer(fh)
@@ -129,7 +112,6 @@ def main() -> None:
         w.writerow([f"AVERAGE({len(inc_rows)})", "", f"{avg_psnr:.3f}",
                     f"{avg_ng:.0f}", ""])
 
-    # Rendered table image.
     table_rows = [[(n + " (excl.)" if n in excluded else n),
                    f"{ps:.2f}", f"{ng:,}"] for n, _it, ps, ng in rows]
     avg_label = f"AVERAGE ({len(inc_rows)} scenes)"
@@ -152,7 +134,6 @@ def main() -> None:
         tbl[(0, c)].set_facecolor("#dddddd")
         tbl[(len(table_rows), c)].set_text_props(weight="bold")
         tbl[(len(table_rows), c)].set_facecolor("#eef3fb")
-    # Grey + italicize excluded scene rows (display rows 1..len(rows)).
     for ri, (n, *_rest) in enumerate(rows, start=1):
         if n in excluded:
             for c in range(ncols):

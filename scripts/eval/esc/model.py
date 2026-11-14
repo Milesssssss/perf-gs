@@ -1,19 +1,12 @@
 # Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-"""Immutable value objects that flow through the harness.
-
-These carry *no behaviour* beyond trivial derived properties. All scoring logic
-lives in :mod:`esc.scoring`; keeping the data inert makes results easy to
-serialise, diff between champion and candidate, and store as a dashboard.
-"""
+"""Immutable value objects that flow through the harness; all scoring logic lives in :mod:`esc.scoring`."""
 
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
-
-# --- Subscores and the headline result --------------------------------------
 
 @dataclass(frozen=True)
 class SubScores:
@@ -54,8 +47,6 @@ class EscResult:
         }
 
 
-# --- Agent telemetry --------------------------------------------------------
-
 @dataclass(frozen=True)
 class AgentTelemetry:
     """What one agent run cost. Fed into edit-efficiency ``E``."""
@@ -77,8 +68,6 @@ class AgentTelemetry:
             "patch": float(self.patch_lines),
         }
 
-
-# --- Change-task run outcome ------------------------------------------------
 
 @dataclass(frozen=True)
 class PatchStats:
@@ -131,8 +120,6 @@ class ComprehensionRunResult:
     confidence: float            # agent's self-reported confidence in [0,1]
     was_correct: bool            # thresholded correctness for calibration
 
-
-# --- Testability inputs -----------------------------------------------------
 
 @dataclass(frozen=True)
 class MutationResult:

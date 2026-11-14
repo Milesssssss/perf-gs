@@ -2,25 +2,7 @@
 
 """The manifest: what ran, under what code, and whether it may be reused.
 
-``manifest.json`` is the suite's memory. It answers three questions:
-
-  1. **Resume.** Is this cell already done, with outputs that match the config
-     hash it was recorded under? If so, skip it. If the hash differs, the cached
-     run was produced by a DIFFERENT invocation and is not interchangeable — it is
-     reported as stale and re-run, never quietly reused.
-  2. **Provenance.** For every cell: the exact argv, the commit and whether the
-     tree was dirty, the STBN asset hash, the GPU and driver, resolution, image
-     counts, the split rule, timestamps, active and total wall seconds, the final
-     Gaussian count, and on failure the return code plus the path to the captured
-     stderr.
-  3. **Integrity.** Which cells are missing or failed, so aggregation can refuse
-     to average an incomplete group instead of silently reporting a mean over
-     whatever happened to succeed.
-
-That last point is the reason ``status`` is explicit rather than inferred from
-"does the output file exist". A cell that crashed halfway can leave a readable
-``test_psnr.json`` from an earlier attempt; only the manifest knows that the run
-which produced the current outputs completed.
+``status`` is explicit because a crashed cell can leave readable outputs from an earlier attempt.
 """
 from __future__ import annotations
 
@@ -57,9 +39,7 @@ class CellRecord:
     config_hash: str = ""
     argv: list[str] = field(default_factory=list)
     run_dir: str = ""
-    # Timing. active excludes every mid-loop observation; process_wall is
-    # measured by the PARENT and therefore includes scene load, shader compile,
-    # the post-loop metrics pass and interpreter teardown.
+    # active excludes mid-loop observation; process_wall is measured by the parent, so includes load/compile/teardown.
     train_wall_s: float | None = None
     train_active_s: float | None = None
     observation_s: float | None = None
@@ -70,8 +50,7 @@ class CellRecord:
     lpips: float | None = None
     n_gaussians: int | None = None
     render_fps: float | None = None
-    # Scene / protocol facts, per cell (resolution differs by dataset because
-    # T&T and Deep Blending ship only full-res images and are resized on load).
+    # Scene / protocol facts, per cell (resolution differs by dataset).
     width: int | None = None
     height: int | None = None
     n_cams: int | None = None
@@ -108,11 +87,7 @@ class CellRecord:
 
     @property
     def usable(self) -> bool:
-        """Whether this record may contribute to an aggregate.
-
-        Requires completion AND the headline metric — a run that finished but
-        produced no PSNR is not a data point.
-        """
+        """Whether this record may contribute to an aggregate: completed and with a PSNR."""
         return self.status == STATUS_OK and self.psnr_srgb is not None
 
 
@@ -124,8 +99,6 @@ class Manifest:
         self.environment: dict = environment or {}
         self.records: dict[str, CellRecord] = {}
         self.suite: dict[str, Any] = {}
-
-    # -- persistence -----------------------------------------------------
 
     @classmethod
     def load(cls, path: Path, environment: dict | None = None) -> "Manifest":
@@ -150,8 +123,7 @@ class Manifest:
             manifest.records[key] = CellRecord(
                 **{k: v for k, v in row.items() if k in known})
         manifest.suite = data.get("suite") or {}
-        # Keep the ORIGINAL environment of a resumed run visible: if the commit
-        # moved between sessions, that is exactly what a reader needs to know.
+        # Keep earlier sessions' environments visible in case the commit moved between them.
         history = data.get("environment_history") or []
         if data.get("environment"):
             history.append(data["environment"])
@@ -171,16 +143,13 @@ class Manifest:
             "environment_history": getattr(self, "_history", []),
             "cells": {k: asdict(v) for k, v in sorted(self.records.items())},
         }
-        # Write-then-rename: a suite killed mid-write must not lose the manifest
-        # that records 200 completed hours of training.
+        # Write-then-rename so a suite killed mid-write cannot lose the manifest.
         temp = self.path.with_suffix(".json.tmp")
         temp.write_text(json.dumps(payload, indent=2))
         temp.replace(self.path)
 
-    # -- resume ----------------------------------------------------------
-
     def outputs_present(self, cell: cfg.Cell) -> bool:
-        """Whether the cell's REQUIRED artifacts all exist on disk."""
+        """Whether the cell's required artifacts all exist on disk."""
         run_dir = cell.run_dir
         required = [run_dir / "run_report.json", run_dir / "test_psnr.json"]
         if cell.convergence:
@@ -192,21 +161,14 @@ class Manifest:
         return all(p.exists() for p in required)
 
     def reuse_decision(self, cell: cfg.Cell, python: str) -> tuple[bool, str]:
-        """``(reuse, reason)`` for one cell.
-
-        Reuse requires all three of: a recorded successful run, a matching config
-        hash, and the artifacts still on disk. Anything else re-runs, with the
-        reason logged — a cache that silently serves a mismatched cell is worse
-        than no cache.
-        """
+        """``(reuse, reason)``: reuse needs a recorded ok run, a matching config hash and artifacts on disk."""
         expected = cell.config_hash(python)
         record = self.records.get(cell.key)
         present = self.outputs_present(cell)
 
         if record is None:
             if present:
-                # Outputs exist but this suite never recorded them: could be from
-                # an older schema or a hand-run. Re-run rather than trust them.
+                # Unrecorded outputs (older schema or hand-run) are re-run rather than trusted.
                 return False, "outputs present but not recorded in the manifest"
             return False, "not yet run"
         if record.status == STATUS_MISSING_SCENE:
@@ -220,17 +182,11 @@ class Manifest:
             return False, "recorded ok but artifacts are missing on disk"
         return True, "cached"
 
-    # -- integrity -------------------------------------------------------
-
     def usable_records(self) -> dict[str, CellRecord]:
         return {k: r for k, r in self.records.items() if r.usable}
 
     def integrity_report(self, cells: list[cfg.Cell]) -> dict:
-        """What is complete, what failed, and what is missing.
-
-        Consumed by the aggregation step, which refuses to report a group mean
-        unless the group is complete.
-        """
+        """What is complete, failed and missing; aggregation refuses a group mean unless the group is complete."""
         planned = {c.key: c for c in cells}
         ok, failed, missing, stale = [], [], [], []
         for key, cell in planned.items():

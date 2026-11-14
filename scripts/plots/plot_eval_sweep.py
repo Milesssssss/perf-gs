@@ -2,16 +2,7 @@
 
 """Plot the Mip-NeRF 360 SH0-vs-SH3 sweep: PSNR + training-time bar charts.
 
-Reads outputs/eval_sweep/results.json (written by eval_mipnerf_sweep.py) and
-writes, into that folder:
-  - psnr_sweep.png     grouped bars: held-out sRGB PSNR per scene, SH0 vs SH3
-  - timing_sweep.png   grouped bars: train wall time (s) per scene, SH0 vs SH3
-  - eval_sweep_summary.csv
-
-Design (per the dataviz method): two categorical series (SH0, SH3) get a fixed
-CVD-safe hue pair (Okabe-Ito blue/orange), one y-axis per chart, a legend, direct
-value labels, recessive grid. Scenes in canonical outdoor-then-indoor order with
-an AVERAGE group appended.
+Reads outputs/eval_sweep/results.json (from eval_mipnerf_sweep.py); writes the PNGs and eval_sweep_summary.csv beside it.
 """
 from __future__ import annotations
 
@@ -30,7 +21,7 @@ OUT = REPO / "outputs" / "eval_sweep"
 SCENE_ORDER = ["bicycle", "flowers", "garden", "stump", "treehill",
                "bonsai", "counter", "kitchen", "room"]
 # Okabe-Ito: canonical 2-category colorblind-safe pair (identity, fixed order).
-SH_COLORS = {0: "#0072B2", 3: "#E69F00"}   # SH0 = blue, SH3 = orange
+SH_COLORS = {0: "#0072B2", 3: "#E69F00"}
 SH_LABEL = {0: "SH degree 0", 3: "SH degree 3"}
 
 
@@ -49,8 +40,7 @@ def _grouped_bar(results, field, ylabel, title, out_path, fmt):
     shs = sorted({r["sh"] for r in results})
     vals = _index(results, field)
 
-    # Per-SH mean over scenes (the AVERAGE group), computed over scenes present
-    # for that SH so a missing run doesn't bias the mean.
+    # Per-SH mean over only the scenes present for that SH, so a missing run doesn't bias it.
     avg = {}
     for sh in shs:
         xs = [vals[(s, sh)] for s in scenes if vals.get((s, sh)) is not None]
@@ -77,25 +67,21 @@ def _grouped_bar(results, field, ylabel, title, out_path, fmt):
                         fontsize=7.5, color="#222222", xytext=(0, 1.5),
                         textcoords="offset points")
 
-    # AVERAGE separator + emphasis.
     ax.axvline(len(scenes) - 0.5, color="#bbbbbb", lw=1.0, ls="--", zorder=1)
     ax.set_xticks(x)
     ax.set_xticklabels(labels, rotation=30, ha="right")
     ax.set_ylabel(ylabel)
-    # Figure-level title at the very top; the legend sits just under it (below),
-    # both above the axes so neither collides with the tall bars.
+    # Suptitle and legend both sit above the axes so neither collides with the tall bars.
     fig.suptitle(title, y=0.99, fontsize=12)
     ax.grid(axis="y", alpha=0.25, zorder=0)
     ax.set_axisbelow(True)
     for spine in ("top", "right"):
         ax.spines[spine].set_visible(False)
-    # Headroom so the top value labels + legend never collide with the tallest
-    # bars, then place the legend in that reserved band above the plot.
+    # Headroom so the top value labels never collide with the tallest bars.
     finite = [v for v in
               ([vals.get((s, sh)) for s in scenes for sh in shs] + list(avg.values()))
               if v is not None]
     ax.set_ylim(0, max(finite) * 1.12)
-    # Legend between the suptitle and the axes (upper area of the figure).
     ax.legend(frameon=False, ncol=n, loc="lower center",
               bbox_to_anchor=(0.5, 1.01))
     # Reserve a top band for suptitle + legend so tight_layout doesn't overlap.
@@ -122,7 +108,6 @@ def main() -> int:
                  "Mip-NeRF 360: training time by scene (SH0 vs SH3, 3k iters)",
                  OUT / "timing_sweep.png", "{:.0f}")
 
-    # CSV summary.
     scenes = _ordered_scenes(results)
     shs = sorted({r["sh"] for r in results})
     psnr = _index(results, "psnr_srgb")

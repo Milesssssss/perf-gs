@@ -12,10 +12,10 @@ from _colmap_testkit import write_colmap_scene
 from _pipeline_testkit import TestPipeline
 
 from trainer.backend.compute.device import create_device
-from trainer.backend.densify.structure_analysis_gpu import StructureTensorGPU
+from trainer.backend.densify.structure_tensor import StructureTensor
 from trainer.backend.memory import budget
-from trainer.backend.memory.vram import query_video_memory
-from trainer.backend.render.pipeline import TrainingPipeline
+from trainer.backend.platform.dxgi import query_video_memory
+from trainer.backend.render.pipeline import TrainingPipeline, estimate_pipeline_bytes
 from trainer.config.config import AdamLRs, LossConfig
 from trainer.data.dataset import simple_camera
 from trainer.frontend.app import TrainingApplication
@@ -48,7 +48,7 @@ def _three_splats(device, **kwargs) -> TestPipeline:
         opacities=np.array([0.8, 0.6, 0.7], np.float32),
         color_logits=np.array([[1.5, -1.5, -1.5], [-1.5, 1.5, -1.5], [-1.5, -1.5, 1.5]],
                               np.float32))
-    pipeline.clear_gradients()
+    pipeline.optimizer.zero_grad()
     return pipeline
 
 
@@ -77,6 +77,15 @@ def test_query_video_memory_reports_this_process() -> None:
     assert measured[0] > 0 and measured[1] >= 0
 
 
+def test_allocated_bytes_cover_the_planned_allocation(device) -> None:
+    pipeline = _three_splats(device)
+    owned = budget.allocated_bytes(pipeline.buffers)
+    assert owned["raster.output_image"] >= 16 * 16 * 16
+    planned = estimate_pipeline_bytes(pipeline.shared_data_module, max_splats=16,
+                                      width=16, height=16, sh_degree=0)
+    assert sum(owned.values()) >= planned
+
+
 def test_streamed_target_matches_resident_texture(device) -> None:
     target = np.zeros((16, 16, 3), np.float32)
     target[..., 0] = 0.5
@@ -84,23 +93,23 @@ def test_streamed_target_matches_resident_texture(device) -> None:
     results = []
     for streamed in (False, True):
         pipeline = _three_splats(device)
-        packed = pipeline.pack_target_texture(target)
-        pipeline.set_target_texture(
-            packed if streamed else pipeline.upload_target_texture(packed))
+        packed = pipeline.targets.pack(target)
+        pipeline.targets.select(
+            packed if streamed else pipeline.targets.upload(packed))
         pipeline.train_step(CAMERA, lrs=lrs)
         device.wait_for_idle()
-        results.append(pipeline.buffers.gaussians.to_numpy().copy())
+        results.append(pipeline.buffers.primitive.values.to_numpy().copy())
     np.testing.assert_array_equal(results[0], results[1])
 
 
 def test_streamed_structure_fields_match_resident_texture(device) -> None:
     target = np.random.default_rng(0).uniform(0.0, 1.0, (16, 16, 3)).astype(np.float32)
-    builder = StructureTensorGPU(device, 16, 16)
+    builder = StructureTensor(device, 16, 16)
     results = []
-    for mode in ("resident", "host", "derived"):
+    for mode in ("resident", "derived"):
         pipeline = _three_splats(device)
-        packed = pipeline.pack_target_texture(target)
-        target_texture = pipeline.upload_target_texture(packed)
+        packed = pipeline.targets.pack(target)
+        target_texture = pipeline.targets.upload(packed)
         field = device.create_texture(
             type=spy.TextureType.texture_2d, format=spy.Format.rgba16_float,
             width=16, height=16,
@@ -109,25 +118,24 @@ def test_streamed_structure_fields_match_resident_texture(device) -> None:
         builder.record_into(batch.encoder, target_texture, field)
         builder.runtime.submit(batch)
         builder.runtime.wait_for_idle()
-        structure = {"resident": field, "host": field.to_numpy(), "derived": builder}[mode]
-        pipeline.set_target_texture(target_texture if mode == "resident" else packed)
+        structure = field if mode == "resident" else builder
+        pipeline.targets.select(target_texture if mode == "resident" else packed)
         pipeline.train_step(CAMERA, structure_tensor=structure)
         device.wait_for_idle()
         eta = pipeline.buffers.eta
         results.append(np.stack([buffer.to_numpy() for buffer in eta.components.values()]))
     assert results[0].any()
     np.testing.assert_array_equal(results[0], results[1])
-    np.testing.assert_array_equal(results[0], results[2])
 
 
 def test_sort_stats_count_demand_and_dropped_pairs(device) -> None:
     roomy = _three_splats(device, max_sort_pairs=1024)
     roomy.render(CAMERA)
-    peak, dropped = roomy.buffers.sort_stats.to_numpy().view(np.uint32)
+    peak, dropped = roomy.buffers.sort.stats.to_numpy().view(np.uint32)
     assert peak > 2 and dropped == 0
     tight = _three_splats(device, max_sort_pairs=2)
     tight.render(CAMERA)
-    assert list(tight.buffers.sort_stats.to_numpy().view(np.uint32)) == [peak, 1]
+    assert list(tight.buffers.sort.stats.to_numpy().view(np.uint32)) == [peak, 1]
 
 
 def test_viewer_grows_to_the_snapshot(device) -> None:
@@ -136,7 +144,7 @@ def test_viewer_grows_to_the_snapshot(device) -> None:
     viewer.update_gaussians(train)
     device.wait_for_idle()
     assert viewer.max_splats == 3
-    shown = viewer._pipeline.buffers.num_gaussians_counter.to_numpy().view(np.uint32)
+    shown = viewer._pipeline.buffers.primitive.active_count.to_numpy().view(np.uint32)
     assert shown[0] == 3
     viewer._pipeline.render(CAMERA)      # the resized buffers rasterize
     assert viewer._pipeline.read_output_image()[..., 3].max() > 0
@@ -156,7 +164,7 @@ def _train_scene(device, tmp_path, monkeypatch, residency: str) -> np.ndarray:
     monkeypatch.setattr("trainer.frontend.app.create_training_device", lambda _args: device)
     # Earlier tests' devices count against this process's DXGI budget.
     monkeypatch.setattr("trainer.frontend.app.available_bytes", lambda *_: None)
-    monkeypatch.setattr("trainer.frontend.app.TrainingPipeline",
+    monkeypatch.setattr("trainer.frontend.factory.TrainingPipeline",
                         lambda **kwargs: TrainingPipeline(max_sort_pairs=512, **kwargs))
     app = TrainingApplication(args)
     app.prepare_training_context()
@@ -164,7 +172,7 @@ def _train_scene(device, tmp_path, monkeypatch, residency: str) -> np.ndarray:
         assert app._stream_targets == (residency == "stream")
         app.build_training_loop().launch_training_loop()
         app.pipeline.runtime.wait_for_idle()
-        return app.pipeline.buffers.gaussians.to_numpy().copy()
+        return app.pipeline.buffers.primitive.values.to_numpy().copy()
     finally:
         app.runtime.artifacts.close_all()
 

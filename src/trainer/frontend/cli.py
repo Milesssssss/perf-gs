@@ -1,24 +1,21 @@
 # Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-"""CLI parser for the v2 trainer.
-
-Owns all ``argparse`` work — the single boundary that produces the untyped
-Namespace. Extracted from ``scripts/v2_train.py`` to thin the entry script; flag
-names, defaults, and help text are preserved EXACTLY (frozen by
-tests/test_cli_defaults.py). Callers should resolve the Namespace into the typed
-config (``trainer.config_types``) rather than threading it around.
-
-The flags the hub panel ALSO offers are not declared here: they are the shared
-:data:`trainer.frontend.settings.SETTINGS` rows, mounted by :func:`_shared` at the
-position they belong in ``--help``. That is what keeps the command line and the
-panel from disagreeing about a type, a default or a set of choices — a knob is
-declared once, in the settings table, and consumed by both.
-"""
+"""CLI parser, the single boundary that produces the untyped Namespace. Flags the hub panel
+also offers are declared once as shared ``settings.SETTINGS`` rows and mounted via ``_shared``."""
 
 from __future__ import annotations
 
 import argparse
 
+from trainer.config.config import (
+    DensifyConfig,
+    LossConfig,
+    RasterConfig,
+    RegularizationConfig,
+    ShaderSpecialization,
+    StbnConfig,
+    StructureConfig,
+)
 from trainer.config.config_types import SplatKernel
 from trainer.frontend.settings import SETTINGS_MAP
 
@@ -93,9 +90,8 @@ def build_parser() -> argparse.ArgumentParser:
     _shared(parser, "densify_every")
     _shared(parser, "densify_from")
     _shared(parser, "densify_to")
-    #ap.add_argument("--opacity-reset-iters", type=int, nargs="*", default=[3000])
-    parser.add_argument("--n-scoring-views", type=int, default=10)
-    parser.add_argument("--t-opacity", type=float, default=0.005,
+    parser.add_argument("--n-scoring-views", type=int, default=StructureConfig.n_scoring_views)
+    parser.add_argument("--t-opacity", type=float, default=DensifyConfig.t_opacity,
                     help="prune splats with sigmoid(opacity) below this. MUST stay BELOW "
                          "--opacity-reset-value (default 0.01): opacity reset clamps every "
                          "splat down to the reset value, so a floor above it prunes the "
@@ -114,13 +110,14 @@ def build_parser() -> argparse.ArgumentParser:
                          "tick right after an opacity reset is always skipped: the "
                          "reset itself depresses every blend weight.")
     _shared(parser, "reset_every")
-    parser.add_argument("--opacity-reg", type=float, default=0.00)
-    parser.add_argument("--scale-reg", type=float, default=0.00)
-    parser.add_argument("--w-alpha", type=float, default=0.0,
+    parser.add_argument("--opacity-reg", type=float,
+                        default=RegularizationConfig.opacity_weight)
+    parser.add_argument("--scale-reg", type=float, default=RegularizationConfig.scale_weight)
+    parser.add_argument("--w-alpha", type=float, default=LossConfig.alpha_weight,
                     help="alpha loss weight; set > 0 for RGBA targets (e.g. 1.0)")
     _shared(parser, "lambda_ssim")
     _shared(parser, "max_splats")
-    parser.add_argument("--z-near-cull", type=float, default=0.01,
+    parser.add_argument("--z-near-cull", type=float, default=RasterConfig.z_near_cull,
                     help="view-space depth floor for bin cull; raise for scenes "
                          "where points can land near a camera pose (e.g. 0.2)")
     parser.add_argument("--profile-every", type=int, default=0,
@@ -135,7 +132,7 @@ def build_parser() -> argparse.ArgumentParser:
                          "accumulators are slot-indexed and must be reset when "
                          "slots are permuted.")
     parser.add_argument("--cluster-cull", action=argparse.BooleanOptionalAction,
-                    default=True,
+                    default=RasterConfig.cluster_cull,
                     help="Cluster-frustum cull before each forward: bound the "
                          "128-splat clusters (Morton-adjacent) by a per-cluster "
                          "AABB and skip clusters fully outside the view frustum. "
@@ -145,13 +142,14 @@ def build_parser() -> argparse.ArgumentParser:
                          "whole scene). Mask-in-bin_count design (no compaction, "
                          "no slot remap) — every downstream pass is unaware.")
     _shared(parser, "densify_mode")
-    parser.add_argument("--sad-tau-split", type=float, default=0.8,
+    parser.add_argument("--sad-tau-split", type=float, default=StructureConfig.tau_split,
                     help="SAD split_ratio_threshold: split if high_ratio (fraction of views "
                          "with scalar eta>1) exceeds this AND the gradient is high (SADGS 0.8)")
-    parser.add_argument("--sad-tau-prune", type=float, default=0.8,
+    parser.add_argument("--sad-tau-prune", type=float, default=StructureConfig.tau_prune,
                     help="SAD prune_ratio_threshold: prune if low_ratio (fraction of views "
                          "with eta<0.1) exceeds this (SADGS 0.8)")
-    parser.add_argument("--sad-grad-threshold", type=float, default=1e-5,
+    parser.add_argument("--sad-grad-threshold", type=float,
+                    default=StructureConfig.grad_threshold,
                     help="SAD is_grad_high floor: avg 2D-grad magnitude a gaussian must exceed "
                          "to be split-eligible (SADGS hardcodes 1e-5)")
     parser.add_argument("--sad-accum-every", type=int, default=10,
@@ -169,11 +167,13 @@ def build_parser() -> argparse.ArgumentParser:
                          "eta is only folded in from views where the gaussian has a high "
                          "per-view screen gradient; rescaled by W*H*3 into our accumulator's "
                          "sum-of-abs convention. 0 disables the per-view grad gate.")
-    parser.add_argument("--sad-split-power", type=float, default=0.5,
+    parser.add_argument("--sad-split-power", type=float, default=StructureConfig.split_power,
                     help="SAD: per-axis split factor n_k = ceil(eta_max ** power); 0.5 = sqrt (paper)")
-    parser.add_argument("--sad-max-split-factor", type=int, default=8,
+    parser.add_argument("--sad-max-split-factor", type=int,
+                    default=StructureConfig.max_split_factor,
                     help="SAD: per-axis cap on the grid split factor n_k (SADGS max_clones_per_axis=8)")
-    parser.add_argument("--sad-ks-scale-power", type=float, default=1.0,
+    parser.add_argument("--sad-ks-scale-power", type=float,
+                    default=StructureConfig.ks_scale_power,
                     help="SAD: child scale along axis k = sigma_k / n_k**power (SADGS "
                          "ks_scale_power). 1.0 for Mip-NeRF 360 (variance-preserving with the "
                          "sqrt(12) child spacing); 1.2 for Tanks & Temples / Deep Blending.")
@@ -182,7 +182,7 @@ def build_parser() -> argparse.ArgumentParser:
                          "warmup 0.005), pruning the post-split population hard so weak "
                          "children don't survive to compound into the next structure pass. "
                          "Default 0.005 = current behavior; set 0.1 to match the reference.")
-    parser.add_argument("--sad-opacity-cap", type=float, default=0.8,
+    parser.add_argument("--sad-opacity-cap", type=float, default=StructureConfig.opacity_cap,
                     help="post-densify opacity cap applied to ALL survivors after the "
                          "structure prune (SADGS inverse_sigmoid(min(opacity,0.8))). "
                          "0 = off (current). Set 0.8 to match the reference (measured: "
@@ -194,7 +194,7 @@ def build_parser() -> argparse.ArgumentParser:
                          "reset. On by default; pass --no-sad-relative-reset to disable. "
                          "REQUIRED when --sad-structure-min-opacity=0.1 so the floor "
                          "doesn't wipe the scene at the first post-reset structure pass.")
-    parser.add_argument("--sad-reset-decay", type=float, default=0.1,
+    parser.add_argument("--sad-reset-decay", type=float, default=DensifyConfig.reset_decay,
                     help="RELATIVE-reset multiplier (SADGS opacity_reset_decay=0.1). "
                          "Only used with --sad-relative-reset.")
     parser.add_argument("--densify-diag", action="store_true",
@@ -212,7 +212,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--sad-lambda-l2", type=float, default=2.0,
                     help="SADGS additive L2 loss weight (their opt.lambda_l2). Applied when "
                          "--densify-mode structure_aware and --sad-match-loss-lrs (else --lambda-l2 is used).")
-    parser.add_argument("--lambda-l2", type=float, default=0.0,
+    parser.add_argument("--lambda-l2", type=float, default=LossConfig.l2_weight,
                     help="additive L2 loss weight for non-SAD runs (0 = pure L1(+SSIM))")
     parser.add_argument("--grad-thresh", type=float, default=0.0005,
                     help="2D-gradient densification threshold. gsplat uses 0.0002 for "
@@ -266,7 +266,7 @@ def build_parser() -> argparse.ArgumentParser:
                          "rounding) halves optimizer memory: 56 B/splat at SH0, "
                          "236 B at SH3. Compile-time, so launch-only in the hub.")
     parser.add_argument("--splat-kernel", choices=tuple(k.value for k in SplatKernel),
-                    default=SplatKernel.GAUSSIAN.value,
+                    default=ShaderSpecialization.splat_kernel.value,
                     help="how a splat's footprint G becomes alpha. 'gaussian' "
                          "(default) = opacity * G. 'density' treats it as an optical "
                          "depth: alpha = 1 - (1 - opacity)^G, the same peak alpha, but "
@@ -275,13 +275,15 @@ def build_parser() -> argparse.ArgumentParser:
                          "logit. 'opaque_core' = log_density whose falloff power "
                          "rises from 1 to --splat-profile-power as the splat turns "
                          "opaque. Compile-time, so launch-only in the hub.")
-    parser.add_argument("--splat-profile-power", type=float, default=1.0,
+    parser.add_argument("--splat-profile-power", type=float,
+                    default=ShaderSpecialization.splat_profile_power,
                     help="radial falloff power p >= 1 of every splat kernel: "
                          "G = exp(-m^p), m = half the squared Mahalanobis "
                          "distance. 1 (default) = gaussian; > 1 flattens the top "
                          "and steepens the edge, shrinking the footprint. "
                          "Compile-time, so launch-only in the hub.")
-    parser.add_argument("--splat-profile-onset", type=float, default=0.0,
+    parser.add_argument("--splat-profile-onset", type=float,
+                    default=ShaderSpecialization.splat_profile_onset,
                     help="opaque_core only: the power ramps with sigmoid(logit - "
                          "onset), so a splat flattens only once its opacity logit "
                          "passes the onset. 0 (default) = ramp with the opacity "
@@ -308,7 +310,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--init-opacity", type=float, default=0.1, help="initial opacity for all splats")
     parser.add_argument("--grow-scale3d", type=float, default=0.001,
                     help="Scale factor for 3D growth of Gaussians (for split/clone routing).")
-    parser.add_argument("--opacity-reset-value", type=float, default=0.01, help="value to reset opacity to when doing opacity reset")
+    parser.add_argument("--opacity-reset-value", type=float,
+                    default=DensifyConfig.t_opacity_reset_value, help="value to reset opacity to when doing opacity reset")
     parser.add_argument("--profile-run", action="store_true",
                     help="Nsight Graphics profiling mode. Runs a NORMAL training loop "
                          "(densify + logs still on, per your schedule) but also opens "
@@ -373,7 +376,7 @@ def build_parser() -> argparse.ArgumentParser:
                          "changes nothing measurable. It exists to A/B that claim "
                          "- the speedup comes from the shorter pixel loop "
                          "(--stbn-pixel-fraction), not from the staging.")
-    parser.add_argument("--stbn-source", type=str, default="nvidia",
+    parser.add_argument("--stbn-source", type=str, default=StbnConfig.source,
                     choices=["nvidia", "white", "file"],
                     help="Where the spatiotemporal blue noise comes from. "
                          "'nvidia' (default): the pregenerated scalar STBN from "
@@ -385,11 +388,11 @@ def build_parser() -> argparse.ArgumentParser:
                          "downstream code path. 'file': rank your own scalar "
                          "volume from --stbn-file. Only used when "
                          "--stbn-pixel-fraction < 1.")
-    parser.add_argument("--stbn-file", type=str, default="",
+    parser.add_argument("--stbn-file", type=str, default=StbnConfig.file_path,
                     help="Path to a (slices, height, width) .npy scalar STBN "
                          "volume for --stbn-source file. Also overrides the "
                          "cached asset path for --stbn-source nvidia.")
-    parser.add_argument("--stbn-select-mode", type=str, default="global",
+    parser.add_argument("--stbn-select-mode", type=str, default=StbnConfig.select_mode,
                     choices=["global", "tile_rank"],
                     help="Which pixels a density selects. 'global' (default): "
                          "threshold the WHOLE 128x128 slice and keep its lowest "
@@ -407,12 +410,12 @@ def build_parser() -> argparse.ArgumentParser:
                          "control ~24%% bluer than true white, compressing the "
                          "blue-vs-white contrast from both ends. Kept as an "
                          "ablation. Incompatible with --stbn-warmup-iters > 0.")
-    parser.add_argument("--stbn-seed", type=int, default=0,
+    parser.add_argument("--stbn-seed", type=int, default=StbnConfig.seed,
                     help="Seed for --stbn-source white (ignored otherwise). Kept "
                          "separate from --seed so the mask can be re-rolled "
                          "without changing the camera draw order.")
     parser.add_argument("--stbn-independent",
-                    action=argparse.BooleanOptionalAction, default=False,
+                    action=argparse.BooleanOptionalAction, default=StbnConfig.independent,
                     help="Draw a fresh RANDOM mask slice each step instead of "
                          "advancing the temporal axis per camera visit. This "
                          "turns the spatiotemporal mask into an INDEPENDENT-"
@@ -422,71 +425,6 @@ def build_parser() -> argparse.ArgumentParser:
                          "slice RNG is seeded from --stbn-seed, kept separate "
                          "from the camera draw so it can't shift the sampling "
                          "order. Only used when --stbn-pixel-fraction < 1.")
-    parser.add_argument("--stbn-adaptive",
-                    action=argparse.BooleanOptionalAction, default=False,
-                    help="IMPORTANCE-GUIDED sparse sampling. Spend the same "
-                         "expected pixel budget (--stbn-pixel-fraction) "
-                         "preferentially where the screen-space loss gradient is "
-                         "large, instead of uniformly. The dense objective is "
-                         "PRESERVED: each selected pixel's gradient is weighted "
-                         "by 1/p_i, so the Gaussian gradient stays an unbiased "
-                         "estimate of the dense one. The blue-noise field is "
-                         "untouched — the importance map only moves the "
-                         "per-pixel threshold it is compared against. Requires "
-                         "--stbn-pixel-fraction < 1. Leaves the uniform regimes "
-                         "(plain --stbn-source/--stbn-independent) unchanged.")
-    parser.add_argument("--stbn-importance-alpha", type=float, default=0.75,
-                    help="Mixture weight between uniform exploration and "
-                         "gradient importance: a_i = (1-alpha) + alpha * "
-                         "s~_i/mean(s~). 0 is exactly uniform sampling and "
-                         "reproduces the non-adaptive mask bit for bit; ->1 is "
-                         "strongly importance-driven. Must be < 1 (alpha=1 admits "
-                         "p_i=0 pixels, for which the 1/p_i weight is undefined).")
-    parser.add_argument("--stbn-importance-sigma", type=float, default=8.0,
-                    help="Gaussian smoothing scale of the importance field, in "
-                         "OUTPUT-IMAGE pixels. A single pixel's loss gradient is "
-                         "a very noisy stand-in for the Gaussian gradient it "
-                         "seeds (L1's is sign-valued), so the field is smoothed "
-                         "to the scale a splat actually covers. Deliberately "
-                         "unrelated to the 8x8 rasterizer tile and to the "
-                         "128x128 STBN texture. 0 disables smoothing (the "
-                         "raw per-pixel field), which is the sigma=0 arm of the "
-                         "robustness sweep.")
-    parser.add_argument("--stbn-importance-downsample", type=int, default=4,
-                    help="Resolution divisor the importance field is evaluated "
-                         "at before bilinear reconstruction. A COST knob only: "
-                         "the coarse-grid Gaussian sigma is compensated for the "
-                         "box-downsample and the reconstruction, so the effective "
-                         "smoothing stays --stbn-importance-sigma output pixels "
-                         "(measured within 2%% at the default). Capped at "
-                         "floor(sigma).")
-    parser.add_argument("--stbn-adaptive-uniform", type=str,
-                    default="blue_temporal",
-                    choices=["iid", "blue_independent", "blue_temporal"],
-                    help="Which uniform sequence the per-pixel threshold is "
-                         "compared against — the ONLY difference between the "
-                         "three adaptive regimes, since they share the identical "
-                         "probability map. 'iid': a fresh independent uniform per "
-                         "pixel per visit. 'blue_independent': a spatially "
-                         "blue-noise field per visit with the slice drawn "
-                         "independently each step (the existing indep_blue "
-                         "semantics). 'blue_temporal' (default): the same volume "
-                         "walked by each camera's own visit counter (the existing "
-                         "stbn semantics). The ladder iid -> blue_independent -> "
-                         "blue_temporal asks whether blue-noise correlations "
-                         "still help once the sampling DENSITY has been optimized.")
-    parser.add_argument("--stbn-adaptive-biased",
-                    action=argparse.BooleanOptionalAction, default=False,
-                    help="DIAGNOSTIC CONTROL, not the method. Sample from the "
-                         "adaptive probabilities but omit the 1/p_i weighting, "
-                         "i.e. deliberately change the training objective toward "
-                         "high-error regions. Kept only to answer whether that "
-                         "reweighting happens to help reconstruction; the "
-                         "proposed method is the unbiased estimator. The gradient "
-                         "is still rescaled by the GLOBAL 1/rho so its magnitude "
-                         "matches the unbiased arm — otherwise this would also "
-                         "change the effective learning rate and the meaning of "
-                         "the densifier's absolute --grad-thresh.")
     _shared(parser, "extinction_hardness")
     _shared(parser, "extinction_hardness_warmup")
     parser.add_argument("--final-test-psnr", action="store_true", default=False,

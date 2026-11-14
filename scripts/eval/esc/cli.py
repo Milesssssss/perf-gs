@@ -2,18 +2,7 @@
 
 """Command-line entry point for the ESC harness.
 
-Subcommands:
-
-    analyze    agent-free: compute S and the static locality term over a codebase
-               and print the concept-entropy dashboard (runnable today)
-    score      combine six subscores into ESC (the aggregation, in isolation)
-    evaluate   full evaluation with an agent (scripted no-op by default; wire a
-               real agent with --agent-cmd)
-    loop       run the champion/candidate procedure
-
-Only ``analyze`` and ``score`` are useful without a live agent; ``evaluate`` and
-``loop`` are the seams for a real coding agent via ``--agent-cmd`` (a shell
-command run inside each sandbox).
+``analyze`` and ``score`` need no agent; ``evaluate`` and ``loop`` run a real one via ``--agent-cmd``.
 """
 
 from __future__ import annotations
@@ -40,8 +29,6 @@ from esc.tasks.registry import default_families, select_families
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 
-
-# --- Argument parsing -------------------------------------------------------
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="esc", description=__doc__)
@@ -79,8 +66,6 @@ def _add_agent_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--mutation-json", type=Path, default=None,
                    help="JSON file with mutation/fault evidence for T")
 
-
-# --- Command handlers -------------------------------------------------------
 
 def cmd_analyze(args: argparse.Namespace, config: EscConfig) -> int:
     analysis = analyze_static(args.root, config)
@@ -129,8 +114,6 @@ def cmd_loop(args: argparse.Namespace, config: EscConfig) -> int:
         loop.cleanup()
     return 0
 
-
-# --- Helpers ----------------------------------------------------------------
 
 def _parse_seeds(raw: str) -> tuple[int, ...]:
     return tuple(int(s) for s in raw.split(",") if s.strip())

@@ -1,94 +1,47 @@
 // Modfications to the software are Copyright (c) 2026 Electronic Arts Inc, provided under the original license.
 // Original sorting code: Copyright (c) 2024 Thomas Smith (MIT).
 
-// Device-level LSD radix sort ported from Thomas Smith's GPUSorting
-// (b0nes164/GPUSorting, MIT). Reduce-then-scan variant (Upsweep -> Scan ->
-// Downsweep), no cross-workgroup spin loops or forward-progress requirement.
-//
-// This is the WGE16 (wave lane count >= 16), ascending-only path,
-// generalized from the reference's 32-bit key + optional 32-bit payload
-// to a 3-word record (keys_lo, keys_hi, values) so the existing pipeline
-// contract holds: 64-bit key stored as (hi:lo) uint32 pair + uint32
-// gaussian-index payload, 8 passes (passes 0-3 digit from keys_lo, passes
-// 4-7 from keys_hi).
-//
-// Kernels:
-//   initGlobalHist  — clear b_global_hist[2048] once per full sort.
-//   upsweep         — per PART_SIZE partition: histogram digit-source word,
-//                     write per-(digit,partition) counts to b_pass_hist,
-//                     atomic-add per-digit totals into b_global_hist.
-//   scan            — one workgroup per digit; exclusive-scan
-//                     b_pass_hist[digit * max_blocks + 0..active_blocks).
-//   downsweep       — per partition: wave-multisplit rank digit-source word,
-//                     scatter all 3 words to *_out using the same offsets.
-//
-// GPU-resident count: `n = n_buf[0]` (scan_total[0]). Buffers are sized to
-// max capacity; inactive partitions early-out on n. Kernels are dispatched
-// with a fixed group count derived from max_blocks; b_pass_hist stride is
-// also max_blocks so indexing is uniform across kernels.
-//
-// Constraints:
-//   RADIX = 256 (8-bit digit).
-//   PART_SIZE = 2048 keys per partition.
-//   Max supported n bounded by 1D dispatch limit at PART_SIZE resolution
-//   (~134M keys with 65535 groups). Well above the pipeline's 8M cap.
+// Reduce-then-scan device radix sort from GPUSorting (b0nes164, MIT): no forward-progress requirement.
+// Wave size >= 16, ascending; sorts (keys_lo, keys_hi, values), passes 0-3 on keys_lo, 4-7 on keys_hi.
 
 #ifndef TRAINER_DEVICE_RADIX_SORT_SLANG
 #define TRAINER_DEVICE_RADIX_SORT_SLANG
 
-// ---------------------------------------------------------------------------
-// Constants
-// ---------------------------------------------------------------------------
 static const uint RADIX = 256u;
 static const uint RADIX_MASK = 255u;
 static const uint RADIX_LOG = 8u;
 
-// Upsweep / Scan block sizes (from GPUSorting reference).
+// Upsweep / Scan block sizes, as in GPUSorting.
 static const uint US_DIM = 128u;
 static const uint SCAN_DIM = 128u;
 
-// Downsweep block size + keys/thread, sourced from the host<->shader contract.
-#include "generated/execution_contract.slang"
-static const uint D_DIM = CONTRACT_RADIX_DIGITS;
-static const uint KEYS_PER_THREAD = CONTRACT_RADIX_KEYS_PER_THREAD;
-static const uint PART_SIZE = CONTRACT_RADIX_PART_SIZE;
+// Downsweep sizes are shared with the host; the 1D dispatch limit caps n at 65535 * PART_SIZE.
+#include "common/execution.slang"
+static const uint D_DIM = RADIX_DIGITS;
+static const uint KEYS_PER_THREAD = RADIX_KEYS_PER_THREAD;
+static const uint PART_SIZE = RADIX_PART_SIZE;
 
-// Shared-memory size for the Downsweep. Sized as
-//   max(waveHist@minLane, PART_SIZE + RADIX)
-// waveHist = D_DIM / laneCount * RADIX. At lane=16 (WGE16 minimum): 4096.
-// PART_SIZE + RADIX = 2304. Max = 4096. At lane=32 this leaves the tail
-// [waveHist..end) unused, which is fine.
+// max(wave histograms at 16 lanes = D_DIM / 16 * RADIX = 4096, PART_SIZE + RADIX = 2304).
 static const uint D_TOTAL_SMEM = 4096u;
 
-// Digit source: pass_idx 0-3 use keys_lo, 4-7 use keys_hi. Encoded on host
-// as a uniform `key_word` (0 or 1) plus `radix_shift` (0/8/16/24).
 static const uint SENTINEL = 0xFFFFFFFFu;
 
-// ---------------------------------------------------------------------------
-// Groupshared memory
-// ---------------------------------------------------------------------------
-// Two histograms in Upsweep: threads [0..63] write hist 0, [64..127] write
-// hist 1. Then reduced to one row in the write-back step.
+// Upsweep's two histograms: threads 0..63 fill hist 0, 64..127 hist 1; merged before write-back.
 groupshared uint g_us[RADIX * 2];
 
-// SCAN_DIM staging for the per-digit scan.
 groupshared uint g_scan[SCAN_DIM];
 
-// Downsweep's shared memory. Layout during the pass:
-//   [0, waveHistSize)          -> wave-local histograms (during ranking)
-//   [0, PART_SIZE)             -> staged keys (after ScatterKeysShared)
-//   [PART_SIZE, PART_SIZE+RADIX) -> device scatter offsets (LoadThreadBlockReductions)
+// Downsweep: [0, waveHistsSize) wave histograms while ranking, then [0, PART_SIZE) staged keys
+// and [PART_SIZE, PART_SIZE + RADIX) per-digit device offsets.
 groupshared uint g_d[D_TOTAL_SMEM];
 
 struct KeyStruct { uint k[KEYS_PER_THREAD]; };
 struct OffsetStruct { uint o[KEYS_PER_THREAD]; };
 struct DigitStruct { uint d[KEYS_PER_THREAD]; };
 
-// ---------------------------------------------------------------------------
-// Small helpers
-// ---------------------------------------------------------------------------
 uint activeBlocksOf(uint n) { return (n + PART_SIZE - 1u) / PART_SIZE; }
 
+// Host-encoded digit source: key_word 0 = keys_lo, 1 = keys_hi; radix_shift is 0/8/16/24.
 uint loadDigitSourceWord(uint idx, uint key_word,
                          StructuredBuffer<uint> keys_lo,
                          StructuredBuffer<uint> keys_hi)
@@ -111,10 +64,7 @@ uint waveHistsSize()
     return (D_DIM / WaveGetLaneCount()) * RADIX;
 }
 
-// ===========================================================================
-// InitGlobalHist — clears b_global_hist[2048]
-// ===========================================================================
-// One thread per entry. Dispatched with thread_count = [2048, 1, 1].
+// Clears b_global_hist once per sort; dispatch one thread per entry (2048).
 [shader("compute")]
 [numthreads(256, 1, 1)]
 void initGlobalHist(
@@ -125,13 +75,7 @@ void initGlobalHist(
         b_global_hist[dtid.x] = 0u;
 }
 
-// ===========================================================================
-// PrepareDispatchArgs — writes indirect-dispatch args for upsweep/downsweep
-// ===========================================================================
-// Single-thread kernel. Reads n_buf[0], computes active_blocks, and writes
-// two DispatchIndirectCommand triples (each: groups_x, groups_y, groups_z):
-//   args[0..2] = (active_blocks, 1, 1)   — upsweep + downsweep group count
-//   (scan is dispatched normally with 256 groups.)
+// Indirect args (active_blocks, 1, 1) for upsweep and downsweep; scan is a direct 256-group dispatch.
 [shader("compute")]
 [numthreads(1, 1, 1)]
 void prepareDispatchArgs(
@@ -146,21 +90,13 @@ void prepareDispatchArgs(
     if (requested > max_sort_pairs)
         sort_stats[1] += 1u;
 
-    // Clamp the pair count to the sort-buffer capacity, IN PLACE, so every
-    // downstream reader (upsweep/downsweep/identifyTileRanges) sees a value
-    // that never exceeds what bin_emit actually wrote. bin_emit drops pairs
-    // past max_sort_pairs (graceful overflow), so the valid written region is
-    // min(N, max_sort_pairs); without this clamp the downsweep's last active
-    // block would set partition_end = N > capacity and READ past the buffer.
-    // This is the single choke point: prepareDispatchArgs runs once, before
-    // any n_buf consumer in the sort and before tile-range identification.
+    // Clamp n_buf in place: bin_emit drops pairs past capacity, and every later reader
+    // (sort, identifyTileRanges) would otherwise read past the buffer.
     uint n = min(requested, max_sort_pairs);
     n_buf[0] = n;
 
     uint active_blocks = (n + PART_SIZE - 1u) / PART_SIZE;
-    // Vulkan/D3D12 require at least (1,1,1) even for zero-work dispatches
-    // (else the driver may error). If active_blocks==0, launch 1 group; the
-    // in-shader early-out on (g >= active_blocks) makes it a no-op.
+    // Launch at least one group (zero-group dispatches may error); it early-outs on active_blocks.
     uint g = (active_blocks == 0u) ? 1u : active_blocks;
     // Clamp: if n is somehow corrupted, don't queue billions of workgroups.
     g = min(g, max_blocks);
@@ -169,24 +105,8 @@ void prepareDispatchArgs(
     dispatch_args[2] = 1u;
 }
 
-// ===========================================================================
-// Upsweep — per-partition digit histogram
-// ===========================================================================
-//
-// Steps (mirrors GPUSorting DeviceRadixSort.hlsl Upsweep, WGE16 path):
-//   1. Zero g_us[0..2*RADIX).
-//   2. Histogram digit-source word into two shared histograms (threads
-//      0..63 -> hist 0, threads 64..127 -> hist 1), using InterlockedAdd
-//      on groupshared.
-//   3. Merge (hist0 += hist1) and write per-(digit, partition) counts to
-//      b_pass_hist[digit * max_blocks + gid]. Then start a prefix sum for
-//      the atomic-add-into-global step.
-//   4. Exclusive scan across all 256 digits, atomically added into
-//      b_global_hist[digit + pass_idx * RADIX].
-//
-// Inactive partitions (gid >= active_blocks) write 0 into b_pass_hist and
-// return without touching b_global_hist. This keeps Scan's exclusive scan
-// exact using the fixed-stride layout.
+// Per-partition digit counts -> b_pass_hist[digit * max_blocks + partition]; their exclusive
+// digit scan is atomically added to b_global_hist[pass_idx * RADIX + digit].
 [shader("compute")]
 [numthreads(US_DIM, 1, 1)]
 void upsweep(
@@ -207,7 +127,7 @@ void upsweep(
     uint g = gid.x;
     uint t = gtid.x;
 
-    // Inactive partition: zero this column of b_pass_hist and return.
+    // Inactive partitions zero their b_pass_hist column so Scan's fixed-stride scan stays exact.
     if (g >= active_blocks)
     {
         for (uint i = t; i < RADIX; i += US_DIM)
@@ -215,13 +135,11 @@ void upsweep(
         return;
     }
 
-    // Clear the two shared histograms.
     for (uint i = t; i < RADIX * 2u; i += US_DIM)
         g_us[i] = 0u;
     GroupMemoryBarrierWithGroupSync();
 
-    // Histogram: two histograms in parallel to reduce shared atomic pressure.
-    // Threads 0..63 accumulate into hist 0, threads 64..127 into hist 1.
+    // Two histograms reduce shared-atomic contention.
     uint partition_start = g * PART_SIZE;
     uint partition_end = (g == active_blocks - 1u) ? n : partition_start + PART_SIZE;
     uint hist_offset = (t / 64u) * RADIX;
@@ -232,9 +150,7 @@ void upsweep(
     }
     GroupMemoryBarrierWithGroupSync();
 
-    // Merge (hist0 += hist1), write per-(digit,partition) counts to b_pass_hist,
-    // then begin a running exclusive prefix sum in g_us (still holding the
-    // pre-scan hist0 values -- we upgrade to a full scan below).
+    // Merge the histograms, store this partition's counts, then start the digit scan per wave.
     for (uint i = t; i < RADIX; i += US_DIM)
     {
         g_us[i] += g_us[i + RADIX];
@@ -242,9 +158,7 @@ void upsweep(
         g_us[i] += WavePrefixSum(g_us[i]);  // inclusive within the wave
     }
 
-    // GlobalHistExclusiveScanWGE16: propagate the wave-level scans into a
-    // full 256-wide exclusive prefix, then atomic-add to b_global_hist in
-    // the pass's own [pass_idx * RADIX, (pass_idx+1) * RADIX) region.
+    // GlobalHistExclusiveScanWGE16: wave scans -> 256-wide exclusive scan, added to this pass's row.
     GroupMemoryBarrierWithGroupSync();
     uint lane_count = WaveGetLaneCount();
     if (t < (RADIX / lane_count))
@@ -266,16 +180,8 @@ void upsweep(
     }
 }
 
-// ===========================================================================
-// Scan — exclusive scan of b_pass_hist across active partitions per digit
-// ===========================================================================
-//
-// One workgroup per digit (dispatch 256 groups). SCAN_DIM threads. Uses the
-// GPUSorting circular-lane-shift trick to write scanned values back one lane
-// shifted so consecutive lanes' writes don't collide.
-//
-// b_pass_hist layout: fixed stride = max_blocks. We only scan the first
-// `active_blocks` entries; the rest were zeroed by Upsweep.
+// Exclusive scan of each digit's active b_pass_hist entries, one group per digit (256 groups),
+// written back one lane shifted (GPUSorting's circular lane shift).
 [shader("compute")]
 [numthreads(SCAN_DIM, 1, 1)]
 void scan(
@@ -295,7 +201,6 @@ void scan(
     uint lane_mask = lane_count - 1u;
     uint circular_lane_shift = (WaveGetLaneIndex() + 1u) & lane_mask;
 
-    // Number of full SCAN_DIM chunks over active_blocks.
     uint parts_end = (active_blocks / SCAN_DIM) * SCAN_DIM;
     uint reduction = 0u;
 
@@ -348,19 +253,10 @@ void scan(
     }
 }
 
-// ===========================================================================
-// Downsweep — wave-multisplit rank + scatter (3-word record)
-// ===========================================================================
-//
-// Ports the WGE16 path from SortCommon.hlsl. Generalized to a 3-word record:
-// the digit is extracted from a single word (`digit_source_word`, selected
-// by `key_word` uniform), and all three words (keys_lo, keys_hi, values)
-// are scattered using the same ranking offsets.
+// Downsweep: rank the digit-source word by wave multisplit, then scatter all three record
+// words with the same offsets.
 
-// WarpLevelMultiSplit: for a given key, find the lanes in the wave that
-// share its 8-bit digit at radix_shift. `waveFlags` is a per-part bitmask;
-// iteratively AND with (t ? 0 : ~0) ^ ballot(bit==1) across the 8 bits of
-// the digit until only equal-digit peers remain.
+// Narrows waveFlags (one bit per lane) to the lanes sharing this key's digit, one ballot per bit.
 void warpLevelMultiSplitWGE16(uint key, uint radix_shift, uint wave_parts,
                               inout uint4 waveFlags)
 {
@@ -410,12 +306,8 @@ uint findLowestRankPeer(uint4 waveFlags, uint wave_parts)
     return 0u;  // unreachable
 }
 
-// Rank keys within the workgroup. For each key: find equal-digit wave peers,
-// count how many lanes with lower index share this digit (= intra-wave rank),
-// have the lowest-ranked peer atomically bump the wave-histogram bucket.
-// Returns offsets in [0, wave_hist_size) that are position-within-wave for
-// this key's digit; UpdateOffsetsWGE16 later adds the cross-wave device
-// offsets to make them absolute.
+// Intra-wave rank of each key among its digit peers; the lowest peer bumps the wave histogram
+// for all of them. updateOffsetsWGE16 later adds the cross-wave offsets.
 OffsetStruct rankKeysWGE16(uint gtid, KeyStruct keys, uint radix_shift)
 {
     OffsetStruct offsets;
@@ -448,11 +340,7 @@ OffsetStruct rankKeysWGE16(uint gtid, KeyStruct keys, uint radix_shift)
     return offsets;
 }
 
-// After ranking, g_d[0..waveHistSize) holds each wave's per-digit hist
-// counts (contiguous by wave). This function does a circular-shift
-// inclusive scan across waves for each digit (so g_d[digit + w*RADIX] ends
-// up holding the sum of hist[digit] over waves [0..w) after the exclusive
-// scan step). Returns the total for this digit across all waves.
+// Per digit, exclusive scan across the wave histograms in g_d; returns the digit's total.
 uint waveHistInclusiveScanCircularShiftWGE16(uint gtid)
 {
     uint histReduction = g_d[gtid];
@@ -464,8 +352,7 @@ uint waveHistInclusiveScanCircularShiftWGE16(uint gtid)
     return histReduction;
 }
 
-// Given per-digit reductions (one value per lane), form an exclusive scan
-// across 256 digits using the circular-lane-shift pattern.
+// Exclusive scan of the per-digit totals across all 256 digits (circular lane shift).
 void waveHistReductionExclusiveScanWGE16(uint gtid, uint histReduction)
 {
     if (gtid < RADIX)
@@ -485,8 +372,7 @@ void waveHistReductionExclusiveScanWGE16(uint gtid, uint histReduction)
         g_d[gtid] += WaveReadLaneAt(g_d[gtid - 1u], 1u);
 }
 
-// Add cross-wave device offsets to per-key intra-wave offsets so offsets.o[i]
-// becomes a position in [0, PART_SIZE) staging.
+// Turns intra-wave ranks into positions in the [0, PART_SIZE) staging area.
 void updateOffsetsWGE16(uint gtid, inout OffsetStruct offsets, KeyStruct keys,
                         uint radix_shift)
 {
@@ -508,8 +394,6 @@ void updateOffsetsWGE16(uint gtid, inout OffsetStruct offsets, KeyStruct keys,
     }
 }
 
-// After ranking, offsets.o[i] identifies a position in [0, PART_SIZE) for
-// each of this thread's KEYS_PER_THREAD keys. Stage into g_d.
 void scatterKeysShared(OffsetStruct offsets, KeyStruct keys)
 {
     [unroll]
@@ -517,14 +401,12 @@ void scatterKeysShared(OffsetStruct offsets, KeyStruct keys)
         g_d[offsets.o[i]] = keys.k[i];
 }
 
-// Read the "digit-source" word at index idx: keys_lo if key_word==0 else keys_hi.
 uint readWord(uint idx, uint key_word,
               StructuredBuffer<uint> keys_lo, StructuredBuffer<uint> keys_hi)
 {
     return (key_word == 0u) ? keys_lo[idx] : keys_hi[idx];
 }
 
-// Load KEYS_PER_THREAD words from (keys_lo | keys_hi) selected by key_word.
 KeyStruct loadKeysWGE16Sel(uint gtid, uint part_index, uint key_word,
                            StructuredBuffer<uint> keys_lo,
                            StructuredBuffer<uint> keys_hi)
@@ -600,10 +482,7 @@ void loadThreadBlockReductions(uint gtid, uint part_index,
     }
 }
 
-// ---- 3-word scatter (ascending) ----
-//
-// Extract digit from staged key word in g_d[t] and cache it in digits.d[i].
-// Write the key word to the correct output buffer.
+// Scatters the staged digit-source words and caches their digits for the payload scatters.
 void scatterKeyPhaseOne(uint gtid, uint radix_shift,
                         RWStructuredBuffer<uint> key_out,
                         inout DigitStruct digits)
@@ -661,7 +540,6 @@ void scatterKeyPhasePartial(uint gtid, uint radix_shift, uint key_word,
         scatterKeyPhasePartialOne(gtid, radix_shift, final_size, keys_hi_out, digits);
 }
 
-// Load payload word into g_d[offsets.o[i]] using the ranking offsets.
 void scatterPayloadShared(OffsetStruct offsets, KeyStruct payloads)
 {
     [unroll]
@@ -669,7 +547,6 @@ void scatterPayloadShared(OffsetStruct offsets, KeyStruct payloads)
         g_d[offsets.o[i]] = payloads.k[i];
 }
 
-// Scatter the payload word to its output buffer using cached digits.
 void scatterPayloadDevice(uint gtid, DigitStruct digits,
                           RWStructuredBuffer<uint> out_buf)
 {
@@ -695,9 +572,7 @@ void scatterPayloadDevicePartial(uint gtid, uint final_size, DigitStruct digits,
     }
 }
 
-// key_word-selected variants: DXC requires the target buffer be statically
-// resolvable at the write site. We branch on key_word once around the whole
-// scatter so both branches are pure-buffer writes.
+// DXC needs a statically resolvable target buffer, so branch on key_word around the whole scatter.
 void scatterPayloadDeviceSel(uint gtid, DigitStruct digits, uint key_word,
                              RWStructuredBuffer<uint> keys_lo_out,
                              RWStructuredBuffer<uint> keys_hi_out)
@@ -719,7 +594,6 @@ void scatterPayloadDevicePartialSel(uint gtid, uint final_size, DigitStruct digi
         scatterPayloadDevicePartial(gtid, final_size, digits, keys_lo_out);
 }
 
-// ---- The Downsweep entry point ----
 [shader("compute")]
 [numthreads(D_DIM, 1, 1)]
 void downsweep(
@@ -768,8 +642,7 @@ void downsweep(
     offsets = rankKeysWGE16(t, keys, radix_shift);
     GroupMemoryBarrierWithGroupSync();
 
-    // 4. Wave-histogram inclusive-scan (circular shift) + reduce/exclusive-scan
-    //    across digits.
+    // 4. Scan the wave histograms per digit, then the digit totals.
     uint histReduction;
     if (t < RADIX)
     {
@@ -781,12 +654,12 @@ void downsweep(
     waveHistReductionExclusiveScanWGE16(t, histReduction);
     GroupMemoryBarrierWithGroupSync();
 
-    // 5. Add device offsets to per-key intra-wave offsets.
+    // 5. Intra-wave ranks -> staging positions.
     updateOffsetsWGE16(t, offsets, keys, radix_shift);
 
     uint exclusiveHistReduction = 0u;
     if (t < RADIX)
-        exclusiveHistReduction = g_d[t];  // wave-0's original hist[digit=t] row
+        exclusiveHistReduction = g_d[t];
     GroupMemoryBarrierWithGroupSync();
 
     // 6. Stage the digit-source-word into g_d[0..PART_SIZE).
@@ -797,8 +670,7 @@ void downsweep(
                               pass_idx, max_blocks, exclusiveHistReduction);
     GroupMemoryBarrierWithGroupSync();
 
-    // 8. Key phase: extract digit from g_d[t], write to the digit-source
-    //    output buffer, cache digits.
+    // 8. Scatter the digit-source word and cache its digits.
     if (!last)
     {
         scatterKeyPhase(t, radix_shift, key_word,
@@ -812,9 +684,7 @@ void downsweep(
     }
     GroupMemoryBarrierWithGroupSync();
 
-    // 9. Payload phase 1: the OTHER key word (hi if key_word==0 else lo).
-    //    Load via the key_word-selected loader with the arguments swapped so
-    //    we read the "other" word.
+    // 9. Scatter the other key word.
     KeyStruct otherKey;
     uint other_key_word = 1u - key_word;
     if (!last)
@@ -833,7 +703,7 @@ void downsweep(
     }
     GroupMemoryBarrierWithGroupSync();
 
-    // 10. Payload phase 2: the value word.
+    // 10. Scatter the values.
     KeyStruct valuePayload;
     if (!last)
         valuePayload = loadKeysWGE16(t, g, values_in);

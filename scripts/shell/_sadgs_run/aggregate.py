@@ -1,16 +1,8 @@
 # Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-"""Aggregate SADGS reference PSNR across scenes and compare to the Slang trainer.
+"""Aggregate SADGS reference PSNR across scenes and compare it to the Slang trainer.
 
-Reads:
-  - SADGS: outputs/SADGS_ref_sh0_<scene>/results.json  (canonical metrics.py)
-  - Slang: outputs/train/mipnerf360_run_1/<scene>/psnr_curve.json (final point)
-
-Writes into outputs/:
-  - sadgs_ref_summary.csv    per-scene SADGS PSNR/SSIM/LPIPS + averages
-  - sadgs_vs_slang.csv       side-by-side final PSNR (SADGS vs Slang) + averages
-  - sadgs_vs_slang.png       grouped bar chart of the two
-and prints the table.
+Writes sadgs_ref_summary.csv, sadgs_vs_slang.csv and sadgs_vs_slang.png into outputs/ and prints the table.
 """
 from __future__ import annotations
 
@@ -65,7 +57,6 @@ def main() -> None:
     all9 = set(SCENES)
     seven = all9 - EXCLUDE
 
-    # --- SADGS-only summary CSV ---
     with (ROOT / "sadgs_ref_summary.csv").open("w", newline="") as fh:
         w = csv.writer(fh)
         w.writerow(["scene", "psnr", "ssim", "lpips"])
@@ -79,7 +70,6 @@ def main() -> None:
         w.writerow([f"AVG_7_excl_flowers_treehill", f"{avg('sadgs_psnr', seven):.3f}",
                     f"{avg('sadgs_ssim', seven):.4f}", f"{avg('sadgs_lpips', seven):.4f}"])
 
-    # --- SADGS vs Slang CSV ---
     with (ROOT / "sadgs_vs_slang.csv").open("w", newline="") as fh:
         w = csv.writer(fh)
         w.writerow(["scene", "sadgs_psnr", "slang_psnr", "delta_slang_minus_sadgs"])
@@ -94,7 +84,6 @@ def main() -> None:
             w.writerow([label, f"{avg('sadgs_psnr', sc):.3f}", f"{avg('slang_psnr', sc):.3f}",
                         f"{avg('slang_psnr', sc) - avg('sadgs_psnr', sc):+.3f}"])
 
-    # --- bar chart ---
     x = np.arange(len(SCENES))
     ref_v = [r["sadgs_psnr"] for r in rows]
     sl_v = [r["slang_psnr"] for r in rows]
@@ -110,7 +99,6 @@ def main() -> None:
     ax.grid(True, axis="y", alpha=0.3); ax.legend()
     fig.tight_layout(); fig.savefig(ROOT / "sadgs_vs_slang.png"); plt.close(fig)
 
-    # --- print ---
     print(f"{'scene':<10} {'SADGS':>8} {'Slang':>8} {'delta':>8}")
     for r in rows:
         d = (r["slang_psnr"] - r["sadgs_psnr"]) if (r["slang_psnr"] and r["sadgs_psnr"]) else None

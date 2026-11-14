@@ -1,15 +1,8 @@
 # Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-"""Hard behavioural gates — the constraints that precede any scoring.
+"""Hard behavioural gates that precede any scoring.
 
-A candidate refactor is *invalid* (and receives no ESC) if it breaks existing
-tests, drifts numerically beyond tolerance, regresses performance past the
-ceiling, breaks the serialization/ABI, introduces nondeterminism, trips a static
-blocker, or drops the mutation score too far. This encodes the optimisation as
-
-    max ESC   subject to all behavioural constraints passing,
-
-which is far safer than folding correctness into a weighted sum.
+A candidate failing any gate is invalid (no ESC): maximise ESC subject to the gates, never a weighted sum.
 """
 
 from __future__ import annotations

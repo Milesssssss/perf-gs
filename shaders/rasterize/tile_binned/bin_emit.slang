@@ -1,16 +1,7 @@
 // Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-// Phase 2 of the uncapped binning pipeline: emit (key, value) pairs.
-//
-// For each live gaussian, re-run AccuTile and for every tile it touches
-// write one pair at tile_offset_per_gaussian[gid] + local_tile_index:
-//   key_hi = tile_id                         (32 bits)
-//   key_lo = float_to_sortable_u32(depth_vs)  (32 bits)
-//   value  = gaussian_idx
-//
-// The radix sort then sorts by the composite 64-bit key (hi:lo), which
-// groups entries by tile_id and within each tile orders them by ascending
-// depth (front-to-back).
+// Binning phase 2: per touched tile, emit key_hi = tile_id, key_lo = sortable depth, value = gaussian
+// at the scanned offset; sorting by hi:lo groups tiles and orders each front-to-back.
 
 #include "../../common/types.slang"
 #include "../../common/math.slang"
@@ -18,16 +9,12 @@
 #include "../../primitives/gaussian/snugbox.slang"
 #include "../../primitives/gaussian/accutile.slang"
 
-#include "generated/execution_contract.slang"
-static const uint2 TILE_DIM = uint2(CONTRACT_TILE_WIDTH, CONTRACT_TILE_HEIGHT);
-static const uint CLUSTER_SIZE = CONTRACT_CLUSTER_SIZE;
+#include "common/execution.slang"
+static const uint2 TILE_DIM = uint2(TILE_WIDTH, TILE_HEIGHT);
 
-// IEEE float32 -> sortable uint32. For positive finite floats, flipping
-// the sign bit makes the uint32 bit-pattern ascend with the float value.
-// All our inputs have depth_vs > z_near > 0 by construction (bin cull).
+// Order-preserving uint key; valid because the bin cull guarantees depth > z_near > 0.
 uint depthToSortable(float depth)
 {
-    // asuint reinterprets without conversion.
     uint bits = asuint(depth);
     return bits ^ 0x80000000u;
 }
@@ -47,25 +34,12 @@ void binEmit(
     // Cluster-cull mask: seeded all-ones when disabled.
     StructuredBuffer<uint> cluster_visible,
     uniform float z_near,
-    // Capacity of the sort-pair buffers (keys_lo/hi/values). The exclusive
-    // scan that produced tile_offset_per_gaussian is UNBOUNDED — for a
-    // viewpoint whose total (tile,depth,gaussian) pairs exceed this capacity,
-    // write_slot runs past the buffers and scribbles into whatever is
-    // allocated next (tile_start/tile_end), producing corrupted per-tile
-    // ranges → alternating black tiles for that view. Guarding each write by
-    // this cap turns overflow into graceful degradation (excess pairs are
-    // dropped: some splats go missing from that frame) instead of memory
-    // corruption. The pipeline also clamps scan_total to this same capacity so
-    // the sort/tile-range stages never READ past the written region.
+    // Sort-pair capacity; offsets are unbounded, so overflow is dropped (the host also clamps scan_total).
     uniform uint max_sort_pairs)
 {
     uint gid = dtid.x;
     if (gid >= num_gaussians_counter[0]) return;
-    // Cluster-frustum cull: skip culled clusters BEFORE loading gaussians[gid]
-    // and projected_2d[gid]. bin_count assigned tile_count=0 for these slots
-    // so tile_offset_per_gaussian[gid] would reserve 0 write space anyway; the
-    // benefit here is eliminating the two 32-byte-sector reads (56 B + 24 B)
-    // per culled slot. Wave-uniform under Morton clustering.
+    // bin_count gave culled clusters 0 tiles; skip them before loading their data.
     if (cluster_visible[gid / CLUSTER_SIZE] == 0u) return;
 
     Gaussian3D g = gaussians[gid];
@@ -92,18 +66,14 @@ void binEmit(
     uint write_slot = tile_offset_per_gaussian[gid];
     uint key_lo = depthToSortable(proj.depth_vs);
 
-    // AccuTile: emit only the tiles the ellipse actually crosses. This walk
-    // MUST visit the same tiles bin_count summed (same stored projection →
-    // bit-identical ellipse), or write_slot overruns/underruns the scanned
-    // offset and the sort reads garbage. Shared helpers keep the two in lock
-    // step; see accutile.slang.
+    // Must visit exactly the tiles bin_count counted, or write_slot desyncs from the scanned offsets.
     EllipseParams e;
     if (!computeEllipseParams(cov2d, g.opacity, e))
         return;
     float x_d_args, y_d_args;
     computeExtremumOffsets(e, x_d_args, y_d_args);
 
-    if (accuTileIterateRows(tile_min, tile_max)) //We iterate: for each row, for each col
+    if (accuTileIterateRows(tile_min, tile_max))
     {
         for (uint ty = tile_min.y; ty <= tile_max.y; ++ty)
         {
@@ -121,7 +91,7 @@ void binEmit(
             }
         }
     }
-    else //her instead we iterate: for each col, for each row
+    else
     {
         for (uint tx = tile_min.x; tx <= tile_max.x; ++tx)
         {

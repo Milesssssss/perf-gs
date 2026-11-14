@@ -1,19 +1,9 @@
 # Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-"""Measure per-tile binning pressure and per-pixel overlap on a DENSIFIED
-geometry, to see the alpha-skip's effect where it matters (late training),
-not at init.
+"""Measure per-tile binning pressure and per-pixel overlap on densified geometry from a trained .ply.
 
-Loads a trained .ply, uploads it, renders a few held-out cameras, and reports:
-  - tile_count  = tile_end - tile_start  (splats BINNED per tile; skip-independent)
-  - overlap     = gaussian_count_per_pixel (splats that CONTRIBUTED >= 1/255,
-                  post alpha-skip + early-break — the honest per-pixel overlap)
-The ratio tile_count/overlap shows how much the skip + T-early-break cut the
-per-pixel walk vs the raw binned count.
-
-Usage:
-  python scripts/measure_overdraw.py --ply outputs/train/<run>/output.ply \
-      --scene datasets/360_v2/bicycle --downsample 4 [--n-cams 5]
+The tile_count/overlap ratio shows how much alpha-skip + early-break cut the per-pixel walk.
+    python scripts/debug/measure_overdraw.py --ply outputs/train/<run>/output.ply --scene datasets/360_v2/bicycle
 """
 from __future__ import annotations
 
@@ -74,9 +64,6 @@ def main() -> None:
         tile_counts, overlap, ntx, nty = pipeline.read_bin_debug()
         tile_all.append(tile_counts.astype(np.int64))
         ov_all.append(overlap.astype(np.int64).ravel())
-        # Per-view: how much did skip+break cut the per-pixel walk vs raw tile
-        # occupancy? Compare the per-tile mean binned to the per-pixel mean
-        # contributing.
         tm = float(tile_counts.mean())
         om = float(overlap.mean())
         ratio_rows.append((cam_i, tm, om, tm / max(om, 1e-9)))

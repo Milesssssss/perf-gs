@@ -9,7 +9,7 @@ static const float ETA_LOW  = 0.1;    // eta < this ⟹ over-resolved (prune vot
 static const float EPS = 1e-8;
 static const float COV_DILATION = 1e-8;
 
-// Wang-hash uniform[0,1), matching split_and_clone.slang's jitter RNG so the sampling is deterministic per (gaussian, view)
+// Wang-hash uniform[0,1), as in split_and_clone.slang, so sampling is deterministic per (gaussian, view).
 uint _wang_hash(uint x)
 {
     x = (x ^ 61u) ^ (x >> 16u);
@@ -80,7 +80,7 @@ void scoreStructureAware(
     RWStructuredBuffer<uint> eta_max_x, RWStructuredBuffer<uint> eta_max_y, RWStructuredBuffer<uint> eta_max_z,
     // Count of views in which this gaussian was on-screen / valid.
     RWStructuredBuffer<uint> eta_n_total,
-    uniform float opacity_threshold,  // SADGS is_active_vis: sigmoid(opacity) > this (0.05)
+    uniform float opacity_threshold,  // SADGS active-visibility test: sigmoid(opacity) > this (0.05)
     uniform float per_view_grad_thresh,
     uniform uint pass_idx,       // view index, for jitter decorrelation across views
     uniform uint max_splats)
@@ -104,7 +104,6 @@ void scoreStructureAware(
         if (sqrt(gx * gx + gy * gy) < per_view_grad_thresh) return;
     }
 
-    // Project mean to view + pixel space (shared convention in project.slang).
     float3 mean_vs;
     float2 mean_px;
     float clip_w;
@@ -133,8 +132,7 @@ void scoreStructureAware(
     float cov_xy = A[0][0] * A[1][0] + A[0][1] * A[1][1] + A[0][2] * A[1][2];
     float cov_yy = A[1][0] * A[1][0] + A[1][1] * A[1][1] + A[1][2] * A[1][2] + 0.3;
 
-    // Cholesky of the 2D covariance (matches SADGS L11/L21/L22):
-    //   L11 = sqrt(cov_xx); L21 = cov_xy / L11; L22 = sqrt(cov_yy - L21²).
+    // Cholesky of the 2D covariance (as in SADGS).
     float L11 = sqrt(max(cov_xx, 1e-6));
     float L21 = cov_xy / L11;
     float L22 = sqrt(max(cov_yy - L21 * L21, 1e-6));
@@ -168,13 +166,12 @@ void record_observations(uint gaussian_idx, float eta_x, float eta_y, float eta_
     RWStructuredBuffer<uint> eta_n_total
 )
 {
-    //Record how many times this gaussian was observed
     InterlockedAdd(eta_n_total[gaussian_idx], 1u);
 
     if (eta_max_scalar > ETA_HIGH) InterlockedAdd(eta_n_high[gaussian_idx], 1u);
     else if (eta_max_scalar <= ETA_LOW) InterlockedAdd(eta_n_low[gaussian_idx], 1u);
 
-    //We need to accumulate these for the anisotripic split decision, so we store the max of each axis across all views
+    // Per-axis max over views feeds the anisotropic split decision.
     InterlockedMax(eta_max_x[gaussian_idx], uint(max(eta_x, 0.0) * FIXED_SCALE));
     InterlockedMax(eta_max_y[gaussian_idx], uint(max(eta_y, 0.0) * FIXED_SCALE));
     InterlockedMax(eta_max_z[gaussian_idx], uint(max(eta_z, 0.0) * FIXED_SCALE));

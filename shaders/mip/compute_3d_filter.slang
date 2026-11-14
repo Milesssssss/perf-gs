@@ -3,12 +3,8 @@
 #include "../common/types.slang"
 #include "../primitives/gaussian/project.slang"
 
-// One threadgroup of THREADS_PER_SPLAT threads per gaussian: each lane strides
-// over num_cameras/THREADS_PER_SPLAT cameras computing a local min view-space
-// depth, then the group reduces to a single min and lane 0 writes filter_3D[gid]
-// once. Total camera-tests are unchanged vs. 1-thread-per-splat, but the per-
-// splat latency is cut ~THREADS_PER_SPLAT-fold when the grid under-occupies the
-// device (few live gaussians).
+// One group of THREADS_PER_SPLAT lanes per gaussian, each striding over cameras for a min
+// view-space depth; this cuts per-splat latency when few live gaussians under-occupy the device.
 static const uint THREADS_PER_SPLAT = 32;
 static const uint MIP_DISPATCH_WIDTH = 65535u;
 
@@ -68,9 +64,8 @@ void computeMip3DFilter(
     uint lane = gtid.x;               // 0 .. THREADS_PER_SPLAT-1
     if (gid >= max_splats) return;
 
-    // Uniform across the group (gid is per-group), so these early-outs never
-    // split the group ahead of a barrier. A separate clear maintains the dead
-    // tail, so unused capacity needs no per-splat workgroups.
+    // Group-uniform early-outs (gid is per group) never split the group before a barrier;
+    // clearMipFilterTail zeroes the dead tail.
     if (gid >= num_gaussians_counter[0]) return;
 
     float3 mean = gaussians[gid].mean;
@@ -83,7 +78,6 @@ void computeMip3DFilter(
     {
         CameraData cam = cameras[c];
 
-        // Shared mean projection (single source of truth in project.slang).
         float3 vs;
         float2 px;
         float clip_w;
@@ -92,7 +86,7 @@ void computeMip3DFilter(
         if (z <= 0.2)
             continue;
 
-        // In-screen with the reference's 1.15x tangent-space margin
+        // In-screen test with Mip-Splatting's 1.15x margin.
         float W = cam.image_size.x;
         float H = cam.image_size.y;
         bool in_screen =
@@ -105,9 +99,7 @@ void computeMip3DFilter(
         any_valid = true;
     }
 
-    // Usually the entire group fits in one wave: no shared-memory round trip
-    // or six group barriers per gaussian. Narrow-wave devices merge the
-    // per-wave results after one group barrier instead.
+    // The group usually fits in one wave; narrower waves merge their results after one barrier.
     float group_min = WaveActiveMin(min_z);
     bool group_any = WaveActiveAnyTrue(any_valid);
     uint wave_size = WaveGetLaneCount();
@@ -128,7 +120,7 @@ void computeMip3DFilter(
 
     if (lane == 0)
     {
-        // a gaussian seen by no view needs no low-pass (and is a prune candidate)
+        // A gaussian seen by no view needs no low-pass (and is a prune candidate).
         filter_3D[gid] = group_any ? (group_min * filter_coef) : 0.0;
     }
 }

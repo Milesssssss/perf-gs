@@ -1,12 +1,8 @@
 # Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-"""A deterministic, offline agent runner.
+"""A deterministic, offline agent runner replaying behaviour keyed by task name.
 
-The scripted runner replays pre-programmed behaviour keyed by task name. Because
-a scripted change can *actually apply real edits* to the sandbox, it drives the
-full pipeline — sandbox, gates, hidden tests, scoring — deterministically and
-without a live model. That makes the harness self-testable and gives operators a
-zero-cost dry run before spending tokens on a real agent.
+Scripted changes can apply real edits, so the full pipeline runs deterministically without a live model.
 """
 
 from __future__ import annotations
@@ -25,8 +21,7 @@ from esc.agents.base import (
 )
 from esc.model import AgentTelemetry, PatchStats
 
-#: An ``apply`` callable mutates the sandbox for one (workspace, seed) and
-#: returns the structural footprint of what it changed.
+#: Mutates the sandbox for one (workspace, seed) and returns the footprint of what it changed.
 ApplyFn = Callable[[Path, int], PatchStats]
 
 

@@ -57,7 +57,7 @@ def test_opacity_reg_gradient(backend: str):
     p.set_primitive_from_numpy(**scene)
 
     # Isolate the reg gradient: clear all grads, then run ONLY regularization.
-    p.clear_gradients()
+    p.optimizer.zero_grad()
     p.regularize()
     device.wait_for_idle()
 
@@ -90,7 +90,7 @@ def test_opacity_reg_off_is_zero(backend: str):
     )
     scene = _scene()
     p.set_primitive_from_numpy(**scene)
-    p.clear_gradients()
+    p.optimizer.zero_grad()
     p.regularize()
     device.wait_for_idle()
     n = scene["opacities"].shape[0]

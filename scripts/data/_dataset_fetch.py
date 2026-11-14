@@ -2,14 +2,7 @@
 
 """Dependency-free download/extract machinery shared by the dataset fetchers.
 
-``download_mipnerf360.py`` and ``download_tandt_db.py`` both stream a large
-``.zip`` to disk (atomically, via a ``.part`` rename), extract it, and move the
-scene folders into ``datasets/``. That common machinery lives here so a change to
-it is a one-file fix and neither script duplicates the other; each fetcher keeps
-only its own URLs, scene lists and licensing notices. Standard library, plus
-certifi's CA bundle when it is installed — some dataset hosts serve a cert chain
-the default trust store can't complete, and certifi resolves it WITHOUT ever
-disabling verification.
+Uses certifi's CA bundle when installed; TLS verification is never disabled.
 """
 from __future__ import annotations
 
@@ -53,12 +46,9 @@ def _print_progress(downloaded: int, total: int, *, final: bool = False) -> None
 
 
 def _ssl_context() -> ssl.SSLContext | None:
-    """A VERIFYING SSL context, preferring certifi's CA bundle when installed.
+    """Verifying SSL context from certifi's CA bundle, or None (urllib's verifying default) without certifi.
 
-    Some hosts (e.g. repo-sam.inria.fr) serve a chain the OS/Python default store
-    can't complete ("unable to get local issuer certificate"); certifi's roots
-    resolve it. Returns None when certifi is absent, so urllib falls back to its
-    default context — which still verifies. Verification is never disabled.
+    certifi completes chains the default store can't (e.g. repo-sam.inria.fr).
     """
     try:
         import certifi
@@ -68,11 +58,7 @@ def _ssl_context() -> ssl.SSLContext | None:
 
 
 def stream_to_file(url: str, dest: Path) -> None:
-    """Stream ``url`` to ``dest`` with a progress readout (stdlib only).
-
-    Writes to a ``.part`` sibling first and renames on success, so an
-    interrupted download never masquerades as a complete archive.
-    """
+    """Stream ``url`` to ``dest`` via a ``.part`` rename so an interrupted download never looks complete."""
     part = dest.with_name(dest.name + ".part")
     part.parent.mkdir(parents=True, exist_ok=True)
     request = urllib.request.Request(
@@ -100,11 +86,7 @@ def stream_to_file(url: str, dest: Path) -> None:
 
 
 def _archive_root(staging: Path) -> Path:
-    """The dir inside ``staging`` that directly holds the extracted folders.
-
-    Handles both layouts: folders at the zip root, or nested under a single
-    top-level folder (e.g. ``360_v2/`` or ``tandt_db/``).
-    """
+    """The dir in ``staging`` holding the extracted folders (zip root or its single top-level folder)."""
     entries = [p for p in staging.iterdir() if p.name != "__MACOSX"]
     if len(entries) == 1 and entries[0].is_dir():
         return entries[0]
@@ -113,13 +95,9 @@ def _archive_root(staging: Path) -> Path:
 
 def extract_and_place(zip_path: Path, staging: Path, target: Path, *,
                       force: bool, only: Iterable[str] | None = None) -> list[str]:
-    """Extract ``zip_path`` and move its top-level folders into ``target``.
+    """Extract ``zip_path`` and move its top-level folders (restricted to ``only``) into ``target``.
 
-    ``only`` restricts which top-level folder names are placed (``None`` = all),
-    which is what lets one combined archive (e.g. ``tandt_db.zip`` holding both
-    ``tandt/`` and ``db/``) serve either dataset. Existing folders are skipped
-    unless ``force``. The staging area is removed afterwards. Returns the names
-    actually placed.
+    Existing folders are skipped unless ``force``; returns the names actually placed.
     """
     if staging.exists():
         shutil.rmtree(staging)
@@ -141,8 +119,7 @@ def extract_and_place(zip_path: Path, staging: Path, target: Path, *,
 
 
 def move_into(src: Path, dst: Path, *, force: bool) -> bool:
-    """Move ``src`` onto ``dst``. If ``dst`` exists and not ``force``, leave it
-    and return False; otherwise replace it and return True."""
+    """Move ``src`` onto ``dst``; an existing ``dst`` is replaced only with ``force`` (returns whether moved)."""
     if dst.exists():
         if not force:
             return False

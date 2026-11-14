@@ -1,20 +1,8 @@
 # Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-"""The stochastic champion/candidate iteration procedure.
+"""The stochastic champion/candidate iteration procedure, run entirely on copies of the workspace.
 
-    champion = current codebase
-    repeat:
-        candidate = refactor(champion, random hotspot)
-        if not hard_gates_pass(candidate): reject
-        evaluate champion and candidate on the SAME tasks and seeds
-        if candidate has a meaningful ESC gain and no major subscore regresses:
-            champion = candidate
-        else: reject
-
-Safeguards from the design are enforced here: paired evaluation, a *separate*
-evaluation agent from the refactoring agent (no self-grading), bounded patch
-size (reject large unexplained rewrites), and a per-subscore regression guard.
-The real workspace is never mutated — the loop operates entirely on copies.
+Safeguards: paired evaluation, a separate evaluation agent (no self-grading), bounded patches, a subscore guard.
 """
 
 from __future__ import annotations
@@ -43,7 +31,7 @@ CandidatePrecheck = Callable[[Path, TaskEnvironment, EscConfig], GateReport]
 
 def default_precheck(root: Path, env: TaskEnvironment, config: EscConfig) -> GateReport:
     """A cheap CPU-only hard gate on the candidate codebase itself."""
-    abi_ok = env.run_python(root, ("-m", "trainer.contracts", "--check")).ok
+    abi_ok = env.run_python(root, ("-m", "pytest", "-q", "tests/test_shader_constants.py")).ok
     import_ok = env.run_python(root, ("-c", "import trainer.config_types")).ok
     inputs = GateInputs(
         existing_tests_pass=import_ok,
@@ -56,8 +44,6 @@ def default_precheck(root: Path, env: TaskEnvironment, config: EscConfig) -> Gat
     )
     return evaluate_gates(inputs, config.gates)
 
-
-# --- Decision + history records ---------------------------------------------
 
 @dataclass(frozen=True)
 class LoopDecision:
@@ -128,8 +114,6 @@ class ChampionCandidateLoop:
         self._baselines = {t.name: t.baseline for t in all_change_tasks(self.families)}
         self._workdir = Path(tempfile.mkdtemp(prefix="esc_loop_"))
 
-    # -- lifecycle -----------------------------------------------------------
-
     def cleanup(self) -> None:
         shutil.rmtree(self._workdir, ignore_errors=True)
 
@@ -152,8 +136,6 @@ class ChampionCandidateLoop:
                 shutil.rmtree(outcome.candidate_root, ignore_errors=True)
 
         return LoopHistory(history, champion_result.esc, champion_root)
-
-    # -- internals -----------------------------------------------------------
 
     def _evaluate(self, root: Path) -> tuple[EscResult, list[TaskRunResult], list]:
         return evaluate_codebase_detailed(

@@ -2,8 +2,7 @@
 
 """Bar chart of Slang trainer per-scene training time (0->3k iters).
 
-Reads outputs/train/timing_<scene>/log.jsonl (the train_complete event's
-train_wall_s) and writes outputs/slang_timings.{png,csv}.
+Reads train_complete.train_wall_s from outputs/train/timing_<scene>/log.jsonl; writes outputs/slang_timings.{png,csv}.
 """
 from __future__ import annotations
 
@@ -47,7 +46,6 @@ def main() -> None:
     times = [t for _, t in rows]
     avg = float(np.mean(times))
 
-    # CSV
     with (Path("outputs") / "slang_timings.csv").open("w", newline="") as fh:
         w = csv.writer(fh)
         w.writerow(["scene", "train_wall_s", "it_per_s_3000"])
@@ -55,7 +53,6 @@ def main() -> None:
             w.writerow([s, f"{t:.1f}", f"{3000 / t:.1f}"])
         w.writerow(["AVERAGE", f"{avg:.1f}", f"{3000 / avg:.1f}"])
 
-    # Bar chart
     x = np.arange(len(scenes))
     colors = ["#1f77b4"] * len(scenes)
     fig, ax = plt.subplots(figsize=(10, 6), dpi=140)

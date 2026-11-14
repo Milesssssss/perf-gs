@@ -1,16 +1,7 @@
 // Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-// Phase 1 of the uncapped binning pipeline: per-gaussian tile-touch count.
-//
-// For each live gaussian:
-//   1. Project to 2D (same as old bin.slang).
-//   2. Near-plane cull, SnugBox, clamp to frame.
-//   3. Use AccuTile to count the exact number of tiles the ellipse touches.
-//   4. Write projected_2d (so forward/backward can reuse it) and
-//      tile_count_per_gaussian[gid].
-//
-// The caller then prefix-scans tile_count_per_gaussian to get write
-// offsets, and dispatches bin_emit to actually write (key, value) pairs.
+// Binning phase 1: project each live gaussian and count the tiles its ellipse touches (AccuTile).
+// The caller prefix-scans tile_count_per_gaussian into bin_emit's write offsets.
 
 #include "../../common/types.slang"
 #include "../../common/math.slang"
@@ -18,13 +9,10 @@
 #include "../../primitives/gaussian/snugbox.slang"
 #include "../../primitives/gaussian/accutile.slang"
 
-//TODO: I believe this and bin_emit.slang could be merged into a single kernel, mot likely
+// TODO: try merging this and bin_emit.slang into a single kernel.
 
-#include "generated/execution_contract.slang"
-// Non-square tiles: x uses WIDTH, y uses HEIGHT. TILE_DIM packs them for the
-// vectorized pixel->tile maps below.
-static const uint2 TILE_DIM = uint2(CONTRACT_TILE_WIDTH, CONTRACT_TILE_HEIGHT);
-static const uint CLUSTER_SIZE = CONTRACT_CLUSTER_SIZE;
+#include "common/execution.slang"
+static const uint2 TILE_DIM = uint2(TILE_WIDTH, TILE_HEIGHT);
 
 [shader("compute")]
 [numthreads(256, 1, 1)]
@@ -38,7 +26,7 @@ void binCount(
     RWStructuredBuffer<uint> tile_count_per_gaussian,  // [max_splats]
     StructuredBuffer<uint> cluster_visible,            // [ceil(max_splats/128)]
     StructuredBuffer<float> filter_3D,                 // [max_splats], mip 3D size (0=off)
-    uniform uint mip_enabled,                          // Mip-Splatting on/off
+    uniform uint mip_enabled,
     uniform float kernel_size,                         // 2D dilation (0.3 vanilla / 0.1 mip)
     uniform float z_near,
     uniform uint max_splats)
@@ -46,27 +34,12 @@ void binCount(
     uint gid = dtid.x;
     if (gid >= max_splats) return;
 
-    // Default: zero tiles (culled). Write now so the scan sees a clean
-    // value even if we early-return.
+    // Written before any early return so the scan never sees a stale count.
     tile_count_per_gaussian[gid] = 0;
 
     if (gid >= num_gaussians_counter[0]) return;
 
-    // Cluster-frustum cull: if the entire 128-splat cluster's AABB is
-    // outside the view frustum, its members contribute no tile pairs.
-    // cluster_visible is seeded to all-ones when cluster-cull is off, so
-    // this check is a no-op unless the cluster-cull kernels wrote it.
-    // Wave-uniform read: Morton keeps 128-splat clusters aligned to two
-    // consecutive 256-thread workgroups, so a workgroup sees at most two
-    // cluster_visible values and every warp reads a single uniform value —
-    // zero branch divergence cost.
-    //
-    // Placed BEFORE projection + blend pack so culled clusters skip the
-    // ~15 ALU ops of projectGaussian3DTo2D AND the two 60 B sector writes
-    // (projected_2d + blend_data). bin_emit also reads cluster_visible and
-    // skips those slots, so projected_2d[gid] / blend_data[gid] for culled
-    // slots are never read by any downstream kernel — stale contents are
-    // fine.
+    // Culled slots keep stale projected_2d/blend_data, which no downstream kernel reads.
     if (cluster_visible[gid / CLUSTER_SIZE] == 0u) return;
 
     Gaussian3D g = gaussians[gid];
@@ -76,16 +49,10 @@ void binCount(
     float depth_vs;
     float cov2d_det;
 
-    // Mip-Splatting: 3D smoothing size folded into the projected covariance,
-    // plus the coef3d*coef2d opacity compensation (1.0 when off), computed
-    // DIFFERENTIABLY inside project so the backward can route dL/dcomp to
-    // scale/rot/mean. f3d==0 and kernel_size==0.3 reproduce vanilla exactly.
+    // Mip-Splatting 3D filter and opacity compensation (1.0 when off); f3d = 0, kernel_size = 0.3 is vanilla.
     float f3d = (mip_enabled != 0u) ? filter_3D[gid] : 0.0;
     float comp;
 
-    // Project through the primitive model (GaussianModel = mean/log_scale/
-    // rot_quat). projectInto wraps the same projectGaussian3DTo2D, so the
-    // projected values are bit-identical — the projection seam is now generic.
     GaussianModel model;
     model.mean = g.mean;
     model.log_scale = g.log_scale;
@@ -100,8 +67,7 @@ void binCount(
     proj.opacity_compensation = comp;
     projected_2d[gid] = proj;
 
-    //The blend backward gathers this 36 B
-    // record instead of the 80 B (gaussians + projected_2d) pair
+    // Compact record the blend passes gather instead of gaussians + projected_2d.
     BlendData bd;
     bd.mean = mean_2d;
     bd.cov2d = cov2d;
@@ -128,10 +94,7 @@ void binCount(
     uint2 tile_max = uint2(bbox_max) / TILE_DIM;
     tile_max = min(tile_max, num_tiles - 1);
 
-    // AccuTile: count only the tiles the ellipse actually crosses, not every
-    // tile in the SnugBox rectangle. Iterate the shorter axis, summing the
-    // per-strip tile range. bin_emit re-runs the IDENTICAL walk (same stored
-    // projection) so its write count matches this exactly — see accutile.slang.
+    // AccuTile count; bin_emit replays this exact walk, so its writes match the scanned offsets.
     EllipseParams e;
     if (!computeEllipseParams(cov2d, g.opacity, e))
         return;

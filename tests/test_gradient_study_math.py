@@ -151,8 +151,8 @@ def test_averaging_independent_unbiased_estimates_reduces_error() -> None:
 # ---------------------------------------------------------------------------
 
 def _spec(fraction: float):
-    from trainer.backend.render import stbn as stbn_module
-    return stbn_module.StbnMaskSpec(fraction=fraction)
+    from trainer.backend.render import stbn_table as stbn_module
+    return stbn_module.StbnSpec(fraction=fraction)
 
 
 @pytest.mark.parametrize("fraction", [0.25, 0.50])
@@ -178,13 +178,13 @@ def test_temporal_only_is_white_spatially_not_blue() -> None:
     isolate the temporal axis. Compared against the NVIDIA blue mask, its
     low-frequency power must be far higher (i.e. much whiter).
     """
-    from trainer.backend.render import stbn as stbn_module
+    from trainer.backend.render import stbn_table as stbn_module
 
     spec = _spec(0.25)
     temporal = study.build_temporal_only_volume(spec, seed=0)
     low_temporal = float(np.mean([stbn_module.low_frequency_power(f)
                                   for f in temporal[:8]]))
-    blue_spec = stbn_module.StbnMaskSpec(
+    blue_spec = stbn_module.StbnSpec(
         fraction=0.25, select_mode=stbn_module.SELECT_GLOBAL)
     if not blue_spec.resolved_path().is_file():
         pytest.skip("NVIDIA STBN asset absent")
@@ -197,15 +197,15 @@ def test_temporal_only_is_white_spatially_not_blue() -> None:
 def test_temporal_only_packs_into_a_valid_table() -> None:
     """It must round-trip through the same packer the GPU table uses, or the
     diagnostic would be measuring a mask the shader cannot read."""
-    from trainer.backend.render import stbn as stbn_module
+    from trainer.backend.render import stbn_table as stbn_module
 
     spec = _spec(0.25)
     volume = study.build_temporal_only_volume(spec, seed=0)
     packed = stbn_module.pack_selection(volume, spec)
     assert packed.dtype == np.uint32 and packed.shape == (spec.voxels,)
     slots, _compacted, counts = stbn_module.unpack_table(packed, spec)
-    index = stbn_module._block_voxel_index(spec)
-    assert ((slots != stbn_module._SLOT_NONE)
+    index = stbn_module.block_voxel_index(spec)
+    assert ((slots != stbn_module.SLOT_NONE)
             == volume.reshape(-1)[index]).all()
     # Unlike a tile-stratified mask, per-tile counts must VARY here (it is white
     # spatially), which is also what exercises the variable-count shader path.

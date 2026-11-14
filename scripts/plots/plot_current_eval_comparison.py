@@ -2,9 +2,7 @@
 
 """Plot the current nine-scene timing and PSNR regression evaluation.
 
-Reads ``outputs/current_eval_20260723_vs_baseline.csv`` and writes the matching
-PNG beside it. The left panel compares 3000-iteration training wall time; the
-right panel shows current-minus-baseline held-out PSNR.
+Reads ``outputs/current_eval_20260723_vs_baseline.csv``; writes the PNG beside it (wall time and PSNR delta panels).
 """
 from __future__ import annotations
 

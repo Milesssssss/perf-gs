@@ -1,16 +1,7 @@
 // Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-// Core contracts for the generic differentiable blendable-primitive rasterizer.
-//
-// A "blend record" is the compact, per-pixel-evaluable form a primitive takes
-// inside the tile blend loop. It is IDifferentiable so the backward rasterizer
-// can flow per-pixel gradients into the primitive's stored fields via bwd_diff
-// (validated on vulkan+d3d12 by the P0 spike, shaders/_spike/generic_spike.slang).
-//
-// Each primitive supplies only the two differentiable per-pixel quantities the
-// blend loop needs: coverage() (its alpha / falloff) and color(). HOW those
-// accumulate front-to-back — the extinction / compositing — is the Compositor's
-// job (core/compositor.slang), kept orthogonal so either can vary on its own.
+// Core interfaces of the generic differentiable blendable-primitive rasterizer: primitives supply
+// differentiable coverage() and color(); compositing is the Compositor's job (core/compositor.slang).
 
 #ifndef TRAINER_CORE_INTERFACES_SLANG
 #define TRAINER_CORE_INTERFACES_SLANG
@@ -19,13 +10,9 @@
 
 interface IBlendablePrimitive : IDifferentiable
 {
-    // Per-pixel coverage/alpha BEFORE the blend loop's ALPHA_MAX clamp and
-    // ALPHA_MIN skip. For a 3D gaussian this is sigmoid(opacity) * comp *
-    // exp(-0.5 * dᵀ Σ⁻¹ d); a 2D disk would return a smoothstep falloff.
+    // Alpha before the blend loop's ALPHA_MAX clamp and ALPHA_MIN skip.
     [Differentiable] float coverage(no_diff float2 pixel);
 
-    // View-independent linear-RGB color the covered pixel receives. For a
-    // gaussian this is the SH band-0 (DC) activation shDC(sh0).
     [Differentiable] float3 color();
 }
 
@@ -37,12 +24,9 @@ float primitiveCoverage<P : IBlendablePrimitive>(P prim, no_diff float2 pixel)
 
 interface IPrimitiveSource
 {
-    // The concrete primitive type this source yields (e.g. GaussianPrimitive).
     associatedtype Primitive : IBlendablePrimitive;
 
-    // Gather + assemble the primitive record at `idx`. Not differentiable: the
-    // storage load is a plain gather; the diff path runs through the returned
-    // primitive's coverage()/color().
+    // Not differentiable: gradients flow through the returned primitive's coverage()/color().
     Primitive primitiveAt(uint idx);
 }
 
@@ -68,23 +52,17 @@ void projectModel<M : IProjectableModel>(
 
 interface IScreenFootprint
 {
-    // Unclamped screen-space AABB of the footprint. Returns false when the
-    // primitive has no extent (fully culled); out params are then undefined.
+    // Unclamped screen-space AABB; false (outputs undefined) when the primitive has no extent.
     bool bounds(out float2 out_min, out float2 out_max);
 
-    // Pick the walk axis: true iterates ROWS (per-row column spans via
-    // rowTiles), false iterates COLUMNS (per-column row spans via colTiles).
-    // Choosing the shorter axis keeps the per-strip crossing tests minimal.
+    // True walks rows (rowTiles), false columns (colTiles); the shorter axis minimizes crossing tests.
     bool iterateRows(uint2 tile_min, uint2 tile_max);
 
-    // For tile row `ty`, the inclusive column range [tx_lo, tx_hi] the footprint
-    // actually crosses within [tile_min_x, tile_max_x]. False if the row is
-    // untouched (skip it).
+    // Inclusive column range [tx_lo, tx_hi] crossed in tile row `ty`; false if the row is untouched.
     bool rowTiles(float2 bbox_min, float2 bbox_max, uint ty,
                   uint tile_min_x, uint tile_max_x, out uint tx_lo, out uint tx_hi);
 
-    // Column twin of rowTiles: the inclusive row range [ty_lo, ty_hi] crossed in
-    // tile column `tx` within [tile_min_y, tile_max_y]. False if untouched.
+    // Column twin of rowTiles.
     bool colTiles(float2 bbox_min, float2 bbox_max, uint tx,
                   uint tile_min_y, uint tile_max_y, out uint ty_lo, out uint ty_hi);
 }

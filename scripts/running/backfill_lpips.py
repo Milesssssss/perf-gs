@@ -1,31 +1,9 @@
 # Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-"""Recompute held-out LPIPS from SAVED renders, without retraining anything.
+"""Recompute held-out LPIPS (e.g. the published VGG backbone) from saved 8-bit renders, without retraining.
 
-Why this exists: LPIPS was first computed with the AlexNet backbone, while 3DGS,
-Mip-NeRF 360 and essentially every NeRF/splatting paper report the VGG variant.
-The two are not interchangeable — measured on this trainer's own held-out bicycle
-renders, AlexNet reads 0.1662 where VGG reads 0.2194, a factor of 1.32 — so the
-AlexNet numbers looked better than published 30k-iteration results at 3000
-iterations. Retraining 289 cells to change a post-hoc CPU metric would be absurd,
-and it is unnecessary: cells run with ``--save-test-renders`` have the exact
-8-bit renders that were scored, and the ground truth is on disk beside them.
-
-This is deliberately a separate, idempotent pass rather than a change to the
-training path: the renders are the evidence, and any perceptual metric can be
-recomputed from them later without touching the GPU.
-
-    .venv/Scripts/python.exe scripts/running/backfill_lpips.py --nets vgg alex
-
-Writes ``lpips_backfill.json`` into each run directory and a combined
-``lpips_backfill.csv`` under the suite output, leaving the original
-``run_report.json`` untouched (the recomputation is additive evidence, not a
-rewrite of what the run reported at the time).
-
-CAVEAT it records: the original in-loop value was computed from the FLOAT render,
-this one from the 8-bit PNG. On bicycle the two agree to 1e-4 for AlexNet, so the
-round trip is not a meaningful source of difference — but the fact is recorded
-rather than assumed.
+Writes lpips_backfill.json per run and a suite CSV; run_report.json (scored on the float render) is untouched.
+Usage: python scripts/running/backfill_lpips.py --nets vgg alex
 """
 from __future__ import annotations
 
@@ -57,11 +35,7 @@ def _load_png(path: Path) -> np.ndarray | None:
 
 
 def _ground_truth_dir(run_dir: Path, manifest: dict) -> Path | None:
-    """The cams/ directory holding this scene's ground truth.
-
-    Only one cell per scene dumps it (``--write-ground-truths``), so this looks
-    the owner up rather than assuming it is the current run.
-    """
+    """This scene's ground-truth cams/ dir; only one cell per scene writes it, so look up its owner."""
     own = run_dir / "cams"
     if own.is_dir() and any(own.glob("cam_*/gt.png")):
         return own
@@ -108,8 +82,7 @@ def backfill_run(run_dir: Path, nets: tuple[str, ...],
         if rendered is None or truth is None:
             continue
         if rendered.shape != truth.shape:
-            # A resolution mismatch would silently compare different content;
-            # count it rather than resize into a number nobody can trace.
+            # Count resolution mismatches rather than resizing, which would compare different content.
             mismatched += 1
             continue
         row = {"cam_idx": cam_idx,

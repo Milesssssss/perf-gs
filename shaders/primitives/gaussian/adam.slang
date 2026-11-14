@@ -4,8 +4,7 @@
 
 #include "parameters.slang"
 
-#include "../../generated/execution_contract.slang"
-static const uint CLUSTER_SIZE = CONTRACT_CLUSTER_SIZE;
+#include "common/execution.slang"
 
 [shader("compute")]
 [numthreads(256, 1, 1)]

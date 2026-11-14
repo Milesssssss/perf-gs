@@ -19,11 +19,7 @@ _ROOT_MARKERS = ("densify_structure", "densify_simple", "densify_tracking",
 
 class MutationTimingRecorder:
     """Measure every expensive mutation event when stage timing is enabled.
-
-    These events are rare and need their own samples: the step recorder removes
-    its timer BEFORE densification, and submission time alone does not measure
-    asynchronous Morton/Mip work. Normal, uninstrumented runs never wait here.
-    """
+    They need their own samples: the step recorder removes its timer before densification."""
 
     def __init__(self, *, enabled: bool) -> None:
         self.enabled = enabled
@@ -35,15 +31,15 @@ class MutationTimingRecorder:
         if not self.enabled or not active:
             yield
             return
-        previous_timer = pipeline._step_timer
+        previous_timer = pipeline.commands.timer
         try:
             if self._timer is None:
                 self._timer = StepTimer(pipeline.device, pool_size=256)
             self._timer.begin_step()
-            pipeline._step_timer = self._timer
+            pipeline.commands.timer = self._timer
         except Exception as error:                         # noqa: BLE001
             self.enabled = False
-            pipeline._step_timer = previous_timer
+            pipeline.commands.timer = previous_timer
             print(f"[mutation-timing] disabled: {error}", flush=True)
             yield
             return
@@ -68,7 +64,7 @@ class MutationTimingRecorder:
             except Exception as error:                     # noqa: BLE001
                 print(f"[mutation-timing] read failed at iter {step}: {error}", flush=True)
             finally:
-                pipeline._step_timer = previous_timer
+                pipeline.commands.timer = previous_timer
 
     def summary(self) -> dict:
         kinds = {}

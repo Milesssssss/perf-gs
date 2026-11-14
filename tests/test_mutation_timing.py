@@ -28,7 +28,7 @@ class _Timer:
 
 def _pipeline():
     waits = []
-    pipeline = SimpleNamespace(device=object(), _step_timer=None,
+    pipeline = SimpleNamespace(device=object(), commands=SimpleNamespace(timer=None),
                                runtime=SimpleNamespace(wait_for_idle=lambda: waits.append(1)))
     return pipeline, waits
 
@@ -40,7 +40,7 @@ def test_disabled_mutation_timer_never_waits(enabled, active, monkeypatch) -> No
     monkeypatch.setattr(mutation_timing, "StepTimer",
                         lambda *a, **k: pytest.fail("must not allocate timer"))
     with recorder.measure(100, pipeline, "structure", active=active):
-        assert pipeline._step_timer is None
+        assert pipeline.commands.timer is None
     assert waits == [] and recorder.samples == []
 
 
@@ -49,11 +49,11 @@ def test_mutation_timer_covers_completion_without_double_counting(monkeypatch) -
     clock = iter([1.0, 1.1, 1.4])
     monkeypatch.setattr(mutation_timing.time, "perf_counter", lambda: next(clock))
     pipeline, waits = _pipeline()
-    original = pipeline._step_timer = object()
+    original = pipeline.commands.timer = object()
     recorder = MutationTimingRecorder(enabled=True)
     with recorder.measure(500, pipeline, "structure"):
-        assert pipeline._step_timer is recorder._timer
-    assert pipeline._step_timer is original and waits == [1]
+        assert pipeline.commands.timer is recorder._timer
+    assert pipeline.commands.timer is original and waits == [1]
     sample = recorder.samples[0]
     assert sample["iter"] == 500 and sample["kind"] == "structure"
     assert sample["gpu_root_ms"] == 40.0  # not 46: copies are nested.
@@ -70,7 +70,7 @@ def test_failed_mutation_restores_timer_and_propagates(monkeypatch) -> None:
     with pytest.raises(ValueError, match="mutation failed"):
         with recorder.measure(100, pipeline, "structure"):
             raise ValueError("mutation failed")
-    assert pipeline._step_timer is None
+    assert pipeline.commands.timer is None
 
 
 def test_timing_failure_does_not_break_mutations(monkeypatch) -> None:
@@ -83,7 +83,7 @@ def test_timing_failure_does_not_break_mutations(monkeypatch) -> None:
     with recorder.measure(100, pipeline, "structure"):
         ran.append(1)
     assert ran == [1] and waits == [] and not recorder.enabled
-    assert pipeline._step_timer is None
+    assert pipeline.commands.timer is None
 
 
 def test_mutation_samples_do_not_pollute_step_means(monkeypatch, tmp_path) -> None:

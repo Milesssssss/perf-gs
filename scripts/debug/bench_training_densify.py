@@ -254,7 +254,7 @@ def run(args: argparse.Namespace) -> dict:
                 "resolution": [application.scene_context.width, application.scene_context.height],
                 "camera_count": application.scene_context.camera_count,
                 "stbn_pixel_fraction": args.stbn_pixel_fraction,
-                "stbn_source": args.stbn_source, "stbn_adaptive": args.stbn_adaptive,
+                "stbn_source": args.stbn_source,
                 "settings": {name: getattr(args, name) for name in (
                     "downsample", "sample_mode", "densify_mode", "densify_from", "densify_to",
                     "densify_every", "sad_structure_every", "sad_accum_every", "sad_tau_split",

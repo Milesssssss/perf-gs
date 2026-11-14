@@ -2,18 +2,7 @@
 
 """Chart the speed/quality frontier written by scripts/running/eval_pareto.py.
 
-Reads ``results.json`` (one record per run), averages seeds per (config, scene)
-and writes next to it:
-
-    pareto.png           held-out PSNR against train time, one panel per scene,
-                         plus the mean change against the baseline over scenes
-    pareto_summary.csv   every point as a table
-
-FORM. Two quantities that trade against each other -> a scatter with time on x
-(left is faster) and PSNR on y (up is better). The frontier, the configurations
-no other one beats on both axes, is a connected line in the accent hue; the
-dominated points are muted. Every point carries its label, so identity is never
-color-alone, and the CSV holds every number.
+Averages seeds per (config, scene) of ``results.json``; writes pareto.png (per scene + mean vs baseline) and pareto_summary.csv beside it.
 """
 from __future__ import annotations
 
@@ -71,7 +60,7 @@ def _by_scene(results: list[dict]) -> dict[str, dict[str, dict]]:
 
 
 def _frontier(points: dict[str, tuple[float, float]]) -> list[str]:
-    """Configs no other config matches on time AND quality while beating one."""
+    """Pareto-optimal configs (not dominated on time and quality), sorted by time."""
     front = [name for name, (t, q) in points.items()
              if not any(t2 <= t and q2 >= q and (t2 < t or q2 > q)
                         for other, (t2, q2) in points.items() if other != name)]
@@ -106,9 +95,7 @@ def _overlap(box: Bbox, others: list[Bbox]) -> float:
 
 def _place_labels(ax, points: dict[str, tuple[float, float]], labels: dict[str, str],
                   front: list[str]) -> None:
-    """Greedy placement on the final layout: frontier labels first, each at the
-    first offset that stays inside the panel and clears markers and labels (else
-    the offset with the least overlap)."""
+    """Greedy label placement on the final layout, frontier first: first clear in-panel offset, else least overlap."""
     renderer = ax.figure.canvas.get_renderer()
     panel = ax.get_window_extent(renderer)
     taken = [Bbox.from_bounds(x - MARKER_HALF_PX, y - MARKER_HALF_PX,
@@ -143,8 +130,7 @@ def _place_labels(ax, points: dict[str, tuple[float, float]], labels: dict[str, 
 
 
 def _relative(table: dict[str, dict[str, dict]]) -> dict[str, tuple[float, float]]:
-    """Mean over scenes of (train time / baseline, PSNR - baseline), for configs
-    present in every scene that also has a baseline."""
+    """Mean over baseline scenes of (time % of baseline, PSNR - baseline), for configs present in all of them."""
     scenes = [s for s, configs in table.items() if BASELINE in configs]
     shared = set.intersection(*(set(table[s]) for s in scenes)) if scenes else set()
     order = [c for c in table[scenes[0]] if c in shared] if scenes else []
@@ -188,7 +174,6 @@ def main() -> int:
     labels = {config: m["label"] for configs in table.values()
               for config, m in configs.items()}
 
-    # Scenes side by side on top, the cross-scene mean across the bottom row.
     with rc_context({"font.size": 12}):
         fig = Figure(figsize=(12, 10.5 if relative else 5.5), dpi=130)
         FigureCanvasAgg(fig)

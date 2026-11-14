@@ -1,17 +1,7 @@
 # Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-"""Get the two binaries reconstruction needs: ``colmap`` and (optionally) ``glomap``.
-
-Both ship prebuilt Windows x64 zips on their GitHub releases, in a CUDA and a
-no-CUDA flavour. We download one, unzip it under ``.recon-tools/<tool>-<variant>/``
-(the exe stays beside its DLLs) and check it starts. Elsewhere, or if that fails,
-the tool has to be on PATH — ``conda install -c conda-forge colmap glomap``.
-
-CUDA is the default: it is what puts SIFT extraction/matching and bundle
-adjustment on the GPU. A CUDA build that cannot load its DLLs on this machine
-(no driver) is detected here and replaced with the no-CUDA zip, because the
-alternative is failing halfway through a reconstruction.
-"""
+"""Get the two binaries reconstruction needs: ``colmap`` and (optionally) ``glomap``, downloaded
+as prebuilt Windows zips; a CUDA build that cannot start here falls back to the no-CUDA zip."""
 from __future__ import annotations
 
 import os
@@ -31,8 +21,7 @@ _ROOT = Path(__file__).resolve().parents[4]
 _REPO = {"colmap": "colmap/colmap", "glomap": "colmap/glomap"}
 _WINDOWS = os.name == "nt"          # the only platform with prebuilt release zips
 _MAX_DOWNLOAD = 768 * 1024 * 1024   # runaway guard; the colmap CUDA zip is ~360 MB
-# Windows STATUS_DLL_NOT_FOUND / STATUS_ENTRYPOINT_NOT_FOUND: how a CUDA build
-# exits when the driver/runtime DLLs it needs are not there.
+# STATUS_DLL_NOT_FOUND / STATUS_ENTRYPOINT_NOT_FOUND: a CUDA build missing its runtime DLLs.
 _DLL_FAILURE = (-1073741515, -1073741511, 3221225781, 3221225785)
 
 
@@ -91,9 +80,7 @@ def _download(url: str, dest: Path, progress: ProgressCallable) -> bool:
 
 def _unzip(src: Path, dest: Path) -> None:
     with zipfile.ZipFile(src) as z:
-        # zipfile.extract() strips absolute paths and '..' itself, so members
-        # cannot escape dest; this rejects the archive rather than silently
-        # rewriting a name that tried to.
+        # zipfile already sanitizes member names; reject such an archive instead of rewriting.
         if any(Path(m).is_absolute() or ".." in Path(m).parts for m in z.namelist()):
             raise ValueError("zip member escapes its destination")
         z.extractall(dest)

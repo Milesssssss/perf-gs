@@ -22,7 +22,7 @@ import numpy as np
 import pytest
 
 from trainer.data.dataset import simple_camera
-from trainer.contracts.codegen import (
+from trainer.backend.compute.execution import (
     RASTER_BUCKET_SIZE, TILE_WIDTH, TILE_HEIGHT, TILE_AREA)
 from trainer.backend.compute.device import create_device
 from _pipeline_testkit import TestPipeline
@@ -99,31 +99,31 @@ def test_forward_checkpoints_reconstruct(backend: str) -> None:
     num_tiles_x = (W + TILE_WIDTH - 1) // TILE_WIDTH
     num_tiles_y = (H + TILE_HEIGHT - 1) // TILE_HEIGHT
 
-    tile_start = np.frombuffer(b.tile_start.to_numpy().tobytes(), dtype=np.uint32)
-    tile_end = np.frombuffer(b.tile_end.to_numpy().tobytes(), dtype=np.uint32)
-    bucket_offsets = np.frombuffer(b.bucket_offsets.to_numpy().tobytes(), dtype=np.uint32)
-    sorted_ids = np.frombuffer(b.sort_values_a.to_numpy().tobytes(), dtype=np.uint32)
+    tile_start = np.frombuffer(b.raster.tile_start.to_numpy().tobytes(), dtype=np.uint32)
+    tile_end = np.frombuffer(b.raster.tile_end.to_numpy().tobytes(), dtype=np.uint32)
+    bucket_offsets = np.frombuffer(b.raster.bucket_offsets.to_numpy().tobytes(), dtype=np.uint32)
+    sorted_ids = np.frombuffer(b.sort.values.to_numpy().tobytes(), dtype=np.uint32)
     # sorted result may be in A or B ping-pong; use the stashed sorted buffer.
-    sorted_ids = np.frombuffer(pipeline._sorted_values.to_numpy().tobytes(), dtype=np.uint32)
+    sorted_ids = np.frombuffer(pipeline.rasterizer.sorted_values.to_numpy().tobytes(), dtype=np.uint32)
 
-    proj = b.projected_2d.to_numpy()
+    proj = b.raster.projected_2d.to_numpy()
     proj_f = np.frombuffer(proj.tobytes(), dtype=np.float32)
     # Projected2DGaussian layout: mean(2) cov2d(3) depth(1) ... read defensively
     # by re-deriving stride from buffer size.
     stride = proj_f.size // pipeline.max_splats
     proj_f = proj_f.reshape(pipeline.max_splats, stride)
 
-    gauss = b.gaussians.to_numpy()
+    gauss = b.primitive.values.to_numpy()
     gf = np.frombuffer(gauss.tobytes(), dtype=np.float32)
     gstride = gf.size // pipeline.max_splats
     gf = gf.reshape(pipeline.max_splats, gstride)
 
-    ckpt = b.raster_checkpoints.to_numpy()
+    ckpt = b.raster.raster_checkpoints.to_numpy()
     ckpt_u = np.frombuffer(ckpt.tobytes(), dtype=np.uint32).reshape(-1, 2)
 
     # Final transmittance is no longer stored in a dedicated texture; the
     # forward writes output_image.a = 1 - T, so T = 1 - alpha (see forward.slang).
-    out_img = np.frombuffer(b.output_image.to_numpy().tobytes(), dtype=np.float32).reshape(H, W, 4)
+    out_img = np.frombuffer(b.raster.output_image.to_numpy().tobytes(), dtype=np.float32).reshape(H, W, 4)
     out_T = 1.0 - out_img[..., 3]
 
     def unpack_half2(u):

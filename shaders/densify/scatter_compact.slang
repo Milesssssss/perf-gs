@@ -1,18 +1,7 @@
 // Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-// Phase E of densification: scatter live gaussians + Adam state into
-// scratch buffers using the prefix-scan-derived destination indices.
-//
-// For each index i in the post-split range:
-//   if valid_mask[i] == 1:
-//       gaussians_out[scan[i]]  = gaussians_in[i]
-//       adam_state_out[scan[i]] = adam_state_in[i]
-//
-// The caller (Python) is responsible for:
-//   - ensuring scan[] was produced on the same valid_mask[]
-//   - swapping primary<->scratch buffer references after this dispatch
-//   - updating num_gaussians_counter to scan[N-1] + valid_mask[N-1]
-//     (available as the ``total_out`` of the scan pass).
+// Densify phase E: scatter valid gaussians + Adam state to their scan[i] slot; the caller swaps
+// primary/scratch buffers and sets num_gaussians_counter to the scan total.
 
 #include "../common/types.slang"
 #include "../common/half_pack.slang"
@@ -34,8 +23,7 @@ void scatterCompact(
     RWStructuredBuffer<AdamState>  adam_state_out,
     uniform uint max_splats)
 {
-    // Dispatched over [max_splats]; buildPruneMask zeroes valid_mask for
-    // i >= post_count, so those slots are naturally skipped here.
+    // buildPruneMask zeroes valid_mask beyond post_count, so the max_splats-wide dispatch skips the tail.
     uint i = dtid.x;
     if (i >= max_splats) return;
     if (valid_mask[i] == 0u) return;
@@ -44,14 +32,8 @@ void scatterCompact(
     adam_state_out[dst] = adam_state_in[i];
 }
 
-// Single-output variants of scatterCompact, used by the shared-scratch-arena
-// path (see buffers.ScratchArena / densify.py). The fused two-output kernel
-// above requires two full-size scratch buffers live at once; splitting the
-// compaction into one-output-per-dispatch lets a SINGLE arena buffer serve as
-// the scatter destination for each resource in turn (scatter -> copy arena
-// back into the live buffer -> reuse arena for the next resource). Same
-// valid_mask / scan contract as scatterCompact; dst = scan[i] <= i so the
-// caller's arena->live copy is safe.
+// Single-output variants so one shared scratch arena serves each resource in turn (scatter, copy back,
+// reuse); dst = scan[i] <= i keeps the caller's arena->live copy safe.
 [shader("compute")]
 [numthreads(256, 1, 1)]
 void scatterCompactGaussian(
@@ -141,12 +123,7 @@ void scatterCompactEta(
     }
 }
 
-// Eta-only compaction for the shared-scratch-arena path: the 6 SAD-GS eta
-// accumulators through the SAME valid_mask/scan the gaussian compaction used,
-// with the identical KEEP/CLONE carry logic as scatterCompactEta (split/prune
-// slots reset to 0). Gaussians + Adam are compacted separately by
-// scatterCompactGaussian / scatterCompactAdam so they can route through the
-// arena; eta keeps its own small dedicated scratch + swap.
+// Eta-only compaction for the arena path, with scatterCompactEta's carry (other slots reset to 0).
 [shader("compute")]
 [numthreads(256, 1, 1)]
 void scatterCompactEtaOnly(
@@ -196,11 +173,8 @@ void scatterCompactEtaOnly(
     }
 }
 
-// Additive SH-carry for compaction: move the optional features_rest coeffs +
-// their Adam moments through the SAME valid_mask / scan the gaussian compaction
-// used, so they land on the compacted slot. Dispatched only when SH is enabled,
-// after scatterCompact / scatterCompactEta. Features are fp16-packed uint32;
-// Adam uses 2*rest_floats FP32/uint planes with max_splats stride.
+// Moves SH rest coefficients and their Adam moments through the same valid_mask/scan; features are
+// fp16-packed uint32, Adam uses 2*rest_floats FP32/uint planes with max_splats stride.
 [shader("compute")]
 [numthreads(256, 1, 1)]
 void scatterCompactSH(
@@ -228,8 +202,7 @@ void scatterCompactSH(
         adam_rest_out[c * max_splats + dst] = adam_rest_in[c * max_splats + i];
 }
 
-// Single-output SH compaction variants for the shared-scratch-arena path.
-// Same fp16-packed layout and valid_mask/scan contract as scatterCompactSH.
+// Single-output SH compaction variants for the arena path; same layout and contract as scatterCompactSH.
 [shader("compute")]
 [numthreads(256, 1, 1)]
 void scatterCompactFeatures(
@@ -272,9 +245,7 @@ void scatterCompactAdamRest(
         adam_rest_out[c * max_splats + dst] = adam_rest_in[c * max_splats + i];
 }
 
-// Bound scratch by scattering a subset of independent moment planes. Output
-// planes start at zero in the arena; copy-back restores their live prefixes to
-// first_plane in the original buffer before the arena is reused.
+// Bounds scratch by scattering a subset of moment planes; arena planes start at 0, copied back to first_plane.
 [shader("compute")]
 [numthreads(256, 1, 1)]
 void scatterCompactAdamRestPlanes(

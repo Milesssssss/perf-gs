@@ -2,39 +2,8 @@
 
 """Download the Tanks & Temples and Deep Blending COLMAP datasets into datasets/.
 
-Source: the pre-processed COLMAP datasets hosted by the INRIA 3D Gaussian
-Splatting authors (Kerbl et al., "3D Gaussian Splatting for Real-Time Radiance
-Field Rendering", SIGGRAPH 2023). They ship as a single ``tandt_db.zip`` (~650 MB)
-holding both datasets:
-
-  * ``tandt/`` - Tanks & Temples scenes ``train`` and ``truck``.
-  * ``db/``    - Deep Blending scenes ``drjohnson`` and ``playroom``.
-
-These are the standard T&T / Deep Blending splits the 3DGS papers report on, in
-the same COLMAP layout (``images/`` + ``sparse/``) the trainer already reads, so
-a fetched scene trains directly:
-
-    python scripts/running/v2_train.py --scene datasets/tandt/truck
-    python scripts/running/v2_train.py --scene datasets/db/drjohnson
-
-Stdlib-only stream download, idempotent (re-running skips datasets already
-present), same as download_mipnerf360.py.
-
-RESEARCH USE: Tanks & Temples and Deep Blending carry their originators' terms
-(the 3DGS authors redistribute them for research). Only download if your use
-complies — see https://www.tanksandtemples.org/ and the Deep Blending project
-page http://visual.cs.ucl.ac.uk/pubs/deepblending/ .
-
-Examples
---------
-    # both datasets -> datasets/tandt/ and datasets/db/
-    python scripts/data/download_tandt_db.py
-
-    # only Tanks & Temples (still fetches the combined archive)
+Research use only: both carry their originators' terms (the 3DGS authors redistribute them).
     python scripts/data/download_tandt_db.py --set tandt
-
-    # custom location, keep the .zip
-    python scripts/data/download_tandt_db.py --dest D:/data --keep-zip
 """
 from __future__ import annotations
 
@@ -56,13 +25,11 @@ TANDT_DB_URL = (
     "tandt_db.zip")
 
 # Dataset folder -> its scene subfolders, used for the idempotent skip check.
-# Layout tandt_db.zip ships: datasets/tandt/{train,truck}, datasets/db/{...}.
 DATASET_SCENES: dict[str, tuple[str, ...]] = {
     "tandt": ("train", "truck"),
     "db": ("drjohnson", "playroom"),
 }
 
-# ``--set`` value -> the dataset folders it keeps (both come from one archive).
 SET_DATASETS: dict[str, tuple[str, ...]] = {
     "tandt": ("tandt",),
     "db": ("db",),
@@ -79,11 +46,7 @@ TERMS_NOTICE = (
 
 def download(datasets: tuple[str, ...], dest: Path, *, force: bool,
              keep_zip: bool) -> None:
-    """Fetch ``tandt_db.zip`` once and place the selected datasets.
-
-    Both datasets live in ONE archive, so a single download serves either or
-    both; ``datasets`` selects which top-level folders are kept.
-    """
+    """Fetch ``tandt_db.zip`` once and keep the selected ``datasets`` (both live in one archive)."""
     if not force and all(dirs_present(dest / d, DATASET_SCENES[d])
                          for d in datasets):
         print(f"[tandt_db] {', '.join(datasets)} already present under {dest} - "

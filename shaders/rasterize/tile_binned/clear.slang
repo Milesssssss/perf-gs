@@ -1,7 +1,6 @@
 // Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-// Per-frame clear kernels. Each resets one of the scratch/output
-// resources used by the tile-binned forward pipeline.
+// Per-frame clears of the tile-binned forward's scratch/output resources.
 
 [shader("compute")]
 [numthreads(64, 1, 1)]
@@ -25,8 +24,7 @@ void clearTextures(
 {
     uint2 p = dtid.xy;
     if (p.x >= frame_dim.x || p.y >= frame_dim.y) return;
-    // alpha = 0 corresponds to T = 1 (fully transmissive); the backward reads
-    // T = 1 - output_image.a, so no separate transmittance texture is cleared.
+    // alpha = 0 is T = 1: the backward reads T = 1 - output_image.a.
     output_image[p] = float4(0.0, 0.0, 0.0, 0.0);
     gaussian_count_per_pixel[p] = 0;
 }

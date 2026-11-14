@@ -16,14 +16,8 @@ uint per_axis_split_factor(float eta_axis, float split_power, uint max_split_fac
     return clamp(uint(raw), 1u, max_split_factor);
 }
 
-// Single-pass structure-aware decision. One thread per gaussian: reads the
-// multiview eta accumulators + grad window, writes KEEP/SPLIT/CLONE/PRUNE into
-// `action` and the per-axis grid factors into `split_factor_{x,y,z}`.
-//
-// No capacity clamp / demotion: if a window's requested splits exceed the buffer
-// headroom, split_anisotropic drops the overflow children at the tail and the
-// host logs it (densify_children_sum is read back after the tick). We surface an
-// overbudget event rather than silently downsizing splits — see densify.py.
+// Structure-aware decision: writes each gaussian's action and per-axis split factors. No capacity
+// clamp: split_anisotropic drops overflow children and the host logs it from densify_children_sum.
 [shader("compute")]
 [numthreads(256, 1, 1)]
 void decideActionsStructure(
@@ -65,8 +59,7 @@ void decideActionsStructure(
     float high_ratio = float(eta_n_high[gaussian_idx]) * inv_total;
     float low_ratio  = float(eta_n_low[gaussian_idx])  * inv_total;
 
-    // Per-axis eta maxima: uint fixed-point (uint(eta*FIXED_SCALE)), decode with
-    // a plain divide — NOT fromFixed (that is the int64 grad convention).
+    // Eta maxima are uint(eta*FIXED_SCALE): decode with a plain divide, not fromFixed (int64 grad convention).
     float eta_x = float(eta_max_x[gaussian_idx]) / FIXED_SCALE;
     float eta_y = float(eta_max_y[gaussian_idx]) / FIXED_SCALE;
     float eta_z = float(eta_max_z[gaussian_idx]) / FIXED_SCALE;
@@ -82,7 +75,6 @@ void decideActionsStructure(
     float3 scale = exp(g.log_scale);
     float max_scale = max(scale.x, max(scale.y, scale.z));
 
-    // Defaults; overwritten below on the split/clone/prune branches.
     uint out_action = ACTION_KEEP;
     uint nkx = 1u, nky = 1u, nkz = 1u;
 

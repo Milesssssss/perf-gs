@@ -1,51 +1,9 @@
 # Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-"""Experiment F — gradient-quality diagnostic on a REAL trained scene state.
+"""Experiment F: sparse-vs-dense gradient fidelity at real, frozen training states.
 
-Asks one question: how close is the gradient a sparse mask produces to the one
-dense supervision would have produced, and how fast does that close as the mask
-is accumulated over K consecutive visits?
-
-Structured so it CANNOT influence training. It is a separate process, it is never
-invoked by a training cell, and inside it:
-
-  * the scene is advanced to the target iteration by the normal training loop, so
-    the state examined is a genuine mid-training state with real densification
-    history — not a synthetic one;
-  * from then on NO optimizer step is taken. The probe records forward + loss +
-    backward, reads the gradient buffers, and stops. Parameters, Adam moments and
-    the densification accumulators are never written;
-  * the camera is pinned and the Gaussians are frozen, so the only thing varying
-    between measurements is the mask.
-
-Accumulation, and why the mean is the right thing to compare. The sparse loss is
-already reweighted by 1/rho, so ONE masked backward is an unbiased estimate of the
-dense gradient. K masks therefore accumulate as a MEAN of K unbiased estimates,
-not a sum — a sum would be K times too large and every cosine similarity would
-still look fine while every relative L2 error looked catastrophic. Because the
-backward is linear in the loss, the mean of K individually-read gradients is
-exactly the gradient of the averaged loss, so the probe reads each mask's gradient
-separately (clearing in between) and averages on the host. That also means a
-single pass over 16 masks yields every K in {1,2,4,8,16} as a prefix mean, rather
-than needing five passes.
-
-Two comparisons per parameter group:
-
-    cosine similarity   direction agreement — what actually matters to an
-                        optimizer, since Adam renormalizes magnitude per-parameter
-    relative L2 error   ||sparse - dense|| / ||dense|| — total error including
-                        magnitude, the stricter and less flattering number
-
-Both are reported per parameter group (position, scale, rotation, opacity, colour)
-because the groups have very different sparsity: a position gradient comes from a
-handful of pixels under one splat, while a colour gradient integrates over its
-whole footprint, so they should not be expected to degrade alike.
-
-Usage (invoked by the suite; runnable by hand):
-
-    .venv/Scripts/python.exe scripts/running/paper_gradient_probe.py \
-        --scene datasets/360_v2/bicycle --state-iters 500 1500 3000 \
-        --out outputs/paper_stbn/gradient_analysis/bicycle.json
+Takes no optimizer step; K masks accumulate as the mean of K unbiased 1/rho-reweighted estimates.
+Usage: python scripts/running/paper_gradient_probe.py --scene datasets/360_v2/bicycle --state-iters 500 1500 3000 --out outputs/paper_stbn/gradient_analysis/bicycle.json
 """
 from __future__ import annotations
 
@@ -61,20 +19,16 @@ for _sub in ("running", "debug", "plots"):
     if _p not in sys.path:
         sys.path.append(_p)
 
-from trainer.backend.render import stbn as stbn_module
+from trainer.backend.render import stbn_table
+from trainer.backend.render.stbn_mask import StbnMask
 from trainer.config.config import (DensificationProperties, IterationContextualVariables, StbnVariables)
-from trainer.contracts.codegen import TILE_AREA
+from trainer.backend.compute.execution import TILE_AREA
 from trainer.frontend.app import TrainingApplication
 from trainer.frontend.cli import build_parser
 
-# The 14 scalar gradient components, grouped as a paper would report them.
-# Names must match trainer.backend.render.pipeline.GRAD_SCALAR_COMPONENTS
-# exactly — a typo would silently drop that group from every table rather than
-# fail, so :func:`_validate_groups` checks the mapping is total at startup.
+# Names must exactly partition GRAD_SCALAR_COMPONENTS; _validate_groups checks this at startup.
 PARAM_GROUPS: dict[str, tuple[str, ...]] = {
     "position": ("mean_x", "mean_y", "mean_z"),
-    # The optimizer parameterizes scale in log space; the gradient buffers are
-    # named accordingly.
     "scale": ("log_scale_x", "log_scale_y", "log_scale_z"),
     "rotation": ("rot_x", "rot_y", "rot_z", "rot_w"),
     "opacity": ("opacity",),
@@ -84,25 +38,19 @@ FIXED_POINT_INV = 1.0 / 65536.0
 
 DEFAULT_K_VALUES = (1, 2, 4, 8, 16)
 DEFAULT_STATE_ITERS = (500, 1500, 3000)
-# Regimes, as (label, stbn source, independent-draw?). Mirrors the trainer's
-# --stbn-source / --stbn-independent combinations exactly.
-SPARSE_REGIMES = (("iid_white", stbn_module.SOURCE_WHITE, True),
-                  ("indep_blue", stbn_module.SOURCE_NVIDIA, True),
-                  ("stbn", stbn_module.SOURCE_NVIDIA, False))
+# (label, stbn source, independent draw), mirroring --stbn-source / --stbn-independent.
+SPARSE_REGIMES = (("iid_white", stbn_table.SOURCE_WHITE, True),
+                  ("indep_blue", stbn_table.SOURCE_NVIDIA, True),
+                  ("stbn", stbn_table.SOURCE_NVIDIA, False))
 
 
 def _grad_components() -> tuple[str, ...]:
-    from trainer.backend.render.pipeline import GRAD_SCALAR_COMPONENTS
+    from trainer.backend.memory.buffers import GRAD_SCALAR_COMPONENTS
     return tuple(GRAD_SCALAR_COMPONENTS)
 
 
 def _validate_groups() -> None:
-    """Fail loudly if PARAM_GROUPS does not exactly partition the gradient set.
-
-    A misnamed component would otherwise make its group silently disappear from
-    the results — the failure mode where a reader concludes "the paper didn't
-    report scale gradients" when in fact the key was misspelled.
-    """
+    """Fail loudly if PARAM_GROUPS does not exactly partition the gradient set."""
     actual = set(_grad_components())
     mapped = {c for group in PARAM_GROUPS.values() for c in group}
     missing, extra = actual - mapped, mapped - actual
@@ -115,11 +63,11 @@ def _validate_groups() -> None:
 def read_gradients(pipeline) -> dict[str, np.ndarray]:
     """The 14 int64 fixed-point gradient buffers, as floats, for live splats."""
     pipeline.runtime.wait_for_idle()
-    count = int(pipeline.buffers.num_gaussians_counter
+    count = int(pipeline.buffers.primitive.active_count
                 .to_numpy().view(np.uint32)[0])
     out: dict[str, np.ndarray] = {}
     for name in _grad_components():
-        raw = pipeline.buffers.grad_buffers[name].to_numpy()
+        raw = pipeline.buffers.gradients.params[name].to_numpy()
         ints = np.frombuffer(raw.tobytes(), dtype=np.int64)[:count]
         out[name] = ints.astype(np.float64) * FIXED_POINT_INV
     return out
@@ -127,20 +75,14 @@ def read_gradients(pipeline) -> dict[str, np.ndarray]:
 
 def one_backward(pipeline, camera, *, sh_degree: int, hardness: float,
                  stbn: StbnVariables | None) -> dict[str, np.ndarray]:
-    """Forward + loss + backward for ONE mask, then read the gradients.
-
-    A full ``clear_gradients`` precedes it, because the training loop only clears
-    the 2D seeds per iteration and relies on the Adam step to consume the scalar
-    gradients — and this probe deliberately never runs Adam. Without the explicit
-    clear every reading would be a running sum of all previous masks.
-    """
+    """Forward + loss + backward for one mask; clears gradients first since no Adam step consumes them."""
     contextual = IterationContextualVariables(
         hardness_value=hardness, sh_degree=sh_degree, contextual_stbn=stbn,
         densification_variables=DensificationProperties(
             structure_tensor_texture=None, structure_kwargs={}),
     )
-    with pipeline.recording("grad_probe"):
-        pipeline.clear_gradients()
+    with pipeline.commands.recording("grad_probe"):
+        pipeline.optimizer.zero_grad()
         pipeline.record_forward(camera, contextual)
         pipeline.record_loss(contextual)
         pipeline.record_backward(contextual)
@@ -169,8 +111,7 @@ def compare(sparse: dict[str, np.ndarray],
             "relative_l2_error": rel_l2,
             "sparse_norm": norm_a,
             "dense_norm": norm_b,
-            # >1 means the sparse estimate is systematically too large. With
-            # correct 1/rho reweighting this should sit near 1.
+            # Should sit near 1 with correct 1/rho reweighting.
             "norm_ratio": (norm_a / norm_b) if norm_b > 0 else None,
             "n_values": int(a.size),
         }
@@ -178,32 +119,18 @@ def compare(sparse: dict[str, np.ndarray],
 
 
 def upload_tables(pipeline, stbn_seed: int) -> dict[str, object]:
-    """One uploaded mask table per noise source, held for the whole probe.
-
-    Both tables live on the device simultaneously and are bound by swapping
-    ``pipeline._stbn`` between measurements. This is what lets ONE process
-    measure all three regimes at ONE frozen state — the alternative (a process
-    per noise source) would have each regime training its own trajectory to
-    "the same" iteration and then compare gradients at genuinely different
-    Gaussian configurations, which would not be a controlled comparison at all.
-    """
+    """One mask table per noise source, all resident so every regime is probed at one frozen state."""
     tables: dict[str, object] = {}
-    cache = stbn_module.default_cache_dir() / "cache"
-    for source in (stbn_module.SOURCE_WHITE, stbn_module.SOURCE_NVIDIA):
-        spec = stbn_module.StbnMaskSpec(source=source, seed=int(stbn_seed))
-        tables[source] = stbn_module.upload_mask(pipeline.device, spec, cache)
+    cache = stbn_table.default_cache_dir() / "cache"
+    for source in (stbn_table.SOURCE_WHITE, stbn_table.SOURCE_NVIDIA):
+        spec = stbn_table.StbnSpec(source=source, seed=int(stbn_seed))
+        tables[source] = StbnMask.build(pipeline.device, spec, cache)
     return tables
 
 
 def probe_state(app, loop, state_iter: int, *, k_values, fraction: float,
                 stbn_seed: int, tables: dict[str, object]) -> dict:
-    """Advance to ``state_iter`` and measure every regime at that frozen state.
-
-    The advance is DENSE (``loop.stbn_density`` is cleared before this runs), so
-    the state reached is a property of the scene and the seed alone — not of the
-    sampling regime. Every regime is then probed against that one shared state,
-    which is the only way the three are comparable.
-    """
+    """Advance (densely, so the state is regime-independent) to ``state_iter`` and probe every regime there."""
     context = loop.advance_to_capture(state_iter)
     pipeline = app._pipeline
     camera = context.camera_entry.camera
@@ -211,14 +138,13 @@ def probe_state(app, loop, state_iter: int, *, k_values, fraction: float,
     hardness = context.iteration_contextual_variables.hardness_value
 
     pipeline.runtime.wait_for_idle()
-    n_gaussians = int(pipeline.buffers.num_gaussians_counter
+    n_gaussians = int(pipeline.buffers.primitive.active_count
                       .to_numpy().view(np.uint32)[0])
 
-    # Reference: the dense gradient at this exact state, mask off.
     dense = one_backward(pipeline, camera, sh_degree=sh_degree,
                          hardness=hardness, stbn=None)
 
-    budget = stbn_module.pixels_per_tile(fraction, TILE_AREA)
+    budget = stbn_table.pixels_per_tile(fraction, TILE_AREA)
     max_k = max(k_values)
     slices = pipeline.stbn_slices
     record: dict = {
@@ -240,10 +166,8 @@ def probe_state(app, loop, state_iter: int, *, k_values, fraction: float,
         table = tables.get(source)
         if table is None:
             continue
-        # Bind this regime's noise source. Everything else — the state, the
-        # camera, the per-tile budget, the reweighting, the backward path — is
-        # held fixed, so the only difference between regimes is the mask.
-        pipeline._stbn = table
+        # Only the noise source changes between regimes; state, camera, budget and backward path are fixed.
+        pipeline.stbn = table
         if independent:
             rng = np.random.default_rng(int(stbn_seed))
             indices = [int(rng.integers(slices)) for _ in range(max_k)]
@@ -263,8 +187,7 @@ def probe_state(app, loop, state_iter: int, *, k_values, fraction: float,
         for k in sorted(k_values):
             if k > len(per_mask):
                 continue
-            # Prefix MEAN: K unbiased 1/rho-reweighted estimates average to an
-            # estimate of the dense gradient (a sum would be K times too big).
+            # Mean, not sum: each 1/rho-reweighted mask is already an unbiased dense-gradient estimate.
             averaged = {name: np.mean([m[name] for m in per_mask[:k]], axis=0)
                         for name in per_mask[0]}
             by_k[str(k)] = compare(averaged, dense)
@@ -288,9 +211,7 @@ def main() -> int:
     parser.add_argument("--out", type=str, required=True)
     args = parser.parse_args()
 
-    # Force the headless, observation-free configuration. This process must not
-    # write a run report, evaluate, or dump renders: it is a diagnostic, and any
-    # artifact it produced would look like a training cell to the suite.
+    # No reports, evals or renders: any artifact would look like a training cell to the suite.
     args.no_viewer = True
     args.profile_run = False
     args.capture_external = False
@@ -314,12 +235,8 @@ def main() -> int:
     app.prepare_training_context()
     loop = app.build_training_loop()
 
-    # DENSE advance. The frozen state must not depend on the regime being
-    # measured, so the trajectory that reaches it supervises every pixel.
-    # Clearing the density schedule makes _stbn_variables return None, which
-    # _stbn_kwargs resolves to the full per-tile budget — and a full budget is
-    # bit-identical to running with no mask at all (tests/test_stbn.py).
-    loop.stbn_density = None
+    # Dense advance (no sampler = full budget, bit-identical to no mask) so the frozen state is regime-independent.
+    loop.stbn_sampler = None
     tables = upload_tables(app._pipeline, int(args.stbn_seed))
 
     scene_name = Path(args.scene).name

@@ -1,21 +1,7 @@
 # Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-"""Densification subsystem controller for the training loop.
-
-The v2 loop's ``if do_densify:`` block was ~200 lines of tightly-ordered GPU work
-mixing structure-aware / AbsGS filler / simple branches with the SAD-GS eta-window
-carry logic, a post-densify Morton
-re-sort, the Mip-Splatting filter recompute, population-trajectory snapshots and
-a read-back diagnostics pass. :class:`DensificationController` owns that whole
-subsystem: it is constructed once with its dependencies, and :meth:`run` executes
-one densify tick and returns the (possibly updated) live gaussian count.
-
-The body of :meth:`run` is a verbatim lift of the original inline block (the
-loop-local names are re-bound from instance state at the top of the method), so
-the extraction is behavior-preserving; the ordering invariants documented inline
-(clears BEFORE Morton, eta carry on filler ticks, mip recompute after count
-change) are exactly as they were in ``app.main()``.
-"""
+"""Densification controller: executes one densify tick per call, keeping its ordering invariants
+(tracking clears before Morton, eta carry on filler ticks, mip recompute after count change)."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -33,9 +19,7 @@ if TYPE_CHECKING:
 
 @dataclass
 class DensifyOutcome:
-    """Result of one densify tick. The controller produces this; the reporting
-    layer (:meth:`TrainingReporter.report_densify`) turns it into JSON + console
-    lines, so orchestration and reporting stay separate."""
+    """Result of one densify tick, reported by :meth:`TrainingReporter.report_densify`."""
 
     iteration: int
     count: int
@@ -76,11 +60,7 @@ class DensificationController:
         self._queue_limiter = queue_limiter
 
     def run(self, it: int, ev: "IterationEvents", cur_n_gaussians: int) -> DensifyOutcome:
-        """Execute one densify tick and return its outcome (updated count,
-        stats, and any diagnostics). Reporting/IO is the caller's job — see
-        :meth:`TrainingReporter.report_densify`."""
-        # Re-bind loop-local names from instance state so the body below is a
-        # verbatim lift of the original inline ``if do_densify:`` block.
+        """Execute one densify tick and return its outcome; reporting is the caller's job."""
         pipeline = self._pipeline
         args = self._args
         mode = self._densify_mode
@@ -93,7 +73,7 @@ class DensificationController:
         queue_limiter = self._queue_limiter
         do_structure_step = ev.structure
 
-        # First densify starts the extinction-hardness ramp (held at 1.0 up to here; see ExtinctionHardnessSchedule).
+        # The first densify starts the extinction-hardness ramp (held at 1.0 until then).
         extinction_hardness_schedule.notify_first_densification(it)
 
         stats = {}
@@ -103,10 +83,10 @@ class DensificationController:
         min_blend_weight = args.prune_blend_weight if ev.blend_prune else 0.0
 
         if do_structure_step:
-            stats = pipeline.densify_structure_aware(structure_cfg, min_blend_weight)
+            stats = pipeline.structure_densifier.densify(structure_cfg, min_blend_weight)
         elif mode == DensificationMode.STRUCTURE_AWARE:
             allow_scale_prune = it > args.reset_every
-            stats = pipeline.densify_simple(
+            stats = pipeline.simple_densifier.run(
                 densify_cfg,
                 grad_thresh=args.grad_thresh,
                 scale_thresh=extent * args.grow_scale3d,
@@ -117,7 +97,7 @@ class DensificationController:
             )
         elif mode == DensificationMode.SIMPLE:
             allow_scale_prune = it > args.reset_every
-            stats = pipeline.densify_simple(
+            stats = pipeline.simple_densifier.run(
                 densify_cfg,
                 grad_thresh=args.grad_thresh,
                 scale_thresh=extent * args.grow_scale3d,
@@ -127,19 +107,19 @@ class DensificationController:
             )
         if pipeline.last_submit_id:
             queue_limiter.record(pipeline.last_submit_id)
-        with pipeline.recording("densify_tracking"), pipeline.marker_group("densify_tracking"):
-            pipeline.clear_tracking()
+        commands = pipeline.commands
+        with commands.recording("densify_tracking"), commands.marker_group("densify_tracking"):
+            pipeline.densify_stats.clear()
             if mode == DensificationMode.STRUCTURE_AWARE and not sad_carry_eta:
-                pipeline.clear_structure_scores()
+                pipeline.structure_densifier.clear_scores()
 
-        # Morton re-sort after every densify.
-        pipeline.morton_sort(morton_world_min, morton_world_max,
+        pipeline.morton.reorder(morton_world_min, morton_world_max,
                              carry_eta=sad_carry_eta)
         if pipeline.last_submit_id:
             queue_limiter.record(pipeline.last_submit_id)
 
         if ev.mip_after_densify:
-            pipeline.compute_3d_filter()
+            pipeline.mip_filter.compute()
             if pipeline.last_submit_id:
                 queue_limiter.record(pipeline.last_submit_id)
 

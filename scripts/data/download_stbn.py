@@ -1,39 +1,9 @@
 # Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-"""Fetch NVIDIA's pregenerated spatiotemporal blue noise into the local cache.
+"""Fetch NVIDIA's scalar spatiotemporal blue noise into the gitignored ``.stbn/`` cache.
 
-Source: https://github.com/NVIDIA-RTX/STBN (the SpatiotemporalBlueNoiseSDK that
-accompanies Wolfe et al., "Scalar Spatiotemporal Blue Noise Masks",
-arXiv:2112.09629 / EGSR 2022). ``Assets/STBN.zip`` in that repo holds the
-textures their ScalarApp (void-and-cluster) produced; this script pulls the
-scalar set — ``stbn_scalar_2Dx1Dx1D_128x128x64x1_<t>.png``, 64 slices of 128x128
-8-bit grayscale — and stores it as one ``(64, 128, 128)`` uint8 ``.npy`` for
-:mod:`trainer.backend.render.stbn` to consume.
-
+The upstream license is non-commercial research only, so the assets are never committed.
     python scripts/data/download_stbn.py
-
-LICENSING — READ THIS
----------------------
-NVIDIA ships that repo under the "NVIDIA Source Code License for Spatiotemporal
-Blue Noise Texture Generation", which limits use to NON-COMMERCIAL research and
-evaluation, and requires that any redistribution carry a complete copy of the
-license plus the original attribution notices.
-
-Consequences this script is built around:
-
-  * The assets land in a GITIGNORED cache (``.stbn/assets/``) and are never
-    committed. Vendoring them into a shared repo would be a redistribution, and
-    whether that is acceptable is a licensing call for a human to make, not a
-    default for a download script to quietly take.
-  * ``License.txt`` and a ``NOTICE.md`` recording the upstream URL/commit are
-    written next to the data, so the provenance travels with it.
-  * Running this script is OPT-IN. STBN pixel sampling is off by default.
-
-If the intended use of this trainer is commercial, do not use this source. The
-trainer's ``--stbn-source file`` accepts any scalar STBN volume instead — e.g.
-one you generate by building that SDK's ScalarApp yourself under whatever terms
-apply to you — and ``--stbn-source white`` needs no asset at all (it is the
-control, not an equivalent).
 """
 from __future__ import annotations
 
@@ -55,9 +25,7 @@ ASSET_ZIP_URL = f"https://raw.githubusercontent.com/{REPO}/{BRANCH}/Assets/STBN.
 LICENSE_URL = f"https://raw.githubusercontent.com/{REPO}/{BRANCH}/License.txt"
 REPO_URL = f"https://github.com/{REPO}"
 
-# The scalar (1-channel) STBN set inside STBN.zip: 2D space x 1D time x 1D
-# value, 128x128x64. The vector sets (vec2/vec3/unitvec*) are for sampling
-# directions and are not what a pixel mask wants.
+# Scalar set only: the vector sets (vec2/vec3/unitvec*) are for sampling directions, not pixel masks.
 SLICE_TEMPLATE = "STBN/stbn_scalar_2Dx1Dx1D_128x128x64x1_{index}.png"
 SLICES = 64
 SIZE = 128
@@ -90,8 +58,7 @@ def _human_bytes(n: float) -> str:
 
 
 def _fetch(url: str, dest: Path, *, progress: bool = True) -> None:
-    """Stream ``url`` to ``dest`` via a ``.part`` sibling (stdlib only), so an
-    interrupted transfer can never be mistaken for a complete file."""
+    """Stream ``url`` to ``dest`` via a ``.part`` rename so an interrupted transfer never looks complete."""
     part = dest.with_name(dest.name + ".part")
     part.parent.mkdir(parents=True, exist_ok=True)
     request = urllib.request.Request(
@@ -121,12 +88,9 @@ def _fetch(url: str, dest: Path, *, progress: bool = True) -> None:
 
 
 def extract_scalar_volume(zip_path: Path) -> np.ndarray:
-    """Assemble the 64 scalar slices into one ``(slices, height, width)`` uint8
-    volume, in slice order.
+    """Stack the 64 scalar slices into one ``(slices, height, width)`` uint8 volume.
 
-    Each slice is an 8-bit grayscale PNG whose values ARE the mask's scalar
-    field (0..255). We keep the raw 8-bit values rather than normalizing: the
-    consumer ranks them per tile, which only needs the order.
+    Raw 8-bit values are kept, not normalized: the consumer only ranks them per tile.
     """
     with zipfile.ZipFile(zip_path) as archive:
         available = set(archive.namelist())

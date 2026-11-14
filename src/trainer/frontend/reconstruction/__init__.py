@@ -1,12 +1,7 @@
 # Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-"""Optional images -> COLMAP reconstruction, driven by the colmap/glomap binaries.
-
-Produces a ``sparse/0`` + ``images`` dataset that the existing loader
-(:func:`trainer.data.colmap.load_colmap`) consumes unchanged. Fully OPTIONAL: the
-trainer runs without it, and the binaries are downloaded on demand from the
-viewer's hub (:class:`ReconTools`) rather than being dependencies.
-"""
+"""Optional images -> COLMAP reconstruction, driven by the colmap/glomap binaries, which the hub
+downloads on demand (:class:`ReconTools`) rather than as dependencies."""
 from __future__ import annotations
 
 from trainer.frontend.reconstruction.pipeline import classify_dataset, reconstruct

@@ -1,19 +1,7 @@
 // Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-// L1 loss in linear color space with optional alpha supervision.
-//
-// Reads the rendered output (linear RGB + alpha in .a) and the ground-truth
-// target (sRGB-encoded RGB + alpha in .a), converts target RGB to linear,
-// writes the per-pixel gradient ``dL/dC`` to a UAV texture that the backward
-// rasterizer reads.
-//
-// L1 matches gsplat's photometric objective (F.l1_loss). Its constant-
-// magnitude gradient sharpens edges, where L2's quadratic penalty smears
-// low-opacity gaussians across error regions (elongation).
-//
-// L1 loss per pixel: L_pixel = sum_c |C_c - T_c| + w_alpha * |A_r - A_t|
-// dL/dC_c = sign(C_c - T_c)
-// dL/dA   = w_alpha * sign(A_r - A_t)  (stored in dL_dC.a)
+// L1 loss gradient against the linearized (sRGB-decoded) target, with optional alpha supervision.
+// dL/dC_c = sign(C_c - T_c); dL/dA = w_alpha * sign(A_r - A_t), stored in dL_dC.a.
 
 static float srgb_to_linear_scalar(float c)
 {
@@ -49,8 +37,7 @@ void computeLossGrad(
     float3 T_srgb = target.rgb;
     float3 T_linear = srgb_to_linear(T_srgb);
 
-    // the subgradient of an absolute value is the sign of its argument :)
-    float3 grad_rgb = sign(C - T_linear); //L1
+    float3 grad_rgb = sign(C - T_linear);
 
     float grad_alpha = 0.0;
     if (w_alpha > 0.0)

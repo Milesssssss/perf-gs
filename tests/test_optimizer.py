@@ -21,6 +21,7 @@ from _pipeline_testkit import TestPipeline
 from trainer.config.config import LossConfig
 from trainer.backend.compute.device import create_device
 from trainer.backend.memory.buffers import GRAD_SCALAR_COMPONENTS
+from trainer.backend.optimize.adam import AdamOptimizer
 
 
 BACKENDS = ["vulkan", "d3d12"]
@@ -107,7 +108,7 @@ def test_adam_step_matches_reference(backend: str) -> None:
         vals = (0.5 + 0.13 * ci) + 0.37 * np.arange(N) + rng.uniform(-0.1, 0.1, N)
         fixed = np.zeros(max_splats, dtype=np.int64)
         fixed[:N] = np.round(vals * FIXED_SCALE).astype(np.int64)
-        p.buffers.grad_buffers[name].copy_from_numpy(fixed)
+        p.buffers.gradients.params[name].copy_from_numpy(fixed)
         grad_raw[name] = fixed[:N].astype(np.float64) / FIXED_SCALE
 
     lr = dict(mean=1e-3, scale=5e-3, rot=2e-3, opacity=5e-2, color=2.5e-3)
@@ -116,13 +117,13 @@ def test_adam_step_matches_reference(backend: str) -> None:
     pixels_per_step = float(W * H)
     inv_pixels = 1.0 / max(pixels_per_step, 1.0)
 
-    p._dispatch(p.k_adam, "adam",
+    p.commands.dispatch(p.kernels.kernel(*AdamOptimizer.KERNELS["adam"]), "adam",
         thread_count=[max_splats, 1, 1],
-        gaussians=p.buffers.gaussians.storage,
-        adam_state=p.buffers.adam_state.storage,
-        num_gaussians_counter=p.buffers.num_gaussians_counter.storage,
-        **p.buffers.grad_kwargs(),
-        cluster_visible=p.buffers.cluster_visible.storage,
+        gaussians=p.buffers.primitive.values.storage,
+        adam_state=p.buffers.adam.state.storage,
+        num_gaussians_counter=p.buffers.primitive.active_count.storage,
+        **p.buffers.gradients.param_kwargs(),
+        cluster_visible=p.buffers.raster.cluster_visible.storage,
         cfg={"lr_mean": lr["mean"], "lr_scale": lr["scale"], "lr_rot": lr["rot"],
              "lr_opacity": lr["opacity"], "lr_color": lr["color"],
              "bias_correction1": bc1, "bias_correction2": bc2},
@@ -130,11 +131,11 @@ def test_adam_step_matches_reference(backend: str) -> None:
     )
     device.wait_for_idle()
 
-    g_out = np.frombuffer(p.buffers.gaussians.to_numpy().tobytes(),
+    g_out = np.frombuffer(p.buffers.primitive.values.to_numpy().tobytes(),
                           dtype=np.float32).reshape(-1, 14)[:N].astype(np.float64)
     # AoS AdamState: 28 floats/gaussian. Pull each channel's m/v moment in
     # GRAD_SCALAR_COMPONENTS order via the offset tables above.
-    adam = np.frombuffer(p.buffers.adam_state.to_numpy().tobytes(),
+    adam = np.frombuffer(p.buffers.adam.state.to_numpy().tobytes(),
                          dtype=np.float32).reshape(-1, 28)[:N].astype(np.float64)
     m1_out = adam[:, _ADAM_M_IDX]
     m2_out = adam[:, _ADAM_V_IDX]
@@ -161,6 +162,6 @@ def test_adam_step_matches_reference(backend: str) -> None:
 
     # Adam must zero the grad accumulators for the next iteration.
     for name in GRAD_SCALAR_COMPONENTS:
-        raw = np.frombuffer(p.buffers.grad_buffers[name].to_numpy().tobytes(),
+        raw = np.frombuffer(p.buffers.gradients.params[name].to_numpy().tobytes(),
                             dtype=np.int64)
         assert np.all(raw[:N] == 0), f"grad buffer {name} not zeroed after Adam"

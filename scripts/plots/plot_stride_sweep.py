@@ -2,11 +2,7 @@
 
 """BACKWARD_PIXEL_STRIDE sweep: training time + test PSNR vs stride.
 
-Reads outputs/train/timing_<scene>_s<stride>/{log.jsonl,test_psnr.json} for
-stride in {1,2,4,8,16} across the 9 Mip-NeRF 360 scenes. Same flags except the
-backward pixel-subsampling stride (a shader define). Writes:
-  outputs/backward_stride_sweep.csv  (per-scene time + PSNR for each stride)
-  outputs/backward_stride_sweep.png  (avg train time + avg PSNR vs stride)
+Reads outputs/train/timing_<scene>_s<stride>/ runs (only the shader-define stride differs); writes outputs/backward_stride_sweep*.
 """
 from __future__ import annotations
 
@@ -54,7 +50,6 @@ def _psnr(run: str) -> float | None:
 
 
 def main() -> None:
-    # time[stride][scene], psnr[stride][scene]
     time_by = {st: {} for st in STRIDES}
     psnr_by = {st: {} for st in STRIDES}
     for s in SCENES:
@@ -73,7 +68,6 @@ def main() -> None:
     time_avg = {st: avg(time_by[st]) for st in STRIDES}
     psnr_avg = {st: avg(psnr_by[st]) for st in STRIDES}
 
-    # CSV: one row per scene, columns time_s<st> + psnr_s<st>.
     Path("outputs").mkdir(exist_ok=True)
     with (Path("outputs") / "backward_stride_sweep.csv").open("w", newline="") as fh:
         w = csv.writer(fh)
@@ -84,7 +78,6 @@ def main() -> None:
             row += [f"{time_by[st].get(s, float('nan')):.1f}" for st in STRIDES]
             row += [f"{psnr_by[st].get(s, float('nan')):.3f}" for st in STRIDES]
             w.writerow(row)
-        # AVERAGE row + speedup / psnr-drop vs stride 1.
         row = ["AVERAGE"]
         row += [f"{time_avg[st]:.1f}" for st in STRIDES]
         row += [f"{psnr_avg[st]:.3f}" for st in STRIDES]
@@ -94,11 +87,9 @@ def main() -> None:
         w.writerow(["speedup_vs_s1"] + [f"{t1 / time_avg[st]:.3f}x" for st in STRIDES]
                    + [f"{psnr_avg[st] - p1:+.3f}" for st in STRIDES])
 
-    # Figure: two panels sharing the stride x-axis.
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(13, 5.5), dpi=140)
     x = np.arange(len(STRIDES))
 
-    # Left: avg training time vs stride (+ per-scene faint lines).
     for s in SCENES:
         ys = [time_by[st].get(s) for st in STRIDES]
         if all(y is not None for y in ys):
@@ -117,7 +108,6 @@ def main() -> None:
     ax1.grid(True, alpha=0.3)
     ax1.legend(loc="upper right", fontsize=9)
 
-    # Right: avg test PSNR vs stride (+ per-scene faint lines).
     for s in SCENES:
         ys = [psnr_by[st].get(s) for st in STRIDES]
         if all(y is not None for y in ys):
@@ -142,7 +132,6 @@ def main() -> None:
     fig.savefig(Path("outputs") / "backward_stride_sweep.png")
     plt.close(fig)
 
-    # --- Per-scene grid: each scene shows time (left axis) + PSNR (right) ---
     ncol = 3
     nrow = (len(SCENES) + ncol - 1) // ncol
     fig2, axes = plt.subplots(nrow, ncol, figsize=(14, 10), dpi=140)
@@ -151,7 +140,6 @@ def main() -> None:
         ax = axes[idx // ncol][idx % ncol]
         ts = [time_by[st].get(s) for st in STRIDES]
         ps = [psnr_by[st].get(s) for st in STRIDES]
-        # Left axis: training time (blue).
         ax.plot(x, ts, "-o", color="#1f77b4", lw=1.8, ms=5)
         ax.set_ylabel("time (s)", color="#1f77b4", fontsize=9)
         ax.tick_params(axis="y", labelcolor="#1f77b4", labelsize=8)
@@ -159,12 +147,10 @@ def main() -> None:
         ax.set_xticklabels([str(st) for st in STRIDES], fontsize=8)
         ax.set_title(s, fontsize=11, fontweight="bold")
         ax.grid(True, alpha=0.25)
-        # Right axis: test PSNR (red).
         axr = ax.twinx()
         axr.plot(x, ps, "-s", color="#d62728", lw=1.8, ms=5)
         axr.set_ylabel("PSNR (dB)", color="#d62728", fontsize=9)
         axr.tick_params(axis="y", labelcolor="#d62728", labelsize=8)
-        # Annotate PSNR drop from stride 1 at each point.
         if ps[0] is not None:
             for xi, pv in zip(x, ps):
                 if pv is not None:
@@ -173,7 +159,6 @@ def main() -> None:
                                  ha="center", fontsize=6.5, color="#d62728")
         if idx % ncol == 0:
             ax.set_xlabel("BACKWARD_PIXEL_STRIDE", fontsize=8)
-    # Hide any unused cells.
     for j in range(len(SCENES), nrow * ncol):
         axes[j // ncol][j % ncol].axis("off")
     fig2.suptitle("Per-scene: training time (blue) & test PSNR (red) vs backward "
@@ -182,7 +167,6 @@ def main() -> None:
     fig2.savefig(Path("outputs") / "backward_stride_sweep_perscene.png")
     plt.close(fig2)
 
-    # Console table.
     print(f"{'stride':>7} {'avg_time':>9} {'speedup':>8} {'avg_psnr':>9} {'dPSNR':>7}")
     for st in STRIDES:
         print(f"{st:>7} {time_avg[st]:>9.1f} {t1 / time_avg[st]:>7.2f}x "

@@ -54,12 +54,10 @@ from pathlib import Path
 sys.path.insert(0, sys.argv[1])
 import trainer
 from trainer.backend.compute.device import SHADERS_DIR
-from trainer.backend.render.stbn import default_cache_dir
-from trainer.contracts.codegen import stale_generated_slang
+from trainer.backend.render.stbn_table import default_cache_dir
 assert Path(trainer.__file__).is_relative_to(sys.argv[1])
 assert SHADERS_DIR == Path(sys.argv[1]) / 'trainer' / 'shaders'
 assert (SHADERS_DIR / 'rasterize/tile_binned/forward.slang').is_file()
-assert stale_generated_slang() == ()
 assert default_cache_dir() == Path.cwd() / '.stbn'
 """
     result = subprocess.run([sys.executable, "-I", "-c", check, str(site)],

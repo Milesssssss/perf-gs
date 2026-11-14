@@ -61,8 +61,8 @@ def _grads_with(pipeline: TestPipeline, scene, camera, use_persplat: bool,
     pipeline.use_flat_bucket_backward = use_flat
     pipeline.use_warp_per_pixel_forward = use_warp_forward
     pipeline.forward_and_loss(camera)
-    pipeline.clear_gradients()
-    pipeline.backward()
+    pipeline.optimizer.zero_grad()
+    pipeline.run_backward()
     pipeline.device.wait_for_idle()
     return pipeline.read_gradients()
 
@@ -82,7 +82,7 @@ def test_persplat_matches_perpixel(backend: str) -> None:
                             loss_config=LossConfig(ssim_weight=0.0, alpha_weight=0.0))
 
     scene = _deep_scene(n, seed=3)
-    pipeline.set_target_image(_target(H, W))
+    pipeline.targets.set_image(_target(H, W))
     camera = simple_camera(width=W, height=H, eye=(0.0, 0.0, 0.0),
                            target=(0.0, 0.0, 1.0), up=(0.0, 1.0, 0.0),
                            fovy_degrees=60.0)
@@ -133,7 +133,7 @@ def test_flat_bucket_matches_persplat(backend: str) -> None:
                             loss_config=LossConfig(ssim_weight=0.0, alpha_weight=0.0))
 
     scene = _deep_scene(n, seed=3)
-    pipeline.set_target_image(_target(H, W))
+    pipeline.targets.set_image(_target(H, W))
     camera = simple_camera(width=W, height=H, eye=(0.0, 0.0, 0.0),
                            target=(0.0, 0.0, 1.0), up=(0.0, 1.0, 0.0),
                            fovy_degrees=60.0)
@@ -178,7 +178,7 @@ def test_warp_forward_backward_matches_baseline(backend: str) -> None:
                             loss_config=LossConfig(ssim_weight=0.0, alpha_weight=0.0))
 
     scene = _deep_scene(n, seed=3)
-    pipeline.set_target_image(_target(H, W))
+    pipeline.targets.set_image(_target(H, W))
     camera = simple_camera(width=W, height=H, eye=(0.0, 0.0, 0.0),
                            target=(0.0, 0.0, 1.0), up=(0.0, 1.0, 0.0),
                            fovy_degrees=60.0)
@@ -220,19 +220,19 @@ def test_projection_backward_resets_the_seeds(backend: str) -> None:
     W = H = 64
     pipeline = TestPipeline(device=device, width=W, height=H, max_splats=128,
                             loss_config=LossConfig(ssim_weight=0.0, alpha_weight=0.0))
-    pipeline.set_target_image(_target(H, W))
+    pipeline.targets.set_image(_target(H, W))
     camera = simple_camera(width=W, height=H, eye=(0.0, 0.0, 0.0),
                            target=(0.0, 0.0, 1.0), up=(0.0, 1.0, 0.0),
                            fovy_degrees=60.0)
 
     first = _grads_with(pipeline, _deep_scene(100, seed=3), camera,
                         use_persplat=True, use_flat=True)
-    for name, buffer in pipeline.buffers.grad_2d_seed_buffers.items():
+    for name, buffer in pipeline.buffers.gradients.seeds.items():
         seeds = np.frombuffer(buffer.to_numpy().tobytes(), dtype=np.int64)
         assert not seeds.any(), f"seed {name} not reset by projection_backward"
 
     pipeline.forward_and_loss(camera)
-    pipeline.backward()
+    pipeline.run_backward()
     pipeline.device.wait_for_idle()
     second = pipeline.read_gradients()
     assert np.any(first["mean_x"] != 0.0) and np.any(first["log_scale_x"] != 0.0)

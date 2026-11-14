@@ -2,19 +2,8 @@
 
 """Plot convergence curves from an eval_curve.jsonl produced by v2_train.py.
 
-Reads a run's eval_curve.jsonl (one JSON line per --eval-every sweep) and writes
-two PNGs into the same run dir:
-  - psnr_vs_iter.png       PSNR (linear + sRGB) vs training iteration
-  - psnr_vs_time.png       PSNR (linear + sRGB) vs pure training wall-clock
-
-Requires matplotlib. Install once with `.venv/Scripts/python.exe -m pip install matplotlib`.
-
-Usage:
-    .venv/Scripts/python.exe scripts/plot_eval_curve.py <run_dir> [<run_dir> ...]
-
-Passing multiple run dirs overlays them on one figure (labeled by dir basename)
-for A/B comparison. The X-axis for the time plot uses each run's own elapsed
-so throughput differences show up as horizontal stretch.
+Writes psnr_vs_iter.png and psnr_vs_time.png into the run dir; several run dirs are overlaid into the first (compare_ prefix).
+Usage: python scripts/plots/plot_eval_curve.py <run_dir> [<run_dir> ...]
 """
 
 from __future__ import annotations
@@ -38,12 +27,10 @@ def plot(runs: list[tuple[list[dict], str]], out_path: Path, x_field: str, x_lab
     fig, ax = plt.subplots(figsize=(10, 6), dpi=120)
     for entries, label in runs:
         xs = [e[x_field] for e in entries]
-        # Current schema: psnr_srgb / psnr_linear (mean of per-image PSNR on the
-        # test split, paper metric). Old runs used avg_psnr_srgb / avg_psnr_linear
-        # (dB-of-mean-MSE over all cams) — fall back so old curves still plot.
+        # Older runs only have avg_psnr_* (dB of mean MSE over all cams).
         y_lin = [e.get("psnr_linear", e.get("avg_psnr_linear")) for e in entries]
         y_srgb = [e.get("psnr_srgb", e.get("avg_psnr_srgb")) for e in entries]
-        # Solid line = sRGB (paper-reported metric); dashed = linear for context.
+        # sRGB is the paper-reported metric, so it gets the prominent line.
         ax.plot(xs, y_srgb, "-", label=f"{label} (sRGB)", linewidth=1.8)
         ax.plot(xs, y_lin, "--", label=f"{label} (linear)", linewidth=1.0, alpha=0.7)
     ax.set_xlabel(x_label)
@@ -63,8 +50,6 @@ def main() -> None:
         sys.exit(1)
     run_dirs = [Path(a) for a in sys.argv[1:]]
     runs = [load_curve(d) for d in run_dirs]
-    # Single-run outputs go into that run's dir; multi-run comparison goes into
-    # the FIRST run's dir with a "compare_" prefix.
     if len(runs) == 1:
         out_dir = run_dirs[0]
         prefix = ""

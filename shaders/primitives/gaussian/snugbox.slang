@@ -1,20 +1,7 @@
 // Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-// SnugBox (Speedy-Splat §4.1.1): tight axis-aligned bounding box of the
-// ellipse where the Gaussian's alpha = opacity * exp(power) exceeds the
-// 1/255 display threshold. Factoring in opacity gives a much tighter
-// bbox than the opacity-agnostic 3-sigma-eigenvalue estimate.
-//
-// Derivation, using inverse covariance Σ⁻¹ = [[a b][b c]]:
-//   alpha(p) >= 1/255  <=>  ax_d² + 2b·x_d·y_d + c·y_d² <= t
-//                        with t = 2·log(255·σ)
-// Differentiating the ellipse y_d = (-b·x_d ± sqrt((b²-ac)·x_d² + tc)) / c
-// w.r.t. x_d and solving ∂y/∂x = 0 gives the x_d values at y-extrema:
-//   x_d_args = ± sqrt( -b²·t / ((b²-ac)·a) ) = ± sqrt( b²·t / ((ac-b²)·a) )
-// Substituting back gives the y-extrema. x-extrema by symmetry.
-//
-// Returns false when the gaussian has no visible extent (opacity too
-// low: t <= 0) — caller should skip binning.
+// SnugBox (Speedy-Splat §4.1.1): opacity-aware tight AABB of the ellipse a·x_d² + 2b·x_d·y_d + c·y_d² <= t
+// (Σ⁻¹ = [[a b][b c]]) where alpha exceeds the 1/255 display threshold.
 
 #ifndef TRAINER_GAUSSIAN_SNUGBOX_SLANG
 #define TRAINER_GAUSSIAN_SNUGBOX_SLANG
@@ -22,8 +9,7 @@
 #include "../../common/math.slang"
 #include "eval.slang"
 
-// ``opacity_logit`` is the pre-sigmoid opacity parameter; the threshold t comes
-// from the active splat kernel (splatCutoffQ).
+// opacity_logit is pre-sigmoid and t comes from splatCutoffQ; false when t <= 0 (the caller skips binning).
 bool snugBox(float2 mean_2d, float3 cov2d, float opacity_logit,
              out float2 bbox_min, out float2 bbox_max)
 {

@@ -74,12 +74,12 @@ def test_cluster_cull_kills_offscreen_cluster(backend: str) -> None:
     pipeline.device.wait_for_idle()
 
     # Read cluster_visible.
-    cv = pipeline.buffers.cluster_visible.to_numpy().view(np.uint32)
+    cv = pipeline.buffers.raster.cluster_visible.to_numpy().view(np.uint32)
     assert cv[0] == 1, f"in-frustum cluster wrongly culled: cv[0]={cv[0]}"
     assert cv[1] == 0, f"behind-camera cluster not culled: cv[1]={cv[1]}"
 
     # Read tile_count_per_gaussian.
-    tc = pipeline.buffers.tile_count_per_gaussian.to_numpy().view(np.uint32)
+    tc = pipeline.buffers.raster.tile_count_per_gaussian.to_numpy().view(np.uint32)
     # Behind-camera cluster: all 128 splats must have tile_count == 0.
     behind_counts = tc[CLUSTER_SIZE:2 * CLUSTER_SIZE]
     assert np.all(behind_counts == 0), (
@@ -118,6 +118,6 @@ def test_cluster_cull_off_is_noop(backend: str) -> None:
     pipeline.device.wait_for_idle()
 
     # cluster_visible must remain all-ones (never dispatched cull kernel).
-    cv = pipeline.buffers.cluster_visible.to_numpy().view(np.uint32)
+    cv = pipeline.buffers.raster.cluster_visible.to_numpy().view(np.uint32)
     assert np.all(cv == 1), (
         f"cluster_cull=False but cluster_visible changed: unique={np.unique(cv)}")

@@ -1,16 +1,8 @@
 # Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-"""Change-task and comprehension-task framework.
+"""Data-driven change-task and comprehension-task framework: new families are declared, not coded.
 
-A *change task* hands an agent a prompt, then verifies the result against hidden
-tests and hard-gate signals executed inside the sandbox. A *comprehension task*
-asks a read-only question and grades the answer. Both are deliberately
-data-driven so new task families are declared, not coded.
-
-Verification runs the sandbox's *own* source by prepending ``<workspace>/src`` to
-``PYTHONPATH`` — this sidesteps the repo's editable-install gotcha where
-``import trainer`` would otherwise resolve to the installed copy instead of the
-candidate under evaluation.
+Verification prepends ``<workspace>/src`` to ``PYTHONPATH`` so the sandbox's source beats the editable install.
 """
 
 from __future__ import annotations
@@ -27,8 +19,6 @@ from typing import Protocol
 from esc.gates import GateInputs
 from esc.model import AgentTelemetry
 
-
-# --- Command execution ------------------------------------------------------
 
 @dataclass(frozen=True)
 class CommandResult:
@@ -97,12 +87,9 @@ class TaskEnvironment:
         return target
 
 
-# --- Task specification -----------------------------------------------------
-
 @dataclass(frozen=True)
 class HiddenTest:
-    """A test file injected into the sandbox at verification time (kept out of
-    the repo so agents cannot train against it)."""
+    """A test file injected at verification time, kept out of the repo so agents cannot train against it."""
 
     filename: str
     source: str
@@ -218,8 +205,6 @@ class CommandChangeTask(ChangeTask):
     def _run_check(self, workspace: Path, env: TaskEnvironment, check: Check) -> CommandResult:
         return env.run_python(workspace, check.args, timeout=check.timeout_s)
 
-
-# --- Comprehension tasks ----------------------------------------------------
 
 @dataclass(frozen=True)
 class ComprehensionTask:

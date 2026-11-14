@@ -1,18 +1,8 @@
 # Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-"""Concept entropy — how scattered a cross-cutting concept's implementation is.
+"""Concept entropy H_c = -(sum_i p_{c,i} log p_{c,i}) / log m_c in [0, 1]: how scattered a concept is.
 
-For a concept ``c`` spread over modules ``i`` with implementation-site fractions
-``p_{c,i}``:
-
-    H_c = - ( sum_i p_{c,i} log p_{c,i} ) / log m_c      in [0, 1]
-
-``H_c ~ 0`` means the concept is localised to one module; ``H_c ~ 1`` means its
-responsibility is evenly scattered across many. Locality rewards ``1 - H_c``.
-
-Crucially this is *not* optimised alone: a 20k-line god file has near-zero
-dispersion while being awful. :mod:`esc.scoring.locality` balances entropy
-against patch spread and the static-quality module-size penalty.
+Not optimised alone (a god file has near-zero dispersion); locality balances it against patch spread.
 """
 
 from __future__ import annotations
@@ -33,8 +23,7 @@ def module_of(rel: str, granularity: str) -> str:
     parts = rel.split("/")
     if parts and parts[0] == "src":
         parts = parts[1:]
-    # package granularity: the directory that owns the file (or the file itself
-    # if it sits at the top level).
+    # Package granularity: the owning directory, or the file itself at top level.
     return "/".join(parts[:-1]) or parts[-1]
 
 

@@ -1,57 +1,9 @@
 # Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-"""Headless Graphics Capture that AUTO-SAVES an .ngfx-capture to disk.
+"""Headless single-frame Graphics Capture that auto-saves an .ngfx-capture for VRAM/resource inspection.
 
-Why this exists (vs. capture_gpu_trace.py)
-------------------------------------------
-``capture_gpu_trace.py`` drives ngfx.exe's "GPU Trace Profiler" activity: a
-continuous HARDWARE-COUNTER profiler that samples many CONTINUOUSLY-PRESENTED,
-bit-identical frames over a ~1s window. That is the right tool for *performance*
-(bottlenecks, throughput, shader timing) and is intentionally kept as-is.
-
-It is the WRONG tool for the "where are my ~20 GB of VRAM going" question. That
-needs a *Graphics Capture*: a single-frame snapshot of API calls AND application
-resources, which you open in Nsight's Graphics Debugger and inspect under
-    Graphics Debugger -> Memory      (VkDeviceMemory objects, sizes, aliasing)
-    Graphics Debugger -> Object Browser
-A separate executable produces those:
-    ngfx-capture.exe        (NOT ngfx.exe --activity "GPU Trace Profiler")
-
-It spawns the target with Nsight injected, triggers a capture at a specific
-presented frame, AUTO-WRITES the capture into --output-dir, and (with
---terminate-after-capture) kills the app afterwards. No HUD, no Save, no Open.
-
-How it stays deterministic
---------------------------
-We reuse the trainer's existing ``--capture-external`` frozen mode unchanged, so
-the Graphics Capture inspects the SAME trainer state the GPU Trace does. In that
-mode v2_train.py trains normally to --capture-iter, then Presents a *frozen*,
-bit-identical workload (all LRs = 0, camera pinned, no densify) for
---capture-frames frames and exits. The trainer's present accounting is:
-
-    frames 1 .. (capture_iter-1)         main loop (one Present per train_step)
-    frames capture_iter .. capture_iter+7    8 warm-up frozen frames
-    frames capture_iter+8 ..             the bounded frozen capture loop
-
-so a 1-based capture target of ``capture_iter + WARMUP_MARGIN`` (the same margin
-capture_gpu_trace.py uses to arm its trace) lands a few frames INTO the frozen
-steady state — after warm-up, before the loop ends. We tell ngfx-capture.exe to
-capture exactly that one presented frame and then terminate the trainer.
-
-Unlike the GPU Trace path we do NOT need the 1500-frame loop: a single frame is
-enough for a resource snapshot. We still present a few hundred frozen frames so
-the trainer is guaranteed to still be presenting when Nsight reaches the target
-frame; --terminate-after-capture stops it the instant the capture completes.
-
-Usage
------
-    .venv\\Scripts\\python.exe scripts/running/capture_graphics.py \\
-        --scene datasets/360_v2/bicycle \\
-        --capture-iter 560 \\
-        --output-dir nsight/graphics/out \\
-        -- --densify-mode structure_aware --seed 42
-
-Everything after ``--`` is forwarded verbatim to v2_train.py.
+Uses ngfx-capture.exe on the same frozen --capture-external trainer state as capture_gpu_trace.py.
+Usage: python scripts/running/capture_graphics.py --scene datasets/360_v2/bicycle --capture-iter 560 -- --densify-mode structure_aware --seed 42
 """
 from __future__ import annotations
 
@@ -63,20 +15,15 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-# Kept identical to capture_gpu_trace.py so the Graphics Capture target frame
-# sits in the same frozen steady state the GPU Trace arms in: main iterations
-# 1..(capture_iter-1), then 8 warm-up frozen frames = capture_iter+7 presents;
-# a 1-based target of capture_iter+15 is ~8 frames into the frozen loop.
+# Same as capture_gpu_trace.py: lands ~8 frames into the frozen steady state (after capture_iter + 7 presents).
 _WARMUP_MARGIN = 15
 
-# ngfx-capture.exe --frame-count is documented as [1 - 600]; a resource snapshot
-# only needs one frame.
+# A resource snapshot needs one frame (--frame-count accepts 1-600).
 _FRAME_COUNT = 1
 
 
 def _find_ngfx_capture_exe() -> Path | None:
-    """Locate ngfx-capture.exe from the newest Nsight Graphics install.
-    Override with the NGFX_CAPTURE_EXE environment variable."""
+    """Locate ngfx-capture.exe in the newest Nsight Graphics install; NGFX_CAPTURE_EXE overrides."""
     override = os.environ.get("NGFX_CAPTURE_EXE")
     if override:
         p = Path(override)
@@ -145,16 +92,12 @@ def main() -> int:
 
     capture_frame = args.capture_frame or (args.capture_iter + _WARMUP_MARGIN)
     if capture_frame <= 1:
-        # ngfx-capture.exe rejects --capture-frame <= 1 ("must be greater
-        # than 1"). Only reachable with a tiny/explicit --capture-iter.
+        # ngfx-capture.exe rejects --capture-frame <= 1; only reachable with a tiny --capture-iter.
         print(f"[capture] --capture-frame must be > 1 (got {capture_frame}). "
               "Raise --capture-iter or pass --capture-frame.", file=sys.stderr)
         return 2
 
-    # Trainer must still be presenting when Nsight reaches the target frame. The
-    # frozen loop begins at present (capture_iter + 8); target is capture_frame.
-    # Give a generous tail so the app never exits first (terminate-after-capture
-    # stops it the moment the capture lands anyway).
+    # The frozen loop starts at present capture_iter + 8; a generous tail keeps it presenting until the target frame.
     frozen_needed = max(1, capture_frame - (args.capture_iter + 8))
     capture_frames = args.capture_frames or (frozen_needed + 300)
     if capture_frames < frozen_needed:
@@ -174,9 +117,7 @@ def main() -> int:
     if fwd and fwd[0] == "--":
         fwd = fwd[1:]
 
-    # Reuse the trainer's frozen external-capture mode unchanged so this snapshot
-    # matches the GPU Trace's trainer state. --capture-external implies
-    # --profile-run (opens the presenting Vulkan window Nsight delimits by).
+    # --capture-external implies --profile-run, which opens the presenting window Nsight delimits frames by.
     trainer = Path(__file__).resolve().parent / "v2_train.py"
     app_argv = [
         str(trainer),
@@ -187,12 +128,7 @@ def main() -> int:
         *fwd,
     ]
 
-    # ngfx-capture.exe's --args is documented as variadic ("TEXT ..."), but its
-    # CLI11 parser still treats any following token beginning with "--" (e.g.
-    # --capture-external) as an unknown option FOR ITSELF, not as a value:
-    #   "The following arguments were not expected: --capture-external ..."
-    # So we pass the whole trainer command line as ONE quoted string, exactly
-    # like capture_gpu_trace.py does for ngfx.exe. Keep it last regardless.
+    # ngfx-capture parses "--x" tokens after --args as its own options; pass one quoted string, kept last.
     app_args_str = subprocess.list2cmdline(app_argv)
     cmd = [
         str(ngfx_capture),
@@ -224,8 +160,7 @@ def main() -> int:
 
     proc = subprocess.run(cmd, cwd=str(repo))
 
-    # Graphics captures land as .ngfx-capture; glob broadly in case the suffix
-    # varies by version, newest first.
+    # Glob broadly in case the capture suffix varies by Nsight version.
     caps = sorted(
         (p for pat in ("*.ngfx-capture", "*.ngfx-frame", "*.nsight-gfxc")
          for p in out_dir.glob(pat)),

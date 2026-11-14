@@ -1,22 +1,13 @@
 // Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-// The compositing / extinction operator for the tile blend loop.
-//
-// Orthogonal to the primitive: IBlendable (core/interfaces.slang) says what a
-// splat looks like at a pixel (coverage + color); the Compositor says how those
-// accumulate front-to-back. 
+// Front-to-back compositing (extinction) operator for the tile blend loop, orthogonal to
+// the primitive's coverage and color (core/interfaces.slang).
 
 #ifndef TRAINER_CORE_COMPOSITOR_SLANG
 #define TRAINER_CORE_COMPOSITOR_SLANG
 
-// Compile-time specialization: when the run's extinction hardness is fixed at
-// 1.0 (the default alpha-over compositor — the schedule target is <= 1), the
-// host injects COMPOSITOR_HARDNESS_ONE=1 so the `pow`-based hardened-extinction
-// paths compile out entirely. Those dead branches otherwise keep `pow` calls +
-// their registers live in the hottest backward loop (coverageGrad runs per pixel
-// per splat), measurably lowering occupancy. Defaults to 0 (full runtime path)
-// so a hardness>1 run is bit-identical to before. Set via
-// ShaderSpecialization.compiler_defines (see app.py).
+// Host sets 1 when hardness is fixed at 1.0 (alpha-over), compiling out the pow paths whose
+// live registers lower occupancy in the hottest backward loop.
 #ifndef COMPOSITOR_HARDNESS_ONE
 #define COMPOSITOR_HARDNESS_ONE 0
 #endif
@@ -25,7 +16,7 @@ struct Compositor
 {
     float hardness;   // k >= 1; 1 = alpha-over
 
-    // Light passing THROUGH this splat: T <- T * transmittance(a).
+    // Light passing through this splat: T <- T * transmittance(a).
     float transmittance(float a)
     {
 #if COMPOSITOR_HARDNESS_ONE
@@ -65,7 +56,6 @@ struct Compositor
         float beta = 1.0 - a;
         float dWeight = hardness * pow(beta, hardness - 1.0);   // weight'(a)
         float transLogGrad = -hardness / beta;                 // t'(a)/t(a)
-        //maybe could be clearer mathematically if we had dL/dai = dL_dC * (ci*dWeight*Ti + t'(ai)/t(ai)*Cbehind))
         return dWeight * dLdc * T_i + transLogGrad * (dLdCbehind - dL_dA * T_final);
 #endif
     }

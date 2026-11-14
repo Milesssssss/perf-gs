@@ -1,13 +1,7 @@
 // Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-// Gaussian conformance to the core IBlendablePrimitive contract.
-//
-// The compact per-pixel blend record — screen-space mean, packed 2D covariance,
-// pre-sigmoid opacity logit, SH band-0 color, and the Mip-Splatting opacity
-// compensation — is exactly the field set BlendData packs. coverage()/color()
-// delegate to the existing differentiable Gaussian primitives (evalGaussian2D-
-// FromCov, shDC), so the tile blend loop can be written generically over
-// IBlendablePrimitive with ZERO change to the Gaussian math or its gradients.
+// Gaussian conformance to the core IBlendablePrimitive contract: coverage()/color() delegate to
+// evalGaussian2DFromCov and shDC, so the generic blend loop keeps the Gaussian math and gradients.
 
 #ifndef TRAINER_GAUSSIAN_BLEND_SLANG
 #define TRAINER_GAUSSIAN_BLEND_SLANG
@@ -37,9 +31,7 @@ struct GaussianPrimitive : IBlendablePrimitive
         return shDC(sh0);
     }
 
-    // Assemble from the values the forward already has in hand (the same
-    // fields BlendData packs). Non-differentiable constructor: the diff path
-    // runs through coverage()/color() on the constructed record.
+    // Non-differentiable constructor; gradients flow through coverage()/color() on the record.
     static GaussianPrimitive make(float2 mean, float3 cov2d, float opacity,
                                   float3 sh0, float opacity_compensation)
     {
@@ -53,13 +45,8 @@ struct GaussianPrimitive : IBlendablePrimitive
     }
 }
 
-// Gaussian source for the generic blend loop: yields a GaussianPrimitive per
-// index. Gathers the compact 36 B BlendData record bin_count packs (mean,
-// cov2d, opacity, sh0, opacity_compensation) — the SAME repacked fields as the
-// fat gaussians[] + projected_2d[] pair, but ONE gather instead of two. The
-// blend reads primitives in random (sorted) order, so gathering 36 B not 80 B
-// lifts the L2 hit rate; this matches backward_persplat's blend_data gather
-// exactly, so forward + backward read the primitive identically.
+// Gathers the compact 36 B BlendData record (one gather, better L2 hit rate in sorted order);
+// matches backward_persplat's blend_data gather so forward and backward read identical primitives.
 struct GaussianSource : IPrimitiveSource
 {
     StructuredBuffer<BlendData> blend_data;

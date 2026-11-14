@@ -1,47 +1,9 @@
 # Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-"""Sweep ONE training flag across the Mip-NeRF 360 scenes; collect PSNR + time.
+"""Sweep one training flag across the Mip-NeRF 360 scenes; collect PSNR + time.
 
-Generalizes ``eval_mipnerf_sweep.py``, which could only sweep ``--sh-degree``.
-Here the swept axis is named on the command line, so any knob the trainer accepts
-can be swept without editing a script:
-
-    # the STBN pixel-density sweep
-    .venv/Scripts/python.exe scripts/running/eval_sweep.py \
-        --axis stbn-pixel-fraction --values 1,0.75,0.5,0.25,0.1
-
-    # one scene, quick
-    .venv/Scripts/python.exe scripts/running/eval_sweep.py \
-        --axis stbn-pixel-fraction --values 1,0.25 --scenes bicycle --iters 500
-
-    # anything else, same machinery
-    .venv/Scripts/python.exe scripts/running/eval_sweep.py --axis sh-degree --values 0,3
-    .venv/Scripts/python.exe scripts/running/eval_sweep.py \
-        --axis extinction-hardness --values 1,2,4 --extra --lambda-ssim 0.0
-
-Each cell is a fresh subprocess, so every run gets its own GPU device and a clean
-densification state — the isolation the published numbers were produced under.
-Only two numbers are collected, both from the run's ``test_psnr.json``:
-held-out TEST-set PSNR (mean per-image sRGB, the paper metric) and
-``train_wall_s`` (the timed loop, with eval excluded), plus the final gaussian
-count because it is free and explains most PSNR differences.
-
-Idempotent: a cell whose ``test_psnr.json`` already exists is reused unless
-``--force``, so an interrupted sweep resumes for free. Results are written after
-every cell, and the plots + CSV are regenerated each time, so a sweep is readable
-while it is still running.
-
-RUN IT ON AN IDLE GPU. ``train_wall_s`` is wall-clock, so anything else using the
-device — a profiler attached (Nsight, PIX), another trainer, even a live viewer —
-inflates it, and the PSNR column will look fine while every timing is quietly
-wrong. Re-run with ``--force`` if a sweep shared the GPU; there is no way to
-salvage the numbers after the fact.
-
-Outputs, under ``outputs/eval_sweep/<name>/``:
-    results.json          one record per cell
-    sweep_summary.csv     the table view (scene x value, plus per-value averages)
-    psnr_sweep.png        held-out PSNR
-    timing_sweep.png      train wall time
+Each cell is a cached fresh subprocess; run on an idle GPU, since train_wall_s is wall-clock.
+Usage: python scripts/running/eval_sweep.py --axis stbn-pixel-fraction --values 1,0.75,0.5,0.25,0.1
 """
 from __future__ import annotations
 
@@ -53,16 +15,12 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent.parent
 
-# Canonical Mip-NeRF 360 order: outdoor scenes, then indoor. flowers/treehill are
-# the "extra" scenes and live in a different folder (see _scene_dir) — the older
-# sweep script hardcoded 360_v2 and silently skipped them.
+# Outdoor then indoor; flowers/treehill live in 360_extra_scenes (see _scene_dir).
 DEFAULT_SCENES = ["bicycle", "flowers", "garden", "stump", "treehill",
                   "bonsai", "counter", "kitchen", "room"]
 DATASET_ROOTS = ["360_v2", "360_extra_scenes", "tandt", "db"]
 
-# The eval config the published numbers use: quarter res (the trainer's default
-# --downsample 4), 3k iters, structure-aware densify, mip-splatting, the paper
-# holdout protocol. --evaluation is required because it vetoes --final-test-psnr.
+# Published eval config; --evaluation is required because it vetoes --final-test-psnr.
 BASE_ARGS = [
     "--densify-mode", "structure_aware",
     "--mip-splatting",
@@ -89,8 +47,7 @@ def _tag(value: str) -> str:
 
 def train_run(scene: str, run_name: str, flags: list[str], *, iters: int,
               force: bool) -> dict | None:
-    """Train ``scene`` with BASE_ARGS + ``flags`` in a fresh subprocess, reusing a
-    cached ``test_psnr.json`` unless ``force``. Returns its metrics, or None."""
+    """Train ``scene`` with BASE_ARGS + ``flags`` in a fresh subprocess; cached unless ``force``, None on failure."""
     scene_dir = _scene_dir(scene)
     if scene_dir is None:
         print(f"[sweep] SKIP {scene}: not found under "
@@ -124,7 +81,7 @@ def train_run(scene: str, run_name: str, flags: list[str], *, iters: int,
         "iters": data.get("iters"),
         **{key: data.get(key) for key in (
             "max_splats", "max_sort_pairs", "peak_sort_pairs", "sort_overflows",
-            "targets_streamed", "vram_budget_bytes", "vram_usage_bytes")},
+            "targets_streamed", "allocated_bytes", "vram_budget_bytes", "vram_usage_bytes")},
     }
 
 
@@ -139,8 +96,7 @@ def run_cell(scene: str, axis: str, value: str, *, iters: int, force: bool,
 
 def _publish(out_dir: Path, results: list[dict], axis: str, iters: int,
              plot: bool) -> None:
-    """Persist results and refresh the CSV + plots. Called after every cell so a
-    long sweep can be read (and a crashed one salvaged) mid-flight."""
+    """Persist results and refresh the CSV + plots; called after every cell so a sweep is readable mid-flight."""
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "results.json").write_text(json.dumps(results, indent=2))
     if not plot or not results:
@@ -148,9 +104,7 @@ def _publish(out_dir: Path, results: list[dict], axis: str, iters: int,
     cmd = [sys.executable, str(REPO / "scripts" / "plots" / "plot_sweep.py"),
            "--results", str(out_dir / "results.json"),
            "--axis-label", axis, "--iters", str(iters)]
-    # Quiet on success (this runs after every cell), but never SILENT on failure:
-    # a broken plotter used to swallow itself here and the sweep looked healthy
-    # right up until there were no charts at the end.
+    # Quiet on success (runs after every cell) but never silent on failure.
     proc = subprocess.run(cmd, cwd=str(REPO), capture_output=True, text=True)
     if proc.returncode != 0:
         print(f"[sweep] WARNING: plotting failed (rc={proc.returncode}); results "
@@ -186,8 +140,7 @@ def main() -> int:
     sweep_name = (args.name or axis).replace("-", "_")
     out_dir = REPO / "outputs" / "eval_sweep" / sweep_name
 
-    # Fail fast on a mistyped axis: the trainer's parser is the authority, and a
-    # bad flag would otherwise surface as N identical subprocess failures.
+    # Fail fast on a mistyped axis rather than N identical subprocess failures.
     sys.path.insert(0, str(REPO / "src"))
     from trainer.frontend.cli import build_parser
     known = set(vars(build_parser().parse_args([])))

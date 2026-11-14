@@ -1,0 +1,214 @@
+# Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
+
+"""Tile-binned forward rasterization of the Gaussian primitives."""
+
+from __future__ import annotations
+
+import numpy as np
+import slangpy as spy
+
+from trainer.backend.compute.algorithms import PrefixScan, RadixSort
+from trainer.backend.compute.execution import CLUSTER_SIZE, TILE_HEIGHT, TILE_WIDTH
+from trainer.backend.compute.gpu import CommandRecorder
+from trainer.backend.compute.kernels import KernelLibrary
+from trainer.backend.memory.buffers import (
+    PrimitiveStorage,
+    RasterResources,
+    SphericalHarmonicsResources,
+)
+from trainer.config.config import IterationContextualVariables, RasterConfig
+from trainer.data.dataset import Camera
+
+_CAMERA_BYTES = 144   # CameraData: two 4x4 matrices + image size, padded to 16 bytes
+
+
+class Rasterizer:
+    """Projects, bins, depth-sorts and blends the splats of one view.
+
+    Keeps the uploaded camera and depth-sorted splat ids for the backward pass.
+    """
+
+    KERNELS = {
+        "clear_textures": ("rasterize/tile_binned/clear.slang", "clearTextures"),
+        "clear_tile_ranges": ("rasterize/tile_binned/tile_ranges.slang", "clearTileRanges"),
+        "bin_count": ("rasterize/tile_binned/bin_count.slang", "binCount"),
+        "bin_emit": ("rasterize/tile_binned/bin_emit.slang", "binEmit"),
+        "identify_tile_ranges": ("rasterize/tile_binned/tile_ranges.slang", "identifyTileRanges"),
+        "bucket_count": ("rasterize/tile_binned/bucket_count.slang", "bucketCount"),
+        "forward": ("rasterize/tile_binned/forward.slang", "forwardRasterize"),
+    }
+    SH_KERNELS = {"sh_forward": ("rasterize/tile_binned/sh_forward.slang", "shForward")}
+    CULL_KERNELS = {
+        "build_cluster_aabb": ("rasterize/cluster_cull.slang", "buildClusterAABB"),
+        "cull_clusters_frustum": ("rasterize/cluster_cull.slang", "cullClustersFrustum"),
+    }
+
+    def __init__(self, device: spy.Device, commands: CommandRecorder,
+                 kernels: KernelLibrary, *, primitive: PrimitiveStorage,
+                 raster: RasterResources, sh: SphericalHarmonicsResources | None,
+                 scan: PrefixScan, sort: RadixSort, config: RasterConfig,
+                 width: int, height: int, num_tiles_x: int, num_tiles_y: int,
+                 capacity: int) -> None:
+        self._commands = commands
+        self._k = kernels.load({**self.KERNELS,
+                                **(self.SH_KERNELS if sh is not None else {}),
+                                **(self.CULL_KERNELS if config.cluster_cull else {})})
+        self._primitive = primitive
+        self.raster = raster
+        self._sh = sh
+        self._scan = scan
+        self._sort = sort
+        self.config = config
+        self.width = width
+        self.height = height
+        self.num_tiles_x = num_tiles_x
+        self.num_tiles_y = num_tiles_y
+        self._capacity = capacity
+        self.camera_buffer = device.create_buffer(
+            size=_CAMERA_BYTES,
+            usage=spy.BufferUsage.shader_resource | spy.BufferUsage.unordered_access,
+            label="camera_data",
+        )
+        self.sorted_values = sort.resources.values
+
+    @property
+    def num_tiles(self) -> int:
+        return self.num_tiles_x * self.num_tiles_y
+
+    def upload_camera(self, camera: Camera) -> None:
+        if camera.image_size != (self.width, self.height):
+            raise ValueError(
+                f"camera resolution {camera.image_size} does not match pipeline "
+                f"resolution {(self.width, self.height)}")
+        data = np.empty(36, dtype=np.float32)
+        data[0:16] = camera.view_matrix.flatten()
+        data[16:32] = camera.proj_matrix.flatten()
+        data[32:34] = np.array([self.width, self.height], dtype=np.float32)
+        data[34:36] = 0.0
+        self.camera_buffer.copy_from_numpy(np.ascontiguousarray(data.view(np.uint8)))
+
+    def record(self, camera: Camera, contextual: IterationContextualVariables) -> None:
+        self.upload_camera(camera)
+        commands, k, r = self._commands, self._k, self.raster
+        primitive, config = self._primitive, self.config
+        num_tiles, capacity = self.num_tiles, self._capacity
+
+        with commands.marker_group("clear"):
+            commands.dispatch(k.clear_textures, "clear_textures",
+                thread_count=[self.width, self.height, 1],
+                output_image=r.output_image,
+                gaussian_count_per_pixel=r.gaussian_count_per_pixel,
+                frame_dim=spy.uint2(self.width, self.height))
+            commands.dispatch(k.clear_tile_ranges, "clear_tile_ranges",
+                thread_count=[num_tiles, 1, 1],
+                tile_start=r.tile_start.storage,
+                tile_end=r.tile_end.storage,
+                num_tiles=num_tiles)
+
+        if config.cluster_cull:
+            num_clusters = (capacity + CLUSTER_SIZE - 1) // CLUSTER_SIZE
+            with commands.marker_group("cluster_cull"):
+                commands.dispatch(k.build_cluster_aabb, "build_cluster_aabb",
+                    thread_count=[num_clusters * CLUSTER_SIZE, 1, 1],
+                    gaussians=primitive.values.storage,
+                    num_gaussians_counter=primitive.active_count.storage,
+                    cluster_aabb_min=r.cluster_aabb_min.storage,
+                    cluster_aabb_max=r.cluster_aabb_max.storage,
+                    max_splats=capacity,
+                    num_clusters=num_clusters)
+                commands.dispatch(k.cull_clusters_frustum, "cull_clusters_frustum",
+                    thread_count=[num_clusters, 1, 1],
+                    cluster_aabb_min=r.cluster_aabb_min.storage,
+                    cluster_aabb_max=r.cluster_aabb_max.storage,
+                    camera=self.camera_buffer,
+                    cluster_visible=r.cluster_visible.storage,
+                    num_clusters=num_clusters)
+
+        with commands.marker_group("bin_count"):
+            commands.dispatch(k.bin_count, "bin_count",
+                thread_count=[capacity, 1, 1],
+                gaussians=primitive.values.storage,
+                num_gaussians_counter=primitive.active_count.storage,
+                camera=self.camera_buffer,
+                projected_2d=r.projected_2d.storage,
+                blend_data=r.blend_data.storage,
+                tile_count_per_gaussian=r.tile_count_per_gaussian.storage,
+                cluster_visible=r.cluster_visible.storage,
+                filter_3D=primitive.filter_3d.storage,
+                mip_enabled=1 if config.mip_enabled else 0,
+                kernel_size=config.kernel_size,
+                z_near=config.z_near_cull,
+                max_splats=capacity)
+
+        if self._sh is not None:
+            with commands.marker_group("sh_forward"):
+                commands.dispatch(k.sh_forward, "sh_forward",
+                    thread_count=[capacity, 1, 1],
+                    gaussians=primitive.values.storage,
+                    num_gaussians_counter=primitive.active_count.storage,
+                    camera=self.camera_buffer,
+                    features_rest=self._sh.features_rest.storage,
+                    blend_data=r.blend_data.storage,
+                    active_sh_degree=contextual.sh_degree,
+                    rest_floats=self._sh.rest_floats,
+                    max_splats=capacity)
+
+        with commands.marker_group("scan_tile_offsets"):
+            self._scan.scan(n=capacity, in_buf=r.tile_count_per_gaussian,
+                            out_buf=r.tile_offset_per_gaussian)
+
+        pairs = self._sort.resources
+        with commands.marker_group("bin_emit"):
+            commands.dispatch(k.bin_emit, "bin_emit",
+                thread_count=[capacity, 1, 1],
+                gaussians=primitive.values.storage,
+                num_gaussians_counter=primitive.active_count.storage,
+                camera=self.camera_buffer,
+                projected_2d=r.projected_2d.storage,
+                tile_offset_per_gaussian=r.tile_offset_per_gaussian.storage,
+                keys_lo=pairs.keys_lo.storage,
+                keys_hi=pairs.keys_hi.storage,
+                values=pairs.values.storage,
+                cluster_visible=r.cluster_visible.storage,
+                z_near=config.z_near_cull,
+                max_sort_pairs=pairs.capacity)
+
+        pair_count = self._scan.resources.total
+        with commands.marker_group("radix_sort"):
+            # Key = (tile index, 32-bit depth); the tile index needs few bits.
+            tile_bits = max(1, (num_tiles - 1).bit_length())
+            _, sorted_hi, sorted_values = self._sort.sort(pair_count, key_bits=32 + tile_bits)
+
+        with commands.marker_group("identify_tile_ranges"):
+            commands.dispatch(k.identify_tile_ranges, "identify_tile_ranges",
+                thread_count=[pairs.capacity, 1, 1],
+                keys_hi=sorted_hi.storage,
+                tile_start=r.tile_start.storage,
+                tile_end=r.tile_end.storage,
+                n_buf=pair_count.storage,
+                num_tiles=num_tiles)
+        self.sorted_values = sorted_values
+
+        with commands.marker_group("bucket_scan"):
+            commands.dispatch(k.bucket_count, "bucket_count",
+                thread_count=[num_tiles, 1, 1],
+                tile_start=r.tile_start.storage,
+                tile_end=r.tile_end.storage,
+                bucket_count=r.bucket_count.storage,
+                num_tiles=num_tiles)
+            self._scan.scan(n=num_tiles, in_buf=r.bucket_count,
+                            out_buf=r.bucket_offsets, total_buf=r.bucket_offset_total)
+
+        with commands.marker_group("rasterize"):
+            commands.dispatch(k.forward, "forward",
+                thread_count=[self.num_tiles_x * TILE_WIDTH, self.num_tiles_y * TILE_HEIGHT, 1],
+                blend_data=r.blend_data.storage,
+                tile_start=r.tile_start.storage,
+                tile_end=r.tile_end.storage,
+                sorted_gaussian_ids=sorted_values.storage,
+                camera=self.camera_buffer,
+                bucket_offsets=r.bucket_offsets.storage,
+                raster_checkpoints=r.raster_checkpoints.storage,
+                output_image=r.output_image,
+                gaussian_count_per_pixel=r.gaussian_count_per_pixel,
+                extinction_hardness=contextual.hardness_value)

@@ -2,12 +2,7 @@
 
 """Paired statistics for the champion/candidate decision.
 
-The loop must decide whether a candidate is *meaningfully* better than the
-champion on the *same* tasks and seeds. Each (task, seed) yields a per-run
-quality that folds correctness and edit cost together; a paired bootstrap over
-those aligned deltas estimates the confidence that the candidate improves on the
-champion. Pairing (same tasks + seeds) removes task-difficulty variance from the
-comparison.
+A paired bootstrap over aligned (task, seed) quality deltas removes task-difficulty variance.
 """
 
 from __future__ import annotations

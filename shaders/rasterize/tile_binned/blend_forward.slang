@@ -6,15 +6,13 @@
 #include "../../core/interfaces.slang"
 #include "../../core/compositor.slang"
 #include "checkpoint.slang"
-#include "generated/execution_contract.slang"
+#include "common/execution.slang"
 
 static const float BLEND_T_EARLY_BREAK = 1e-4;
 static const float BLEND_ALPHA_MAX = 0.99;
 static const float BLEND_ALPHA_MIN = 1.0 / 255.0;
 
-// Shared front-to-back tile blend. Primitive-specific code supplies only an
-// IPrimitiveSource; compositing, checkpoints, thresholds, and early-out are one
-// production implementation monomorphized for every primitive.
+// Shared front-to-back tile blend (compositing, checkpoints, early-out) for any IPrimitiveSource.
 void blendForward<S : IPrimitiveSource>(
     S src,
     uint t_start,

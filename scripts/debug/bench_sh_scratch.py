@@ -2,10 +2,7 @@
 
 """Interleaved full-arena versus bounded-plane SH moment permutation benchmark.
 
-No dataset or optimizer changes. Both variants use identical FP32/uint input,
-permutations, and live counts; only their scratch batch size differs. Restoring
-input and checking output happen outside timing. Both arenas coexist for this
-diagnostic, so their reported sizes are not its combined process residency.
+Variants share input, permutations and live counts; only the scratch batch size differs.
 """
 from __future__ import annotations
 
@@ -19,16 +16,18 @@ import slangpy as spy
 
 from trainer.backend.compute.device import create_device
 from trainer.backend.compute.timing import StepTimer
+from trainer.backend.densify.morton import MortonReorder
+from trainer.backend.densify.simple_densifier import SimpleDensifier
+from trainer.backend.memory.arena import ArenaCommitter
 from trainer.backend.memory.buffers import ScratchArena
-from trainer.backend.memory.reorder import reorder_soa_planes
 from trainer.backend.render.pipeline import TrainingPipeline
 from trainer.config.config_types import DensificationMode
 from trainer.config.config import AppearanceConfig
 
 
 def _reference_arena(pipeline):
-    current = pipeline.buffers.scratch_arena
-    size = pipeline.buffers.adam_rest_state.storage.size
+    current = pipeline.buffers.densification.scratch_arena
+    size = pipeline.buffers.sh.adam_rest.storage.size
     return ScratchArena(
         buffer=spy.NDBuffer(device=pipeline.device, dtype="uint", shape=(size // 4,)),
         capacity_bytes=size, copy_dispatch_args=current.copy_dispatch_args)
@@ -41,65 +40,64 @@ def run(args):
         max_sort_pairs=args.capacity,
         appearance_config=AppearanceConfig(sh_degree=3))
     b, runtime = pipeline.buffers, pipeline.runtime
-    arenas = {"full": _reference_arena(pipeline), "bounded": b.scratch_arena}
+    arenas = {name: ArenaCommitter(pipeline.commands, pipeline.kernels, arena, args.capacity)
+              for name, arena in (("full", _reference_arena(pipeline)),
+                                  ("bounded", b.densification.scratch_arena))}
     rng = np.random.default_rng(2026)
     original = rng.integers(0, 2**32, (90, args.capacity), dtype=np.uint32)
-    b.adam_rest_state.copy_from_numpy(original.ravel())
+    b.sh.adam_rest.copy_from_numpy(original.ravel())
     frozen = device.create_buffer(
         size=original.nbytes, usage=spy.BufferUsage.shader_resource
         | spy.BufferUsage.unordered_access, label="benchmark_original_moments")
     batch = runtime.command_batch("freeze_moments")
-    batch.encoder.copy_buffer(frozen, 0, b.adam_rest_state.storage, 0, original.nbytes)
+    batch.encoder.copy_buffer(frozen, 0, b.sh.adam_rest.storage, 0, original.nbytes)
     runtime.wait_for_submit(runtime.submit(batch))
     timer = StepTimer(device, pool_size=128)
     results = {}
 
     for kind in ("compaction", "morton"):
-        b.scan_total.copy_from_numpy(np.array([args.live], np.uint32))
+        b.scan.total.copy_from_numpy(np.array([args.live], np.uint32))
         if kind == "compaction":
             selected = np.sort(rng.choice(args.capacity, args.live, replace=False))
             mask = np.zeros(args.capacity, np.uint32)
             mask[selected] = 1
-            b.valid_mask_buffer.copy_from_numpy(mask)
-            b.scan_buffer.copy_from_numpy(np.cumsum(mask, dtype=np.uint32) - mask)
-            kernel = pipeline.k_scatter_compact_adam_rest
-            permutation = dict(valid_mask=b.valid_mask_buffer.storage, scan=b.scan_buffer.storage)
+            b.densification.valid_mask.copy_from_numpy(mask)
+            b.scan.work.copy_from_numpy(np.cumsum(mask, dtype=np.uint32) - mask)
+            kernel = pipeline.kernels.kernel(*SimpleDensifier.KERNELS["scatter_compact_adam_rest"])
+            permutation = dict(valid_mask=b.densification.valid_mask.storage, scan=b.scan.work.storage)
         else:
             selected = rng.permutation(args.live)
             indices = np.zeros(args.capacity, np.uint32)
             indices[:args.live] = selected
-            b.sort_values_a.copy_from_numpy(indices)
-            kernel = pipeline.k_morton_scatter_adam_rest
-            permutation = dict(sorted_values=b.sort_values_a.storage, count_buf=b.scan_total.storage)
+            b.sort.values.copy_from_numpy(indices)
+            kernel = pipeline.kernels.kernel(*MortonReorder.KERNELS["scatter_adam_rest"])
+            permutation = dict(sorted_values=b.sort.values.storage, count_buf=b.scan.total.storage)
         expected = original.copy()
         expected[:, :args.live] = original[:, selected]
         samples = defaultdict(list)
 
         for repeat in range(args.warmup + args.repeats):
-            # Alternating AB/BA avoids always giving either batch size the same
-            # position relative to unrelated system load, cache, or clock drift.
+            # Alternate AB/BA so neither batch size always runs first relative to load, cache or clock drift.
             order = ("full", "bounded") if repeat % 2 == 0 else ("bounded", "full")
             for variant in order:
                 restore = runtime.command_batch("restore_moments")
-                restore.encoder.copy_buffer(b.adam_rest_state.storage, 0, frozen, 0, original.nbytes)
+                restore.encoder.copy_buffer(b.sh.adam_rest.storage, 0, frozen, 0, original.nbytes)
                 runtime.wait_for_submit(runtime.submit(restore))
                 timer.begin_step()
-                pipeline._step_timer = timer
+                pipeline.commands.timer = timer
                 started = time.perf_counter()
                 try:
-                    with pipeline.recording("benchmark_reorder"), pipeline.marker_group("reorder"):
-                        reorder_soa_planes(
-                            commands=pipeline, arena=arenas[variant], buffer=b.adam_rest_state,
-                            kernel=kernel, marker=kind, plane_count=90,
-                            capacity=args.capacity, live_count=b.scan_total, **permutation)
+                    with pipeline.commands.recording("benchmark_reorder"), pipeline.commands.marker_group("reorder"):
+                        arenas[variant].reorder_planes(
+                            b.sh.adam_rest, kernel, kind, 90, b.scan.total, **permutation)
                     runtime.wait_for_idle()
                     wall_ms = (time.perf_counter() - started) * 1e3
                     gpu_ms = timer.read().markers_ms["reorder"]
                 finally:
-                    pipeline._step_timer = None
+                    pipeline.commands.timer = None
                 if repeat == 0:
                     np.testing.assert_array_equal(
-                        b.adam_rest_state.to_numpy().view(np.uint32), expected.ravel())
+                        b.sh.adam_rest.to_numpy().view(np.uint32), expected.ravel())
                 if repeat >= args.warmup:
                     samples[variant].append((wall_ms, gpu_ms))
         results[kind] = {
@@ -112,7 +110,7 @@ def run(args):
     report = {
         "backend": args.backend, "adapter": device.info.adapter_name,
         "capacity": args.capacity, "live": args.live,
-        "scratch_bytes": {name: arena.capacity_bytes for name, arena in arenas.items()},
+        "scratch_bytes": {name: arena.arena.capacity_bytes for name, arena in arenas.items()},
         "repeats": args.repeats, "warmup": args.warmup,
         "bit_exact": True, "results": results,
         "scope": "isolated moment scatter + live-prefix commits, not full training",

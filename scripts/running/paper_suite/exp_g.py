@@ -1,34 +1,8 @@
 # Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-"""Experiment G — qualitative material, chosen by measurement rather than by eye.
+"""Experiment G: contact sheets, shared-scale error maps and ranked patches for every held-out view.
 
-Produces, for every held-out view of every scene at the primary seed and rho:
-
-  * a contact sheet, GT | dense | IID | independent blue | STBN, in that fixed
-    order so a reader learns the layout once;
-  * absolute RGB error heatmaps against the ground truth, on a SHARED colour
-    scale within each view so the panels are comparable to each other;
-  * a ranked list of fixed-size patches where the regimes differ most.
-
-The patch scan is the honest part and the reason this is automated. Choosing crops
-by eye is how qualitative figures end up flattering: one scrolls until something
-looks good and stops. Instead every view is tiled into fixed patches, each patch
-scored by local PSNR under each regime, and the patches ranked by the DIFFERENCE
-between regimes. Three rankings are produced and all three are kept:
-
-    stbn_vs_iid_best         where STBN most improves on IID white
-    stbn_vs_indep_best       where STBN most improves on independent blue noise
-    stbn_vs_indep_worst      where STBN is most BEATEN by independent blue noise
-
-The third is not optional and is never filtered out. If the method has a
-characteristic failure, this is where it becomes visible, and a paper that shows
-only the first two rankings has selected its evidence. Every candidate is written
-with its scene, view, pixel rectangle and the measured deltas, so a human choosing
-a figure is choosing among measured extremes rather than impressions.
-
-Ground truth comes from the ONE cell per scene that dumped it (the dense primary
-cell, via ``--write-ground-truths``), so the reference is exactly the image the
-trainer scored against — not a re-decode that might differ in resize filter.
+Crops are ranked by measured local-PSNR deltas, including where STBN loses, never chosen by eye.
 """
 from __future__ import annotations
 
@@ -48,14 +22,10 @@ PANEL_LABELS = {"gt": "Ground truth", "full": "Dense (100%)",
                 "iid_white": "IID white", "indep_blue": "Indep. blue",
                 "stbn": "STBN"}
 
-# Patch scan geometry. 64x64 at quarter resolution is roughly a small object or a
-# patch of foliage — large enough for a local PSNR to be meaningful, small enough
-# to be a usable paper crop. Stride 32 gives 50% overlap so a feature straddling a
-# patch boundary is still captured by a neighbour.
+# Big enough for a meaningful local PSNR, small enough to crop; 50% overlap catches boundary features.
 PATCH_SIZE = 64
 PATCH_STRIDE = 32
-# Patches this flat carry no detail worth showing; a huge relative PSNR delta on a
-# featureless wall is a numerical artifact, not a qualitative finding.
+# Flat patches are skipped: a huge PSNR delta on a featureless wall is a numerical artifact.
 MIN_PATCH_STD = 0.02
 TOP_CANDIDATES = 40
 
@@ -173,11 +143,7 @@ def _contact_sheet(images: dict[str, np.ndarray], out_path: Path, *,
 
 def _error_sheet(images: dict[str, np.ndarray], out_path: Path,
                  title: str) -> bool:
-    """Absolute RGB error against GT, on ONE shared scale across the panels.
-
-    Per-panel autoscaling would make the worst regime look like the best (its
-    errors normalized away), so the scale is shared and printed.
-    """
+    """Absolute RGB error against GT on one shared scale (per-panel autoscaling would flatter the worst regime)."""
     plt = figs.pyplot()
     if plt is None:
         return False
@@ -288,9 +254,7 @@ def run(results: ResultSet, out: dict, *, scenes=cfg.SCENES,
                 images[regime] = _load_png(cells[regime].render_path(cam_idx))
             if any(images.get(r) is None for r in cfg.REGIMES):
                 continue
-            # Guard against a resolution mismatch between the GT dump and the
-            # render (different downsample settings would silently misalign every
-            # error map).
+            # A GT/render resolution mismatch would silently misalign every error map.
             shapes = {images[k].shape[:2] for k in images}
             if len(shapes) != 1:
                 skipped[f"{scene}/cam{cam_idx}"] = f"shape mismatch {shapes}"
@@ -331,8 +295,7 @@ def run(results: ResultSet, out: dict, *, scenes=cfg.SCENES,
 
     tables.write_csv(qualitative / "per_view_index.csv", view_rows, VIEW_COLUMNS)
 
-    # Three rankings, all kept. The "worst" one is the failure-case evidence and
-    # is produced on exactly the same terms as the favourable ones.
+    # The "worst" ranking is failure-case evidence, produced on the same terms as the favourable ones.
     rankings = {
         "stbn_vs_iid_best": ("delta_stbn_minus_iid", True),
         "stbn_vs_indep_best": ("delta_stbn_minus_indep", True),
@@ -349,8 +312,7 @@ def run(results: ResultSet, out: dict, *, scenes=cfg.SCENES,
             row["rank"] = rank
             stem = (f"{rank:02d}_{patch['scene']}_cam{patch['cam_idx']:04d}"
                     f"_x{patch['x0']}_y{patch['y0']}")
-            # POSIX separators: these strings become markdown links in report.md
-            # and paths in a CSV that may be read on another platform.
+            # POSIX separators: these become report.md links and cross-platform CSV paths.
             row["crop_png"] = (
                 (crops_dir / stem).relative_to(out["root"]).as_posix() + ".png")
             candidate_rows.append(row)

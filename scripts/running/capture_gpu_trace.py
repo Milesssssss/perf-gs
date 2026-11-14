@@ -1,42 +1,9 @@
 # Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-"""Headless GPU Trace capture that AUTO-SAVES the .ngfx-gputrace to disk.
+"""Headless GPU Trace capture via ngfx.exe that auto-saves the .ngfx-gputrace (self-injection cannot).
 
-Why this exists
----------------
-The NGFX_Injection API (self-injection, used by --capture-iter in v2_train.py)
-has NO function to persist a capture: the collected trace lives only inside the
-in-process HUD and must be written out with the HUD's *Save* button. If anything
-disturbs that HUD (e.g. pressing *Open* on the capture, which tears down the
-injected host and takes Nsight with it), you lose the trace.
-
-The Nsight Graphics command-line launcher (ngfx.exe) has no such limitation. It
-spawns the target with Nsight injected, starts/stops the GPU Trace itself, and
-AUTO-WRITES the .ngfx-gputrace into --output-dir. No HUD interaction, no Save,
-no Open, nothing to crash.
-
-How it stays deterministic
---------------------------
-In --profile-run each Present is fence-aligned to a completed GPU iteration, so
-Nsight's CPU frame count cannot outrun the Vulkan context. This launcher runs
-v2_train.py in --capture-external mode: it trains normally up to
---capture-iter, then Presents a *frozen*, bit-identical workload (all LRs = 0,
-camera pinned) for --capture-frames frames and exits. We tell ngfx.exe to:
-    * start the trace after (capture_iter + WARMUP_MARGIN) presents  -> we are
-      safely inside the frozen steady state,
-    * stop after --max-duration-ms (and/or --limit-to-frames),
-so every sampled frame is identical and reproducible across runs.
-
-Usage
------
-    .venv\\Scripts\\python.exe scripts/capture_gpu_trace.py \\
-        --scene datasets/360_v2/bicycle \\
-        --capture-iter 560 \\
-        --project nsight/gpu_trace/gpu_trace_base/gpu_trace_base.ngfx-proj \\
-        --output-dir nsight/gpu_trace/out \\
-        -- --densify-mode structure_aware --seed 42
-
-Everything after ``--`` is forwarded verbatim to v2_train.py.
+The trainer runs in --capture-external mode, so every traced frame is a frozen, bit-identical workload.
+Usage: python scripts/running/capture_gpu_trace.py --scene datasets/360_v2/bicycle --capture-iter 560 -- --densify-mode structure_aware --seed 42
 """
 from __future__ import annotations
 
@@ -48,15 +15,12 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-# Fence-completed frames before the frozen loop reaches steady state: main-loop
-# iterations 1..(capture_iter-1), then 8 warm-up frames in the capture block =>
-# capture_iter + 7. Start the trace a bit past that.
+# Steady state starts after capture_iter + 7 presents (8 warm-up frames); start the trace a bit past that.
 _WARMUP_MARGIN = 15
 
 
 def _find_ngfx_exe() -> Path | None:
-    """Locate ngfx.exe from the newest Nsight Graphics install.
-    Override with the NGFX_EXE environment variable."""
+    """Locate ngfx.exe in the newest Nsight Graphics install; NGFX_EXE overrides."""
     override = os.environ.get("NGFX_EXE")
     if override:
         p = Path(override)
@@ -157,7 +121,7 @@ def main() -> int:
     if fwd and fwd[0] == "--":
         fwd = fwd[1:]
 
-    # Command line for the launched trainer (single string for ngfx --args).
+    # ngfx --args takes the trainer command line as a single string.
     trainer = Path(__file__).resolve().parent / "v2_train.py"
     app_argv = [
         str(trainer),
@@ -181,19 +145,13 @@ def main() -> int:
         "--max-duration-ms", str(args.max_duration_ms),
         "--auto-export",
         "--no-timeout",
-        # ngfx.exe does not reliably carry this project setting into a CLI
-        # launch. Without the explicit flag, reports contain shader rows but
-        # show Correlation=None and no Slang source.
+        # ngfx.exe drops this project setting on CLI launch (no Slang source correlation without it).
         "--real-time-shader-profiler",
     ]
-    # Metric set drives which counters (and thus which Trace Analysis bottleneck
-    # rules) are available; must be paired with --architecture. Empty name =
-    # keep the project's set.
+    # The metric set must be paired with --architecture; an empty name keeps the project's set.
     if args.metric_set_name:
         cmd += ["--architecture", args.architecture,
                 "--metric-set-name", args.metric_set_name]
-    # Multi-pass = the aggregated-frame counters + expert-system advice in the
-    # Trace Analysis view (single-pass gives only the timeline).
     if args.multi_pass_metrics:
         cmd += ["--multi-pass-metrics"]
     if args.limit_to_frames > 0:

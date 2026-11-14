@@ -1,23 +1,16 @@
 // Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-// View-dependent spherical-harmonics color (optional; classic 3DGS).
-//
-// The band-0 DC term is Gaussian3D.sh0 (the always-present SH0 color). These
-// are the higher bands, evaluated against the per-gaussian view direction and
-// stored in a SEPARATE features_rest buffer, so the default SH0 path never
-// touches this file. Differentiable in the rest coefficients + view direction
-// so the per-gaussian sh_backward can route dL/dRGB to the coefficients and,
-// via the direction, to the mean (autodiff, matching INRIA's SH backward).
+// View-dependent spherical-harmonics color: the bands above the DC term (Gaussian3D.sh0), stored in
+// a separate features_rest buffer so the default SH0 path never touches this file.
 
 #ifndef TRAINER_GAUSSIAN_SH_SLANG
 #define TRAINER_GAUSSIAN_SH_SLANG
 
 #include "../../common/math.slang"      // SH_C0, shDC
 #include "../../common/half_pack.slang"  // fp16x2 packing for features_rest
-#include "generated/sh_types.slang"     // SH_REST_COEFFS, SH_REST_FLOATS, SH_MAX_DEGREE
+#include "sh_layout.slang"
 
-// Compile-time upper bound on packed feature uints per gaussian (2 coeffs/uint
-// at the max degree); the runtime count is halfFeatUints(rest_floats) <= this.
+// Upper bound on packed uints per gaussian (2 coeffs/uint); the runtime halfFeatUints(rest_floats) <= this.
 static const int SH_FEAT_UINTS_MAX = (SH_REST_FLOATS + 1) / 2;
 
 // Real spherical-harmonics band constants (Kerbl et al. / INRIA 3DGS).
@@ -35,11 +28,8 @@ static const float SH_C3_4 = -0.4570457994644658;
 static const float SH_C3_5 = 1.445305721320277;
 static const float SH_C3_6 = -0.5900435899266435;
 
-// View-dependent SH color BEFORE the >=0 clamp: 0.5 + C0*sh0 plus every band up
-// to active_deg. `dir` is the normalized view direction (gaussian - camera).
-// rest[k] is SH coefficient (k+1) as an RGB triple. Differentiable in rest +
-// dir; sh0 / active_deg are no_diff (the DC gradient is recovered from the
-// accumulated blend-color gradient, not re-derived here).
+// Pre-clamp SH color 0.5 + C0*sh0 + bands up to active_deg; `dir` = normalize(gaussian - camera) and
+// rest[k] is coefficient k+1 as RGB. sh0 is no_diff: its gradient comes from the blend-color gradient.
 [Differentiable]
 float3 evalSHColor(no_diff float3 sh0, float3 rest[SH_REST_COEFFS],
                    float3 dir, no_diff int active_deg)
@@ -73,9 +63,7 @@ float3 evalSHColor(no_diff float3 sh0, float3 rest[SH_REST_COEFFS],
     return 0.5 + c;
 }
 
-// World-space camera center from the world->view matrix. view maps world->view
-// as p_view = R*p_world + t (mul(view, [p,1]), matching project.slang), so the
-// center (where p_view == 0) is -R^T t.
+// World-space camera center -R^T t, for p_view = R*p_world + t (mul(view, [p,1]) as in project.slang).
 float3 cameraCenterWorld(float4x4 view_matrix)
 {
     float3x3 R = float3x3(view_matrix);
@@ -83,10 +71,7 @@ float3 cameraCenterWorld(float4x4 view_matrix)
     return -mul(transpose(R), t);
 }
 
-// SH color as a function of the gaussian MEAN (the view direction depends on
-// it): dir = normalize(mean - cam). Differentiable in mean + rest so the SH
-// backward routes dL/dRGB to the coefficients AND, through the direction, to
-// the mean (INRIA folds this dir->mean term). Returns the pre-clamp color.
+// Pre-clamp SH color as a function of the mean, so the backward also reaches the mean via dir (as INRIA does).
 [Differentiable]
 float3 shColorFromMean(no_diff float3 sh0, float3 rest[SH_REST_COEFFS],
                        float3 mean, no_diff float3 cam_center, no_diff int active_deg)
@@ -95,24 +80,16 @@ float3 shColorFromMean(no_diff float3 sh0, float3 rest[SH_REST_COEFFS],
     return evalSHColor(sh0, rest, dir, active_deg);
 }
 
-// Load a gaussian's SH rest coefficients (RGB-interleaved per coeff) from the
-// fp16-packed features_rest buffer into the fixed-size array evalSHColor wants.
-// `rest_floats` is the configured storage width (3 * per-channel rest coeffs);
-// coefficients beyond it (unused at the active degree) are zero-filled.
+// Loads RGB-interleaved fp16 rest coefficients from features_rest; `rest_floats` is the configured
+// storage width (3 * per-channel rest coeffs) and coefficients beyond it are zero-filled.
 float3[SH_REST_COEFFS] loadSHRest(StructuredBuffer<uint> features_rest, uint gid,
                                  uint rest_floats)
 {
     return loadSHRestActive(features_rest, gid, rest_floats, SH_REST_COEFFS);
 }
 
-// As loadSHRest, but only reads the first `active_coeffs` coefficients from
-// memory and zero-fills the rest. evalSHColor ignores coefficients beyond the
-// active degree, so passing active_coeffs = (active_deg+1)^2 - 1 loads exactly
-// what the color eval consumes and skips the dead fp16 gathers for inactive
-// higher bands (which are zero in storage anyway — never trained). Bit-identical
-// to loadSHRest for the active bands; the zero-fill for inactive bands matches
-// the full-width load (those coeffs are stored as 0). active_coeffs is clamped
-// to the configured storage width.
+// As loadSHRest, but reads only the first `active_coeffs` (clamped to storage) and zero-fills the rest;
+// with active_coeffs = (active_deg+1)^2 - 1 it is bit-identical for the bands evalSHColor uses.
 float3[SH_REST_COEFFS] loadSHRestActive(StructuredBuffer<uint> features_rest,
                                         uint gid, uint rest_floats,
                                         uint active_coeffs)

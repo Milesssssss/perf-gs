@@ -1,29 +1,8 @@
 # Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-"""Experiment C — convergence: quality against ITERATIONS and against TIME.
+"""Experiment C: convergence, held-out quality against iterations and active training time.
 
-The seed-42 rho=0.25 cells are evaluated on the held-out split at 250, 500, 750,
-1000, 1500, 2000, 2500 and 3000 iterations. Two things make this measurement
-trustworthy rather than circular:
-
-**Evaluation does not count as training.** Each sweep renders and scores every
-held-out view, which takes longer than the training it interrupts. The trainer
-accumulates that cost and reports ``elapsed_s`` per checkpoint with it already
-subtracted, so the x-axis of every time plot here is ACTIVE training seconds. A
-run that was measured more often does not appear slower.
-
-**Evaluation does not perturb training.** The sweep only renders; it advances no
-optimizer step, draws no camera from the sampler, and consumes no mask slice
-(the slice index follows each camera's own visit counter, which only
-``_next_iteration`` touches). This was verified empirically: the same cell run
-with and without the checkpoint ladder produced identical held-out PSNR and an
-identical final Gaussian count.
-
-The time-to-quality analysis targets the DENSE final PSNR minus 0.5/0.2/0.1 dB,
-per scene. Two rules keep it honest: interpolation only ever happens BETWEEN
-measured checkpoints, and a trajectory that never reaches a target is recorded as
-``not_reached`` with its shortfall — never extrapolated to a number that would be
-the single most quotable figure in the section.
+Eval sweeps are excluded from the time axis and do not perturb training; time-to-quality is never extrapolated.
 """
 from __future__ import annotations
 
@@ -65,12 +44,7 @@ TTQ_SUMMARY_COLUMNS = (
 
 
 def _curve_rows(results: ResultSet, scenes, fraction, seed) -> list[dict]:
-    """Flatten every checkpoint of every convergence cell.
-
-    Only the ladder points the experiment asked for are emitted, so a run that
-    also happened to evaluate elsewhere cannot quietly add points to a curve that
-    other regimes lack.
-    """
+    """Flatten every convergence cell's checkpoints, keeping only the requested ladder points."""
     wanted = set(cfg.CONVERGENCE_ITERS)
     rows: list[dict] = []
     for regime in cfg.REGIMES:
@@ -181,9 +155,7 @@ def _time_to_quality(results: ResultSet, curve_rows: list[dict], scenes,
             reached = [r for r in picked
                        if r["status"] in ("reached", "reached_at_first_checkpoint")]
             seconds = stats.mean_std([r["seconds"] for r in reached])
-            # Speedup only over scenes where BOTH this regime and dense reached
-            # the target — a ratio against a scene dense never reached would be
-            # undefined, and dropping it silently would bias the mean.
+            # Speedup only over scenes where both this regime and dense reached the target.
             dense_reached = {
                 r["scene"]: r["seconds"] for r in rows
                 if r["regime"] == "full"
@@ -210,10 +182,6 @@ def _time_to_quality(results: ResultSet, curve_rows: list[dict], scenes,
     return rows, summary
 
 
-# ---------------------------------------------------------------------------
-# Figures
-# ---------------------------------------------------------------------------
-
 def _figure_aggregate(aggregate: list[dict], figures_dir: Path,
                       fraction: float) -> None:
     plt = figs.pyplot()
@@ -226,8 +194,7 @@ def _figure_aggregate(aggregate: list[dict], figures_dir: Path,
               ("iter", "psnr_srgb_mean", "iteration", "held-out PSNR (dB)"),
               ("active_train_s_mean", "n_gaussians_mean",
                "active train time (s)", "Gaussians")]
-    # Four panels with independent y-labels and scientific-notation ticks; the
-    # extra width is what lets tight_layout actually resolve the decorations.
+    # Extra width so tight_layout can fit four panels with independent labels.
     fig, axes = plt.subplots(1, len(panels),
                              figsize=(figs.FIG_WIDTH_DOUBLE * 1.25, 2.3))
     for ax, (xkey, ykey, xlabel, ylabel) in zip(axes, panels):
@@ -332,8 +299,7 @@ def _figure_time_to_quality(summary: list[dict], figures_dir: Path) -> None:
         positions = np.arange(len(labels))
         ax.bar(positions, values, 0.6, yerr=errors, capsize=2, color=colors,
                error_kw={"linewidth": 0.6})
-        # Reach rate printed on each bar: a mean over the scenes that made it is
-        # meaningless without knowing how many did.
+        # A mean over the scenes that reached the target is meaningless without the reach rate.
         for pos, value, rate in zip(positions, values, reach):
             if rate is not None and value == value:
                 ax.text(pos, value, f"{rate:.0%}", ha="center", va="bottom",

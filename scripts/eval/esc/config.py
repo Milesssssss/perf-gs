@@ -1,11 +1,8 @@
 # Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-"""Tunable configuration for the ESC harness.
+"""Tunable configuration for the ESC harness, as immutable dataclasses.
 
-Everything a reviewer might want to argue about — subscore weights, cost
-weights, gate tolerances, the concept list used for locality, and the "good vs
-bad" thresholds for static metrics — lives here as immutable dataclasses so the
-scoring code downstream stays free of magic numbers.
+Weights, gate tolerances, concepts and static thresholds live here so scoring code has no magic numbers.
 """
 
 from __future__ import annotations
@@ -14,12 +11,9 @@ from dataclasses import dataclass, field
 from enum import Enum
 
 
-# --- Subscore weights -------------------------------------------------------
-
 @dataclass(frozen=True)
 class EscWeights:
-    """Exponents of the weighted geometric mean. They must sum to 1.0 so the
-    aggregate stays on the same scale as its inputs."""
+    """Exponents of the weighted geometric mean; they must sum to 1.0 to keep the aggregate on the input scale."""
 
     correctness: float = 0.40
     edit_efficiency: float = 0.15
@@ -44,15 +38,10 @@ class EscWeights:
             raise ValueError(f"ESC weights must sum to 1.0, got {total:.6f}")
 
 
-# --- Edit-efficiency cost model ---------------------------------------------
-
 class CostNormalization(str, Enum):
-    """How a raw agent cost is turned into the non-negative ``r`` term of ``E``.
+    """How a raw agent cost becomes the non-negative ``r`` term of ``E``.
 
-    RATIO         r = observed / baseline           (the spec's literal form;
-                                                      baseline maps to E=e^-1)
-    EXCESS_RATIO  r = max(0, observed/baseline - 1)  (baseline maps to E=1;
-                                                      the intuitive default)
+    RATIO: observed/baseline (baseline -> E=e^-1). EXCESS_RATIO: max(0, observed/baseline - 1) (baseline -> E=1).
     """
 
     RATIO = "ratio"
@@ -78,8 +67,6 @@ class CostWeights:
         }
 
 
-# --- Hard-gate tolerances ---------------------------------------------------
-
 @dataclass(frozen=True)
 class GateThresholds:
     """Behavioural tolerances a candidate must satisfy to be *valid* at all."""
@@ -93,28 +80,23 @@ class GateThresholds:
     max_mutation_drop: float = 0.05  # candidate may lose at most 5 pts vs champion
 
 
-# --- Concept-entropy (locality) definitions ---------------------------------
-
 @dataclass(frozen=True)
 class ConceptSpec:
     """A cross-cutting concept whose implementation dispersion we measure.
 
-    ``patterns`` are case-insensitive regexes; a file counts as an
-    implementation site for the concept once per match. ``H_c`` (normalised
-    concept entropy) is low when the concept is localised to few modules.
+    ``patterns`` are case-insensitive regexes; each match counts once as an implementation site.
     """
 
     name: str
     patterns: tuple[str, ...]
 
 
-#: The 3DGS trainer's load-bearing concepts. These are the things that, when
-#: they scatter, make the codebase resist change.
+#: The 3DGS trainer's load-bearing concepts: when they scatter, the codebase resists change.
 DEFAULT_CONCEPTS: tuple[ConceptSpec, ...] = (
     ConceptSpec("opacity", (r"\bopacit", r"\bsigmoid\b")),
     ConceptSpec("densification", (r"densif", r"\bclone\b", r"\bsplit\b", r"\bprune\b")),
     ConceptSpec("optimizer", (r"\badam\b", r"optimi[sz]er", r"moment", r"learning_rate", r"\blr\b")),
-    ConceptSpec("gaussian_field_layout", (r"FieldSpec", r"GAUSSIAN_FIELDS", r"field_offset", r"scalar_count")),
+    ConceptSpec("gaussian_field_layout", (r"Gaussian3D", r"GaussianChannel", r"StructLayout", r"float_count")),
     ConceptSpec("gradients", (r"gradient", r"\bgrad_", r"backward")),
     ConceptSpec("serialization", (r"\bply\b", r"serial", r"export", r"checkpoint")),
     ConceptSpec("projection", (r"project", r"\bcov2d\b", r"\bmean2d\b")),
@@ -122,14 +104,9 @@ DEFAULT_CONCEPTS: tuple[ConceptSpec, ...] = (
 )
 
 
-# --- Static-quality thresholds ----------------------------------------------
-
 @dataclass(frozen=True)
 class StaticThresholds:
-    """"Good" and "bad" anchors for each static metric. Each metric is mapped
-    through a smooth decreasing curve: at ``good`` the sub-score is ~1.0, at
-    ``bad`` it is ~0.0. Percentile choices follow the spec (95th pct for
-    complexity)."""
+    """"Good"/"bad" anchors per static metric: a decreasing curve maps ``good`` to ~1.0 and ``bad`` to ~0.0."""
 
     complexity_percentile: float = 0.95
     cyclomatic_good: float = 6.0
@@ -156,16 +133,11 @@ class StaticThresholds:
     )
 
 
-# --- Change-locality tolerances ---------------------------------------------
-
 @dataclass(frozen=True)
 class LocalityThresholds:
-    """How the static concept-entropy term and the dynamic patch-spread term
-    combine into ``L``."""
+    """How the static concept-entropy term and the dynamic patch-spread term combine into ``L``."""
 
-    #: Blend of static localisation (1-H_c averaged over concepts) vs the
-    #: measured patch spread. When no change runs exist, the static term is used
-    #: alone.
+    #: Weight of static localisation (mean 1-H_c) vs measured patch spread; static is used alone without change runs.
     static_weight: float = 0.5
     files_good: float = 3.0
     files_bad: float = 15.0
@@ -179,8 +151,6 @@ class LocalityThresholds:
     #: "file" localises to individual files; "package" to owning directories.
     granularity: str = "file"
 
-
-# --- Testability tolerances -------------------------------------------------
 
 @dataclass(frozen=True)
 class TestabilityThresholds:
@@ -197,8 +167,6 @@ class TestabilityThresholds:
     runtime_bad_s: float = 600.0
 
 
-# --- Understandability grading weights --------------------------------------
-
 @dataclass(frozen=True)
 class UnderstandabilityWeights:
     answer: float = 0.45
@@ -209,23 +177,18 @@ class UnderstandabilityWeights:
     context_token_budget: int = 40_000
 
 
-# --- Loop controls ----------------------------------------------------------
-
 @dataclass(frozen=True)
 class LoopControls:
     """Guards for the champion/candidate procedure."""
 
     max_patch_files: int = 12
     max_patch_lines: int = 600
-    #: A candidate wins only if its ESC gain clears this margin with the given
-    #: paired-bootstrap confidence and no subscore drops more than the margin.
+    #: A candidate must clear this ESC gain at the paired-bootstrap confidence, with no subscore drop beyond the margin.
     min_esc_gain: float = 0.5
     bootstrap_confidence: float = 0.90
     max_subscore_regression: float = 0.03
     bootstrap_samples: int = 2000
 
-
-# --- Aggregate config -------------------------------------------------------
 
 @dataclass(frozen=True)
 class EscConfig:
@@ -246,7 +209,6 @@ class EscConfig:
         "assets", ".pytest_cache", ".ruff_cache", "node_modules",
         "slang_3dgs_trainer.egg-info",
     )
-    #: File suffixes that count as source for scanning.
     source_suffixes: tuple[str, ...] = (".py", ".slang")
 
     def __post_init__(self) -> None:

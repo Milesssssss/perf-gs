@@ -13,20 +13,19 @@ import numpy as np
 import pytest
 import slangpy as spy
 
-from trainer.contracts.codegen import EXECUTION
 from trainer.backend.compute.device import SHADERS_DIR, create_device
+from trainer.backend.compute.execution import RADIX_DIGITS, RADIX_GLOBAL_HIST_SIZE, RADIX_PART_SIZE
 
 
 BACKENDS = ["vulkan", "d3d12"]
 
 
-# Shader execution parameters come from the same host<->shader contract.
-PART_SIZE = EXECUTION.radix_part_size
+PART_SIZE = RADIX_PART_SIZE
 US_DIM = 128
 SCAN_DIM = 128
-D_DIM = EXECUTION.radix_digits
-RADIX = EXECUTION.radix_digits
-GLOBAL_HIST_SIZE = EXECUTION.radix_global_hist_size
+D_DIM = RADIX_DIGITS
+RADIX = RADIX_DIGITS
+GLOBAL_HIST_SIZE = RADIX_GLOBAL_HIST_SIZE
 
 
 def _make_device_and_kernels(backend: str):

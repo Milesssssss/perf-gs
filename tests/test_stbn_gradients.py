@@ -31,9 +31,9 @@ import numpy as np
 import pytest
 
 from _pipeline_testkit import TestPipeline
-from trainer.backend.render import stbn
+from trainer.backend.render import stbn_table as stbn
 from trainer.config.config import LossConfig, StbnConfig, StbnVariables
-from trainer.contracts.codegen import TILE_AREA, TILE_HEIGHT, TILE_WIDTH
+from trainer.backend.compute.execution import TILE_AREA, TILE_HEIGHT, TILE_WIDTH
 from trainer.data.dataset import simple_camera
 from trainer.backend.compute.device import create_device
 
@@ -51,8 +51,8 @@ N_SPLATS = 100
 BUDGET = 6          # 6/64 ~ 9.4%, the low-density regime the feature targets
 
 
-def _asset_or_skip() -> stbn.StbnMaskSpec:
-    spec = stbn.StbnMaskSpec()
+def _asset_or_skip() -> stbn.StbnSpec:
+    spec = stbn.StbnSpec()
     if not spec.resolved_path().is_file():
         pytest.skip("NVIDIA STBN asset absent; run scripts/data/download_stbn.py")
     return spec
@@ -137,10 +137,10 @@ def _expected_mask(select_mode: str, budget: int, slice_index: int):
 def _gradients(pipeline: TestPipeline, scene, camera,
                variables: "StbnVariables | None"):
     pipeline.set_primitive_from_numpy(**scene)
-    pipeline.set_target_image(_target())
+    pipeline.targets.set_image(_target())
     pipeline.forward_and_loss(camera, stbn=variables)
-    pipeline.clear_gradients()
-    pipeline.backward(stbn=variables)
+    pipeline.optimizer.zero_grad()
+    pipeline.run_backward(stbn=variables)
     pipeline.device.wait_for_idle()
     return pipeline.read_gradients()
 
@@ -190,15 +190,15 @@ def test_loss_zeroes_unsampled_pixels_and_scales_the_sampled_ones(
     scene, camera = _deep_scene(), _camera()
 
     pipeline.set_primitive_from_numpy(**scene)
-    pipeline.set_target_image(_target())
+    pipeline.targets.set_image(_target())
     pipeline.forward_and_loss(camera, stbn=None)
     pipeline.device.wait_for_idle()
-    dense = pipeline.buffers.dL_dC_texture.to_numpy()[..., :3].astype(np.float64)
+    dense = pipeline.buffers.loss.image_gradient.to_numpy()[..., :3].astype(np.float64)
 
     pipeline.forward_and_loss(camera, stbn=StbnVariables(
         slice_index=slice_index, pixels_per_tile=BUDGET))
     pipeline.device.wait_for_idle()
-    sparse = pipeline.buffers.dL_dC_texture.to_numpy()[..., :3].astype(np.float64)
+    sparse = pipeline.buffers.loss.image_gradient.to_numpy()[..., :3].astype(np.float64)
 
     assert (sparse[~expected] == 0.0).all(), "unsampled pixels are not zeroed"
 

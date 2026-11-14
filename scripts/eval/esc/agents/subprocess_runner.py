@@ -1,17 +1,8 @@
 # Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-"""A subprocess-backed agent runner — the seam for a real coding agent CLI.
+"""A subprocess-backed agent runner: the seam for a real coding agent CLI.
 
-The runner invokes a configured command inside the sandbox, then reads the
-resulting ``git diff`` to measure the structural footprint. The agent may drop a
-small JSON telemetry/answer file in the workspace to report tokens, retries and
-cited files; when it does not, the runner synthesises what it can from wall time
-and the diff.
-
-This is intentionally a template: the exact command belongs to whichever agent
-you are evaluating. Wire it via :class:`SubprocessConfig.command`, whose tokens
-are ``str.format``-expanded with ``workspace``, ``prompt_file``, ``seed`` and
-``task``.
+Command tokens are ``str.format``-expanded with ``workspace``, ``prompt_file``, ``seed`` and ``task``.
 """
 
 from __future__ import annotations
@@ -106,8 +97,6 @@ class SubprocessAgentRunner:
         self.config = config
         self.name = config.name
 
-    # -- public interface ----------------------------------------------------
-
     def run_change_task(self, request: ChangeTaskRequest) -> ChangeTaskResult:
         run = self._invoke(request.prompt, request.workspace, request.seed, request.task_name)
         telemetry = self._read_telemetry(request.workspace, run)
@@ -125,8 +114,6 @@ class SubprocessAgentRunner:
         telemetry = self._read_telemetry(request.workspace, run)
         changed = bool(_git(request.workspace, "status", "--porcelain").strip())
         return RefactorResult(telemetry=telemetry, changed=changed, summary=run.stdout[-500:])
-
-    # -- internals -----------------------------------------------------------
 
     def _invoke(self, prompt: str, workspace: Path, seed: int, task: str) -> _Run:
         prompt_file = workspace / ".esc_prompt.txt"

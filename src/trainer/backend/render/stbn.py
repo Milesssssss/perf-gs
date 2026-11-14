@@ -69,7 +69,7 @@ from typing import Any
 import numpy as np
 import slangpy as spy
 
-from trainer.contracts.codegen import TILE_AREA, TILE_HEIGHT, TILE_WIDTH
+from trainer.backend.compute.execution import TILE_AREA, TILE_HEIGHT, TILE_WIDTH
 
 SOURCE_NVIDIA = "nvidia"
 SOURCE_WHITE = "white"

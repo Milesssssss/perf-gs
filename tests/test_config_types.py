@@ -1,13 +1,6 @@
 # Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-"""Characterization + contract tests for trainer.config_types (frontend slice 2).
-
-Freezes the enum values and the resolution of the confusing CLI boolean flags
-(the three densify toggles, sampling mode, blend law) into the typed surface,
-and that ScheduleConfig.from_args maps the parsed defaults correctly. These pin
-the typed layer against build_parser() so later slices can migrate consumers off
-the raw Namespace without changing behavior.
-"""
+"""The shared enums, and how RunConfig resolves the CLI's mode and schedule defaults."""
 
 from __future__ import annotations
 
@@ -18,9 +11,9 @@ from trainer.config.config_types import (
     DensificationMode,
     PrimitiveKind,
     SamplingMode,
-    ScheduleConfig,
     resolve_blend_kind,
 )
+from trainer.config.resolve import RunConfig
 
 
 def test_enum_values_frozen() -> None:
@@ -39,12 +32,12 @@ def test_enum_values_frozen() -> None:
 def test_densify_mode_from_args_reads_cli_choice() -> None:
     for choice in ("none", "simple", "structure_aware"):
         args = build_parser().parse_args(["--densify-mode", choice])
-        assert DensificationMode.from_args(args) == DensificationMode(choice)
+        assert RunConfig.from_args(args, 1.0).densify_mode == DensificationMode(choice)
 
 
 def test_densify_mode_from_cli_default_is_structure_aware() -> None:
     args = build_parser().parse_args([])
-    assert DensificationMode.from_args(args) == DensificationMode.STRUCTURE_AWARE
+    assert RunConfig.from_args(args, 1.0).densify_mode == DensificationMode.STRUCTURE_AWARE
 
 
 def test_sampling_mode_from_cli_default_is_sadgs() -> None:
@@ -59,7 +52,7 @@ def test_blend_kind_from_extinction_target() -> None:
 
 def test_schedule_config_from_args_defaults() -> None:
     args = build_parser().parse_args([])
-    sc = ScheduleConfig.from_args(args)
+    sc = RunConfig.from_args(args, 1.0).schedule
     assert sc.iterations == 3000
     assert (sc.densify_from, sc.densify_to, sc.densify_every) == (100, 1900, 100)
     assert sc.reset_every == 1200
