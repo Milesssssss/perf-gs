@@ -15,8 +15,8 @@ A fast, modular and efficient Slang-based 3DGS trainer.
 ![No CUDA required](https://img.shields.io/badge/CUDA-not%20required-2ea44f)
 ![Status](https://img.shields.io/badge/status-research-F5A623)
 
-An extensible 3D Gaussian Splatting trainer written in [Slang](https://shader-slang.org) and driven from Python through [SlangPy](https://slangpy.shader-slang.org).<br>
-On an RTX 4080 it trains a Mip-NeRF 360 scene in about 25 seconds on average (25.2 seconds at SH0 supervising every pixel, 23.5 seconds with 50% sparse supervision). The codebase has no CUDA dependencies, is directly integratable with pytorch frontend and all shaders are dispatched via SlangPy and written in Slang.
+An extensible 3D Gaussian Splatting [[1]](#ref-3dgs) trainer written in [Slang](https://shader-slang.org) and driven from Python through [SlangPy](https://slangpy.shader-slang.org).<br>
+On an RTX 4080 it trains a Mip-NeRF 360 [[2]](#ref-mipnerf360) scene in 25.2 seconds on average at SH0 and 36.0 seconds at SH3, supervising every pixel (23.5 and 34.5 seconds with 50% sparse supervision). The codebase has no CUDA dependencies, is directly integratable with pytorch frontend and all shaders are dispatched via SlangPy and written in Slang.
 
 <p align="center">
   <img src="assets/teaser.jpg" alt="Mip-NeRF 360 bicycle scene trained by this pipeline, rendered from a held-out view" width="80%">
@@ -34,9 +34,9 @@ By writing the kernels in Slang and having the whole system driven by slangpy, w
 
 ## Features
 
-- Full training from COLMAP scenes: tile-binned forward rasterization, a hand-written backward pass, Adam, and a held-out evaluation split.
-- Densification you choose per run: a gradient (AbsGS-style) path, and a structure-aware (SAD-GS-style) path that grid-splits gaussians which under-resolve local image structure.
-- Mip-Splatting 3D smoothing filter for scale-correct, anti-aliased rendering.
+- Full training from COLMAP [[3]](#ref-colmap) scenes: tile-binned forward rasterization, a hand-written backward pass, Adam [[4]](#ref-adam), and a held-out evaluation split.
+- Densification you choose per run: a gradient (AbsGS-style [[5]](#ref-absgs)) path, and a structure-aware (SAD-GS-style [[6]](#ref-sadgs)) path that grid-splits gaussians which under-resolve local image structure.
+- Mip-Splatting [[7]](#ref-mipsplatting) 3D smoothing filter for scale-correct, anti-aliased rendering.
 - Deterministic Nsight GPU Trace capture hooks for profiling the real, optimized kernels (this is Nvidia specific, but we want to allow integrating profiling also on AMD Radeon GPU Profiler (RGP)).
 
 <p align="center">
@@ -46,49 +46,30 @@ By writing the kernels in Slang and having the whole system driven by slangpy, w
 
 ## Results
 
-**On an RTX 4080, a Mip-NeRF 360 scene trains in about 25 seconds on average:** 25.2 seconds at SH0 supervising every pixel (26.50 dB), 23.5 seconds with 50% sparse supervision (26.42 dB). The indoor scenes take 13.7–18.8 seconds. Stacking pruning, bf16 optimizer state and 50% sparse supervision trains bicycle in 22.9 seconds and room in 11.6 for under 0.1 dB of PSNR, and the fastest combination we tried in 15.7 and 8.5 seconds for 0.4 and 1.0 dB (see [Speed/quality trade-offs](#speedquality-trade-offs)).
+**On an RTX 4080, a Mip-NeRF 360 scene trains in 25.2 seconds on average at SH0 (26.50 dB) and 36.0 seconds at SH3 (26.82 dB),** supervising every pixel; with 50% sparse supervision it takes 23.5 and 34.5 seconds (26.42 and 26.73 dB). The indoor scenes take 13.7–18.8 seconds at SH0. Stacking pruning, bf16 optimizer state and 50% sparse supervision trains bicycle in 22.9 seconds and room in 11.6 for under 0.1 dB of PSNR, and the fastest combination we tried in 15.7 and 8.5 seconds for 0.4 and 1.0 dB (see [Speed/quality trade-offs](#speedquality-trade-offs)).
 
-All runs: 3000 iterations, structure-aware densification with Mip-Splatting, every 8th view held out, one run each. Mip-NeRF 360 trains at quarter resolution, Tanks & Temples at 980×545 and Deep Blending at native resolution. Times cover the training loop only. Every configuration is in [docs/benchmark_results.csv](docs/benchmark_results.csv), and [scripts/plots/plot_readme_results.py](scripts/plots/plot_readme_results.py) regenerates the figures.
+All runs: 3000 iterations, structure-aware densification with Mip-Splatting, every 8th view held out, one run each. Mip-NeRF 360 trains at quarter resolution, Tanks & Temples [[8]](#ref-tandt) at 980×545 and Deep Blending [[9]](#ref-deepblending) at native resolution. Times cover the training loop only. Every configuration is in [docs/benchmark_results.csv](docs/benchmark_results.csv), and [scripts/plots/plot_readme_results.py](scripts/plots/plot_readme_results.py) regenerates the figures.
 
 ### Quality and training time
 
-Every pixel supervised. For reference, the SADGS columns show a fast existing trainer with the same kind of densification, on the same images.
+Averages over each dataset's scenes, every pixel supervised. PSNR, SSIM [[10]](#ref-ssim) and LPIPS [[11]](#ref-lpips) are measured on the held-out views; the figures below break them down per scene.
 
-| Scene | PSNR SH0 | PSNR SH3 | Time SH0 (seconds) | Time SH3 (seconds) | Splats (millions) | SADGS PSNR SH0 | SADGS PSNR SH3 |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| bicycle | 24.46 | 24.85 | 27.2 | 39.4 | 5.23 | 24.46 |  |
-| flowers | 21.08 | 21.30 | 32.4 | 47.4 | 5.40 | 21.26 |  |
-| garden | 26.40 | 26.67 | 41.1 | 58.7 | 5.26 | 26.25 |  |
-| stump | 25.99 | 26.42 | 28.3 | 41.7 | 5.70 | 25.91 |  |
-| treehill | 22.19 | 22.28 | 31.9 | 45.9 | 5.55 | 22.11 |  |
-| bonsai | 30.07 | 30.55 | 14.8 | 20.8 | 2.07 | 29.72 | 30.94 |
-| counter | 27.45 | 28.00 | 18.4 | 25.6 | 1.84 | 27.31 | 28.55 |
-| kitchen | 29.99 | 30.13 | 18.8 | 25.6 | 1.68 | 29.98 | 31.03 |
-| room | 30.88 | 31.18 | 13.7 | 18.9 | 1.68 | 30.83 | 31.24 |
-| train | 20.21 | 20.48 | 29.3 | 43.4 | 3.34 |  |  |
-| truck | 24.98 | 25.25 | 23.7 | 33.5 | 2.94 |  |  |
-| drjohnson | 28.58 | 28.78 | 23.7 | 32.5 | 5.24 |  |  |
-| playroom | 29.68 | 30.02 | 21.8 | 29.1 | 4.28 |  |  |
-| **Mip-NeRF 360** | **26.50** | **26.82** | **25.2** | **36.0** | **3.82** | **26.43** |  |
-| **Tanks & Temples** | **22.59** | **22.87** | **26.5** | **38.4** | **3.14** |  |  |
-| **Deep Blending** | **29.13** | **29.40** | **22.7** | **30.8** | **4.76** |  |  |
+| Dataset | SH | PSNR | SSIM | LPIPS | Time (seconds) |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Mip-NeRF 360 | SH0 | 26.50 | 0.809 | 0.216 | 25.2 |
+| Mip-NeRF 360 | SH3 | 26.82 | 0.817 | 0.207 | 36.0 |
+| Tanks & Temples | SH0 | 22.59 | 0.839 | 0.222 | 26.5 |
+| Tanks & Temples | SH3 | 22.87 | 0.847 | 0.209 | 38.4 |
+| Deep Blending | SH0 | 29.13 | 0.903 | 0.328 | 22.7 |
+| Deep Blending | SH3 | 29.40 | 0.905 | 0.321 | 30.8 |
+
+SH3 adds about 0.3 dB on every dataset (0.27–0.32 dB) for 36–45% more training time.
 
 <p align="center">
-  <img src="assets/timing_sweep.png" alt="Training time per scene, SH0 and SH3, with SADGS for reference" width="95%">
+  <img src="assets/timing_sweep.png" alt="Training time per scene, SH0 and SH3" width="95%">
   <br>
-  <img src="assets/psnr_sweep.png" alt="Held-out PSNR per scene, SH0 and SH3, with SADGS for reference" width="95%">
+  <img src="assets/psnr_sweep.png" alt="Held-out PSNR per scene, SH0 and SH3" width="95%">
 </p>
-
-SH3 adds about 0.3 dB on every dataset (0.27–0.32 dB) for 36–45% more training time. SADGS's SH3 is higher on the indoor scenes.
-
-| Dataset | SH | PSNR | SSIM | LPIPS |
-| --- | ---: | ---: | ---: | ---: |
-| Mip-NeRF 360 | SH0 | 26.50 | 0.809 | 0.216 |
-| Mip-NeRF 360 | SH3 | 26.82 | 0.817 | 0.207 |
-| Tanks & Temples | SH0 | 22.59 | 0.839 | 0.222 |
-| Tanks & Temples | SH3 | 22.87 | 0.847 | 0.209 |
-| Deep Blending | SH0 | 29.13 | 0.903 | 0.328 |
-| Deep Blending | SH3 | 29.40 | 0.905 | 0.321 |
 
 ### Training time and GPU memory
 
@@ -111,7 +92,7 @@ Memory is reserved up front for up to 7 million splats (`--max-splats`), so it i
 
 ### Sparse supervision (STBN)
 
-`--stbn-pixel-fraction` supervises only a blue-noise subset of the pixels at each step. At 50% it costs under 0.1 dB and trains 2–7% faster, at 25% it costs 0.1–0.2 dB and trains 6–14% faster; at 2% quality drops sharply.
+`--stbn-pixel-fraction` supervises only a spatiotemporal blue-noise (STBN [[12]](#ref-stbn)) subset of the pixels at each step. At 50% it costs under 0.1 dB and trains 2–7% faster, at 25% it costs 0.1–0.2 dB and trains 6–14% faster; at 2% quality drops sharply.
 
 SH0:
 
@@ -268,9 +249,9 @@ The download helpers link to **three datasets** that can be obtained separately 
 
 | Dataset | Project / attribution | Included scene selection |
 | --- | --- | --- |
-| Mip-NeRF 360 | [Barron et al., CVPR 2022](https://jonbarron.info/mipnerf360/) | bicycle, bonsai, counter, garden, kitchen, room, stump; optional flowers and treehill |
-| Tanks & Temples | [Knapitsch et al., ACM TOG 2017](https://www.tanksandtemples.org/) | train, truck |
-| Deep Blending | [Hedman et al., ACM TOG 2018](https://visual.cs.ucl.ac.uk/pubs/deepblending/) | drjohnson, playroom |
+| Mip-NeRF 360 | [Barron et al., CVPR 2022](https://jonbarron.info/mipnerf360/) [[2]](#ref-mipnerf360) | bicycle, bonsai, counter, garden, kitchen, room, stump; optional flowers and treehill |
+| Tanks & Temples | [Knapitsch et al., ACM TOG 2017](https://www.tanksandtemples.org/) [[8]](#ref-tandt) | train, truck |
+| Deep Blending | [Hedman et al., ACM TOG 2018](https://visual.cs.ucl.ac.uk/pubs/deepblending/) [[9]](#ref-deepblending) | drjohnson, playroom |
 
 Fetch the [Mip-NeRF 360](https://jonbarron.info/mipnerf360/) dataset with the helper script (standard library only, no extra dependencies):
 
@@ -290,7 +271,7 @@ The archives are large (~12 GB for the public scenes, ~4.5 GB more for the extra
 - `--force` — re-download even if the scenes already exist.
 - `--keep-zip` — keep the downloaded `.zip` archives after extraction.
 
-Fetch the **Tanks & Temples** and **Deep Blending** scenes (the other datasets the 3DGS papers report on) with a second helper. Both ship in one ~650 MB archive from the INRIA 3DGS authors:
+Fetch the **Tanks & Temples** and **Deep Blending** scenes (the other datasets the 3DGS papers report on) with a second helper. Both ship in one ~650 MB archive from the INRIA 3DGS authors [[1]](#ref-3dgs):
 
 ```bash
 # Both -> datasets/tandt/{train,truck} and datasets/db/{drjohnson,playroom}
@@ -327,6 +308,21 @@ pytest -q
 ```
 
 The suite covers Slang math against known inputs, gradient checks against finite differences, the CLI contract, the training schedule, and a device-creation smoke test on each backend. GPU tests are skipped automatically where no device is available.
+
+## References
+
+1. <a id="ref-3dgs"></a>Bernhard Kerbl, Georgios Kopanas, Thomas Leimkühler, George Drettakis. *3D Gaussian Splatting for Real-Time Radiance Field Rendering.* ACM Transactions on Graphics 42(4), 2023. [arXiv:2308.04079](https://arxiv.org/abs/2308.04079)
+2. <a id="ref-mipnerf360"></a>Jonathan T. Barron, Ben Mildenhall, Dor Verbin, Pratul P. Srinivasan, Peter Hedman. *Mip-NeRF 360: Unbounded Anti-Aliased Neural Radiance Fields.* CVPR 2022. [arXiv:2111.12077](https://arxiv.org/abs/2111.12077)
+3. <a id="ref-colmap"></a>Johannes L. Schönberger, Jan-Michael Frahm. *Structure-from-Motion Revisited.* CVPR 2016. [colmap.github.io](https://colmap.github.io/)
+4. <a id="ref-adam"></a>Diederik P. Kingma, Jimmy Ba. *Adam: A Method for Stochastic Optimization.* ICLR 2015. [arXiv:1412.6980](https://arxiv.org/abs/1412.6980)
+5. <a id="ref-absgs"></a>Zongxin Ye, Wenyu Li, Sidun Liu, Peng Qiao, Yong Dou. *AbsGS: Recovering Fine Details for 3D Gaussian Splatting.* arXiv preprint, 2024. [arXiv:2404.10484](https://arxiv.org/abs/2404.10484)
+6. <a id="ref-sadgs"></a>Linjie Lyu, Ayush Tewari, Jianchun Chen, Thomas Leimkühler, Christian Theobalt. *Faster 3D Gaussian Splatting Convergence via Structure-Aware Densification.* SIGGRAPH 2026. [arXiv:2604.28016](https://arxiv.org/abs/2604.28016)
+7. <a id="ref-mipsplatting"></a>Zehao Yu, Anpei Chen, Binbin Huang, Torsten Sattler, Andreas Geiger. *Mip-Splatting: Alias-free 3D Gaussian Splatting.* CVPR 2024. [arXiv:2311.16493](https://arxiv.org/abs/2311.16493)
+8. <a id="ref-tandt"></a>Arno Knapitsch, Jaesik Park, Qian-Yi Zhou, Vladlen Koltun. *Tanks and Temples: Benchmarking Large-Scale Scene Reconstruction.* ACM Transactions on Graphics 36(4), 2017. [tanksandtemples.org](https://www.tanksandtemples.org/)
+9. <a id="ref-deepblending"></a>Peter Hedman, Julien Philip, True Price, Jan-Michael Frahm, George Drettakis, Gabriel Brostow. *Deep Blending for Free-Viewpoint Image-Based Rendering.* ACM Transactions on Graphics 37(6), 2018. [Project page](https://repo-sam.inria.fr/fungraph/deep-blending/)
+10. <a id="ref-ssim"></a>Zhou Wang, Alan C. Bovik, Hamid R. Sheikh, Eero P. Simoncelli. *Image Quality Assessment: From Error Visibility to Structural Similarity.* IEEE Transactions on Image Processing 13(4):600–612, 2004. [Project page](https://www.cns.nyu.edu/~lcv/ssim/)
+11. <a id="ref-lpips"></a>Richard Zhang, Phillip Isola, Alexei A. Efros, Eli Shechtman, Oliver Wang. *The Unreasonable Effectiveness of Deep Features as a Perceptual Metric.* CVPR 2018. [arXiv:1801.03924](https://arxiv.org/abs/1801.03924)
+12. <a id="ref-stbn"></a>Alan Wolfe, Nathan Morrical, Tomas Akenine-Möller, Ravi Ramamoorthi. *Scalar Spatiotemporal Blue Noise Masks.* Eurographics Symposium on Rendering (EGSR) 2022. [arXiv:2112.09629](https://arxiv.org/abs/2112.09629)
 
 ## License
 

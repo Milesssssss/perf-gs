@@ -60,8 +60,6 @@ FRACTIONS = ("1.0", "0.5", "0.25", "0.1", "0.02")
 DENSE = "1.0"
 SH_DEGREES = (0, 3)
 PRECISIONS = ("fp32", "bf16")
-# Metrics that do not depend on the GPU, so the earlier SADGS runs can supply them.
-PORTABLE_FIELDS = ("psnr", "ssim", "lpips", "splats")
 CONVERGENCE_SCENES = ("bicycle", "kitchen", "train", "drjohnson")
 QUALITATIVE_SCENE = "bicycle"
 # The whole bicycle in that view, in render pixels (left, top, right, bottom).
@@ -70,9 +68,9 @@ QUALITATIVE_BOX = (290, 145, 950, 585)
 # the curves skip the samples taken while it recovers.
 OPACITY_RESET_ITERS = range(1200, 1400)
 
-# Okabe-Ito hues (SH0 blue, SH3 orange); the SADGS reference is the lighter tint.
-COLORS = {("ours", 0): "#0072B2", ("ours", 3): "#E69F00",
-          ("sadgs", 0): "#56B4E9", ("sadgs", 3): "#F3CA6B"}
+# Okabe-Ito hues: SH0 blue, SH3 orange.
+BLUE, ORANGE = "#0072B2", "#E69F00"
+COLORS = {0: BLUE, 3: ORANGE}
 FRACTION_RAMP = {"1.0": "#104281", "0.5": "#1c5cab", "0.25": "#2a78d6",
                  "0.1": "#5598e7", "0.02": "#86b6ef"}
 INK = "#222222"
@@ -172,13 +170,6 @@ class Grid:
                      if (result := load_sadgs_reference(scene)) is not None}
         return cls(ours, sadgs, reference)
 
-    def sadgs_for(self, sh: int, scene: str, field: str) -> Result | None:
-        """SH0 quality and splat counts come from the complete earlier reference
-        set; times, memory and SH3 from the same-GPU runs."""
-        if sh == 0 and field in PORTABLE_FIELDS:
-            return self.reference.get(scene)
-        return self.sadgs.get((sh, scene))
-
     def dense(self, sh: int, scene: str, precision: str = "fp32") -> Result | None:
         return self.ours.get((sh, precision, scene, DENSE))
 
@@ -201,23 +192,17 @@ def _style(ax) -> None:
         ax.spines[spine].set_visible(False)
 
 
-def _series(grid: Grid, field: str) -> list[tuple[str, str, str, dict[str, Result | None]]]:
-    """(label, color, hatch, per-scene result) for the four per-scene series."""
-    series = []
-    for sh in SH_DEGREES:
-        series.append((f"Ours SH{sh}", COLORS[("ours", sh)], "",
-                       {s: grid.dense(sh, s) for s in SCENES}))
-    for sh in SH_DEGREES:
-        series.append((f"SADGS SH{sh}", COLORS[("sadgs", sh)], "//",
-                       {s: grid.sadgs_for(sh, s, field) for s in SCENES}))
-    return series
+def _series(grid: Grid) -> list[tuple[str, str, dict[str, Result | None]]]:
+    """(label, color, per-scene result) for each SH degree."""
+    return [(f"SH{sh}", COLORS[sh], {s: grid.dense(sh, s) for s in SCENES})
+            for sh in SH_DEGREES]
 
 
 def plot_scene_bars(grid: Grid, field: str, ylabel: str, title: str, fmt: str, out: Path,
                     from_zero: bool = True) -> None:
     """Labelled per-scene bars, each dataset followed by its average: Mip-NeRF 360 on
     the first row, the other two datasets (and the legend) on the second."""
-    series = _series(grid, field)
+    series = _series(grid)
     rows = [("Mip-NeRF 360",), ("Tanks & Temples", "Deep Blending")]
     groups = []
     for names in rows:
@@ -235,12 +220,12 @@ def plot_scene_bars(grid: Grid, field: str, ylabel: str, title: str, fmt: str, o
         drawn = []
         for ax, row in zip(axes, groups):
             x = np.arange(len(row))
-            for index, (label, color, hatch, by_scene) in enumerate(series):
+            for index, (label, color, by_scene) in enumerate(series):
                 values = [mean_of([by_scene[s] for s in scenes], field) for _, scenes in row]
                 drawn += [v for v in values if v is not None]
                 offset = (index - (len(series) - 1) / 2) * width
                 ax.bar(x + offset, [np.nan if v is None else v for v in values], width,
-                       label=label, color=color, hatch=hatch, edgecolor="white",
+                       label=label, color=color, edgecolor="white",
                        linewidth=0.5, zorder=3)
                 for xv, value in zip(x + offset, values):
                     if value is not None:
@@ -269,8 +254,7 @@ def plot_scene_bars(grid: Grid, field: str, ylabel: str, title: str, fmt: str, o
 def plot_vram(grid: Grid, out: Path) -> None:
     """GPU memory per SH degree and Adam precision, averaged over every scene."""
     groups = [f"SH{sh}" for sh in SH_DEGREES]
-    bars = [("fp32 Adam", "fp32", COLORS[("ours", 0)]),
-            ("bf16 Adam", "bf16", COLORS[("ours", 3)])]
+    bars = [("fp32 Adam", "fp32", BLUE), ("bf16 Adam", "bf16", ORANGE)]
     x = np.arange(len(groups))
     width = 0.8 / len(bars)
     fig, ax = plt.subplots(figsize=(8, 4.8), dpi=130)
@@ -397,32 +381,6 @@ def _table(header: list[str], rows: list[list[str]], align: str = "---:") -> str
     return "\n".join(lines + [_row(r) for r in rows])
 
 
-def _scene_rows(grid: Grid, cells) -> list[list[str]]:
-    """Per-scene rows, then a bold average row per dataset."""
-    rows = [[scene] + cells({scene}) for scene in SCENES]
-    for name, scenes in DATASETS.items():
-        rows.append([f"**{name}**"] + [f"**{c}**" if c else "" for c in cells(set(scenes))])
-    return rows
-
-
-def scene_table(grid: Grid) -> str:
-    """Per scene: our PSNR, time and splat count, then SADGS's PSNR for reference."""
-    def cells(scenes: set[str]) -> list[str]:
-        ordered = [s for s in SCENES if s in scenes]
-        out = [_cell(mean_of([grid.dense(sh, s) for s in ordered], "psnr"), "{:.2f}")
-               for sh in SH_DEGREES]
-        out += [_cell(mean_of([grid.dense(sh, s) for s in ordered], "seconds"), "{:.1f}")
-                for sh in SH_DEGREES]
-        out.append(_cell(_millions(mean_of([grid.dense(0, s) for s in ordered], "splats")),
-                         "{:.2f}"))
-        out += [_cell(mean_of([grid.sadgs_for(sh, s, "psnr") for s in ordered], "psnr"), "{:.2f}")
-                for sh in SH_DEGREES]
-        return out
-    return _table(["Scene", "PSNR SH0", "PSNR SH3", "Time SH0 (seconds)", "Time SH3 (seconds)",
-                   "Splats (millions)", "SADGS PSNR SH0", "SADGS PSNR SH3"],
-                  _scene_rows(grid, cells))
-
-
 def cost_table(grid: Grid) -> str:
     """Per dataset and SH degree: training time, splat count and GPU memory."""
     rows = []
@@ -436,14 +394,16 @@ def cost_table(grid: Grid) -> str:
 
 
 def dataset_quality_table(grid: Grid) -> str:
+    """Per dataset and SH degree: held-out quality and training time."""
     rows = []
     for name, scenes in DATASETS.items():
         for sh in SH_DEGREES:
             runs = [grid.dense(sh, s) for s in scenes]
             rows.append([name, f"SH{sh}", _cell(mean_of(runs, "psnr"), "{:.2f}"),
                          _cell(mean_of(runs, "ssim"), "{:.3f}"),
-                         _cell(mean_of(runs, "lpips"), "{:.3f}")])
-    return _table(["Dataset", "SH", "PSNR", "SSIM", "LPIPS"], rows)
+                         _cell(mean_of(runs, "lpips"), "{:.3f}"),
+                         _cell(mean_of(runs, "seconds"), "{:.1f}")])
+    return _table(["Dataset", "SH", "PSNR", "SSIM", "LPIPS", "Time (seconds)"], rows)
 
 
 def _millions(value: float | None) -> float | None:
@@ -532,9 +492,8 @@ def main() -> int:
     plot_qualitative(ASSETS / "stbn_qualitative.jpg")
     write_summary_csv(grid, CSV_OUT)
     tables = [
-        "## Per scene", scene_table(grid),
+        "## Quality and training time", dataset_quality_table(grid),
         "## Time and memory", cost_table(grid),
-        "## Dataset averages", dataset_quality_table(grid),
         "## STBN SH0", stbn_table(grid, 0),
         "## STBN SH3", stbn_table(grid, 3),
         "## Adam moment precision", precision_table(grid),
