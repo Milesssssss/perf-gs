@@ -41,6 +41,7 @@ from trainer.config.config import (
 from trainer.config.config_types import (
     DensificationMode,
     ScheduleConfig,
+    SplatKernel,
     validate_training_config,
 )
 from trainer.backend.compute.device import create_device
@@ -188,6 +189,11 @@ class ShaderSpecialization:
 
     adam_bf16 stores the Adam moments as bf16 (ADAM_MOMENTS_BF16). It changes
     buffer layouts, so in the hub it is a launch-time flag too.
+
+    splat_kernel picks how a footprint becomes alpha (SPLAT_KERNEL) and
+    splat_profile_power its radial falloff (SPLAT_PROFILE_POWER), with
+    splat_profile_onset delaying opaque_core's sharpening (SPLAT_PROFILE_ONSET);
+    launch-time flags for the same reason.
     """
 
     backward_pixel_stride: int
@@ -201,6 +207,9 @@ class ShaderSpecialization:
     # tile), which is what every real run wants.
     stbn_staged_fraction: float = 0.0
     adam_bf16: bool = False
+    splat_kernel: SplatKernel = SplatKernel.GAUSSIAN
+    splat_profile_power: float = 1.0
+    splat_profile_onset: float = 0.0
 
     @classmethod
     def from_args(cls, args: argparse.Namespace) -> "ShaderSpecialization":
@@ -218,6 +227,9 @@ class ShaderSpecialization:
             stbn_enabled=enabled,
             stbn_staged_fraction=(max(staged, fraction) if enabled and staged else 0.0),
             adam_bf16=getattr(args, "adam_moments", "fp32") == "bf16",
+            splat_kernel=SplatKernel(getattr(args, "splat_kernel", "gaussian")),
+            splat_profile_power=float(getattr(args, "splat_profile_power", 1.0)),
+            splat_profile_onset=float(getattr(args, "splat_profile_onset", 0.0)),
         )
 
     def compiler_defines(self) -> dict[str, str] | None:
@@ -236,6 +248,12 @@ class ShaderSpecialization:
                 f"{stbn_module.pixels_per_tile(self.stbn_staged_fraction, TILE_AREA)}u")
         if self.adam_bf16:
             defines["ADAM_MOMENTS_BF16"] = "1"
+        if self.splat_kernel is not SplatKernel.GAUSSIAN:
+            defines["SPLAT_KERNEL"] = str(list(SplatKernel).index(self.splat_kernel))
+        if self.splat_profile_power != 1.0:
+            defines["SPLAT_PROFILE_POWER"] = repr(float(self.splat_profile_power))
+        if self.splat_profile_onset != 0.0:
+            defines["SPLAT_PROFILE_ONSET"] = repr(float(self.splat_profile_onset))
         return defines or None
 
 
@@ -1190,7 +1208,8 @@ class TrainingLoop:
                     structure_tensor_texture=self.structure_textures[camera_index] if self._should_accumulate_structure(self.training_step) else None,
                     #TODO: writing the threshold like this is shit, need a better way to avoid having these damn hyperparams float as magic stuff around
                     # ALSO -> the product is hacky way to hide that our magic hyperparms should all be normalized
-                    structure_kwargs={"per_view_grad_thresh": (self.args.sad_freq_grad_threshold * self.scene.width * self.scene.height * 3.0) if self._should_accumulate_structure(self.training_step) else None}
+                    structure_kwargs={"per_view_grad_thresh": (self.args.sad_freq_grad_threshold * self.scene.width * self.scene.height * 3.0) if self._should_accumulate_structure(self.training_step) else None},
+                    track_blend_weight=self._tracks_blend_weight(self.training_step),
                 ),
                 contextual_stbn=self._timed_stbn_variables(camera_index),
             ),
@@ -1317,6 +1336,12 @@ class TrainingLoop:
             and self.args.densify_from < training_step <= self.args.densify_to
             and training_step % self.args.sad_accum_every == 0
         )
+
+    def _tracks_blend_weight(self, training_step: int) -> bool:
+        """Only the windows that end on a blend-pruning tick need blend weights."""
+        first_window = self.args.prune_blend_from - self.args.densify_every
+        return (self.args.prune_blend_weight > 0.0
+                and first_window < training_step <= self.args.densify_to)
 
     def _present_profile_frame_if_enabled(self) -> None:
         if self.runtime.profiler is not None:

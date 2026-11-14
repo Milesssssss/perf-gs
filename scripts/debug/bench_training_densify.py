@@ -89,7 +89,9 @@ class ReferencePipeline(TrainingPipeline):
         arena.copy_back(self._batch.encoder, dst, nbytes,
                 dst_offset_bytes=dst_offset_bytes)
 
-    def densify_structure_aware(self, cfg) -> dict:
+    def densify_structure_aware(self, cfg, min_blend_weight=0.0) -> dict:
+        if min_blend_weight:
+            raise ValueError("the reference densifier has no blend-weight pruning")
         return reference_densify.densify_structure_aware(self, cfg)
 
     def morton_sort(self, world_min, world_max, carry_eta=False) -> None:

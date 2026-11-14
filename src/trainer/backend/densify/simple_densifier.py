@@ -90,6 +90,7 @@ class SimpleDensifier:
         prune_big_scale: float | None = None,
         allow_scale_prune: bool = True,
         carry_eta: bool = False,
+        min_blend_weight: float = 0.0,
     ) -> dict:
         """Threshold-based split/clone/prune with a transactional compaction."""
         if carry_eta and self.eta is None:
@@ -115,12 +116,14 @@ class SimpleDensifier:
                 num_gaussians_counter=primitive.active_count.storage,
                 grad_mean_2d_mag_accum=resources.grad_mean_2d_mag.storage,
                 visibility_count_accum=resources.visibility_count.storage,
+                blend_weight_accum=resources.blend_weight.storage,
                 action=resources.actions.storage,
                 grad_thresh=grad_thresh_internal,
                 scale_thresh=scale_thresh,
                 t_opacity=cfg.t_opacity,
                 t_big_scale=big_scale,
                 allow_scale_prune=1 if allow_scale_prune else 0,
+                min_blend_weight=float(min_blend_weight),
                 max_splats=self.max_primitives,
             )
             commands.dispatch(

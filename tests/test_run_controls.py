@@ -53,6 +53,10 @@ class _Pipeline:
     def read_output_image(self) -> np.ndarray:
         return np.full((16, 16, 4), 0.25, dtype=np.float32)
 
+    def read_bin_debug(self) -> tuple[np.ndarray, np.ndarray, int, int]:
+        return (np.full(4, 3, dtype=np.uint32), np.full((16, 16), 2, dtype=np.uint32),
+                2, 2)
+
 
 def _scene():
     return SimpleNamespace(images=[SimpleNamespace(camera=i, image_name=f"{i}.png")

@@ -247,6 +247,24 @@ def process_environment() -> dict:
 # Held-out per-view metrics + render dump
 # ---------------------------------------------------------------------------
 
+# The forward stops a pixel's walk once its transmittance drops below this.
+_EARLY_OUT_TRANSMITTANCE = 1e-4
+
+
+def _overdraw(pipeline: "TrainingPipeline", alpha: np.ndarray) -> dict:
+    """Blend-loop work of the frame just rendered: sorted splats each pixel
+    walked up to its last blended one (what the backward replays), the
+    tile-splat pairs the sort carried, and the share of pixels whose walk
+    stopped early because they went opaque."""
+    tile_counts, walk, _, _ = pipeline.read_bin_debug()
+    return {
+        "walk_mean": float(walk.mean()),
+        "walk_p99": float(np.percentile(walk, 99)),
+        "tile_pairs": int(tile_counts.sum()),
+        "early_out_fraction": float(np.mean(alpha > 1.0 - _EARLY_OUT_TRANSMITTANCE)),
+    }
+
+
 def evaluate_test_views(
     pipeline: "TrainingPipeline",
     scene,
@@ -282,7 +300,8 @@ def evaluate_test_views(
         checkpoint()
         entry = scene.images[cam_i]
         pipeline.render(entry.camera)
-        rendered = np.clip(pipeline.read_output_image()[..., :3], 0.0, 1.0)
+        image = pipeline.read_output_image()
+        rendered = np.clip(image[..., :3], 0.0, 1.0)
         target = targets_srgb[cam_i][..., :3]
 
         record = {
@@ -292,6 +311,7 @@ def evaluate_test_views(
             "ssim_srgb": ssim_image(rendered, target),
             "height": int(rendered.shape[0]),
             "width": int(rendered.shape[1]),
+            **_overdraw(pipeline, image[..., 3]),
         }
         # Computed from the same float render as PSNR/SSIM, before any PNG
         # round trip, so all three metrics describe one identical image.
@@ -325,6 +345,8 @@ def evaluate_test_views(
         "psnr_srgb_std_views": _std("psnr_srgb"),
         "ssim_srgb_std_views": _std("ssim_srgb"),
         "lpips_std_views": _std("lpips"),
+        "overdraw": {key: _mean(key) for key in
+                     ("walk_mean", "walk_p99", "tile_pairs", "early_out_fraction")},
         "n_test_views": len(per_view),
         "n_lpips_views": sum(1 for r in per_view
                              if r.get("lpips") is not None),

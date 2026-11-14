@@ -1138,6 +1138,13 @@ class TrainingPipeline:
         # (they are declared under #if STBN_ENABLED there).
         stbn_kwargs = self._stbn_kwargs(iteration_contextual_variables)
         backward_stbn = stbn_kwargs if self.stbn_config.backward_compacted else {}
+        densification_variables = iteration_contextual_variables.densification_variables
+        track_blend_weight = (densification_variables is not None
+                              and densification_variables.track_blend_weight)
+        if track_blend_weight and not self.use_persplat_backward:
+            raise RuntimeError("blend-weight tracking needs the per-splat backward")
+        blend_weight_kwargs = dict(blend_weight_accum=b.blend_weight_accum.storage,
+                                   track_blend_weight=int(track_blend_weight))
 
         with self._marker_group("rasterize_backward"):
             if self.use_persplat_backward:
@@ -1195,6 +1202,7 @@ class TrainingPipeline:
                         grad_color_b=gb["color_b"].storage,
                         grad_2d_x_iter=b.grad_2d_x_iter.storage,
                         grad_2d_y_iter=b.grad_2d_y_iter.storage,
+                        **blend_weight_kwargs,
                         pixel_phase=self._backward_pixel_phase,
                         **backward_stbn,
                         extinction_hardness=iteration_contextual_variables.hardness_value,
@@ -1219,6 +1227,7 @@ class TrainingPipeline:
                     grad_color_b=gb["color_b"].storage,
                     grad_2d_x_iter=b.grad_2d_x_iter.storage,
                     grad_2d_y_iter=b.grad_2d_y_iter.storage,
+                    **blend_weight_kwargs,
                     # SGD pixel-subsampling phase; rotates each backward so the
                     # visited subset alternates (no-op at BACKWARD_PIXEL_STRIDE=1).
                     pixel_phase=self._backward_pixel_phase,
@@ -1291,7 +1300,6 @@ class TrainingPipeline:
                     max_splats=self.max_splats,
                 )
 
-        densification_variables = iteration_contextual_variables.densification_variables
         if (densification_variables is not None
                 and densification_variables.structure_tensor_texture is not None):
             structure = densification_variables.structure_tensor_texture
@@ -1343,6 +1351,7 @@ class TrainingPipeline:
             visibility_count_accum=b.visibility_count_accum.storage,
             grad_2d_x_iter=b.grad_2d_x_iter.storage,
             grad_2d_y_iter=b.grad_2d_y_iter.storage,
+            blend_weight_accum=b.blend_weight_accum.storage,
             max_splats=self.max_splats,
         )
 
@@ -1387,12 +1396,12 @@ class TrainingPipeline:
 
     def densify_simple(self, cfg, grad_thresh=0.0002, scale_thresh=None,
                        prune_big_scale=None, allow_scale_prune=True,
-                       carry_eta=False) -> dict:
+                       carry_eta=False, min_blend_weight=0.0) -> dict:
         if self.simple_densifier is None:
             raise RuntimeError("densification is unavailable in viewer-only mode")
         return self.simple_densifier.run(
             cfg, grad_thresh, scale_thresh, prune_big_scale,
-            allow_scale_prune, carry_eta)
+            allow_scale_prune, carry_eta, min_blend_weight)
 
     def set_mipsplatting_cameras(self, train_cameras: list[Camera]) -> None:
         """
@@ -1478,8 +1487,8 @@ class TrainingPipeline:
     def clear_structure_scores(self) -> None:
         return _densify.clear_structure_scores(self)
 
-    def densify_structure_aware(self, cfg) -> dict:
-        return _densify.densify_structure_aware(self, cfg)
+    def densify_structure_aware(self, cfg, min_blend_weight=0.0) -> dict:
+        return _densify.densify_structure_aware(self, cfg, min_blend_weight)
 
     def _scan(self, n: int,
               in_buf: spy.NDBuffer | None = None,

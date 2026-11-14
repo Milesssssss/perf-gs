@@ -20,6 +20,14 @@ float3 sigmoid3(float3 v)
     return float3(sigmoid(v.x), sigmoid(v.y), sigmoid(v.z));
 }
 
+// log(1 + e^x) without overflow. Note softplus(x) == -log(1 - sigmoid(x)).
+[Differentiable]
+[PreferRecompute(SideEffectBehavior.Allow)]
+float softplus(float x)
+{
+    return max(x, 0.0) + log(1.0 + exp(-abs(x)));
+}
+
 // Spherical-harmonics band-0 (DC) color activation, matching 3DGS/INRIA:
 //   color = 0.5 + C0 * sh0,   C0 = 0.5 * sqrt(1/pi).
 // This is an AFFINE (unbounded) map, unlike the old sigmoid. Its Jacobian is

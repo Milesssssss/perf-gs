@@ -90,6 +90,9 @@ class TrainingSchedule:
         mip_after_densify = c.mip_enabled and do_densify
         mip_periodic = (c.mip_enabled and it > c.densify_to
                         and it % 100 == 0 and it < c.iterations - 100)
+        blend_prune = (do_densify and c.prune_blend_weight > 0.0
+                       and it >= c.prune_blend_from
+                       and not self._reset_in_window(it))
 
         return IterationEvents(
             iteration=it,
@@ -104,7 +107,18 @@ class TrainingSchedule:
             morton=do_morton,
             mip_after_densify=mip_after_densify,
             mip_periodic=mip_periodic,
+            blend_prune=blend_prune,
         )
+
+    def _reset_in_window(self, it: int) -> bool:
+        """Whether an opacity reset fired during the densify window ending at
+        ``it`` (a reset replaces its tick, so that window spans two intervals)."""
+        c = self._cfg
+        if c.reset_every <= 0:
+            return False
+        last_reset = (it - 1) // c.reset_every * c.reset_every
+        return (last_reset > 0 and last_reset >= it - c.densify_every
+                and c.densify_from <= last_reset <= c.densify_to)
 
 class MeanLearningRateSchedule:
 

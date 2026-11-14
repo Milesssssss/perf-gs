@@ -147,10 +147,18 @@ def test_gradients_finite_difference(backend: str) -> None:
         eye=(0.0, 0.0, 0.0), target=(0.0, 0.0, 1.0), up=(0.0, 1.0, 0.0),
         fovy_degrees=60.0,
     )
-    target = _target(H, W)
-    pipeline.set_target_image(target)
+    pipeline.set_target_image(_target(H, W))
 
-    scene = _scene()
+    mismatches = finite_difference_mismatches(pipeline, camera, _scene())
+    if mismatches:
+        msg = "\n".join(mismatches)
+        pytest.fail(f"{len(mismatches)} gradient mismatches:\n{msg}")
+
+
+def finite_difference_mismatches(pipeline: TestPipeline, camera, scene: dict,
+                                 eps: float = 1e-3) -> list[str]:
+    """Every PARAM_TABLE component whose analytic gradient disagrees with the
+    central finite difference of the loss (target already set)."""
     n = scene["means"].shape[0]
 
     # Analytic grads from backward.
@@ -160,7 +168,6 @@ def test_gradients_finite_difference(backend: str) -> None:
     pipeline.backward()
     analytic = pipeline.read_gradients()
 
-    eps = 1e-3
     mismatches: list[str] = []
 
     for grad_name, field_name, idx in PARAM_TABLE:
@@ -214,7 +221,4 @@ def test_gradients_finite_difference(backend: str) -> None:
                     f"g{gi} {grad_name:14s}: analytic={a:+.4e} "
                     f"numerical={numerical:+.4e}  rel_err={rel_err:.3f}"
                 )
-
-    if mismatches:
-        msg = "\n".join(mismatches)
-        pytest.fail(f"{len(mismatches)} gradient mismatches:\n{msg}")
+    return mismatches

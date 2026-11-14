@@ -168,6 +168,7 @@ class ScanResources:
 class DensificationResources:
     grad_mean_2d_mag: spy.NDBuffer
     visibility_count: spy.NDBuffer
+    blend_weight: spy.NDBuffer
     # Shared scratch arena for compaction / Morton re-sort. One raw buffer sized
     # for the largest whole-resource scatter (normally main Adam). SH-rest Adam
     # uses bounded plane batches, so it does not enlarge the arena. Re-typed per
@@ -440,6 +441,8 @@ class GaussianBuffers:
         lambda self: self._require_densification().grad_mean_2d_mag)
     visibility_count_accum = property(
         lambda self: self._require_densification().visibility_count)
+    blend_weight_accum = property(
+        lambda self: self._require_densification().blend_weight)
     scratch_arena = property(
         lambda self: self._require_densification().scratch_arena)
     action_buffer = property(lambda self: self._require_densification().actions)
@@ -710,6 +713,7 @@ def allocate(
     # --- v2 densification tracking ---
     grad_mean_2d_mag = allocator.i64_buffer("densification.grad_mean_2d_mag", max_splats)
     visibility_count = allocator.uint_buffer("densification.visibility_count", max_splats)
+    blend_weight = allocator.i64_buffer("densification.blend_weight", max_splats)
     buffers.grad_2d_x_iter = allocator.i64_buffer("grad_2d_x_iter", max_splats)
     buffers.grad_2d_y_iter = allocator.i64_buffer("grad_2d_y_iter", max_splats)
 
@@ -740,6 +744,7 @@ def allocate(
     buffers.densification = DensificationResources(
         grad_mean_2d_mag=grad_mean_2d_mag,
         visibility_count=visibility_count,
+        blend_weight=blend_weight,
         scratch_arena=scratch_arena,
         actions=actions,
         valid_mask=valid_mask,

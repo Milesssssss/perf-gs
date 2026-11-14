@@ -185,7 +185,8 @@ def compute_structure_scores(
         pipeline.rasterize(cam)
         accumulate_structure_scores(pipeline, structure_tex, pass_idx=view_idx)
 
-def densify_structure_aware(pipeline: TrainingPipeline, cfg: StructureConfig) -> dict:
+def densify_structure_aware(pipeline: TrainingPipeline, cfg: StructureConfig,
+                            min_blend_weight: float = 0.0) -> dict:
 
     b = pipeline.buffers
 
@@ -207,6 +208,7 @@ def densify_structure_aware(pipeline: TrainingPipeline, cfg: StructureConfig) ->
         eta_max_z=b.eta_buffers["max_z"].storage,
         grad_mean_2d_mag_accum=b.grad_mean_2d_mag_accum.storage,
         visibility_count_accum=b.visibility_count_accum.storage,
+        blend_weight_accum=b.blend_weight_accum.storage,
         action=b.action_buffer.storage,
         split_factor_x=b.split_factor_x.storage,
         split_factor_y=b.split_factor_y.storage,
@@ -218,6 +220,7 @@ def densify_structure_aware(pipeline: TrainingPipeline, cfg: StructureConfig) ->
         max_split_factor=int(cfg.max_split_factor),
         t_opacity=cfg.t_opacity,
         dense_scale=cfg.dense_scale,
+        min_blend_weight=float(min_blend_weight),
         max_splats=pipeline.max_splats,
         # Prune/scan scratch is unused until splitting finishes.
         selected_parents=b.valid_mask_buffer.storage,

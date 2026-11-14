@@ -39,6 +39,8 @@ class CompositorConfig:
 class DensificationProperties:
     structure_tensor_texture: Any = None
     structure_kwargs: dict[str, Any] | None = None
+    # Sum each splat's blend weight into the densify window (blend-weight pruning).
+    track_blend_weight: bool = False
             
 
 @dataclass(frozen=True)
@@ -145,6 +147,7 @@ class IterationEvents:
     morton: bool
     mip_after_densify: bool   # recompute the 3D filter INSIDE the densify block
     mip_periodic: bool         # standalone periodic recompute past densify_to
+    blend_prune: bool = False  # this densify tick also prunes by blend weight
 
 @dataclass(frozen=True)
 class StbnVariables:

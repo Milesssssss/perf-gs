@@ -20,13 +20,13 @@
 #define TRAINER_GAUSSIAN_SNUGBOX_SLANG
 
 #include "../../common/math.slang"
+#include "eval.slang"
 
-// ``opacity_logit`` is the pre-sigmoid opacity parameter. SnugBox needs
-// the real probability for the alpha threshold, so we sigmoid here.
+// ``opacity_logit`` is the pre-sigmoid opacity parameter; the threshold t comes
+// from the active splat kernel (splatCutoffQ).
 bool snugBox(float2 mean_2d, float3 cov2d, float opacity_logit,
              out float2 bbox_min, out float2 bbox_max)
 {
-    float opacity = sigmoid(opacity_logit);
     float cov00 = cov2d.x;
     float cov01 = cov2d.y;
     float cov11 = cov2d.z;
@@ -37,7 +37,7 @@ bool snugBox(float2 mean_2d, float3 cov2d, float opacity_logit,
     float b = -cov01 * inv_det;   // Σ⁻¹[0][1]
     float c =  cov00 * inv_det;   // Σ⁻¹[1][1]
 
-    float t = 2.0 * log(255.0 * opacity);
+    float t = splatCutoffQ(opacity_logit);
     if (t <= 0.0)
     {
         bbox_min = mean_2d;

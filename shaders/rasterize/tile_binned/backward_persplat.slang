@@ -232,6 +232,10 @@ void backwardRasterizePerSplat(
     RWStructuredBuffer<int64_t> grad_color_b,
     RWStructuredBuffer<int64_t> grad_2d_x_iter,
     RWStructuredBuffer<int64_t> grad_2d_y_iter,
+    // Densify window sum of each splat's blend weight alpha * T over this view's
+    // pixels. Written only when track_blend_weight != 0.
+    RWStructuredBuffer<int64_t> blend_weight_accum,
+    uniform uint track_blend_weight,
     // Per-iteration phase in [0, BACKWARD_PIXEL_STRIDE) selecting which pixel
     // subset this backward visits. Host toggles it each iter so the SGD is
     // unbiased. Ignored when BACKWARD_PIXEL_STRIDE == 1.
@@ -381,6 +385,7 @@ void backwardRasterizePerSplat(
         float3 acc_color  = float3(0.0);
         float  acc_absx = 0.0;
         float  acc_absy = 0.0;
+        float  acc_weight = 0.0;
 
         // Build the primitive record once per lane via the SAME
         // IBlendablePrimitive conformer the forward uses (GaussianPrimitive), so
@@ -595,6 +600,7 @@ void backwardRasterizePerSplat(
                 // scale by SH_C0 once after the pixel loop. Exact, 256x fewer
                 // autodiff calls per bucket.
                 acc_color += dL_dC * alpha_T;
+                acc_weight += alpha_T;
 
 #if BACKWARD_BLEND_SCAN_MODE == 0
                 // FUSED: use the scalar dLdC_C_in_front + dLdC_contrib produced by
@@ -667,6 +673,13 @@ void backwardRasterizePerSplat(
                 acc_color  *= s;
                 acc_absx *= s;
                 acc_absy *= s;
+                acc_weight *= s;
+            }
+            if (track_blend_weight != 0u)
+            {
+                // STBN visited visit_count of the tile's pixels; scale to all.
+                float coverage = float(TILE_AREA) / float(max(visit_count, 1u));
+                InterlockedAdd(blend_weight_accum[g_idx], toFixed(acc_weight * coverage));
             }
 
             // Emit the SUMMED 2D gradients (mean2d, cov2d) for this splat's
@@ -727,6 +740,8 @@ void backwardRasterizePerBucket(
     RWStructuredBuffer<int64_t> grad_color_b,
     RWStructuredBuffer<int64_t> grad_2d_x_iter,
     RWStructuredBuffer<int64_t> grad_2d_y_iter,
+    RWStructuredBuffer<int64_t> blend_weight_accum,
+    uniform uint track_blend_weight,
     uniform uint pixel_phase,
 #if STBN_ENABLED
     StructuredBuffer<uint> stbn_table,
@@ -833,6 +848,7 @@ void backwardRasterizePerBucket(
     float3 acc_color  = float3(0.0);
     float  acc_absx = 0.0;
     float  acc_absy = 0.0;
+    float  acc_weight = 0.0;
 
     GaussianPrimitive prim = splat_valid ? GaussianPrimitive.make(blend_only_data.mean, blend_only_data.cov2d,
                                  blend_only_data.opacity, blend_only_data.sh0,
@@ -931,6 +947,7 @@ void backwardRasterizePerBucket(
             float  T_final = 1.0 - C_total.a;
 
             acc_color += dLdC4.rgb * alpha_T;
+            acc_weight += alpha_T;
 
 #if BACKWARD_BLEND_SCAN_MODE == 0
             float dLdC_Cbehind = dot(dLdC4.rgb, C_total.rgb) - dLdC_C_in_front - dLdC_contrib;
@@ -974,6 +991,12 @@ void backwardRasterizePerBucket(
             acc_color  *= s;
             acc_absx *= s;
             acc_absy *= s;
+            acc_weight *= s;
+        }
+        if (track_blend_weight != 0u)
+        {
+            float coverage = float(TILE_AREA) / float(max(visit_count, 1u));
+            InterlockedAdd(blend_weight_accum[g_idx], toFixed(acc_weight * coverage));
         }
         InterlockedAdd(grad_mean2d_x[g_idx], toFixed(acc_mean2d.x));
         InterlockedAdd(grad_mean2d_y[g_idx], toFixed(acc_mean2d.y));

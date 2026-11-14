@@ -37,6 +37,15 @@ class BlendKind(str, Enum):
     HARDENED_EXTINCTION = "hardened_extinction"
 
 
+class SplatKernel(str, Enum):
+    """How a splat's projected footprint becomes alpha (CLI ``--splat-kernel``).
+    Declaration order is the shader's SPLAT_KERNEL index (primitives/gaussian/eval.slang)."""
+    GAUSSIAN = "gaussian"
+    DENSITY = "density"
+    LOG_DENSITY = "log_density"
+    OPAQUE_CORE = "opaque_core"
+
+
 def resolve_blend_kind(*, extinction_hardness: float) -> BlendKind:
     """The blend law named by the current render config: hardened extinction when
     the target ``k != 1``, else standard alpha-over. (k is still applied as a
@@ -73,6 +82,9 @@ class ScheduleConfig:
     # --eval-every 250 would buy four sweeps nobody asked for, and each sweep
     # renders and scores the whole held-out set. Empty tuple = old behavior.
     eval_iters: tuple[int, ...] = ()
+    # Blend-weight pruning on densify ticks (--prune-blend-weight); 0 = off.
+    prune_blend_weight: float = 0.0
+    prune_blend_from: int = 0
 
     @classmethod
     def from_args(cls, args) -> "ScheduleConfig":
@@ -96,6 +108,8 @@ class ScheduleConfig:
             mip_enabled=bool(args.mip_splatting),
             eval_iters=tuple(sorted({
                 int(v) for v in (getattr(args, "eval_iters", None) or ())})),
+            prune_blend_weight=float(getattr(args, "prune_blend_weight", 0.0)),
+            prune_blend_from=int(getattr(args, "prune_blend_from", 0)),
         )
 
 
@@ -139,6 +153,15 @@ def validate_training_config(args, *, n_cams: int, n_train: int,
         raise ConfigError(
             f"--densify-from ({args.densify_from}) must be <= --densify-to "
             f"({args.densify_to}); otherwise the densify window never opens.")
+    profile_power = float(getattr(args, "splat_profile_power", 1.0))
+    if profile_power < 1.0:
+        raise ConfigError(
+            f"--splat-profile-power must be >= 1, got {profile_power}: below 1 "
+            f"the falloff has a cusp at every splat's center.")
+    blend_weight = float(getattr(args, "prune_blend_weight", 0.0))
+    if blend_weight < 0.0:
+        raise ConfigError(
+            f"--prune-blend-weight must be >= 0 (0 = off), got {blend_weight}.")
 
     # These cadence knobs are modulo divisors only on the structure-aware path.
     if mode == DensificationMode.STRUCTURE_AWARE:

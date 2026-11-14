@@ -15,6 +15,7 @@
 #define TRAINER_GAUSSIAN_ACCUTILE_SLANG
 
 #include "../../common/math.slang"
+#include "eval.slang"
 #include "generated/execution_contract.slang"
 
 // Ellipse data in pre-computed form (inverse covariance a,b,c + threshold t).
@@ -24,14 +25,14 @@ struct EllipseParams
     float a;  // Σ⁻¹[0][0]
     float b;  // Σ⁻¹[0][1]
     float c;  // Σ⁻¹[1][1]
-    float t;  // 2·log(255·opacity)
+    float t;  // splatCutoffQ(opacity_logit)
 };
 
 // Extract the same ellipse parameters snugBox uses. Keeps the math in one
 // place; AccuTile needs them exposed so we don't redo the inverse.
 //
-// ``opacity_logit`` is the pre-sigmoid parameter; we sigmoid here to get
-// the real probability that feeds the alpha threshold.
+// ``opacity_logit`` is the pre-sigmoid parameter; the threshold t comes from
+// the active splat kernel.
 bool computeEllipseParams(float3 cov2d, float opacity_logit, out EllipseParams e)
 {
     float cov00 = cov2d.x;
@@ -42,8 +43,7 @@ bool computeEllipseParams(float3 cov2d, float opacity_logit, out EllipseParams e
     e.a =  cov11 * inv_det;
     e.b = -cov01 * inv_det;
     e.c =  cov00 * inv_det;
-    float opacity = sigmoid(opacity_logit);
-    e.t = 2.0 * log(255.0 * opacity);
+    e.t = splatCutoffQ(opacity_logit);
     return e.t > 0.0;
 }
 

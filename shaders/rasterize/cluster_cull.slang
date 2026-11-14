@@ -2,6 +2,7 @@
 
 #include "../common/types.slang"
 #include "../common/math.slang"
+#include "../primitives/gaussian/eval.slang"
 
 #include "generated/execution_contract.slang"
 static const uint CLUSTER_SIZE = CONTRACT_CLUSTER_SIZE;
@@ -49,7 +50,13 @@ void buildClusterAABB(
     uint n = num_gaussians_counter[0];
     float3 bmin, bmax;
     if (slot < n && slot < max_splats) {
-        splatAABB(gaussians[slot], K_SIGMA, bmin, bmax);
+#if SPLAT_KERNEL == 0
+        float k = K_SIGMA;
+#else
+        // Opaque-core kernels reach past 3 sigma; bound by their real cutoff.
+        float k = max(K_SIGMA, sqrt(max(splatCutoffQ(gaussians[slot].opacity), 0.0)));
+#endif
+        splatAABB(gaussians[slot], k, bmin, bmax);
     } else {
         // Neutral element for min/max reduce — never contributes to the
         // cluster AABB, so tail-of-last-cluster threads are inert.

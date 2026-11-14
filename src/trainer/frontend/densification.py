@@ -100,9 +100,10 @@ class DensificationController:
 
         sad_carry_eta = (mode == DensificationMode.STRUCTURE_AWARE
                          and not do_structure_step)
+        min_blend_weight = args.prune_blend_weight if ev.blend_prune else 0.0
 
         if do_structure_step:
-            stats = pipeline.densify_structure_aware(structure_cfg)
+            stats = pipeline.densify_structure_aware(structure_cfg, min_blend_weight)
         elif mode == DensificationMode.STRUCTURE_AWARE:
             allow_scale_prune = it > args.reset_every
             stats = pipeline.densify_simple(
@@ -112,6 +113,7 @@ class DensificationController:
                 prune_big_scale=extent * args.prune_scale3d,
                 allow_scale_prune=allow_scale_prune,
                 carry_eta=True,
+                min_blend_weight=min_blend_weight,
             )
         elif mode == DensificationMode.SIMPLE:
             allow_scale_prune = it > args.reset_every
@@ -121,6 +123,7 @@ class DensificationController:
                 scale_thresh=extent * args.grow_scale3d,
                 prune_big_scale=extent * args.prune_scale3d,
                 allow_scale_prune=allow_scale_prune,
+                min_blend_weight=min_blend_weight,
             )
         if pipeline.last_submit_id:
             queue_limiter.record(pipeline.last_submit_id)

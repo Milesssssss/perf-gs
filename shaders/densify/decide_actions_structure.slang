@@ -2,6 +2,7 @@
 
 #include "../common/types.slang"
 #include "../common/math.slang"
+#include "blend_weight.slang"
 
 static const uint ACTION_KEEP  = 0;
 static const uint ACTION_SPLIT = 1;
@@ -37,6 +38,7 @@ void decideActionsStructure(
     StructuredBuffer<uint> eta_max_z,
     StructuredBuffer<int64_t> grad_mean_2d_mag_accum,
     StructuredBuffer<uint> visibility_count_accum,
+    StructuredBuffer<int64_t> blend_weight_accum,
     RWStructuredBuffer<uint> action,
     RWStructuredBuffer<uint> split_factor_x,
     RWStructuredBuffer<uint> split_factor_y,
@@ -48,6 +50,7 @@ void decideActionsStructure(
     uniform float grad_threshold_internal,
     uniform float split_power, uniform uint max_split_factor,
     uniform float t_opacity, uniform float dense_scale,
+    uniform float min_blend_weight,
     uniform uint max_splats)
 {
     uint gaussian_idx = dtid.x;
@@ -83,7 +86,8 @@ void decideActionsStructure(
     uint out_action = ACTION_KEEP;
     uint nkx = 1u, nky = 1u, nkz = 1u;
 
-    bool is_prune = ((low_ratio > tau_prune) && seen) || (opacity < t_opacity);
+    bool is_prune = ((low_ratio > tau_prune) && seen) || (opacity < t_opacity)
+        || isUnderweight(blend_weight_accum[gaussian_idx], vis, min_blend_weight);
     bool triggered = (high_ratio > tau_split) && is_grad_high && seen;
 
     if (is_prune)
