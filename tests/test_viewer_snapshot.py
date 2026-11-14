@@ -17,6 +17,7 @@ from types import SimpleNamespace
 
 import numpy as np
 
+from trainer.frontend.viewer.session import Session
 from trainer.frontend.viewer.viewer import Viewer, _copy_splats
 
 GAUSSIAN_STRIDE = 56        # float3 mean + float3 log_scale + float4 quat + 2 floats
@@ -129,6 +130,7 @@ def _snapshot(*, live: int, viewer_capacity: int = CAPACITY, sh: bool = False,
     )
     invalidations: list[int] = []
     viewer = SimpleNamespace(
+        state=Session(),
         runtime=_Runtime(encoder),
         max_splats=viewer_capacity,
         _has_data=False,
@@ -161,6 +163,12 @@ def test_the_count_the_viewer_is_given_is_the_count_that_was_copied() -> None:
     copied_bytes = dict(encoder.copies)[view_buffers.primitive.values.storage]
     assert copied_bytes == 150_000 * GAUSSIAN_STRIDE
     assert viewer._has_data is True
+
+
+def test_a_snapshot_publishes_the_live_splat_count() -> None:
+    """Densify keeps the count on the GPU, so the panel learns it from snapshots."""
+    _encoder, viewer, _buffers_ = _snapshot(live=150_000)
+    assert viewer.state.snapshot().stats.gaussians == 150_000
 
 
 def test_the_counter_travels_in_the_same_batch_as_the_data() -> None:

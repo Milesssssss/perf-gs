@@ -506,6 +506,8 @@ class Viewer:
 
     def update_gaussians(self, train_pipeline: TrainingPipeline):
         count = self.live_splat_count(train_pipeline)
+        # Densify keeps the count on the GPU, so this snapshot read is the panel's live source.
+        self.state.publish_training(gaussians=count)
         if count <= self.max_splats:
             self._copy_snapshot(train_pipeline, count)
             return

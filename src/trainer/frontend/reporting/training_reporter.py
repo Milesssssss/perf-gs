@@ -128,8 +128,6 @@ class TrainingReporter:
         self._artifacts.densify_json.write(json.dumps({
             "iter": outcome.iteration, "event": "densify",
             "kind": outcome.kind, **outcome.stats}) + "\n")
-        # Densify ticks are where the count changes; log ticks may be off (--log-every 0).
-        self._state.publish_training(gaussians=outcome.count)
 
         pre_s = outcome.stats.get("pre_count")
         final_s = outcome.stats.get("final_count")
