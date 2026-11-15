@@ -114,13 +114,15 @@ class ViewerSession:
         return self._viewer.preview_points(initial_points)
 
     def reconfigure_model(self, *, sh_degree: int,
-                          mip_enabled: bool, mip_kernel_size: float) -> bool:
+                          mip_enabled: bool, mip_kernel_size: float,
+                          slang_session) -> bool:
         """Re-shape the viewer's pipeline after the hub's setup changed the model (no-op if unchanged/no viewer)."""
         if self._viewer is None:
             return False
         return self._viewer.reconfigure_model(
             sh_degree=sh_degree,
-            mip_enabled=mip_enabled, mip_kernel_size=mip_kernel_size)
+            mip_enabled=mip_enabled, mip_kernel_size=mip_kernel_size,
+            slang_session=slang_session)
 
     def suspend_rendering(self) -> None:
         """Park the render thread (no GPU work, no frames) until :meth:`resume_rendering`.

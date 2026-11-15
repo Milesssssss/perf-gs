@@ -27,14 +27,13 @@ if TYPE_CHECKING:
 
 def shader_specialization(args: argparse.Namespace) -> ShaderSpecialization:
     """Compile-time policy; needed before the scene, when the device is created."""
-    hub = bool(args.hub)
     fraction = float(args.stbn_pixel_fraction)
-    enabled = fraction < 1.0 and not hub
+    enabled = fraction < 1.0
     # A warmup starts at full density, which a shrunken stage could not hold.
     staged = 0.0 if int(args.stbn_warmup_iters) > 0 else float(args.stbn_max_fraction or 0.0)
     return ShaderSpecialization(
         backward_pixel_stride=args.backward_pixel_stride,
-        hardness_is_one=(not hub and float(args.extinction_hardness) <= 1.0),
+        hardness_is_one=float(args.extinction_hardness) <= 1.0,
         stbn_enabled=enabled,
         stbn_staged_fraction=(max(staged, fraction) if enabled and staged else 0.0),
         adam_bf16=args.adam_moments == "bf16",

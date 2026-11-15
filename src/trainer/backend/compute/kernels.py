@@ -16,16 +16,17 @@ KernelSpecs = Mapping[str, tuple[str, str]]
 
 
 class KernelLibrary:
-    """Compiles each (shader, entry point) pair once per device."""
+    """Compiles each (shader, entry point) pair once, in one Slang session (the device's by default)."""
 
-    def __init__(self, device: spy.Device) -> None:
+    def __init__(self, device: spy.Device, session: spy.SlangSession | None = None) -> None:
         self.device = device
+        self.session = device.slang_session if session is None else session
         self._kernels: dict[tuple[str, str], spy.ComputeKernel] = {}
 
     def kernel(self, path: str, entry: str) -> spy.ComputeKernel:
         key = (path, entry)
         if key not in self._kernels:
-            program = self.device.load_program(str(SHADERS_DIR / path), [entry])
+            program = self.session.load_program(str(SHADERS_DIR / path), [entry])
             self._kernels[key] = self.device.create_compute_kernel(program)
         return self._kernels[key]
 

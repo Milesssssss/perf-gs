@@ -447,7 +447,7 @@ def _setting_widget(panel: Panel, view: View, setup: TrainingSetup,
     The ``s=setting`` defaults capture by value, since these lambdas outlive the loop that builds them.
     """
     def editable() -> bool:
-        return False if setting.launch_only else view.can_configure
+        return view.can_configure
 
     def write(value, s=setting) -> None:
         setup.set(s.setting_name, value)
@@ -457,19 +457,15 @@ def _setting_widget(panel: Panel, view: View, setup: TrainingSetup,
         setup.set_index(s.setting_name, index)
         actions.on_config_change()
 
-    if setting.launch_only:
-        # Fixed at device creation: show the value and why, rather than a greyed-out control.
-        panel.text(lambda s=setting: row(f"  {s.caption}",
-                                         s.display(setup.get(s.setting_name))))
-        note(panel, f"launch-only: {setting.note}", lines=2)
-        return
     if setting.kind == BOOL:
         panel.checkbox(f"  {setting.caption}",
                        lambda s=setting: bool(setup.get(s.setting_name)),
                        write, enabled=editable)
+        note(panel, setting.about, lines=3)
         note(panel, setting.note, lines=2, visible=lambda: bool(setting.note))
         return
     _caption(panel, setting)
+    note(panel, setting.about, lines=3)
     if setting.kind == CHOICE:
         panel.combo("", setting.choice_labels(),
                     lambda s=setting: setup.index_of(s.setting_name),

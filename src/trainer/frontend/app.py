@@ -30,7 +30,7 @@ from trainer.config.config import (
     StbnVariables,
 )
 from trainer.config.config_types import DensificationMode
-from trainer.config.resolve import RunConfig
+from trainer.config.resolve import RunConfig, shader_specialization
 from trainer.config.validation import validate_training_config
 from trainer.data.parallel import map_ordered
 from trainer.data.targets import TargetDataset
@@ -44,6 +44,7 @@ from trainer.frontend.evaluation.evaluation import (
 )
 from trainer.frontend.evaluation.post_training import run_post_training
 from trainer.frontend.factory import (
+    SlangSessions,
     create_gpu_queue_lock,
     create_pipeline,
     create_training_device,
@@ -125,6 +126,7 @@ class TrainingApplication:
         self.config: RunConfig | None = None
 
         self.device: Any = None
+        self.slang_sessions: SlangSessions | None = None
         self.gpu_lock: Any = None
         self.pipeline: TrainingPipeline | None = None
         self.viewer: ViewerSession | None = None
@@ -330,29 +332,36 @@ class TrainingApplication:
         """Create the GPU device and shared queue lock.
         Separate from the pipeline so the hub can start before a dataset is chosen."""
         self.device = create_training_device(self.args)
+        self.slang_sessions = SlangSessions(self.device)
         self.gpu_lock = create_gpu_queue_lock(viewer_enabled=not self.args.no_viewer)
+
+    def slang_session(self) -> Any:
+        """The Slang session compiling the shader specialization of the current args."""
+        return self.slang_sessions.session_for(shader_specialization(self.args))
 
     def _create_pipeline_for_scene(self, scene: SceneContext) -> None:
         """Build the training pipeline for a loaded scene (device must exist)."""
+        session = self.slang_session()
         self.pipeline = create_pipeline(
             device=self.device,
             gpu_lock=self.gpu_lock,
             scene=scene,
-            max_splats=self._plan_memory(scene),
+            max_splats=self._plan_memory(scene, session),
             config=self._config,
             initial_state=scene.colmapScene.initial_points,
+            slang_session=session,
         )
         self._pipeline.mip_filter.set_cameras(
             [scene.colmapScene.images[i].camera for i in scene.train_indices])
 
-    def _plan_memory(self, scene: SceneContext) -> int:
+    def _plan_memory(self, scene: SceneContext, session: Any) -> int:
         """Fit splat capacity to the VRAM budget and return it.
         Lowering capacity changes the trained model, so it is a reported last resort; the
         viewer is budgeted at full capacity since it grows to the trainer's splat count."""
         args = self.args
         self._stream_targets = args.image_residency == "stream"
         structure = self._densify_mode == DensificationMode.STRUCTURE_AWARE
-        module = _module_for_reflection(self.device)
+        module = _module_for_reflection(self.device, session)
         target_bytes = 0 if self._stream_targets else (
             len(scene.train_indices) * scene.width * scene.height
             * (4 + (8 if structure else 0)))

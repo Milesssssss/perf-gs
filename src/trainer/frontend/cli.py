@@ -12,11 +12,9 @@ from trainer.config.config import (
     LossConfig,
     RasterConfig,
     RegularizationConfig,
-    ShaderSpecialization,
     StbnConfig,
     StructureConfig,
 )
-from trainer.config.config_types import SplatKernel
 from trainer.frontend.settings import SETTINGS_MAP
 
 
@@ -100,15 +98,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--prune-scale3d", type=float, default=0.1,
                     help="prune splats whose max 3D scale exceeds this * scene_extent "
                          "(gsplat prune_scale3d). Only active after the first opacity reset.")
-    parser.add_argument("--prune-blend-weight", type=float, default=0.0,
-                    help="on densify ticks, prune splats whose blend weight (alpha*T "
-                         "summed over a view's pixels), averaged over the views they "
-                         "appeared in since the last tick, is below this many pixels. "
-                         "Such splats barely change any image. 0 (default) = off.")
-    parser.add_argument("--prune-blend-from", type=int, default=0,
-                    help="first densify tick that applies --prune-blend-weight. The "
-                         "tick right after an opacity reset is always skipped: the "
-                         "reset itself depresses every blend weight.")
+    _shared(parser, "prune_blend_weight")
+    _shared(parser, "prune_blend_from")
     _shared(parser, "reset_every")
     parser.add_argument("--opacity-reg", type=float,
                         default=RegularizationConfig.opacity_weight)
@@ -261,33 +252,10 @@ def build_parser() -> argparse.ArgumentParser:
                          "'stream' (default) = host RAM, uploaded inside each "
                          "iteration's command buffer (bit-identical, no measured "
                          "slowdown); 'gpu' = one texture per training camera.")
-    parser.add_argument("--adam-moments", choices=("fp32", "bf16"), default="fp32",
-                    help="storage precision of the Adam moments. 'bf16' (stochastic "
-                         "rounding) halves optimizer memory: 56 B/splat at SH0, "
-                         "236 B at SH3. Compile-time, so launch-only in the hub.")
-    parser.add_argument("--splat-kernel", choices=tuple(k.value for k in SplatKernel),
-                    default=ShaderSpecialization.splat_kernel.value,
-                    help="how a splat's footprint G becomes alpha. 'gaussian' "
-                         "(default) = opacity * G. 'density' treats it as an optical "
-                         "depth: alpha = 1 - (1 - opacity)^G, the same peak alpha, but "
-                         "opaque splats grow fully opaque cores. 'log_density' = "
-                         "1 - exp(-exp(logit) * G), whose core grows faster with the "
-                         "logit. 'opaque_core' = log_density whose falloff power "
-                         "rises from 1 to --splat-profile-power as the splat turns "
-                         "opaque. Compile-time, so launch-only in the hub.")
-    parser.add_argument("--splat-profile-power", type=float,
-                    default=ShaderSpecialization.splat_profile_power,
-                    help="radial falloff power p >= 1 of every splat kernel: "
-                         "G = exp(-m^p), m = half the squared Mahalanobis "
-                         "distance. 1 (default) = gaussian; > 1 flattens the top "
-                         "and steepens the edge, shrinking the footprint. "
-                         "Compile-time, so launch-only in the hub.")
-    parser.add_argument("--splat-profile-onset", type=float,
-                    default=ShaderSpecialization.splat_profile_onset,
-                    help="opaque_core only: the power ramps with sigmoid(logit - "
-                         "onset), so a splat flattens only once its opacity logit "
-                         "passes the onset. 0 (default) = ramp with the opacity "
-                         "itself. Compile-time, so launch-only in the hub.")
+    _shared(parser, "adam_moments")
+    _shared(parser, "splat_kernel")
+    _shared(parser, "splat_profile_power")
+    _shared(parser, "splat_profile_onset")
     parser.add_argument("--backend", type=str, default="vulkan", choices=["vulkan", "d3d12"])
     parser.add_argument("--seed", type=int, default=0)
     _shared(parser, "mip_splatting")

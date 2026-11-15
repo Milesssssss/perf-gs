@@ -43,8 +43,6 @@ from trainer.frontend.viewer.ui.sections import (
     viewer_section,
 )
 
-EDITABLE = tuple(s for s in SETTINGS if not s.launch_only)
-
 
 def _session() -> Session:
     return Session(MODE_HUB, setup=TrainingSetup())
@@ -511,7 +509,17 @@ def test_every_editable_parameter_is_offered_exactly_once() -> None:
     controls = [w for w in panel.widgets
                 if w.kind in ("combo", "checkbox", "drag_int", "drag_float")]
     # +1 for the disclosure checkbox itself.
-    assert len(controls) == len(EDITABLE) + 1
+    assert len(controls) == len(SETTINGS) + 1
+
+
+def test_every_parameter_says_what_it_does() -> None:
+    session = _session()
+    panel, view, _ = build(session, "configuration")
+    session.toggle_config_detail(True)
+    view.sample()
+    screen = panel.screen()
+    for setting in SETTINGS:
+        assert setting.about and setting.about in screen, setting.setting_name
 
 
 def test_a_parameter_edit_writes_the_store_and_marks_the_result_stale() -> None:
@@ -536,16 +544,6 @@ def test_parameters_grey_out_while_a_run_consumes_them() -> None:
                 if w.kind in ("combo", "drag_int", "drag_float")]
     assert controls and not any(w.enabled for w in controls)
     assert "Locked while a run is training." in panel.screen()
-
-
-def test_a_launch_only_parameter_is_shown_read_only_with_the_reason() -> None:
-    session = _session()
-    panel, view, _ = build(session, "configuration")
-    session.toggle_config_detail(True)
-    view.sample()
-    screen = panel.screen()
-    assert "backward pixel stride" in screen
-    assert "launch-only" in screen
 
 
 def test_a_collapsed_group_still_says_what_it_holds() -> None:

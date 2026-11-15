@@ -59,3 +59,14 @@ def create_device(
         enable_hot_reload=True,
         compiler_options=compiler_options,
     )
+
+
+def create_slang_session(device: spy.Device, defines: dict[str, str] | None) -> spy.SlangSession:
+    """A session compiling like the device's own, but with ``defines`` as its macros."""
+    # Copied field by field: desc.compiler_options is the device's live object, not a copy.
+    own = device.slang_session.desc.compiler_options
+    return device.create_slang_session(compiler_options=spy.SlangCompilerOptions({
+        "include_paths": own.include_paths,
+        "debug_info": own.debug_info,
+        "defines": dict(defines or {}),
+    }))

@@ -443,6 +443,7 @@ class Viewer:
         self._explicit_sort_pairs = max_sort_pairs
         self._mip_enabled = mip_enabled
         self._mip_kernel_size = mip_kernel_size
+        self._slang_session = device.slang_session
         self._pipeline = self._build_view_pipeline(
             max_splats, sh_degree, mip_enabled, mip_kernel_size, max_sort_pairs)
 
@@ -463,16 +464,18 @@ class Viewer:
             appearance_config=AppearanceConfig(sh_degree=sh_degree),
             raster_config=RasterConfig(mip_enabled=mip_enabled,
                                        kernel_size=mip_kernel_size),
+            slang_session=self._slang_session,
         )
         if sh_degree > 0:
             pipeline.set_active_sh_degree(sh_degree)
         return pipeline
 
-    def reconfigure_model(self, *, sh_degree: int,
-                          mip_enabled: bool, mip_kernel_size: float) -> bool:
+    def reconfigure_model(self, *, sh_degree: int, mip_enabled: bool,
+                          mip_kernel_size: float, slang_session: spy.SlangSession) -> bool:
         if (sh_degree == self.sh_degree
                 and mip_enabled == self._mip_enabled
-                and mip_kernel_size == self._mip_kernel_size):
+                and mip_kernel_size == self._mip_kernel_size
+                and slang_session is self._slang_session):
             return False
         with self._render_lock:      # no frame in flight while we swap pipelines
             with self.runtime.queue_scope():
@@ -480,6 +483,7 @@ class Viewer:
             self.sh_degree = sh_degree
             self._mip_enabled = mip_enabled
             self._mip_kernel_size = mip_kernel_size
+            self._slang_session = slang_session
             self._pipeline = self._build_view_pipeline(
                 self.max_splats, sh_degree, mip_enabled, mip_kernel_size,
                 self._explicit_sort_pairs)

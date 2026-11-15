@@ -14,10 +14,11 @@ from trainer.config.config import (
     AppearanceConfig,
     CompositorConfig,
     LossConfig,
+    ScheduleConfig,
     ShaderSpecialization,
     StbnConfig,
 )
-from trainer.config.config_types import DensificationMode
+from trainer.config.config_types import DensificationMode, SplatKernel
 
 # Widget kinds, derived from a Setting's own declaration (see :attr:`Setting.kind`).
 INT = "int"
@@ -52,7 +53,8 @@ class Setting:
     speed: float = 1.0
     fmt: str = ""
     note: str = ""
-    launch_only: bool = False
+    # The panel's description: what the knob does and what it costs, in about two lines.
+    about: str = ""
 
     @property
     def flag(self) -> str:
@@ -107,9 +109,12 @@ class Setting:
 SETTINGS: tuple[Setting, ...] = (
     # The mean-LR decay horizon is deliberately not a setting: it follows --iters.
     Setting("iters", "iterations", "schedule", int, default=3000,
+            about="Training steps. More steps reach higher quality but take longer.",
             minimum=100, maximum=200_000, speed=25,
             note="the LR decay horizon follows this"),
     Setting("densify_mode", "strategy", "densify", str,
+            about="How splats are added and removed: simple = 3DGS clone/split, "
+                  "structure_aware = SAD-GS splits along image structure, none = fixed set.",
             default=DensificationMode.STRUCTURE_AWARE.value,
             choices=tuple(m.value for m in DensificationMode),
             help="densification strategy the loop runs on a densify tick "
@@ -119,22 +124,34 @@ SETTINGS: tuple[Setting, ...] = (
                  "(arXiv 2604.28016) with an interleaved AbsGS gradient filler on "
                  "the non-structure densify ticks."),
     Setting("densify_from", "first densify iter", "densify", int, default=0,
+            about="First iteration that adds or removes splats.",
             minimum=0, maximum=200_000, speed=25),
     Setting("densify_to", "last densify iter", "densify", int, default=1900,
+            about="Last iteration that adds or removes splats; after it, training only "
+                  "refines the splats it has.",
             minimum=0, maximum=200_000, speed=25),
     Setting("densify_every", "densify interval", "densify", int, default=100,
+            about="Iterations between densification steps.",
             minimum=1, maximum=10_000, speed=5),
     Setting("reset_every", "opacity reset interval", "densify", int, default=1200,
+            about="Iterations between opacity resets, which pull every splat's opacity "
+                  "down so the unneeded ones fade and get pruned.",
             help="opacity-reset interval. Big-scale prune is disabled until after "
                  "the first reset.",
             minimum=0, maximum=200_000, speed=25, note="0 = never reset"),
     Setting("max_splats", "splat capacity", "densify", int, default=7_000_000,
+            about="Most splats the model may grow to. GPU memory for this many is "
+                  "reserved up front, and it is lowered if it does not fit.",
             minimum=100_000, maximum=100_000_000, speed=50_000),
     Setting("lambda_ssim", "SSIM weight", "loss", float, default=LossConfig.ssim_weight,
+            about="Weight of the structural-similarity (SSIM) term in the loss; the "
+                  "rest is per-pixel error.",
             help="SSIM loss weight (3DGS default 0.2); 0 = pure L2",
             minimum=0.0, maximum=1.0, speed=0.005, fmt="%.3f",
             note="0 = pure L1/L2"),
     Setting("log_every", "log every N iters", "loss", int, default=0,
+            about="How often the loss graph and the log sample loss and PSNR. Each "
+                  "sample briefly stalls the GPU.",
             help="sample the loss (and the single-camera PSNR) every N iters. Each "
                  "sample re-renders the sampled camera and reads the frame back to "
                  "the host, so this is the cadence of a GPU sync, not a free "
@@ -143,6 +160,8 @@ SETTINGS: tuple[Setting, ...] = (
             minimum=0, maximum=10_000, speed=10, note="0 = off"),
 
     Setting("sh_degree", "SH degree", "appearance", int, default=AppearanceConfig.sh_degree,
+            about="View-dependent colour (spherical harmonics) for shine and "
+                  "reflections. SH3: about +0.3 dB, but ~40% slower and more memory.",
             choices=(0, 1, 2, 3),
             help="Spherical-harmonics degree for view-dependent color (classic "
                  "3DGS). 0 (default) = view-independent SH band-0 (DC) only, the "
@@ -150,6 +169,7 @@ SETTINGS: tuple[Setting, ...] = (
                  "a separate features_rest buffer allocated only when >0, activated "
                  "one band every --sh-band-interval iters (oneupSHdegree)."),
     Setting("sh_band_interval", "SH band interval", "appearance", int, default=0,
+            about="Iterations between switching on each extra SH band.",
             help="Iterations between activating successive SH bands (classic 3DGS "
                  "oneupSHdegree). Only used with --sh-degree > 0. "
                  "0 (default) = AUTO: scale to --iters so the last band turns on "
@@ -158,6 +178,8 @@ SETTINGS: tuple[Setting, ...] = (
                  "on short runs. Pass a positive value to override.",
             minimum=0, maximum=20_000, speed=10, note="0 = auto from iterations"),
     Setting("mip_splatting", "Mip-Splatting", "appearance", bool, default=True,
+            about="Anti-aliasing: avoids artifacts when the model is viewed closer or "
+                  "farther away than the training photos.",
             help="Enable Mip-Splatting (Yu et al., CVPR 2024): a per-gaussian 3D "
                  "smoothing filter (from the TRAIN cameras) folded into the "
                  "projected covariance, plus the 2D Mip antialiasing filter with "
@@ -165,6 +187,8 @@ SETTINGS: tuple[Setting, ...] = (
                  "detail gap vs SADGS (which uses the same 3D filter). Default on; "
                  "pass --no-mip-splatting for the bit-identical vanilla renderer."),
     Setting("extinction_hardness", "extinction hardness k", "perf", float,
+            about="Above 1, each splat hides more of what is behind it, so rendering "
+                  "stops sooner: faster, at some loss of quality.",
             default=CompositorConfig.extinction_hardness,
             help="Compositor extinction hardness k (a shader UNIFORM, so "
                  "no recompile). 1.0 (default) = standard alpha-over "
@@ -176,6 +200,8 @@ SETTINGS: tuple[Setting, ...] = (
             minimum=1.0, maximum=16.0, speed=0.05, fmt="%.2f",
             note="1 = standard alpha-over"),
     Setting("extinction_hardness_warmup", "hardness warmup steps", "perf", int, default=500,
+            about="Steps over which the hardness ramps up from 1, starting at the "
+                  "first densification.",
             help="Steps to ramp the extinction hardness from 1.0 up to "
                  "--extinction-hardness AFTER the first densification. "
                  "k is held at 1.0 (standard alpha-over) until the first "
@@ -188,6 +214,8 @@ SETTINGS: tuple[Setting, ...] = (
                  "--extinction-hardness <= 1.",
             minimum=-1, maximum=20_000, speed=10, note="-1 = no ramp"),
     Setting("backward_pixel_stride", "backward pixel stride", "perf", int,
+            about="Gradients from 1 in N pixels per step, rotating: a faster backward "
+                  "pass, noisier gradients. Cannot be combined with STBN.",
             default=ShaderSpecialization.backward_pixel_stride,
             choices=(1, 2, 4, 8, 16),
             help="Stochastic pixel-subsampling stride for the backward "
@@ -196,9 +224,10 @@ SETTINGS: tuple[Setting, ...] = (
                  "pixels per iter (unbiased SGD estimator, rotating "
                  "phase) for a faster backward at some gradient-noise "
                  "cost. Injected as a compile-time define.",
-            launch_only=True,
-            note="compile-time: set it with --backward-pixel-stride"),
+            note="1 = exact backward"),
     Setting("stbn_pixel_fraction", "STBN pixel fraction", "perf", float,
+            about="Share of pixels that drive each step (a blue-noise pattern). "
+                  "0.5: 6% faster, -0.04 dB; 0.25: 13% faster, -0.24 dB.",
             default=StbnConfig.pixel_fraction,
             help="Fraction rho of pixels each backward supervises, chosen by a "
                  "spatiotemporal blue-noise mask (NVIDIA STBN, re-ranked per "
@@ -214,6 +243,8 @@ SETTINGS: tuple[Setting, ...] = (
             minimum=0.02, maximum=1.0, speed=0.01, fmt="%.3f",
             note="1 = every pixel (off)"),
     Setting("stbn_warmup_iters", "STBN warmup steps", "perf", int,
+            about="Steps that start from every pixel and ramp down to the share "
+                  "above, which protects thin structures early on.",
             default=StbnConfig.warmup_iters,
             help="Steps spent ramping the STBN pixel fraction from 1.0 down to "
                  "--stbn-pixel-fraction (log-linear, so it passes through the "
@@ -222,7 +253,64 @@ SETTINGS: tuple[Setting, ...] = (
                  "starting dense is the cheap hedge. 0 (default) = the target "
                  "fraction from step 1. No-op at --stbn-pixel-fraction 1.0.",
             minimum=0, maximum=20_000, speed=10, note="0 = no ramp"),
+    Setting("adam_moments", "Adam moments", "perf", str, default="fp32",
+            about="Precision of the optimizer state. bf16: the same quality with "
+                  "0.7-1.7 GiB less memory, and slightly faster.",
+            choices=("fp32", "bf16"),
+            help="storage precision of the Adam moments. 'bf16' (stochastic "
+                 "rounding) halves optimizer memory: 56 B/splat at SH0, "
+                 "236 B at SH3."),
+    Setting("prune_blend_weight", "blend-weight prune floor", "perf", float,
+            about="Densify steps remove splats that barely show in any view (under "
+                  "this many pixels of blend weight): fewer splats, faster.",
+            default=ScheduleConfig.prune_blend_weight,
+            help="on densify ticks, prune splats whose blend weight (alpha*T "
+                 "summed over a view's pixels), averaged over the views they "
+                 "appeared in since the last tick, is below this many pixels. "
+                 "Such splats barely change any image. 0 (default) = off.",
+            minimum=0.0, maximum=50.0, speed=0.01, fmt="%.2f", note="0 = off"),
+    Setting("prune_blend_from", "blend-weight prune from iter", "perf", int,
+            about="Iteration where that pruning starts. 0.2 from 1900: 8% faster, "
+                  "same quality; 0.3 from 500: 29% faster, -0.2 dB.",
+            default=ScheduleConfig.prune_blend_from,
+            help="first densify tick that applies --prune-blend-weight. The "
+                 "tick right after an opacity reset is always skipped: the "
+                 "reset itself depresses every blend weight.",
+            minimum=0, maximum=200_000, speed=25),
+    Setting("splat_kernel", "splat kernel", "perf", str,
+            about="How a splat's footprint becomes opacity; the density kernels grow "
+                  "solid cores. opaque_core (power 3, onset 2): 9% faster, -0.3 dB.",
+            default=ShaderSpecialization.splat_kernel.value,
+            choices=tuple(k.value for k in SplatKernel),
+            help="how a splat's footprint G becomes alpha. 'gaussian' "
+                 "(default) = opacity * G. 'density' treats it as an optical "
+                 "depth: alpha = 1 - (1 - opacity)^G, the same peak alpha, but "
+                 "opaque splats grow fully opaque cores. 'log_density' = "
+                 "1 - exp(-exp(logit) * G), whose core grows faster with the "
+                 "logit. 'opaque_core' = log_density whose falloff power "
+                 "rises from 1 to --splat-profile-power as the splat turns "
+                 "opaque."),
+    Setting("splat_profile_power", "splat profile power", "perf", float,
+            about="Above 1, flattens each splat's top and sharpens its edge, "
+                  "shrinking its footprint.",
+            default=ShaderSpecialization.splat_profile_power,
+            help="radial falloff power p >= 1 of every splat kernel: "
+                 "G = exp(-m^p), m = half the squared Mahalanobis "
+                 "distance. 1 (default) = gaussian; > 1 flattens the top "
+                 "and steepens the edge, shrinking the footprint.",
+            minimum=1.0, maximum=16.0, speed=0.05, fmt="%.2f", note="1 = gaussian falloff"),
+    Setting("splat_profile_onset", "opaque-core onset", "perf", float,
+            about="How opaque a splat must become before opaque_core starts to "
+                  "flatten it; higher = later.",
+            default=ShaderSpecialization.splat_profile_onset,
+            help="opaque_core only: the power ramps with sigmoid(logit - "
+                 "onset), so a splat flattens only once its opacity logit "
+                 "passes the onset. 0 (default) = ramp with the opacity "
+                 "itself.",
+            minimum=-20.0, maximum=20.0, speed=0.05, fmt="%.2f", note="opaque_core only"),
     Setting("evaluation", "eval + final metrics", "eval", bool, default=True,
+            about="Score the model on every camera during and after training. Off "
+                  "finishes sooner; Export still works.",
             help="Run the passes that render every camera: the periodic eval "
                  "sweep (--eval-every, which lands on the LAST iteration whenever "
                  "it divides --iters and is most of the wait after training "
@@ -235,6 +323,7 @@ SETTINGS: tuple[Setting, ...] = (
                  "--render-all-every / --psnr-curve opt-ins.",
             note="off = no full-camera-set renders"),
     Setting("stream_every", "snapshot every N iters", "stream", int, default=10,
+            about="How often this viewer gets a fresh copy of the splats while training.",
             help="push a gaussian snapshot to the in-process viewer every "
                  "N iters. Now a zero-copy GPU->GPU blit, so a fine cadence "
                  "is cheap (was coarse when it required a GPU->CPU readback).",
@@ -320,8 +409,6 @@ class TrainingSetup:
     def apply_to(self, args: Any) -> list[str]:
         changes: list[str] = []
         for setting in SETTINGS:
-            if setting.launch_only:
-                continue
             new = self.get(setting.setting_name)
             old = getattr(args, setting.setting_name, None)
             if old != new:

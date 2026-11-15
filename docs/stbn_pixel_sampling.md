@@ -206,8 +206,7 @@ counting it would keep buckets alive whose every contribution is zero.
 gives a correct-but-slow configuration for free: mask on, compacted backward off
 — the backward keeps its exact full-pixel loop, reaches the unsampled pixels,
 finds zeros and adds nothing. `tests/test_stbn_gradients.py` compares the two
-head-to-head, which is the correctness gate for the compaction. Hub runs also
-land here, because shader defines are fixed before the panel exists.
+head-to-head, which is the correctness gate for the compaction.
 
 ---
 

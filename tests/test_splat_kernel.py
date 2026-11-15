@@ -17,7 +17,7 @@ import slangpy as spy
 from _pipeline_testkit import TestPipeline
 from test_gradients import _scene, _target, finite_difference_mismatches
 
-from trainer.backend.compute.device import SHADERS_DIR, create_device
+from trainer.backend.compute.device import SHADERS_DIR, create_device, create_slang_session
 from trainer.config.config import LossConfig
 from trainer.config.config_types import SplatKernel
 from trainer.data.dataset import simple_camera
@@ -157,12 +157,11 @@ def test_gradients_finite_difference(backend: str, kernel: SplatKernel,
     assert not mismatches, "\n".join(mismatches)
 
 
-def _early_out_fraction(backend: str, kernel: SplatKernel) -> float:
-    """Share of pixels a stack of ten nearly opaque splats turns opaque
-    (transmittance under the forward's 1e-4 early-out)."""
+def _opaque_stack(device, **pipeline_kwargs) -> np.ndarray:
+    """A render of ten nearly opaque splats stacked along the view axis."""
     count = 10
-    pipeline = TestPipeline(device=_device(backend, kernel), width=16, height=16,
-                            max_splats=16)
+    pipeline = TestPipeline(device=device, width=16, height=16, max_splats=16,
+                            **pipeline_kwargs)
     pipeline.set_primitive_from_numpy(
         means=np.stack([np.zeros(count), np.zeros(count),
                         np.linspace(2.0, 3.0, count)], axis=1).astype(np.float32),
@@ -171,7 +170,14 @@ def _early_out_fraction(backend: str, kernel: SplatKernel) -> float:
         opacities=np.full(count, 0.99, np.float32),
         color_logits=np.zeros((count, 3), np.float32))
     pipeline.render(_camera(16))
-    return float(np.mean(pipeline.read_output_image()[..., 3] > 1.0 - 1e-4))
+    return pipeline.read_output_image()
+
+
+def _early_out_fraction(backend: str, kernel: SplatKernel) -> float:
+    """Share of pixels the opaque stack turns opaque (transmittance under the
+    forward's 1e-4 early-out)."""
+    image = _opaque_stack(_device(backend, kernel))
+    return float(np.mean(image[..., 3] > 1.0 - 1e-4))
 
 
 @pytest.mark.parametrize("backend", BACKENDS)
@@ -179,3 +185,16 @@ def test_density_grows_opaque_cores(backend: str) -> None:
     gaussian = _early_out_fraction(backend, SplatKernel.GAUSSIAN)
     density = _early_out_fraction(backend, SplatKernel.DENSITY)
     assert density > 1.5 * gaussian > 0.0, (density, gaussian)
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_a_run_session_compiles_like_a_device_with_its_defines(backend: str) -> None:
+    """A hub run picks its kernel in its own Slang session on the hub's device."""
+    spec = ShaderSpecialization(splat_kernel=SplatKernel.OPAQUE_CORE, splat_profile_power=3.0)
+    hub_device = _device(backend, SplatKernel.GAUSSIAN)
+    session = create_slang_session(hub_device, shader_defines(spec))
+
+    in_session = _opaque_stack(hub_device, slang_session=session)
+    np.testing.assert_array_equal(
+        in_session, _opaque_stack(_device(backend, SplatKernel.OPAQUE_CORE, 3.0)))
+    assert not np.array_equal(in_session, _opaque_stack(hub_device))

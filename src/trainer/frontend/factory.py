@@ -1,6 +1,6 @@
 # Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-"""Builds a run's GPU device, queue lock, and training pipeline from its config."""
+"""Builds a run's GPU device, queue lock, Slang session and training pipeline from its config."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from typing import Any
 
 import slangpy as spy
 
-from trainer.backend.compute.device import create_device
+from trainer.backend.compute.device import create_device, create_slang_session
 from trainer.backend.render.pipeline import TrainingPipeline
 from trainer.backend.render.stbn_table import pixels_per_tile
 from trainer.config.config import ShaderSpecialization
@@ -66,9 +66,27 @@ def create_gpu_queue_lock(*, viewer_enabled: bool) -> Any:
     return threading.RLock() if viewer_enabled else None
 
 
+class SlangSessions:
+    """One Slang session per shader specialization, so a hub run can change compile-time
+    settings on the hub's one device. The device's own session serves the defines it has."""
+
+    def __init__(self, device: spy.Device) -> None:
+        self._device = device
+        own = device.slang_session.desc.compiler_options.defines
+        self._sessions = {frozenset(own.items()): device.slang_session}
+
+    def session_for(self, spec: ShaderSpecialization) -> spy.SlangSession:
+        defines = shader_defines(spec) or {}
+        key = frozenset(defines.items())
+        if key not in self._sessions:
+            self._sessions[key] = create_slang_session(self._device, defines)
+        return self._sessions[key]
+
+
 def create_pipeline(*, device: spy.Device, gpu_lock: Any, scene: SceneContext,
                     max_splats: int, config: RunConfig,
-                    initial_state: dict | None = None) -> TrainingPipeline:
+                    initial_state: dict | None = None,
+                    slang_session: spy.SlangSession | None = None) -> TrainingPipeline:
     return TrainingPipeline(
         device=device,
         width=scene.width,
@@ -82,4 +100,5 @@ def create_pipeline(*, device: spy.Device, gpu_lock: Any, scene: SceneContext,
         stbn_config=config.stbn,
         initial_state=initial_state,
         densify_mode=config.densify_mode,
+        slang_session=slang_session,
     )

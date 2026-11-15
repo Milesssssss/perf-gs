@@ -153,3 +153,39 @@ def test_bf16_training_run_with_sh_and_densification(backend, tmp_path, monkeypa
     finally:
         app.runtime.artifacts.close_all()
         app.device.close()
+
+
+def test_a_hub_run_turns_bf16_on_after_the_device_exists(backend, tmp_path, monkeypatch) -> None:
+    """The hub creates its device before the panel is read; a run switched to bf16 there
+    must still get the bf16 layout (from its own Slang session) and train."""
+    monkeypatch.chdir(tmp_path)
+    scene = write_colmap_scene(tmp_path / "scene", views=[
+        (f"{i}.png", 16, 16, 20.0) for i in range(4)])
+    args = build_parser().parse_args([
+        "--scene", str(scene), "--backend", backend, "--no-viewer", "--iters", "4",
+        "--max-splats", "64", "--width", "16", "--height", "16",
+        "--eval-holdout-stride", "2", "--no-evaluation", "--no-write-ground-truths",
+        "--preview-every", "0",
+    ])
+    monkeypatch.setattr("trainer.frontend.app.available_bytes", lambda *_: None)
+    monkeypatch.setattr("trainer.frontend.factory.TrainingPipeline",
+                        lambda **kwargs: TrainingPipeline(max_sort_pairs=512, **kwargs))
+    create_device_then = TrainingApplication._create_device
+
+    def device_then_panel(app) -> None:
+        create_device_then(app)
+        app.args.adam_moments = "bf16"     # the panel's setup lands after the device exists
+
+    monkeypatch.setattr(TrainingApplication, "_create_device", device_then_panel)
+    app = TrainingApplication(args)
+    app.prepare_training_context()
+    try:
+        assert app.pipeline.slang_session is not app.device.slang_session
+        # bf16 packs each scalar's m and v into one word: 14 words a splat, not 28.
+        assert _words(app.pipeline.buffers.adam.state).size == app.pipeline.max_splats * 14
+        app.build_training_loop().launch_training_loop()
+        app.pipeline.runtime.wait_for_idle()
+        assert np.isfinite(_words(app.pipeline.buffers.primitive.values).view(np.float32)).all()
+    finally:
+        app.runtime.artifacts.close_all()
+        app.device.close()

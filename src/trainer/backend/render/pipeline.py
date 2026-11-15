@@ -44,9 +44,11 @@ from trainer.config.config_types import DensificationMode
 from trainer.data.dataset import Camera
 
 
-def _module_for_reflection(device: spy.Device) -> spy.Module:
-    """The shared-layout module whose struct types size the buffers."""
-    return spy.Module.load_from_file(device, str(SHADERS_DIR / "common" / "types.slang"))
+def _module_for_reflection(device: spy.Device,
+                           session: spy.SlangSession | None = None) -> spy.Module:
+    """The shared-layout module whose struct types size the buffers (bf16 Adam changes them)."""
+    session = device.slang_session if session is None else session
+    return spy.Module(session.load_module(str(SHADERS_DIR / "common" / "types.slang")))
 
 
 def default_sort_pairs(max_splats: int, viewer_only: bool = False) -> int:
@@ -71,7 +73,8 @@ def estimate_pipeline_bytes(module: spy.Module, *, max_splats: int, width: int,
 class TrainingPipeline:
     """Owns the GPU resources and components of one scene at one resolution.
 
-    ``viewer_only`` builds just the forward path, for the live viewer.
+    ``viewer_only`` builds just the forward path, for the live viewer. ``slang_session``
+    carries the shader specialization (default: the device's own).
     """
 
     def __init__(
@@ -92,18 +95,20 @@ class TrainingPipeline:
         use_persplat_backward: bool = True,
         use_flat_bucket_backward: bool = True,
         densify_mode: DensificationMode = DensificationMode.SIMPLE,
+        slang_session: spy.SlangSession | None = None,
     ) -> None:
         self.device = device
+        self.slang_session = device.slang_session if slang_session is None else slang_session
         self.gpu_lock = gpu_lock if gpu_lock is not None else contextlib.nullcontext()
         self.runtime = GpuRuntime(device, self.gpu_lock)
         self.commands = CommandRecorder(self.runtime)
-        self.kernels = KernelLibrary(device)
+        self.kernels = KernelLibrary(device, self.slang_session)
         self.width = width
         self.height = height
         self.max_splats = max_splats
         self.max_sort_pairs = max_sort_pairs or default_sort_pairs(max_splats, viewer_only)
         self.viewer_only = viewer_only
-        self.shared_data_module = _module_for_reflection(device)
+        self.shared_data_module = _module_for_reflection(device, self.slang_session)
 
         raster_config = raster_config or RasterConfig()
         if viewer_only and raster_config.cluster_cull:
@@ -271,7 +276,7 @@ class TrainingPipeline:
 
     def on_hot_reload(self) -> None:
         """Refresh the reflection module after ``device.reload_all_programs()``."""
-        self.shared_data_module = _module_for_reflection(self.device)
+        self.shared_data_module = _module_for_reflection(self.device, self.slang_session)
 
     def record_forward(self, camera: Camera, contextual: IterationContextualVariables) -> None:
         self.rasterizer.record(camera, contextual)

@@ -25,7 +25,6 @@ def test_it_is_one_shared_knob_on_both_surfaces() -> None:
     setting = SETTINGS_MAP["evaluation"]
     assert setting.kind == BOOL and setting.default is False
     assert setting in group_settings("eval")          # the panel renders it
-    assert not setting.launch_only                    # ... and it is editable
     args = build_parser().parse_args([])
     assert args.evaluation is False
     assert build_parser().parse_args(["--evaluation"]).evaluation is True

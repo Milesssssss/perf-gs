@@ -484,14 +484,6 @@ def test_setup_round_trips_through_the_real_cli_args():
     assert changes == ["iters: 7,000 -> 9,000", "lambda_ssim: 0.200 -> 0.500"]
 
 
-def test_apply_to_never_writes_a_launch_only_setting():
-    args = build_parser().parse_args(["--backward-pixel-stride", "4"])
-    setup = TrainingSetup.from_args(args)
-    setup.set("backward_pixel_stride", 16)     # e.g. a stale value in the store
-    assert setup.apply_to(args) == []
-    assert args.backward_pixel_stride == 4     # the value compiled into the shader
-
-
 def test_setting_coerce_clamps_instead_of_rejecting():
     """The panel's drag fields let you type a number; out of range must clamp,
     never raise on the render thread."""

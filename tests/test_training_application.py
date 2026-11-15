@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import numpy as np
 from PIL import Image
 
+from trainer.backend.compute.device import create_device
 from trainer.config.config import (
     AppearanceConfig,
     LossConfig,
@@ -33,7 +34,12 @@ from trainer.frontend.viewer.session import (
 from trainer.data.targets import TargetDataset
 from trainer.frontend.app import TrainingApplication, TrainingLoop
 from trainer.frontend.cli import build_parser
-from trainer.frontend.factory import create_pipeline, create_training_device, shader_defines
+from trainer.frontend.factory import (
+    SlangSessions,
+    create_pipeline,
+    create_training_device,
+    shader_defines,
+)
 
 
 def _parse(*flags: str):
@@ -63,11 +69,20 @@ def test_specialization_compiles_hardness_away_only_when_target_le_one() -> None
     assert shader_defines(off) is None
 
 
-def test_hub_never_compiles_the_hardness_away() -> None:
-    """The hub creates its device before the TRAINING SETUP panel exists, so
-    specializing on the launch value would pin a panel-set k > 1 to alpha-over."""
-    hub = shader_specialization(_parse("--extinction-hardness", "1", "--hub"))
-    assert shader_defines(hub) is None
+def test_a_run_compiles_in_the_session_of_its_own_specialization() -> None:
+    """The hub's device predates the panel, so a run with other compile-time settings gets its
+    own Slang session, once per specialization; the device's session serves its own defines."""
+    launch = shader_specialization(_parse("--hub"))
+    device = create_device(defines=shader_defines(launch))
+    sessions = SlangSessions(device)
+    assert sessions.session_for(launch) is device.slang_session
+
+    opaque = shader_specialization(_parse("--hub", "--splat-kernel", "opaque_core"))
+    session = sessions.session_for(opaque)
+    assert session is not device.slang_session
+    assert session.desc.compiler_options.defines == shader_defines(opaque)
+    assert sessions.session_for(opaque) is session
+    device.close()
 
 
 def test_position_lr_horizon_follows_iters_unless_overridden() -> None:

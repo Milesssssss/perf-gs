@@ -67,8 +67,8 @@ class RegularizationConfig:
 class StbnConfig:
     """Spatiotemporal-blue-noise pixel subsampling policy (off at 1.0).
 
-    ``backward_compacted`` records whether STBN_ENABLED was compiled in (defines are fixed
-    at device creation); when off, the loss still zeroes unsampled pixels.
+    ``backward_compacted`` records whether STBN_ENABLED was compiled in; when off, the
+    loss still zeroes unsampled pixels.
     """
 
     # Steady-state fraction rho of pixels each backward supervises.
@@ -136,11 +136,7 @@ class AdamLRs:
 
 @dataclass(frozen=True)
 class ShaderSpecialization:
-    """Compile-time shader policy, fixed when the device is created.
-
-    The hub's device predates the run's settings, so hub runs keep the runtime
-    compositor and the non-compacted STBN backward.
-    """
+    """Compile-time shader policy: the device's defines, or a hub run's own Slang session."""
 
     backward_pixel_stride: int = 1
     # Alpha-over-only compositor when the run's hardness stays <= 1.

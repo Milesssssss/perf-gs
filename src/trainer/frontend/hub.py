@@ -321,8 +321,8 @@ class TrainingHub:
 
     def _apply_hub_setup(self, setup) -> None:
         """Fold the panel's training setup into this run's args; call with rendering suspended.
-        Also rebuilds the viewer's pipeline, whose SH buffers and Mip raster path are fixed at
-        construction."""
+        Also rebuilds the viewer's pipeline, whose SH buffers, Mip raster path and compiled
+        shader specialization are fixed at construction."""
         state = self.app._viewer.state
         for change in setup.apply_to(self.app.args):
             state.log(f"[setup] {change}")
@@ -331,6 +331,7 @@ class TrainingHub:
             mip_enabled=self.app.args.mip_splatting,
             mip_kernel_size=(self.app.args.mip_kernel_size
                              if self.app.args.mip_splatting else 0.3),
+            slang_session=self.app.slang_session(),
         )
 
     def _hub_setup_tools(self, tools) -> None:
