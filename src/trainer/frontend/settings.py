@@ -18,7 +18,7 @@ from trainer.config.config import (
     ShaderSpecialization,
     StbnConfig,
 )
-from trainer.config.config_types import DensificationMode, SplatKernel
+from trainer.config.config_types import DensificationMode, LearningRateRecipe, SplatKernel
 
 # Widget kinds, derived from a Setting's own declaration (see :attr:`Setting.kind`).
 INT = "int"
@@ -106,12 +106,43 @@ class Setting:
         return f"{int(value):,}" if self.kind == INT else str(value)
 
 
+PRESET = "preset"
+# Each preset's settings; explicit flags (or later panel edits) still override them.
+PRESETS: dict[str, dict[str, Any]] = {
+    "ultrafast": {"adam_moments": "bf16", "prune_blend_weight": 0.3, "prune_blend_from": 500,
+                  "stbn_pixel_fraction": 0.5, "splat_kernel": SplatKernel.OPAQUE_CORE.value,
+                  "splat_profile_power": 3.0, "splat_profile_onset": 2.0},
+    "perf": {"adam_moments": "bf16", "prune_blend_from": 1000},
+    "balanced": {},
+    "quality": {"lr_recipe": LearningRateRecipe.QUALITY.value},
+}
+
+
 SETTINGS: tuple[Setting, ...] = (
+    Setting(PRESET, "preset", "perf", str, default="balanced", choices=tuple(PRESETS),
+            about="ultrafast: every speed knob, ~40% faster for -0.4 to -0.8 dB. perf: ~20% "
+                  "faster for under 0.1 dB. quality: +0.2 to +0.5 dB for 11-22% more time.",
+            help="bundle of settings for the speed/quality trade-off: 'ultrafast' = "
+                 "--adam-moments bf16 --prune-blend-weight 0.3 --prune-blend-from 500 "
+                 "--stbn-pixel-fraction 0.5 --splat-kernel opaque_core "
+                 "--splat-profile-power 3 --splat-profile-onset 2, 'perf' = "
+                 "--adam-moments bf16 --prune-blend-from 1000, 'quality' = "
+                 "--lr-recipe quality, 'balanced' = the defaults. Explicit flags "
+                 "override the preset."),
     # The mean-LR decay horizon is deliberately not a setting: it follows --iters.
     Setting("iters", "iterations", "schedule", int, default=3000,
             about="Training steps. More steps reach higher quality but take longer.",
             minimum=100, maximum=200_000, speed=25,
             note="the LR decay horizon follows this"),
+    Setting("lr_recipe", "learning-rate recipe", "schedule", str,
+            about="quality: scale and rotation LRs start 3x higher and decay to 0.5x, "
+                  "opacity LR 0.7x. +0.2 to +0.5 dB for 11-22% more training time.",
+            default=LearningRateRecipe.DEFAULT.value,
+            choices=tuple(r.value for r in LearningRateRecipe),
+            help="per-parameter learning-rate plan. 'quality' starts the scale and "
+                 "rotation LRs 3x higher, decays them log-linearly to 0.5x by the "
+                 "last step and lowers the opacity LR to 0.7x: sharper results for "
+                 "11-22%% more training time."),
     Setting("densify_mode", "strategy", "densify", str,
             about="How splats are added and removed: simple = 3DGS clone/split, "
                   "structure_aware = SAD-GS splits along image structure, none = fixed set.",
@@ -262,21 +293,23 @@ SETTINGS: tuple[Setting, ...] = (
                  "236 B at SH3."),
     Setting("prune_blend_weight", "blend-weight prune floor", "perf", float,
             about="Densify steps remove splats that barely show in any view (under "
-                  "this many pixels of blend weight): fewer splats, faster.",
+                  "this many pixels of blend weight per megapixel): fewer splats, faster.",
             default=ScheduleConfig.prune_blend_weight,
             help="on densify ticks, prune splats whose blend weight (alpha*T "
                  "summed over a view's pixels), averaged over the views they "
-                 "appeared in since the last tick, is below this many pixels. "
-                 "Such splats barely change any image. 0 (default) = off.",
+                 "appeared in since the last tick, is below this many pixels "
+                 "per megapixel of the training image. Such splats barely change "
+                 "any image. 0 = off.",
             minimum=0.0, maximum=50.0, speed=0.01, fmt="%.2f", note="0 = off"),
     Setting("prune_blend_from", "blend-weight prune from iter", "perf", int,
-            about="Iteration where that pruning starts. 0.2 from 1900: 8% faster, "
-                  "same quality; 0.3 from 500: 29% faster, -0.2 dB.",
+            about="Iteration where that pruning starts; 0 = one pass at the last densify "
+                  "step (12% faster, same quality). From 1000: 27% faster, -0.04 dB.",
             default=ScheduleConfig.prune_blend_from,
-            help="first densify tick that applies --prune-blend-weight. The "
+            help="first densify tick that applies --prune-blend-weight; 0 "
+                 "(default) = only the last densify tick (--densify-to). The "
                  "tick right after an opacity reset is always skipped: the "
                  "reset itself depresses every blend weight.",
-            minimum=0, maximum=200_000, speed=25),
+            minimum=0, maximum=200_000, speed=25, note="0 = last densify step"),
     Setting("splat_kernel", "splat kernel", "perf", str,
             about="How a splat's footprint becomes opacity; the density kernels grow "
                   "solid cores. opaque_core (power 3, onset 2): 9% faster, -0.3 dB.",
@@ -331,6 +364,12 @@ SETTINGS: tuple[Setting, ...] = (
 )
 
 SETTINGS_MAP: dict[str, Setting] = {s.setting_name: s for s in SETTINGS}
+
+
+def preset_values(name: str) -> dict[str, Any]:
+    """Every setting any preset touches: this preset's value, else the setting's default."""
+    touched = {dest for bundle in PRESETS.values() for dest in bundle}
+    return {dest: SETTINGS_MAP[dest].default for dest in touched} | PRESETS[name]
 
 
 def group_settings(group: str) -> list[Setting]:
@@ -398,9 +437,13 @@ class TrainingSetup:
         return SETTINGS_MAP[dest].choice_index(self.get(dest))
 
     def set_index(self, dest: str, index: int) -> Any:
-        """Store a CHOICE setting from a combo index."""
+        """Store a CHOICE setting from a combo index; choosing a preset also applies its settings."""
         choices = SETTINGS_MAP[dest].choices
-        return self.set(dest, choices[int(index) % len(choices)])
+        value = self.set(dest, choices[int(index) % len(choices)])
+        if dest == PRESET:
+            for key, preset_value in preset_values(value).items():
+                self.set(key, preset_value)
+        return value
 
     def values(self) -> dict[str, Any]:
         with self._lock:

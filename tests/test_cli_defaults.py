@@ -26,7 +26,9 @@ from trainer.frontend.cli import build_parser
 # replaced by the single --densify-mode choice (default "structure_aware").
 EXPECTED_DEFAULTS = {
     "scene": "datasets/360_v2/bicycle",
+    "preset": "balanced",
     "iters": 3000,
+    "lr_recipe": "default",
     # 0 == follow --iters (app._resolve_position_lr_max_steps). It used to be a
     # hard 3000 that silently disagreed with any other --iters.
     "position_lr_max_steps": 0,
@@ -57,7 +59,7 @@ EXPECTED_DEFAULTS = {
     "t_opacity": 0.005,
     "t_big_scale": 0.1,
     "prune_scale3d": 0.1,
-    "prune_blend_weight": 0.0,
+    "prune_blend_weight": 0.2,
     "prune_blend_from": 0,
     "reset_every": 1200,
     "opacity_reg": 0.0,

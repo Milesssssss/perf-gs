@@ -6,6 +6,7 @@ also offers are declared once as shared ``settings.SETTINGS`` rows and mounted v
 from __future__ import annotations
 
 import argparse
+from collections.abc import Sequence
 
 from trainer.config.config import (
     DensifyConfig,
@@ -15,16 +16,26 @@ from trainer.config.config import (
     StbnConfig,
     StructureConfig,
 )
-from trainer.frontend.settings import SETTINGS_MAP
+from trainer.frontend.settings import PRESET, SETTINGS_MAP, preset_values
 
 
 def _shared(parser: argparse.ArgumentParser, dest: str) -> None:
     SETTINGS_MAP[dest].add_to(parser)
 
+
+def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
+    """Parse with the chosen --preset's settings as defaults, so explicit flags still win."""
+    parser = build_parser()
+    preset = getattr(parser.parse_known_args(argv)[0], PRESET)
+    parser.set_defaults(**preset_values(preset))
+    return parser.parse_args(argv)
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("--scene", type=str, default="datasets/360_v2/bicycle")
+    _shared(parser, PRESET)
     _shared(parser, "iters")
+    _shared(parser, "lr_recipe")
     parser.add_argument("--position-lr-max-steps", type=int, default=0,
                     help="horizon for the exponential mean-LR decay (3DGS "
                          "position_lr_max_steps). 0 (the default) = FOLLOW --iters, "

@@ -2,13 +2,14 @@
 
 """Regenerate the README's Results figures and tables from the benchmark runs (missing runs are left blank).
 
-Ours: grid below (dense fp32 adds --run-report --eval-lpips; readme_conv adds --run-report --save-test-renders --eval-iters 100 200 ... 3000); SADGS: run_counterparts.sh.
+Ours: grid below over all 13 scenes, each at its 3DGS eval resolution (dense fp32 adds --run-report --eval-lpips; readme_conv adds --run-report --save-test-renders --eval-iters 100 200 ... 3000); SADGS: run_counterparts.sh.
     python scripts/running/eval_sweep.py --axis stbn-pixel-fraction --values 1.0,0.5,0.25,0.1,0.02 --name readme_sh0_fp32 --no-plot --extra --sh-degree 0 --adam-moments fp32 --eval-every 0 --preview-every 0 --no-write-ground-truths
 """
 from __future__ import annotations
 
 import csv
 import json
+import re
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -37,6 +38,8 @@ FRACTIONS = ("1.0", "0.5", "0.25", "0.1", "0.02")
 DENSE = "1.0"
 SH_DEGREES = (0, 3)
 PRECISIONS = ("fp32", "bf16")
+# --preset values -> their Adam moments; balanced is the default, so its runs are the dense fp32 grid.
+PRESETS = {"ultrafast": "bf16", "perf": "bf16", "balanced": "fp32", "quality": "fp32"}
 CONVERGENCE_SCENES = ("bicycle", "kitchen", "train", "drjohnson")
 QUALITATIVE_SCENE = "bicycle"
 # The whole bicycle in that view, in render pixels (left, top, right, bottom).
@@ -61,6 +64,8 @@ class Result:
     seconds: float | None
     splats: int | None
     vram_gib: float | None
+    # Image downsample factor the run trained and was evaluated at.
+    downsample: int | None
 
 
 def _read_json(path: Path) -> dict | None:
@@ -75,20 +80,32 @@ def _percent(fraction: str) -> str:
     return f"{float(fraction) * 100:g}%"
 
 
+def _sadgs_downsample(run: Path) -> int | None:
+    """N of the images_N folder a SADGS run trained on, from its saved arguments."""
+    args = run / "cfg_args"
+    match = re.search(r"images='images_(\d+)'", args.read_text()) if args.is_file() else None
+    return int(match.group(1)) if match else None
+
+
 def run_dir(name: str, scene: str, fraction: str) -> Path:
     """Run directory eval_sweep.py gives a cell (its value tag replaces '.')."""
     return TRAIN / f"sweep_{name}_{scene}_{fraction.replace('.', 'p')}"
 
 
 def load_ours(sh: int, precision: str, scene: str, fraction: str) -> Result | None:
-    run = run_dir(f"readme_sh{sh}_{precision}", scene, fraction)
+    return load_run(run_dir(f"readme_sh{sh}_{precision}", scene, fraction))
+
+
+def load_run(run: Path) -> Result | None:
     test = _read_json(run / "test_psnr.json")
     if test is None:
         return None
     quality = (_read_json(run / "run_report.json") or {}).get("quality", {})
+    cli_args = (_read_json(run / "config.json") or {}).get("cli_args", {})
     return Result(psnr=test["psnr_srgb"], ssim=quality.get("ssim_srgb"),
                   lpips=quality.get("lpips"), seconds=test["train_wall_s"],
-                  splats=test["n_gaussians"], vram_gib=_gib(test.get("vram_usage_bytes")))
+                  splats=test["n_gaussians"], vram_gib=_gib(test.get("vram_usage_bytes")),
+                  downsample=cli_args.get("downsample"))
 
 
 def load_sadgs(sh: int, scene: str) -> Result | None:
@@ -97,20 +114,26 @@ def load_sadgs(sh: int, scene: str) -> Result | None:
     if metrics is None:
         return None
     timing = _read_json(root / "timing.json") or {}
+    # Reserving more than the GPU holds pages into host memory, so the loop time is not comparable.
+    paged = timing.get("peak_reserved_bytes", 0) > timing.get("gpu_total_bytes", float("inf"))
     return Result(psnr=metrics["PSNR"], ssim=metrics["SSIM"], lpips=metrics["LPIPS"],
-                  seconds=timing.get("loop_wall_s"), splats=timing.get("num_gaussians"),
-                  vram_gib=_gib(timing.get("peak_reserved_bytes")))
+                  seconds=None if paged else timing.get("loop_wall_s"),
+                  splats=timing.get("num_gaussians"),
+                  vram_gib=_gib(timing.get("peak_reserved_bytes")),
+                  downsample=_sadgs_downsample(root))
 
 
 def load_sadgs_reference(scene: str) -> Result | None:
     root = REPO / "outputs"
-    metrics = (_read_json(root / f"SADGS_ref_sh0_{scene}" / "results.json") or {}).get("ours_3000")
+    run = root / f"SADGS_ref_sh0_{scene}"
+    metrics = (_read_json(run / "results.json") or {}).get("ours_3000")
     if metrics is None:
         return None
     timing = _read_json(root / "sadgs_timing" / scene / "timing.json") or {}
     # Measured on another GPU, so only quality and splat count are comparable.
     return Result(psnr=metrics["PSNR"], ssim=metrics["SSIM"], lpips=metrics["LPIPS"],
-                  seconds=None, splats=timing.get("num_gaussians"), vram_gib=None)
+                  seconds=None, splats=timing.get("num_gaussians"), vram_gib=None,
+                  downsample=_sadgs_downsample(run))
 
 
 def load_curve(scene: str, fraction: str) -> list[dict]:
@@ -123,9 +146,10 @@ def load_curve(scene: str, fraction: str) -> list[dict]:
 
 @dataclass
 class Grid:
-    """Every loaded result, keyed by (sh, precision, scene, fraction) for ours,
-    (sh, scene) for the same-GPU SADGS runs and scene for the SADGS SH0 reference."""
+    """Every loaded result, keyed by (sh, precision, scene, fraction) for ours, (sh, preset, scene)
+    for the presets, (sh, scene) for the same-GPU SADGS runs and scene for the SADGS SH0 reference."""
     ours: dict[tuple[int, str, str, str], Result]
+    presets: dict[tuple[int, str, str], Result]
     sadgs: dict[tuple[int, str], Result]
     reference: dict[str, Result]
 
@@ -139,11 +163,19 @@ class Grid:
                         result = load_ours(sh, precision, scene, fraction)
                         if result is not None:
                             ours[(sh, precision, scene, fraction)] = result
+        presets = {}
+        for sh in SH_DEGREES:
+            for preset in PRESETS:
+                for scene in SCENES:
+                    result = (ours.get((sh, "fp32", scene, DENSE)) if preset == "balanced"
+                              else load_run(run_dir(f"readme_presets_sh{sh}", scene, preset)))
+                    if result is not None:
+                        presets[(sh, preset, scene)] = result
         sadgs = {(sh, scene): result for sh in SH_DEGREES for scene in SCENES
                  if (result := load_sadgs(sh, scene)) is not None}
         reference = {scene: result for scene in SCENES
                      if (result := load_sadgs_reference(scene)) is not None}
-        return cls(ours, sadgs, reference)
+        return cls(ours, presets, sadgs, reference)
 
     def dense(self, sh: int, scene: str, precision: str = "fp32") -> Result | None:
         return self.ours.get((sh, precision, scene, DENSE))
@@ -409,6 +441,24 @@ def precision_table(grid: Grid) -> str:
                    "Time (seconds)", "VRAM (GiB)"], rows)
 
 
+def preset_table(grid: Grid) -> str:
+    """Per SH degree and preset: each dataset's PSNR and time, and LPIPS over all scenes."""
+    rows = []
+    for sh in SH_DEGREES:
+        for preset in PRESETS:
+            row = [f"SH{sh}", preset]
+            for scenes in DATASETS.values():
+                runs = [grid.presets.get((sh, preset, s)) for s in scenes]
+                row += [_cell(mean_of(runs, "psnr"), "{:.2f}"),
+                        _cell(mean_of(runs, "seconds"), "{:.1f}")]
+            every = [grid.presets.get((sh, preset, s)) for s in SCENES]
+            rows.append(row + [_cell(mean_of(every, "lpips"), "{:.3f}")])
+    header = ["SH", "Preset"]
+    for short in ("M360", "T&T", "DB"):
+        header += [f"{short} PSNR", f"{short} time (seconds)"]
+    return _table(header + ["LPIPS"], rows)
+
+
 def precision_spread(grid: Grid) -> str:
     """Mean and max |bf16 - fp32| PSNR gap over every paired cell of the grid."""
     gaps = [abs(grid.ours[(sh, "bf16", s, f)].psnr - grid.ours[(sh, "fp32", s, f)].psnr)
@@ -433,6 +483,10 @@ def write_summary_csv(grid: Grid, out: Path) -> None:
         for (sh, precision, scene, fraction), result in sorted(grid.ours.items()):
             writer.writerow(["ours", "RTX 4080", sh, precision, scene, fraction,
                              *_csv_values(result)])
+        for (sh, preset, scene), result in sorted(grid.presets.items()):
+            if preset != "balanced":  # already written above as the dense fp32 cell
+                writer.writerow([f"ours --preset {preset}", "RTX 4080", sh, PRESETS[preset],
+                                 scene, DENSE, *_csv_values(result)])
         for (sh, scene), result in sorted(grid.sadgs.items()):
             writer.writerow(["sadgs", "RTX 4080", sh, "fp32", scene, DENSE, *_csv_values(result)])
         for scene, result in sorted(grid.reference.items()):
@@ -463,6 +517,7 @@ def main() -> int:
         "## STBN SH3", stbn_table(grid, 3),
         "## Adam moment precision", precision_table(grid),
         f"bf16 vs fp32 over the grid: {precision_spread(grid)}",
+        "## Presets", preset_table(grid),
     ]
     (REPORT / "tables.md").write_text("\n\n".join(tables) + "\n", encoding="utf-8")
     print(f"{len(grid.ours)} runs, {len(grid.sadgs)} SADGS runs -> {REPORT}")

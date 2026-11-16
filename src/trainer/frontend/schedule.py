@@ -5,7 +5,7 @@ events fire at iteration ``it``, with no GPU or I/O so its invariants are unit-t
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 
@@ -75,7 +75,7 @@ class TrainingSchedule:
         mip_periodic = (c.mip_enabled and it > c.densify_to
                         and it % 100 == 0 and it < c.iterations - 100)
         blend_prune = (do_densify and c.prune_blend_weight > 0.0
-                       and it >= c.prune_blend_from
+                       and it >= c.blend_prune_start
                        and not self._reset_in_window(it))
 
         return IterationEvents(
@@ -104,16 +104,33 @@ class TrainingSchedule:
         return (last_reset > 0 and last_reset >= it - c.densify_every
                 and c.densify_from <= last_reset <= c.densify_to)
 
-class MeanLearningRateSchedule:
+class LearningRateSchedule:
+    """Each step's Adam learning rates. The mean LR decays log-linearly to 1% over ``mean_steps``
+    (in scene-extent units); scale and rotation go log-linearly from ``scale_rotation_decay[0]``
+    to ``[1]`` times their base over the run."""
 
-    def __init__(self, lr_init: float, lr_final: float, max_steps: int) -> None:
-        self._lr_init = lr_init
-        self._lr_final = lr_final
-        self._max_steps = max_steps
+    def __init__(self, base: AdamLRs, extent: float, mean_steps: int, iterations: int,
+                 scale_rotation_decay: tuple[float, float]) -> None:
+        self._base = base
+        self._mean_init = base.mean * extent
+        self._mean_final = base.mean * 1e-2 * extent
+        self._mean_steps = mean_steps
+        self._iterations = iterations
+        self._scale_rotation_decay = scale_rotation_decay
 
-    def at(self, step: int) -> float:
-        t = min(max(step / max(self._max_steps, 1), 0.0), 1.0)
-        return float(np.exp(np.log(self._lr_init) * (1.0 - t) + np.log(self._lr_final) * t))
+    def at(self, step: int) -> AdamLRs:
+        first, last = self._scale_rotation_decay
+        factor = _log_lerp(first, last, step, self._iterations)
+        return replace(self._base,
+                       mean=_log_lerp(self._mean_init, self._mean_final, step, self._mean_steps),
+                       scale=self._base.scale * factor,
+                       rot=self._base.rot * factor)
+
+
+def _log_lerp(start: float, end: float, step: int, steps: int) -> float:
+    """``start`` at step 0 to ``end`` at ``steps``, log-linearly; clamped outside."""
+    t = min(max(step / max(steps, 1), 0.0), 1.0)
+    return float(np.exp(np.log(start) * (1.0 - t) + np.log(end) * t))
 
 
 class ExtinctionHardnessSchedule:

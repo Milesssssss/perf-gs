@@ -133,9 +133,11 @@ def test_events_carry_iteration() -> None:
 
 def test_blend_prune_ticks() -> None:
     """Densify ticks from --prune-blend-from on, minus the one whose window the
-    1200 opacity reset depressed; never when the threshold is 0."""
-    assert not any(_schedule(prune_blend_from=100).events_at(it).blend_prune
+    1200 opacity reset depressed; only the last densify tick by default; never
+    when the threshold is 0."""
+    assert not any(_schedule(prune_blend_weight=0.0, prune_blend_from=100).events_at(it).blend_prune
                    for it in range(1, 3001))
+    assert [it for it in range(1, 3001) if _schedule().events_at(it).blend_prune] == [1900]
     schedule = _schedule(prune_blend_weight=0.5, prune_blend_from=1000)
     ticks = [it for it in range(1, 3001) if schedule.events_at(it).blend_prune]
     assert ticks == [1000, 1100, 1400, 1500, 1600, 1700, 1800, 1900]

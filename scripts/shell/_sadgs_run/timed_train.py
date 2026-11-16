@@ -81,6 +81,7 @@ def main() -> None:
         "loop_peak_allocated_bytes": torch.cuda.max_memory_allocated(),
         "pin_sh0": os.environ.get("REF_PIN_SH0") == "1",
         "gpu": torch.cuda.get_device_name(0),
+        "gpu_total_bytes": torch.cuda.get_device_properties(0).total_memory,
     }
     with open(os.environ["REF_TIMING_OUT"], "w") as handle:
         json.dump(record, handle, indent=1)

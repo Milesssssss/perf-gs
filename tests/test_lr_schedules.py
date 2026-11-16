@@ -20,9 +20,10 @@ import math
 import numpy as np
 import pytest
 
+from trainer.config.config import AdamLRs
 from trainer.frontend.schedule import (
     ExtinctionHardnessSchedule,
-    MeanLearningRateSchedule,
+    LearningRateSchedule,
     StbnDensitySchedule,
 )
 
@@ -99,10 +100,40 @@ def test_extinction_zero_warmup_jumps_after_first_densify() -> None:
 # --- the extracted schedule CLASSES reproduce the frozen reference -----------
 
 def test_mean_lr_class_matches_reference() -> None:
-    s = MeanLearningRateSchedule(lr_init=1e-3, lr_final=1e-6, max_steps=1000)
+    s = LearningRateSchedule(base=AdamLRs(mean=1e-3), extent=1.0, mean_steps=1000,
+                             iterations=1000, scale_rotation_decay=(1.0, 1.0))
     for step in (0, 250, 500, 750, 1000, 2000, -5):
-        assert s.at(step) == pytest.approx(
-            _reference_mean_lr(step, 1e-3, 1e-6, 1000))
+        assert s.at(step).mean == pytest.approx(
+            _reference_mean_lr(step, 1e-3, 1e-5, 1000))
+
+
+def test_mean_lr_scales_with_the_scene_extent() -> None:
+    s = LearningRateSchedule(base=AdamLRs(mean=1e-3), extent=4.0, mean_steps=100,
+                             iterations=100, scale_rotation_decay=(1.0, 1.0))
+    assert s.at(0).mean == pytest.approx(4e-3)
+    assert s.at(100).mean == pytest.approx(4e-5)
+
+
+def test_constant_decay_keeps_every_other_lr_exactly() -> None:
+    base = AdamLRs()
+    s = LearningRateSchedule(base=base, extent=1.0, mean_steps=100, iterations=100,
+                             scale_rotation_decay=(1.0, 1.0))
+    for step in (0, 50, 100):
+        lrs = s.at(step)
+        assert (lrs.scale, lrs.rot, lrs.opacity, lrs.color, lrs.sh_rest) == (
+            base.scale, base.rot, base.opacity, base.color, base.sh_rest)
+
+
+def test_scale_and_rotation_decay_log_linearly_over_the_run() -> None:
+    base = AdamLRs(scale=0.01, rot=0.002, opacity=0.05)
+    s = LearningRateSchedule(base=base, extent=1.0, mean_steps=3000, iterations=3000,
+                             scale_rotation_decay=(3.0, 0.5))
+    assert s.at(0).scale == pytest.approx(0.03)
+    assert s.at(3000).rot == pytest.approx(0.001)
+    # Log-linear: halfway is the geometric mean of 3x and 0.5x.
+    assert s.at(1500).scale == pytest.approx(0.01 * math.sqrt(1.5))
+    assert s.at(4000).scale == pytest.approx(0.005)
+    assert s.at(1500).opacity == 0.05
 
 
 def test_extinction_class_matches_reference() -> None:

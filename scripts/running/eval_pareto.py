@@ -19,8 +19,10 @@ COMMON = ["--sh-degree", "0", "--eval-every", "0", "--preview-every", "0",
           "--no-write-ground-truths", "--run-report", "--eval-lpips"]
 
 BF16 = ["--adam-moments", "bf16"]
-PRUNE = ["--prune-blend-weight", "0.2", "--prune-blend-from", "1900"]
+# The default already prunes once at the last densify step; these prune from earlier on.
+PRUNE = ["--prune-blend-from", "1000"]
 PRUNE_EARLY = ["--prune-blend-weight", "0.3", "--prune-blend-from", "500"]
+NO_PRUNE = ["--prune-blend-weight", "0"]
 OPAQUE_CORE = ["--splat-kernel", "opaque_core", "--splat-profile-power", "3",
                "--splat-profile-onset", "2"]
 
@@ -32,6 +34,7 @@ def stbn(fraction: float) -> list[str]:
 # tag -> (chart label, trainer flags)
 CONFIGS: dict[str, tuple[str, list[str]]] = {
     "baseline": ("baseline", []),
+    "no_prune": ("no pruning", NO_PRUNE),
     "bf16": ("bf16", BF16),
     "stbn50": ("STBN 50%", stbn(0.5)),
     "stbn25": ("STBN 25%", stbn(0.25)),
@@ -71,6 +74,8 @@ def main() -> int:
     ap.add_argument("--iters", type=int, default=3000)
     ap.add_argument("--name", default="pareto")
     ap.add_argument("--force", action="store_true")
+    ap.add_argument("--cooldown-c", type=float, default=None,
+                    help="wait for the GPU to cool to this many degrees Celsius before each run")
     args = ap.parse_args()
 
     tags = [t.strip() for t in args.configs.split(",") if t.strip()]
@@ -93,7 +98,8 @@ def main() -> int:
                 run_name = f"{args.name}_{tag}_{scene}_s{seed}"
                 record = train_run(scene, run_name,
                                    [*COMMON, *flags, "--seed", str(seed)],
-                                   iters=args.iters, force=args.force)
+                                   iters=args.iters, force=args.force,
+                                   cooldown_c=args.cooldown_c)
                 if record is None:
                     continue
                 results.append({"config": tag, "label": label, "seed": seed,

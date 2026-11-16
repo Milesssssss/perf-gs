@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 from trainer.config.config import (
@@ -19,10 +19,14 @@ from trainer.config.config import (
     StbnConfig,
     StructureConfig,
 )
-from trainer.config.config_types import DensificationMode, SplatKernel
+from trainer.config.config_types import DensificationMode, LearningRateRecipe, SplatKernel
 
 if TYPE_CHECKING:
     import argparse
+
+# The quality recipe: measured +0.37 dB at SH0 for ~11% more training time.
+QUALITY_OPACITY_LR_FACTOR = 0.7
+QUALITY_SCALE_ROTATION_DECAY = (3.0, 0.5)
 
 
 def shader_specialization(args: argparse.Namespace) -> ShaderSpecialization:
@@ -58,11 +62,15 @@ class RunConfig:
     structure: StructureConfig
     base_lrs: AdamLRs
     position_lr_max_steps: int
+    # Scale and rotation LR multipliers at the first and the last step.
+    scale_rotation_lr_decay: tuple[float, float]
 
     @classmethod
     def from_args(cls, args: argparse.Namespace, scene_extent: float) -> RunConfig:
         mode = DensificationMode(args.densify_mode)
         loss, base_lrs = _loss_and_lrs(args, mode)
+        base_lrs, scale_rotation_lr_decay = _apply_recipe(
+            base_lrs, LearningRateRecipe(args.lr_recipe))
         return cls(
             densify_mode=mode,
             schedule=_schedule(args, mode),
@@ -103,6 +111,7 @@ class RunConfig:
             # 0 follows --iters, so the mean-LR decay always lands at the end of the run.
             position_lr_max_steps=(args.iters if args.position_lr_max_steps <= 0
                                    else args.position_lr_max_steps),
+            scale_rotation_lr_decay=scale_rotation_lr_decay,
         )
 
 
@@ -144,6 +153,13 @@ def _loss_and_lrs(args: argparse.Namespace,
     return (LossConfig(alpha_weight=args.w_alpha, ssim_weight=args.lambda_ssim,
                        l2_weight=args.lambda_l2),
             AdamLRs())
+
+
+def _apply_recipe(lrs: AdamLRs, recipe: LearningRateRecipe) -> tuple[AdamLRs, tuple[float, float]]:
+    if recipe == LearningRateRecipe.QUALITY:
+        return (replace(lrs, opacity=lrs.opacity * QUALITY_OPACITY_LR_FACTOR),
+                QUALITY_SCALE_ROTATION_DECAY)
+    return lrs, (1.0, 1.0)
 
 
 def _sh_band_interval(args: argparse.Namespace) -> int:

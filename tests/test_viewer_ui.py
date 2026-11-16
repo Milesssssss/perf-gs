@@ -449,6 +449,20 @@ def test_the_store_opens_on_the_cli_defaults():
     assert TrainingSetup().values() == {s.setting_name: defaults[s.setting_name] for s in SETTINGS}
 
 
+def test_choosing_a_preset_applies_it_and_balanced_restores_the_defaults():
+    setup = TrainingSetup()
+    preset = SETTINGS_MAP["preset"]
+    setup.set_index("preset", preset.choice_index("ultrafast"))
+    assert (setup.get("stbn_pixel_fraction"), setup.get("splat_kernel")) == (0.5, "opaque_core")
+    setup.set_index("preset", preset.choice_index("perf"))
+    assert (setup.get("adam_moments"), setup.get("prune_blend_from")) == ("bf16", 1000)
+    assert (setup.get("stbn_pixel_fraction"), setup.get("splat_kernel")) == (1.0, "gaussian")
+    setup.set_index("preset", preset.choice_index("quality"))
+    assert (setup.get("adam_moments"), setup.get("lr_recipe")) == ("fp32", "quality")
+    setup.set_index("preset", preset.choice_index("balanced"))
+    assert setup.values() == TrainingSetup().values()
+
+
 def test_a_row_the_cli_never_mounted_is_reported(monkeypatch):
     """A knob added to the table but not to build_parser() would give a widget
     that edits an attribute the run never reads — validate() must say so."""

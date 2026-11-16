@@ -24,7 +24,6 @@ from trainer.backend.render.pipeline import (
     estimate_pipeline_bytes,
 )
 from trainer.config.config import (
-    AdamLRs,
     DensificationProperties,
     IterationContextualVariables,
     StbnVariables,
@@ -34,7 +33,7 @@ from trainer.config.resolve import RunConfig, shader_specialization
 from trainer.config.validation import validate_training_config
 from trainer.data.parallel import map_ordered
 from trainer.data.targets import TargetDataset
-from trainer.frontend.cli import build_parser
+from trainer.frontend.cli import parse_args
 from trainer.frontend.densification import DensificationController
 from trainer.frontend.evaluation import run_report as run_report_module
 from trainer.frontend.evaluation.evaluation import (
@@ -63,7 +62,7 @@ from trainer.frontend.schedule import (
     AppearanceSchedule,
     ExtinctionHardnessSchedule,
     IterationContext,
-    MeanLearningRateSchedule,
+    LearningRateSchedule,
     TrainingSchedule,
 )
 from trainer.frontend.viewer.session import ResultInfo, TrainingState
@@ -135,13 +134,13 @@ class TrainingApplication:
         self.structure_textures: dict[int, Any] = {}
         self._stream_targets = False
         self._memory_summary: dict = {}
-        self.mean_lr: MeanLearningRateSchedule | None = None
+        self.learning_rate_schedule: LearningRateSchedule | None = None
         self.extinction_hardness_schedule: ExtinctionHardnessSchedule | None = None
         self.appearance_schedule: AppearanceSchedule | None = None
 
     @classmethod
     def from_cli(cls) -> "TrainingApplication":
-        return cls(build_parser().parse_args())
+        return cls(parse_args())
 
     def prepare_training_context(self) -> None:
         self.profiling_enabled = apply_profile_session_overrides(self.args)
@@ -480,10 +479,12 @@ class TrainingApplication:
         reporter.write_header()
 
         config = self._config
-        self.mean_lr = MeanLearningRateSchedule(
-            lr_init=config.base_lrs.mean * scene.extent,
-            lr_final=config.base_lrs.mean * 1e-2 * scene.extent,
-            max_steps=config.position_lr_max_steps,
+        self.learning_rate_schedule = LearningRateSchedule(
+            base=config.base_lrs,
+            extent=scene.extent,
+            mean_steps=config.position_lr_max_steps,
+            iterations=config.schedule.iterations,
+            scale_rotation_decay=config.scale_rotation_lr_decay,
         )
 
         self.extinction_hardness_schedule = ExtinctionHardnessSchedule(
@@ -530,7 +531,7 @@ class TrainingApplication:
             config=self._config,
             target_textures=self.target_textures,
             structure_textures=self.structure_textures,
-            mean_lr_scheduler=self._mean_lr, # THis should not be an individual attribute
+            learning_rate_scheduler=self._learning_rate_schedule, # THis should not be an individual attribute
             extinction_hardness_scheduler=self.extinction_hardness_schedule, # same for this
             appearance_scheduler=self._appearance_schedule,
             paths=self.paths,
@@ -581,6 +582,8 @@ class TrainingApplication:
                 "base_lr_rot": base_lrs.rot,
                 "base_lr_opacity": base_lrs.opacity,
                 "base_lr_color": base_lrs.color,
+                "base_lr_sh_rest": base_lrs.sh_rest,
+                "scale_rotation_lr_decay": list(resolved.scale_rotation_lr_decay),
             },
         }
         (self.paths.root / "config.json").write_text(json.dumps(config, indent=2))
@@ -708,9 +711,9 @@ class TrainingApplication:
         return self.viewer
 
     @property
-    def _mean_lr(self) -> MeanLearningRateSchedule:
-        assert self.mean_lr is not None
-        return self.mean_lr
+    def _learning_rate_schedule(self) -> LearningRateSchedule:
+        assert self.learning_rate_schedule is not None
+        return self.learning_rate_schedule
 
     @property
     def _appearance_schedule(self) -> AppearanceSchedule:
@@ -730,7 +733,7 @@ class TrainingLoop:
         config: RunConfig,
         target_textures: dict[int, Any],
         structure_textures: dict[int, Any],
-        mean_lr_scheduler: MeanLearningRateSchedule,
+        learning_rate_scheduler: LearningRateSchedule,
         extinction_hardness_scheduler: ExtinctionHardnessSchedule | None = None,
         appearance_scheduler: AppearanceSchedule | None = None,
         paths: RunPaths,
@@ -741,10 +744,9 @@ class TrainingLoop:
         self.runtime = runtime
         self.densify_mode = config.densify_mode
         self.densify_config = config.densify
-        self.base_lrs = config.base_lrs
         self.target_textures = target_textures
         self.structure_textures = structure_textures
-        self.mean_lr = mean_lr_scheduler
+        self.learning_rates = learning_rate_scheduler
         self.extinction_hardness_schedule: ExtinctionHardnessSchedule | None = extinction_hardness_scheduler
         self.appearance_schedule: AppearanceSchedule | None = appearance_scheduler
         self.paths = paths
@@ -853,14 +855,7 @@ class TrainingLoop:
         self.training_step += 1
         camera_index = self.sampler.next()
         camera_entry = self.scene.colmapScene.images[camera_index]
-        learning_rates = AdamLRs(
-            mean=self.mean_lr.at(self.training_step - 1),
-            scale=self.base_lrs.scale,
-            rot=self.base_lrs.rot,
-            opacity=self.base_lrs.opacity,
-            color=self.base_lrs.color,
-            sh_rest=self.base_lrs.sh_rest,
-        )
+        learning_rates = self.learning_rates.at(self.training_step - 1)
 
         return IterationContext(
             step_number=self.training_step,
@@ -979,9 +974,10 @@ class TrainingLoop:
 
     def _tracks_blend_weight(self, training_step: int) -> bool:
         """Only the windows that end on a blend-pruning tick need blend weights."""
-        first_window = self.args.prune_blend_from - self.args.densify_every
-        return (self.args.prune_blend_weight > 0.0
-                and first_window < training_step <= self.args.densify_to)
+        schedule = self.schedule.config
+        first_window = schedule.blend_prune_start - schedule.densify_every
+        return (schedule.prune_blend_weight > 0.0
+                and first_window < training_step <= schedule.densify_to)
 
     def _tracks_screen_grad(self, training_step: int) -> bool:
         """No densify tick reads the screen gradient after the last one."""

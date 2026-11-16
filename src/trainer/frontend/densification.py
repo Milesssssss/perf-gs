@@ -80,7 +80,9 @@ class DensificationController:
 
         sad_carry_eta = (mode == DensificationMode.STRUCTURE_AWARE
                          and not do_structure_step)
-        min_blend_weight = args.prune_blend_weight if ev.blend_prune else 0.0
+        # Per megapixel, so the floor is the same image fraction at every resolution.
+        min_blend_weight = (args.prune_blend_weight * self._image_width * self._image_height / 1e6
+                            if ev.blend_prune else 0.0)
 
         if do_structure_step:
             stats = pipeline.structure_densifier.densify(structure_cfg, min_blend_weight)

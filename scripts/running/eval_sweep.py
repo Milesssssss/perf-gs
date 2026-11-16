@@ -3,6 +3,7 @@
 """Sweep one training flag across the Mip-NeRF 360 scenes; collect PSNR + time.
 
 Each cell is a cached fresh subprocess; run on an idle GPU, since train_wall_s is wall-clock.
+Scenes train at their 3DGS eval resolution (Mip-NeRF 360 indoor at half, outdoor at quarter).
 Usage: python scripts/running/eval_sweep.py --axis stbn-pixel-fraction --values 1,0.75,0.5,0.25,0.1
 """
 from __future__ import annotations
@@ -11,7 +12,10 @@ import argparse
 import json
 import subprocess
 import sys
+import time
 from pathlib import Path
+
+from paper_suite.config import scene_downsample
 
 REPO = Path(__file__).resolve().parent.parent.parent
 
@@ -45,8 +49,31 @@ def _tag(value: str) -> str:
     return value.replace(".", "p").replace("-", "neg").replace("/", "_")
 
 
+def _gpu_temperature() -> float | None:
+    """The GPU's temperature in Celsius from nvidia-smi; None where that is unavailable."""
+    try:
+        out = subprocess.run(["nvidia-smi", "--query-gpu=temperature.gpu",
+                              "--format=csv,noheader,nounits"],
+                             capture_output=True, text=True, timeout=10)
+        return float(out.stdout.split()[0])
+    except (OSError, ValueError, IndexError, subprocess.SubprocessError):
+        return None
+
+
+def wait_for_cool_gpu(max_celsius: float, timeout_s: float = 300.0) -> None:
+    """Block until the GPU is at most ``max_celsius``, so timed runs start from the same thermal state."""
+    start = time.monotonic()
+    while time.monotonic() - start < timeout_s:
+        temperature = _gpu_temperature()
+        if temperature is None or temperature <= max_celsius:
+            return
+        time.sleep(5.0)
+    print(f"[sweep] GPU still above {max_celsius:g} C after {timeout_s:.0f} s; "
+          f"timing the next run anyway", flush=True)
+
+
 def train_run(scene: str, run_name: str, flags: list[str], *, iters: int,
-              force: bool) -> dict | None:
+              force: bool, cooldown_c: float | None = None) -> dict | None:
     """Train ``scene`` with BASE_ARGS + ``flags`` in a fresh subprocess; cached unless ``force``, None on failure."""
     scene_dir = _scene_dir(scene)
     if scene_dir is None:
@@ -62,10 +89,14 @@ def train_run(scene: str, run_name: str, flags: list[str], *, iters: int,
             sys.executable, str(REPO / "scripts" / "running" / "v2_train.py"),
             "--scene", str(scene_dir),
             "--iters", str(iters),
+            # An explicit --downsample in flags comes later and wins.
+            "--downsample", str(scene_downsample(scene)),
             *BASE_ARGS,
             *flags,
             "--run-name", run_name,
         ]
+        if cooldown_c is not None:
+            wait_for_cool_gpu(cooldown_c)
         print(f"[sweep] TRAIN {run_name} ...", flush=True)
         proc = subprocess.run(cmd, cwd=str(REPO))
         if proc.returncode != 0 or not result_json.exists():
@@ -86,9 +117,11 @@ def train_run(scene: str, run_name: str, flags: list[str], *, iters: int,
 
 
 def run_cell(scene: str, axis: str, value: str, *, iters: int, force: bool,
-             extra: list[str], sweep_name: str) -> dict | None:
+             extra: list[str], sweep_name: str,
+             cooldown_c: float | None = None) -> dict | None:
     record = train_run(scene, f"sweep_{sweep_name}_{scene}_{_tag(value)}",
-                       [f"--{axis}", value, *extra], iters=iters, force=force)
+                       [f"--{axis}", value, *extra], iters=iters, force=force,
+                       cooldown_c=cooldown_c)
     if record is None:
         return None
     return {"scene": scene, "axis": axis, "value": value, **record}
@@ -129,6 +162,10 @@ def main() -> int:
                     help="retrain cells that already have results")
     ap.add_argument("--no-plot", action="store_true",
                     help="collect results only; skip the charts + CSV")
+    ap.add_argument("--cooldown-c", type=float, default=None,
+                    help="before each training run, wait (up to 5 min) until the GPU is at "
+                         "most this many degrees Celsius (nvidia-smi), so wall-clock "
+                         "times start from the same thermal state")
     ap.add_argument("--extra", nargs=argparse.REMAINDER, default=[],
                     help="everything after this is passed through to the "
                          "trainer verbatim (must be LAST)")
@@ -156,7 +193,7 @@ def main() -> int:
         for scene in scenes:
             record = run_cell(scene, axis, value, iters=args.iters,
                               force=args.force, extra=list(args.extra),
-                              sweep_name=sweep_name)
+                              sweep_name=sweep_name, cooldown_c=args.cooldown_c)
             if record is None:
                 continue
             results.append(record)

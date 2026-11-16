@@ -131,7 +131,8 @@ class AdamLRs:
     rot: float = 1e-3
     opacity: float = 2.5e-2
     color: float = 2.5e-3  # the SH0 learning rate
-    sh_rest: float = 0.0025 / 20.0  # TODO: tune the SH-rest learning rate.
+    # 6x 3DGS's 0.0025/20, which leaves bands 1-3 undertrained in a 3000-step run.
+    sh_rest: float = 0.015 / 20.0
 
 
 @dataclass(frozen=True)
@@ -174,9 +175,14 @@ class ScheduleConfig:
     mip_enabled: bool
     # Extra eval checkpoints, union-ed with the eval_every cadence.
     eval_iters: tuple[int, ...] = ()
-    # Blend-weight pruning on densify ticks (--prune-blend-weight); 0 = off.
-    prune_blend_weight: float = 0.0
+    # Blend-weight pruning on densify ticks, in pixels per megapixel (--prune-blend-weight); 0 = off.
+    prune_blend_weight: float = 0.2
+    # First pruning tick; 0 = the last densify tick, a single cleanup pass.
     prune_blend_from: int = 0
+
+    @property
+    def blend_prune_start(self) -> int:
+        return self.prune_blend_from or self.densify_to
 
 
 @dataclass

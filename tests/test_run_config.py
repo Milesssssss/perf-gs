@@ -4,11 +4,13 @@
 
 from __future__ import annotations
 
+import pytest
 from _colmap_testkit import write_colmap_scene
 from v2_train import build_parser
 
 from trainer.config.config import AdamLRs
 from trainer.config.resolve import RunConfig
+from trainer.frontend.cli import parse_args
 from trainer.frontend.scene import holdout_split, load_scene_context
 
 
@@ -50,6 +52,24 @@ def test_structure_aware_runs_match_sadgs_loss_and_lrs() -> None:
     assert config.loss.ssim_weight == args.lambda_ssim
     base = config.base_lrs
     assert (base.scale, base.rot, base.opacity, base.color) == (0.01, 0.002, 0.05, 0.0025)
+    assert config.scale_rotation_lr_decay == (1.0, 1.0)
+
+
+def test_quality_recipe_lowers_the_opacity_lr_and_decays_scale_and_rotation() -> None:
+    config = RunConfig.from_args(
+        _args("--densify-mode", "structure_aware", "--lr-recipe", "quality"), 1.0)
+    assert config.base_lrs.opacity == pytest.approx(0.035)
+    assert config.scale_rotation_lr_decay == (3.0, 0.5)
+
+
+def test_presets_supply_defaults_that_explicit_flags_override() -> None:
+    perf = parse_args(["--preset", "perf"])
+    assert (perf.adam_moments, perf.prune_blend_from) == ("bf16", 1000)
+    assert parse_args(["--adam-moments", "fp32", "--preset", "perf"]).adam_moments == "fp32"
+    assert parse_args(["--preset", "quality"]).lr_recipe == "quality"
+    ultrafast = parse_args(["--preset", "ultrafast"])
+    assert (ultrafast.stbn_pixel_fraction, ultrafast.splat_kernel) == (0.5, "opaque_core")
+    assert vars(parse_args([])) == vars(build_parser().parse_args([]))
 
 
 def test_other_modes_keep_the_default_loss_and_lrs() -> None:

@@ -2,10 +2,11 @@
 # Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
 # SADGS reference counterparts on THIS machine's GPU, for the README comparison:
-# the Mip-NeRF 360 indoor scenes at images_4 with the Config 3 recipe (the protocol
-# of the existing outputs/SADGS_ref_sh0_* runs), at SH0 (active degree pinned) and
+# the Mip-NeRF 360 indoor scenes at images_2 (the 3DGS evaluation resolution, as in
+# the README) with the Config 3 recipe, at SH0 (active degree pinned) and
 # SH3. On a 16 GB card the outdoor scenes do not fit: bicycle fills the GPU at the
-# iteration-1000 densification and pages, so their times would be meaningless.
+# iteration-1000 densification and pages, so their times would be meaningless. The indoor
+# scenes at images_2 also reserve ~18 GB, so those runs report quality only.
 # Images stay in host memory (--data_device cpu) for the same reason, and the
 # allocator avoids expandable segments, which fail under WSL here ("device not ready").
 # train (loop timed by timed_train.py) -> render test views -> metrics. Idempotent:
@@ -38,7 +39,7 @@ run_scene() {  # <sh degree> <dataset-relative scene path>
   mkdir -p "$out"
   echo "==================== [$(date +%H:%M:%S)] TRAIN $name sh$sh ===================="
   REF_PIN_SH0=$pin REF_TIMING_OUT=$out/timing.json "$PY" "$REPO/scripts/shell/_sadgs_run/timed_train.py" \
-    -s "$REPO/datasets/$scene_path" -i images_4 --eval --data_device cpu "${M360[@]}" \
+    -s "$REPO/datasets/$scene_path" -i images_2 --eval --data_device cpu "${M360[@]}" \
     --save_iterations 3000 --model_path "$out" > "$out/train.log" 2>&1 \
     || { echo "TRAIN FAILED $name sh$sh"; tail -3 "$out/train.log"; return; }
   (cd "$SADGS_ROOT" && "$PY" render.py -m "$out" --iteration 3000 --skip_train --mult 0.25) \

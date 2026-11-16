@@ -187,7 +187,7 @@ def main() -> int:
     values = _sorted_values(results)
     baseline = values[0] if values else "?"
     run_note = f"{args.iters} iters, " if args.iters else ""
-    suffix = (f"({run_note}quarter-res, "
+    suffix = (f"({run_note}3DGS eval resolutions, "
               f"{len(scenes)} scene{'s' if len(scenes) != 1 else ''}, "
               f"held-out protocol)")
 

@@ -42,6 +42,12 @@ class SplatKernel(str, Enum):
     OPAQUE_CORE = "opaque_core"
 
 
+class LearningRateRecipe(str, Enum):
+    """Per-parameter learning-rate plan (CLI ``--lr-recipe``)."""
+    DEFAULT = "default"
+    QUALITY = "quality"
+
+
 def resolve_blend_kind(*, extinction_hardness: float) -> BlendKind:
     """Hardened extinction when ``k != 1``, else alpha-over; names the law, k stays a uniform."""
     return (BlendKind.HARDENED_EXTINCTION if extinction_hardness != 1.0
