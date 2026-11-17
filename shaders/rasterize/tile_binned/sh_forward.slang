@@ -1,7 +1,7 @@
 // Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
 // Optional view-dependent SH forward (sh_degree > 0): once per gaussian, overwrites bin_count's
-// BlendData.sh0 with the effective DC e = (clamp(rgb, 0) - 0.5) / C0, so the blend is unchanged.
+// BlendData.color (the DC color) with the full SH color, clamped at 0.
 
 #include "../../common/types.slang"
 #include "../../primitives/gaussian/sh.slang"
@@ -16,6 +16,8 @@ void shForward(
     StructuredBuffer<uint> num_gaussians_counter,
     StructuredBuffer<CameraData> camera,
     StructuredBuffer<uint> features_rest,
+    // Splats that touch no tile are never blended, so their color is never read.
+    StructuredBuffer<uint> tile_count_per_gaussian,
     RWStructuredBuffer<BlendData> blend_data,
     uniform uint active_sh_degree,
     uniform uint rest_floats,
@@ -24,6 +26,7 @@ void shForward(
     uint gid = dtid.x;
     if (gid >= max_splats) return;
     if (gid >= num_gaussians_counter[0]) return;
+    if (tile_count_per_gaussian[gid] == 0u) return;
 
     Gaussian3D g = gaussians[gid];
     float3 cam_center = cameraCenterWorld(camera[0].view_matrix);
@@ -34,8 +37,5 @@ void shForward(
     float3 rgb = max(shColorFromMean(g.sh0, rest, g.mean, cam_center,
                                      int(active_sh_degree)), 0.0);
 
-    // Effective DC: shDC(e) == rgb, so the blend record stays a plain DC color.
-    BlendData bd = blend_data[gid];
-    bd.sh0 = (rgb - 0.5) / SH_C0;
-    blend_data[gid] = bd;
+    blend_data[gid].color = rgb;
 }

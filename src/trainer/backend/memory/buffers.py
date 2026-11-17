@@ -32,7 +32,7 @@ GRAD_SCALAR_COMPONENTS = (
     "opacity",
     "color_r", "color_g", "color_b",
 )
-GRAD_2D_SEED_COMPONENTS = ("mean2d_x", "mean2d_y", "cov2d_a", "cov2d_b", "cov2d_c", "comp")
+GRAD_2D_SEED_COMPONENTS = ("mean2d_x", "mean2d_y", "conic_a", "conic_b", "conic_c", "amplitude")
 ETA_ACCUM_COMPONENTS = ("n_high", "n_low", "max_x", "max_y", "max_z")
 
 DEFAULT_MAX_SORT_PAIRS = 12_000_000
@@ -139,7 +139,11 @@ class RasterResources:
     projected_2d: spy.NDBuffer
     blend_data: spy.NDBuffer
     tile_count_per_gaussian: spy.NDBuffer
-    tile_offset_per_gaussian: spy.NDBuffer
+    # Splats sorted front to back once per view; pairs are then emitted in that order.
+    depth_sort: SortResources
+    depth_count: spy.NDBuffer
+    tile_count_by_depth: spy.NDBuffer
+    pair_offset_by_depth: spy.NDBuffer
     tile_start: spy.NDBuffer
     tile_end: spy.NDBuffer
     bucket_count: spy.NDBuffer
@@ -372,21 +376,34 @@ def _make_scratch_arena(allocator: _Alloc, types: _ShaderTypes,
         copy_dispatch_args=allocator.indirect_buffer("densification.arena_copy_args"))
 
 
-def _allocate_sort(allocator: _Alloc, max_sort_pairs: int) -> SortResources:
-    max_blocks = ceil_div(max_sort_pairs, RADIX_PART_SIZE)
+def _allocate_sort(allocator: _Alloc, capacity: int, name: str = "sort",
+                   key_words: int = 2) -> SortResources:
+    max_blocks = ceil_div(capacity, RADIX_PART_SIZE)
+    # 32-bit keys never touch keys_hi, so it shrinks to a placeholder.
+    high_words = capacity if key_words > 1 else 1
     return SortResources(
-        keys_lo=allocator.uint_buffer("sort_keys_lo_a", max_sort_pairs),
-        keys_hi=allocator.uint_buffer("sort_keys_hi_a", max_sort_pairs),
-        values=allocator.uint_buffer("sort_values_a", max_sort_pairs),
-        keys_lo_alt=allocator.uint_buffer("sort_keys_lo_b", max_sort_pairs),
-        keys_hi_alt=allocator.uint_buffer("sort_keys_hi_b", max_sort_pairs),
-        values_alt=allocator.uint_buffer("sort_values_b", max_sort_pairs),
-        global_hist=allocator.uint_buffer("radix_global_hist", RADIX_GLOBAL_HIST_SIZE),
-        pass_hist=allocator.uint_buffer("radix_pass_hist", 256 * max_blocks),
-        dispatch_args=allocator.indirect_buffer("radix_dispatch_args"),
-        stats=allocator.uint_buffer("sort_stats", 2),
-        capacity=max_sort_pairs,
+        keys_lo=allocator.uint_buffer(f"{name}_keys_lo_a", capacity),
+        keys_hi=allocator.uint_buffer(f"{name}_keys_hi_a", high_words),
+        values=allocator.uint_buffer(f"{name}_values_a", capacity),
+        keys_lo_alt=allocator.uint_buffer(f"{name}_keys_lo_b", capacity),
+        keys_hi_alt=allocator.uint_buffer(f"{name}_keys_hi_b", high_words),
+        values_alt=allocator.uint_buffer(f"{name}_values_b", capacity),
+        global_hist=allocator.uint_buffer(f"{name}_global_hist", RADIX_GLOBAL_HIST_SIZE),
+        pass_hist=allocator.uint_buffer(f"{name}_pass_hist", 256 * max_blocks),
+        dispatch_args=allocator.indirect_buffer(f"{name}_dispatch_args"),
+        stats=allocator.uint_buffer(f"{name}_stats", 2),
+        capacity=capacity,
     )
+
+
+def _allocate_depth_order(allocator: _Alloc, max_splats: int) -> dict:
+    """Front-to-back splat order and the depth-ordered pair offsets bin_emit writes at."""
+    return {
+        "depth_sort": _allocate_sort(allocator, max_splats, "depth_sort", key_words=1),
+        "depth_count": allocator.uint_buffer("depth_count", 1),
+        "tile_count_by_depth": allocator.uint_buffer("tile_count_by_depth", max_splats),
+        "pair_offset_by_depth": allocator.uint_buffer("pair_offset_by_depth", max_splats),
+    }
 
 
 def _allocate_scan(allocator: _Alloc, max_splats: int, with_work: bool) -> ScanResources:
@@ -435,7 +452,7 @@ def allocate(
     projected_2d = allocator.typed_buffer("projected_2d", types.projected, max_splats)
     blend_data = allocator.typed_buffer("blend_data", types.blend, max_splats)
     tile_count = allocator.uint_buffer("tile_count_per_gaussian", max_splats)
-    tile_offset = allocator.uint_buffer("tile_offset_per_gaussian", max_splats)
+    depth_order = _allocate_depth_order(allocator, max_splats)
     sort = _allocate_sort(allocator, max_sort_pairs)
     tile_start = allocator.uint_buffer("tile_start", num_tiles)
     tile_end = allocator.uint_buffer("tile_end", num_tiles)
@@ -538,7 +555,7 @@ def allocate(
         projected_2d=projected_2d,
         blend_data=blend_data,
         tile_count_per_gaussian=tile_count,
-        tile_offset_per_gaussian=tile_offset,
+        **depth_order,
         tile_start=tile_start,
         tile_end=tile_end,
         bucket_count=bucket_count,
@@ -554,6 +571,7 @@ def allocate(
 
     active_count.copy_from_numpy(np.zeros(1, dtype=np.uint32))
     sort.stats.copy_from_numpy(np.zeros(2, dtype=np.uint32))
+    raster.depth_sort.stats.copy_from_numpy(np.zeros(2, dtype=np.uint32))
 
     return GaussianBuffers(
         max_splats=max_splats, max_sort_pairs=max_sort_pairs, width=width, height=height,
@@ -590,7 +608,7 @@ def allocate_viewer(
     projected_2d = allocator.typed_buffer("projected_2d", types.projected, max_splats)
     blend_data = allocator.typed_buffer("blend_data", types.blend, max_splats)
     tile_count = allocator.uint_buffer("tile_count_per_gaussian", max_splats)
-    tile_offset = allocator.uint_buffer("tile_offset_per_gaussian", max_splats)
+    depth_order = _allocate_depth_order(allocator, max_splats)
     sort = _allocate_sort(allocator, max_sort_pairs)
     tile_start = allocator.uint_buffer("tile_start", num_tiles)
     tile_end = allocator.uint_buffer("tile_end", num_tiles)
@@ -606,7 +624,7 @@ def allocate_viewer(
         projected_2d=projected_2d,
         blend_data=blend_data,
         tile_count_per_gaussian=tile_count,
-        tile_offset_per_gaussian=tile_offset,
+        **depth_order,
         tile_start=tile_start,
         tile_end=tile_end,
         bucket_count=bucket_count,
@@ -632,6 +650,7 @@ def allocate_viewer(
 
     active_count.copy_from_numpy(np.zeros(1, dtype=np.uint32))
     sort.stats.copy_from_numpy(np.zeros(2, dtype=np.uint32))
+    raster.depth_sort.stats.copy_from_numpy(np.zeros(2, dtype=np.uint32))
 
     return GaussianBuffers(
         max_splats=max_splats, max_sort_pairs=max_sort_pairs, width=width, height=height,

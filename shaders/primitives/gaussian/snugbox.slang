@@ -9,21 +9,15 @@
 #include "../../common/math.slang"
 #include "eval.slang"
 
-// opacity_logit is pre-sigmoid and t comes from splatCutoffQ; false when t <= 0 (the caller skips binning).
-bool snugBox(float2 mean_2d, float3 cov2d, float opacity_logit,
+// conic is the packed inverse covariance and t comes from splatCutoffQ; false when t <= 0 (the caller
+// skips binning).
+bool snugBox(float2 mean_2d, float3 conic, float t,
              out float2 bbox_min, out float2 bbox_max)
 {
-    float cov00 = cov2d.x;
-    float cov01 = cov2d.y;
-    float cov11 = cov2d.z;
-    float det_cov = cov00 * cov11 - cov01 * cov01;
-    det_cov = max(det_cov, 1e-20);
-    float inv_det = 1.0 / det_cov;
-    float a =  cov11 * inv_det;   // Σ⁻¹[0][0]
-    float b = -cov01 * inv_det;   // Σ⁻¹[0][1]
-    float c =  cov00 * inv_det;   // Σ⁻¹[1][1]
+    float a = conic.x;   // Σ⁻¹[0][0]
+    float b = conic.y;   // Σ⁻¹[0][1]
+    float c = conic.z;   // Σ⁻¹[1][1]
 
-    float t = splatCutoffQ(opacity_logit);
     if (t <= 0.0)
     {
         bbox_min = mean_2d;

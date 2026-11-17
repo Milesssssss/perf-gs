@@ -242,7 +242,7 @@ Lay an `nkx × nky × nkz` grid in the parent's local frame. Named variables:
 | `tau_prune` | `float` | 0.8 | PRUNE if `low_ratio` exceeds this |
 | `grad_threshold` | `float` | 1e-5 | `is_grad_high` floor (host scales into `grad_threshold_internal` by ×`width*height*3`) |
 | `split_power` | `float` | 0.5 | exponent in `_nk_from_eta`; 0.5 → `ceil(sqrt(eta))` |
-| `max_split_factor` | `int` | 8 | per-axis cap on `nk*` (so `prod` ≤ 512) |
+| `max_split_factor` | `int` | 2 | per-axis cap on `nk*` (so `prod` ≤ 8); SADGS uses 8, which trains 17% slower for ~0.04 dB |
 | `ks_scale_power` | `float` | 1.0 | child scale exponent `scale.k / n.k^ks_scale_power` |
 | `dense_scale` | `float` | `dense*extent` | CLONE (≤) vs SPLIT (>) cutoff on `max_scale`, world units |
 | `t_opacity` | `float` | 0.005 | opacity PRUNE floor |

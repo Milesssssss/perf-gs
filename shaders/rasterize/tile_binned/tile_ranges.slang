@@ -21,7 +21,7 @@ void clearTileRanges(
 [numthreads(256, 1, 1)]
 void identifyTileRanges(
     uint3 dtid: SV_DispatchThreadID,
-    StructuredBuffer<uint> keys_hi,    // sorted
+    StructuredBuffer<uint> tile_keys,    // sorted
     RWStructuredBuffer<uint> tile_start,
     RWStructuredBuffer<uint> tile_end,
     // n = scan_total[0], read on the GPU to avoid a per-frame readback.
@@ -32,7 +32,7 @@ void identifyTileRanges(
     uint n = n_buf[0];
     if (i >= n) return;
 
-    uint t = keys_hi[i];
+    uint t = tile_keys[i];
     if (t >= num_tiles) return;
 
     if (i == 0)
@@ -41,7 +41,7 @@ void identifyTileRanges(
     }
     else
     {
-        uint t_prev = keys_hi[i - 1];
+        uint t_prev = tile_keys[i - 1];
         if (t_prev != t)
         {
             tile_start[t] = i;

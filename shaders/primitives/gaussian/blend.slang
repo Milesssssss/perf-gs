@@ -1,7 +1,7 @@
 // Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-// Gaussian conformance to the core IBlendablePrimitive contract: coverage()/color() delegate to
-// evalGaussian2DFromCov and shDC, so the generic blend loop keeps the Gaussian math and gradients.
+// Gaussian conformance to the core IBlendablePrimitive contract: coverage() is splatCoverage on the
+// per-view record bin_count precomputes, so the generic blend loop keeps the Gaussian math and gradients.
 
 #ifndef TRAINER_GAUSSIAN_BLEND_SLANG
 #define TRAINER_GAUSSIAN_BLEND_SLANG
@@ -14,38 +14,49 @@
 struct GaussianPrimitive : IBlendablePrimitive
 {
     float2 mean;                    // screen-space center (pixels)
-    float3 cov2d;                   // packed (cov_00, cov_01, cov_11)
+    float3 conic;                   // packed inverse covariance (00, 01, 11)
+    float  amplitude;               // splatAmplitude(opacity logit, Mip compensation)
     float  opacity;                 // pre-sigmoid logit
-    float3 sh0;                     // SH band-0 (DC) coeff
-    float  opacity_compensation;    // Mip-Splatting coef3d*coef2d (1.0 = off)
+    float3 rgb;                     // this view's color
 
     [Differentiable]
     float coverage(no_diff float2 pixel)
     {
-        return evalGaussian2DFromCov(pixel, mean, cov2d, opacity, opacity_compensation);
+        return splatCoverage(pixel, mean, conic, amplitude, opacity);
     }
 
     [Differentiable]
     float3 color()
     {
-        return shDC(sh0);
+        return rgb;
     }
 
     // Non-differentiable constructor; gradients flow through coverage()/color() on the record.
-    static GaussianPrimitive make(float2 mean, float3 cov2d, float opacity,
-                                  float3 sh0, float opacity_compensation)
+    static GaussianPrimitive make(BlendData bd)
     {
         GaussianPrimitive g;
-        g.mean = mean;
-        g.cov2d = cov2d;
-        g.opacity = opacity;
-        g.sh0 = sh0;
-        g.opacity_compensation = opacity_compensation;
+        g.mean = bd.mean;
+        g.conic = bd.conic;
+        g.amplitude = bd.amplitude;
+        g.opacity = bd.opacity;
+        g.rgb = bd.color;
+        return g;
+    }
+
+    // Zero coverage everywhere: masked backward lanes stay finite scan identities.
+    static GaussianPrimitive none()
+    {
+        GaussianPrimitive g;
+        g.mean = float2(0.0);
+        g.conic = float3(0.0);
+        g.amplitude = 0.0;
+        g.opacity = 0.0;
+        g.rgb = float3(0.0);
         return g;
     }
 }
 
-// Gathers the compact 36 B BlendData record (one gather, better L2 hit rate in sorted order);
+// Gathers the compact 40 B BlendData record (one gather, better L2 hit rate in sorted order);
 // matches backward_persplat's blend_data gather so forward and backward read identical primitives.
 struct GaussianSource : IPrimitiveSource
 {
@@ -55,9 +66,7 @@ struct GaussianSource : IPrimitiveSource
 
     GaussianPrimitive primitiveAt(uint idx)
     {
-        BlendData bd = blend_data[idx];
-        return GaussianPrimitive.make(bd.mean, bd.cov2d, bd.opacity,
-                                      bd.sh0, bd.opacity_compensation);
+        return GaussianPrimitive.make(blend_data[idx]);
     }
 }
 

@@ -44,6 +44,18 @@ void shBackward(
                        fromFixed(grad_color_g[gid]),
                        fromFixed(grad_color_b[gid]));
 
+    // Higher-band gradients packed fp16, 2 scalars per uint, into features_rest_grad (sole writer).
+    uint fu = halfFeatUints(rest_floats);
+    uint gbase = gid * fu;
+
+    // No color gradient (e.g. no tile pairs this view): every output gradient is zero.
+    if (all(gaussianColor == float3(0.0)))
+    {
+        for (uint u = 0u; u < fu; ++u)
+            features_rest_grad[gbase + u] = 0u;
+        return;
+    }
+
     // Only the active bands (excluding DC): coeffs beyond deg are ignored and get zero gradient.
     uint active_coeffs = uint((deg + 1) * (deg + 1) - 1);
     float3 rest[SH_REST_COEFFS] = loadSHRestActive(features_rest, gid, rest_floats,
@@ -62,9 +74,6 @@ void shBackward(
     var dp_mean = diffPair(g.mean);
     bwd_diff(shColorFromMean)(g.sh0, dp_rest, dp_mean, cam, deg, seed);
 
-    // Higher-band gradients packed fp16, 2 scalars per uint, into features_rest_grad (sole writer).
-    uint fu = halfFeatUints(rest_floats);
-    uint gbase = gid * fu;
     [ForceUnroll]
     for (uint u = 0u; u < uint(SH_FEAT_UINTS_MAX); ++u)
     {

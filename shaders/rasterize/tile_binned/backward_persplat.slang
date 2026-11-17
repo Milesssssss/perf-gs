@@ -26,32 +26,49 @@ static const float ALPHA_MIN_TRACK = 1.0 / 255.0;
 
 // Exclusive bucket scan of the affine maps T -> T * T_step, S -> S + dLdC_weight * T, where
 // (a1, b1) then (a2, b2) composes to (a1*a2, b1 + a1*b2): one Hillis-Steele pass yields both prefixes.
-// Multiplies only (no division by T_step), so opaque splats (T_step -> 0) stay stable.
-void blendPrefixExclusive(float T_step, float dLdC_weight, uint lane,
-                          out float T_prefix, out float dLdC_C_in_front_prefix)
+// Each of the N components scans one pixel; their shuffle chains are independent and interleave.
+void blendPrefixExclusive<let N : int>(vector<float, N> T_step, vector<float, N> dLdC_weight, uint lane,
+                                       out vector<float, N> T_prefix,
+                                       out vector<float, N> dLdC_C_in_front_prefix)
 {
     // Inclusive scan: lane i holds the composed map over splats [0..i].
-    float a = T_step;
-    float b = dLdC_weight;
+    vector<float, N> a = T_step;
+    vector<float, N> b = dLdC_weight;
     [unroll]
     for (uint d = 1u; d < RASTER_BUCKET_SIZE; d <<= 1u)
     {
         // Clamped source is unused when lane < d; all 32 lanes are active (warp-uniform region).
         uint src = (lane >= d) ? (lane - d) : 0u;
-        float a_lo = WaveReadLaneAt(a, src);
-        float b_lo = WaveReadLaneAt(b, src);
+        vector<float, N> a_lo = WaveReadLaneAt(a, src);
+        vector<float, N> b_lo = WaveReadLaneAt(b, src);
         if (lane >= d)
         {
             b = b_lo + a_lo * b;   // b1 + a1*b2  (before overwriting a)
             a = a_lo * a;          // a1 * a2
         }
     }
-    // Exclusive = inclusive value of lane i-1; lane 0 gets the identity map (1, 0).
+#if COMPOSITOR_HARDNESS_ONE
+    // Exclusive = inclusive with this lane's own step taken out, saving a dependent shuffle round:
+    // T_step = 1 - alpha >= 1 - ALPHA_MAX, so the division is well conditioned.
+    T_prefix = a / T_step;
+    dLdC_C_in_front_prefix = b - T_prefix * dLdC_weight;
+#else
+    // Hardened extinction can drive T_step toward 0, so shift by a lane instead of dividing.
     uint prev = (lane >= 1u) ? (lane - 1u) : 0u;
-    float a_prev = WaveReadLaneAt(a, prev);
-    float b_prev = WaveReadLaneAt(b, prev);
-    T_prefix        = (lane >= 1u) ? a_prev : 1.0;
-    dLdC_C_in_front_prefix = (lane >= 1u) ? b_prev : 0.0;
+    vector<float, N> a_prev = WaveReadLaneAt(a, prev);
+    vector<float, N> b_prev = WaveReadLaneAt(b, prev);
+    T_prefix        = (lane >= 1u) ? a_prev : vector<float, N>(1.0);
+    dLdC_C_in_front_prefix = (lane >= 1u) ? b_prev : vector<float, N>(0.0);
+#endif
+}
+
+void blendPrefixExclusive(float T_step, float dLdC_weight, uint lane,
+                          out float T_prefix, out float dLdC_C_in_front_prefix)
+{
+    vector<float, 1> t, s;
+    blendPrefixExclusive<1>(vector<float, 1>(T_step), vector<float, 1>(dLdC_weight), lane, t, s);
+    T_prefix = t.x;
+    dLdC_C_in_front_prefix = s.x;
 }
 
 // Stochastic pixel subsampling: visit 1/STRIDE of the pixels and scale grads by STRIDE; the host
@@ -88,6 +105,10 @@ static const uint STAGED_PIXELS = TILE_AREA / BACKWARD_PIXEL_STRIDE;
 
 groupshared uint2  gs_checkpoints[NUM_WARPS][STAGED_PIXELS]; // (T,RGB) as fp16
 
+// Pixels the per-bucket backward advances together (independent scans that overlap their latency).
+static const int PIXELS_PER_STEP = 2;
+typealias PixelStepVector = vector<float, PIXELS_PER_STEP>;
+
 [shader("compute")]
 [numthreads(TILE_AREA, 1, 1)]
 void backwardRasterizePerSplat(
@@ -104,14 +125,14 @@ void backwardRasterizePerSplat(
     RWTexture2D<float4> output_image,
     RWTexture2D<uint> gaussian_count_per_pixel,
     RWTexture2D<float4> dL_dC_texture,
-    // Tile-summed 2D seeds for projection_backward.slang; the opacity/color grads below are final.
+    // Tile-summed BlendData seeds for projection_backward.slang; the color grads below are final.
     RWStructuredBuffer<int64_t> grad_mean2d_x,
     RWStructuredBuffer<int64_t> grad_mean2d_y,
-    RWStructuredBuffer<int64_t> grad_cov2d_a,
-    RWStructuredBuffer<int64_t> grad_cov2d_b,
-    RWStructuredBuffer<int64_t> grad_cov2d_c,
-    RWStructuredBuffer<int64_t> grad_comp,   // Mip: dL/d(opacity_compensation)
-    RWStructuredBuffer<int64_t> grad_opacity,
+    RWStructuredBuffer<int64_t> grad_conic_a,
+    RWStructuredBuffer<int64_t> grad_conic_b,
+    RWStructuredBuffer<int64_t> grad_conic_c,
+    RWStructuredBuffer<int64_t> grad_amplitude,
+    RWStructuredBuffer<int64_t> grad_opacity,   // opaque_core's direct falloff term only
     RWStructuredBuffer<int64_t> grad_color_r,
     RWStructuredBuffer<int64_t> grad_color_g,
     RWStructuredBuffer<int64_t> grad_color_b,
@@ -229,20 +250,17 @@ void backwardRasterizePerSplat(
         }
 
         float2 acc_mean2d = float2(0.0);
-        float3 acc_cov2d  = float3(0.0);
+        float3 acc_conic  = float3(0.0);
+        float  acc_amplitude = 0.0;
         float  acc_opacity = 0.0;
-        float  acc_comp = 0.0;   // Mip: sum_pixels dL/d(opacity_compensation)
         float3 acc_color  = float3(0.0);
         float  acc_absx = 0.0;
         float  acc_absy = 0.0;
         float  acc_weight = 0.0;
 
         // Same GaussianPrimitive as the forward; masked lanes get a finite zero prim.
-        GaussianPrimitive prim = splat_valid
-            ? GaussianPrimitive.make(blend_only_data.mean, blend_only_data.cov2d,
-                                     blend_only_data.opacity, blend_only_data.sh0,
-                                     blend_only_data.opacity_compensation)
-            : GaussianPrimitive.make(float2(0.0), float3(0.0), 0.0, float3(0.0), 0.0);
+        GaussianPrimitive prim = splat_valid ? GaussianPrimitive.make(blend_only_data)
+                                             : GaussianPrimitive.none();
         float3 c_i = prim.color();
 
         uint cp_bucket = tile_bucket_base + bucket;
@@ -382,9 +400,9 @@ void backwardRasterizePerSplat(
                 bwd_diff(primitiveCoverage<GaussianPrimitive>)(dp_prim, pixel_center, dL_d_alpha_raw);
 
                 acc_mean2d += dp_prim.d.mean;
-                acc_cov2d  += dp_prim.d.cov2d;
+                acc_conic  += dp_prim.d.conic;
+                acc_amplitude += dp_prim.d.amplitude;
                 acc_opacity += dp_prim.d.opacity;
-                acc_comp   += dp_prim.d.opacity_compensation;
 
                 if (alpha >= ALPHA_MIN_TRACK)
                 {
@@ -404,9 +422,9 @@ void backwardRasterizePerSplat(
             {
                 float s = float(BACKWARD_PIXEL_STRIDE);
                 acc_mean2d *= s;
-                acc_cov2d  *= s;
+                acc_conic  *= s;
+                acc_amplitude *= s;
                 acc_opacity *= s;
-                acc_comp   *= s;
                 acc_color  *= s;
                 acc_absx *= s;
                 acc_absy *= s;
@@ -422,11 +440,13 @@ void backwardRasterizePerSplat(
             // projection_backward.slang applies J^T once per gaussian to these tile sums.
             InterlockedAdd(grad_mean2d_x[g_idx], toFixed(acc_mean2d.x));
             InterlockedAdd(grad_mean2d_y[g_idx], toFixed(acc_mean2d.y));
-            InterlockedAdd(grad_cov2d_a[g_idx], toFixed(acc_cov2d.x));
-            InterlockedAdd(grad_cov2d_b[g_idx], toFixed(acc_cov2d.y));
-            InterlockedAdd(grad_cov2d_c[g_idx], toFixed(acc_cov2d.z));
-            InterlockedAdd(grad_comp[g_idx], toFixed(acc_comp));
+            InterlockedAdd(grad_conic_a[g_idx], toFixed(acc_conic.x));
+            InterlockedAdd(grad_conic_b[g_idx], toFixed(acc_conic.y));
+            InterlockedAdd(grad_conic_c[g_idx], toFixed(acc_conic.z));
+            InterlockedAdd(grad_amplitude[g_idx], toFixed(acc_amplitude));
+#if SPLAT_KERNEL == 3
             InterlockedAdd(grad_opacity[g_idx], toFixed(acc_opacity));
+#endif
             InterlockedAdd(grad_color_r[g_idx], toFixed(acc_color.x));
             InterlockedAdd(grad_color_g[g_idx], toFixed(acc_color.y));
             InterlockedAdd(grad_color_b[g_idx], toFixed(acc_color.z));
@@ -462,10 +482,10 @@ void backwardRasterizePerBucket(
     RWTexture2D<float4> dL_dC_texture,
     RWStructuredBuffer<int64_t> grad_mean2d_x,
     RWStructuredBuffer<int64_t> grad_mean2d_y,
-    RWStructuredBuffer<int64_t> grad_cov2d_a,
-    RWStructuredBuffer<int64_t> grad_cov2d_b,
-    RWStructuredBuffer<int64_t> grad_cov2d_c,
-    RWStructuredBuffer<int64_t> grad_comp,
+    RWStructuredBuffer<int64_t> grad_conic_a,
+    RWStructuredBuffer<int64_t> grad_conic_b,
+    RWStructuredBuffer<int64_t> grad_conic_c,
+    RWStructuredBuffer<int64_t> grad_amplitude,
     RWStructuredBuffer<int64_t> grad_opacity,
     RWStructuredBuffer<int64_t> grad_color_r,
     RWStructuredBuffer<int64_t> grad_color_g,
@@ -561,129 +581,155 @@ void backwardRasterizePerBucket(
     }
 
     float2 acc_mean2d = float2(0.0);
-    float3 acc_cov2d  = float3(0.0);
+    float3 acc_conic  = float3(0.0);
+    float  acc_amplitude = 0.0;
     float  acc_opacity = 0.0;
-    float  acc_comp = 0.0;
     float3 acc_color  = float3(0.0);
     float  acc_absx = 0.0;
     float  acc_absy = 0.0;
     float  acc_weight = 0.0;
 
-    GaussianPrimitive prim = splat_valid ? GaussianPrimitive.make(blend_only_data.mean, blend_only_data.cov2d,
-                                 blend_only_data.opacity, blend_only_data.sh0,
-                                 blend_only_data.opacity_compensation) : GaussianPrimitive.make(float2(0.0), float3(0.0), 0.0, float3(0.0), 0.0);
+    GaussianPrimitive prim = splat_valid ? GaussianPrimitive.make(blend_only_data)
+                                         : GaussianPrimitive.none();
     float3 c_i = prim.color();
 
-    [loop]
-    for (uint v = 0u; v < visit_count; ++v)
-    {
+    // hardness 1 = alpha-over, k > 1 sharpens extinction (core/compositor.slang).
+    Compositor comp;
+    comp.hardness = extinction_hardness;
+
+    // Visit slot k is pixel phase + k * STRIDE (or the k-th STBN sample) and checkpoint k. PIXELS_PER_STEP
+    // slots per iteration: their loads and wave scans are independent, so they hide each other's latency.
 #if STBN_ENABLED
-        uint p = gs_stbn_visit[warp_idx][v];
-        uint checkpoint_slot = v;
+    uint slot_count = visit_count;
 #else
-        uint p = v;
+    uint slot_count = STAGED_PIXELS;
 #endif
-        uint2 pixel = uint2(tile_origin_x + (p % TILE_WIDTH),
-                            tile_origin_y + (p / TILE_WIDTH));
-        bool pix_valid = (pixel.x < frame_dim_px.x && pixel.y < frame_dim_px.y);
-        uint processed = pix_valid ? gaussian_count_per_pixel[pixel] : 0u;
-        // Saturation skip; warp-uniform, so the wave scans stay in lockstep.
-        if (processed <= bucket_first_splat)
-            continue;
-
-#if !STBN_ENABLED
-        // Stochastic pixel subsampling (folds away at STRIDE=1). Warp-uniform.
-        if (BACKWARD_PIXEL_STRIDE > 1u && (p % BACKWARD_PIXEL_STRIDE) != phase)
-            continue;
-#endif
-
-        bool contributes = splat_valid && (local_splat < processed);
-
-#if !STBN_ENABLED
-        uint checkpoint_slot = (p - phase) / BACKWARD_PIXEL_STRIDE;
-#endif
-        float2 pixel_center = float2(pixel) + 0.5;
-
-
-        float T_checkpoint; float3 C_checkpoint;
-        unpackCheckpoint(gs_checkpoints[warp_idx][checkpoint_slot], T_checkpoint, C_checkpoint);
-        float dLdC_c, dLdC_C_checkpoint;
+    [loop]
+    for (uint v = 0u; v < slot_count; v += PIXELS_PER_STEP)
+    {
+        uint slot[PIXELS_PER_STEP];
+        uint2 pixel[PIXELS_PER_STEP];
+        uint processed[PIXELS_PER_STEP];
+        uint max_processed = 0u;
+        [unroll]
+        for (uint j = 0u; j < PIXELS_PER_STEP; ++j)
         {
-            float3 dL_dC = dL_dC_texture[pixel].rgb;
-            dLdC_c = dot(dL_dC, c_i);
-            dLdC_C_checkpoint = dot(dL_dC, C_checkpoint);
+            slot[j] = min(v + j, slot_count - 1u);
+#if STBN_ENABLED
+            uint p = gs_stbn_visit[warp_idx][slot[j]];
+#else
+            uint p = phase + slot[j] * BACKWARD_PIXEL_STRIDE;
+#endif
+            pixel[j] = uint2(tile_origin_x + (p % TILE_WIDTH), tile_origin_y + (p / TILE_WIDTH));
+            bool visited = (v + j < slot_count)
+                && pixel[j].x < frame_dim_px.x && pixel[j].y < frame_dim_px.y;
+            processed[j] = visited ? gaussian_count_per_pixel[pixel[j]] : 0u;
+            max_processed = max(max_processed, processed[j]);
+            // An unvisited partner still loads (in bounds) but contributes nothing.
+            pixel[j] = min(pixel[j], frame_dim_px - 1u);
         }
+        // Saturation skip: every ray ended before this bucket. Warp-uniform, so the scans stay in lockstep.
+        if (max_processed <= bucket_first_splat)
+            continue;
 
-        float alpha = 0.0;
-        bool alpha_unclamped = false;
-        if (contributes)
+        // Lanes past a pixel's early break get alpha = 0: a scan identity (T_step = 1, c*alpha*T = 0).
+        bool contributes[PIXELS_PER_STEP];
+        float2 pixel_center[PIXELS_PER_STEP];
+        float alpha[PIXELS_PER_STEP];
+        bool alpha_unclamped[PIXELS_PER_STEP];
+        float T_checkpoint[PIXELS_PER_STEP];
+        float3 C_checkpoint[PIXELS_PER_STEP];
+        float dLdC_c[PIXELS_PER_STEP];
+        float dLdC_C_checkpoint[PIXELS_PER_STEP];
+        float4 dLdC4[PIXELS_PER_STEP];
+        float4 C_total[PIXELS_PER_STEP];
+        PixelStepVector T_step;
+        PixelStepVector dLdC_weight;
+        [unroll]
+        for (uint j = 0u; j < PIXELS_PER_STEP; ++j)
         {
-            float alpha_raw = prim.coverage(pixel_center);
-            alpha = min(alpha_raw, ALPHA_MAX);
-            alpha_unclamped = (alpha_raw <= ALPHA_MAX);
-            if (alpha < ALPHA_MIN_TRACK)
+            contributes[j] = splat_valid && (local_splat < processed[j]);
+            pixel_center[j] = float2(pixel[j]) + 0.5;
+            unpackCheckpoint(gs_checkpoints[warp_idx][slot[j]], T_checkpoint[j], C_checkpoint[j]);
+            dLdC4[j] = dL_dC_texture[pixel[j]];
+            C_total[j] = output_image[pixel[j]];
+            dLdC_c[j] = dot(dLdC4[j].rgb, c_i);
+            dLdC_C_checkpoint[j] = dot(dLdC4[j].rgb, C_checkpoint[j]);
+
+            alpha[j] = 0.0;
+            alpha_unclamped[j] = false;
+            if (contributes[j])
             {
-                alpha = 0.0;
-                alpha_unclamped = false;
+                float alpha_raw = prim.coverage(pixel_center[j]);
+                alpha[j] = min(alpha_raw, ALPHA_MAX);
+                alpha_unclamped[j] = (alpha_raw <= ALPHA_MAX);
+                if (alpha[j] < ALPHA_MIN_TRACK)
+                {
+                    alpha[j] = 0.0;
+                    alpha_unclamped[j] = false;
+                }
             }
+            T_step[j] = comp.transmittance(alpha[j]);
+            dLdC_weight[j] = dLdC_c[j] * comp.weight(alpha[j]);
         }
 
-        // hardness 1 = alpha-over, k > 1 sharpens extinction (core/compositor.slang).
-        Compositor comp;
-        comp.hardness = extinction_hardness;
-        float T_step = comp.transmittance(alpha);
-
 #if BACKWARD_BLEND_SCAN_MODE == 0
-        float dLdC_weight = dLdC_c * comp.weight(alpha);
-        float T_prefix, dLdC_C_in_front_prefix;
+        PixelStepVector T_prefix, dLdC_C_in_front_prefix;
         blendPrefixExclusive(T_step, dLdC_weight, lane, T_prefix, dLdC_C_in_front_prefix);
-        float T_i     = T_checkpoint * T_prefix;
-        float alpha_T = comp.weight(alpha) * T_i;
-        float dLdC_contrib = dLdC_weight * T_i;
-        float dLdC_C_in_front = dLdC_C_checkpoint + T_checkpoint * dLdC_C_in_front_prefix;
 #else
-        float T_prefix = WavePrefixProduct(T_step);
-        float T_i     = T_checkpoint * T_prefix;
-        float alpha_T = comp.weight(alpha) * T_i;
-        float3 contrib = c_i * alpha_T;
-        float3 C_in_front = C_checkpoint + float3(
-            WavePrefixSum(contrib.x),
-            WavePrefixSum(contrib.y),
-            WavePrefixSum(contrib.z)); // WavePrefixSum is exclusive
+        PixelStepVector T_prefix;
+        [unroll]
+        for (uint j = 0u; j < PIXELS_PER_STEP; ++j)
+            T_prefix[j] = WavePrefixProduct(T_step[j]);
 #endif
 
-        if (contributes)
+        [unroll]
+        for (uint j = 0u; j < PIXELS_PER_STEP; ++j)
         {
-            // Re-read, not carried through the scan: only contributing lanes pay, and the texels are L1-hot.
-            float4 dLdC4 = dL_dC_texture[pixel];
-            float4 C_total = output_image[pixel];
-            float  T_final = 1.0 - C_total.a;
+            float T_i     = T_checkpoint[j] * T_prefix[j];
+            float alpha_T = comp.weight(alpha[j]) * T_i;
+#if BACKWARD_BLEND_SCAN_MODE == 0
+            float dLdC_contrib = dLdC_weight[j] * T_i;
+            float dLdC_C_in_front = dLdC_C_checkpoint[j] + T_checkpoint[j] * dLdC_C_in_front_prefix[j];
+#else
+            float3 contrib = c_i * alpha_T;
+            float3 C_in_front = C_checkpoint[j] + float3(
+                WavePrefixSum(contrib.x),
+                WavePrefixSum(contrib.y),
+                WavePrefixSum(contrib.z)); // WavePrefixSum is exclusive
+#endif
 
-            acc_color += dLdC4.rgb * alpha_T;
-            acc_weight += alpha_T;
+            if (contributes[j])
+            {
+                float  T_final = 1.0 - C_total[j].a;
+
+                acc_color += dLdC4[j].rgb * alpha_T;
+                acc_weight += alpha_T;
 
 #if BACKWARD_BLEND_SCAN_MODE == 0
-            float dLdC_Cbehind = dot(dLdC4.rgb, C_total.rgb) - dLdC_C_in_front - dLdC_contrib;
-            float dL_dalpha = comp.coverageGrad(alpha, dLdC_c, T_i, dLdC_Cbehind, dLdC4.a, T_final);
+                float dLdC_Cbehind = dot(dLdC4[j].rgb, C_total[j].rgb) - dLdC_C_in_front - dLdC_contrib;
+                float dL_dalpha = comp.coverageGrad(alpha[j], dLdC_c[j], T_i, dLdC_Cbehind, dLdC4[j].a,
+                                                    T_final);
 #else
-            // C_total = C_in_front + contrib + C_behind.
-            float3 C_behind = C_total.rgb - C_in_front - contrib;
-            float dL_dalpha = comp.coverageGrad(alpha, dLdC_c, T_i,
-                                                dot(dLdC4.rgb, C_behind), dLdC4.a, T_final);
+                // C_total = C_in_front + contrib + C_behind.
+                float3 C_behind = C_total[j].rgb - C_in_front - contrib;
+                float dL_dalpha = comp.coverageGrad(alpha[j], dLdC_c[j], T_i,
+                                                    dot(dLdC4[j].rgb, C_behind), dLdC4[j].a, T_final);
 #endif
-            var dp_prim = diffPair(prim);
+                var dp_prim = diffPair(prim);
+                bwd_diff(primitiveCoverage<GaussianPrimitive>)(
+                    dp_prim, pixel_center[j], alpha_unclamped[j] ? dL_dalpha : 0.0);
 
-            bwd_diff(primitiveCoverage<GaussianPrimitive>)(dp_prim, pixel_center, alpha_unclamped ? dL_dalpha : 0.0);
+                acc_mean2d += dp_prim.d.mean;
+                acc_conic  += dp_prim.d.conic;
+                acc_amplitude += dp_prim.d.amplitude;
+                acc_opacity += dp_prim.d.opacity;
 
-            acc_mean2d += dp_prim.d.mean;
-            acc_cov2d  += dp_prim.d.cov2d;
-            acc_opacity += dp_prim.d.opacity;
-            acc_comp   += dp_prim.d.opacity_compensation;
-
-            if (alpha >= ALPHA_MIN_TRACK)
-            {
-                acc_absx += abs(dp_prim.d.mean.x);
-                acc_absy += abs(dp_prim.d.mean.y);
+                if (alpha[j] >= ALPHA_MIN_TRACK)
+                {
+                    acc_absx += abs(dp_prim.d.mean.x);
+                    acc_absy += abs(dp_prim.d.mean.y);
+                }
             }
         }
     }
@@ -697,9 +743,9 @@ void backwardRasterizePerBucket(
         {
             float s = float(BACKWARD_PIXEL_STRIDE);
             acc_mean2d *= s;
-            acc_cov2d  *= s;
+            acc_conic  *= s;
+            acc_amplitude *= s;
             acc_opacity *= s;
-            acc_comp   *= s;
             acc_color  *= s;
             acc_absx *= s;
             acc_absy *= s;
@@ -712,11 +758,13 @@ void backwardRasterizePerBucket(
         }
         InterlockedAdd(grad_mean2d_x[g_idx], toFixed(acc_mean2d.x));
         InterlockedAdd(grad_mean2d_y[g_idx], toFixed(acc_mean2d.y));
-        InterlockedAdd(grad_cov2d_a[g_idx], toFixed(acc_cov2d.x));
-        InterlockedAdd(grad_cov2d_b[g_idx], toFixed(acc_cov2d.y));
-        InterlockedAdd(grad_cov2d_c[g_idx], toFixed(acc_cov2d.z));
-        InterlockedAdd(grad_comp[g_idx], toFixed(acc_comp));
+        InterlockedAdd(grad_conic_a[g_idx], toFixed(acc_conic.x));
+        InterlockedAdd(grad_conic_b[g_idx], toFixed(acc_conic.y));
+        InterlockedAdd(grad_conic_c[g_idx], toFixed(acc_conic.z));
+        InterlockedAdd(grad_amplitude[g_idx], toFixed(acc_amplitude));
+#if SPLAT_KERNEL == 3
         InterlockedAdd(grad_opacity[g_idx], toFixed(acc_opacity));
+#endif
         InterlockedAdd(grad_color_r[g_idx], toFixed(acc_color.x));
         InterlockedAdd(grad_color_g[g_idx], toFixed(acc_color.y));
         InterlockedAdd(grad_color_b[g_idx], toFixed(acc_color.z));

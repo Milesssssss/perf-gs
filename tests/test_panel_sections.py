@@ -606,13 +606,34 @@ def test_the_log_is_off_by_default_and_summarized_in_its_header() -> None:
 
 def test_the_viewer_section_reports_the_camera_it_is_looking_through() -> None:
     panel = RecordingPanel()
-    viewer_section(panel, CameraControls(
-        names=lambda: ["free fly", "cam_0001"], selection=lambda: 1,
-        select=lambda _i: None, label=lambda: "cam_0001 / 148",
-        speed=lambda: 1.25, fovy=lambda: 45.0))
+    viewer_section(panel, _camera_controls())
     screen = panel.screen()
     assert "cam_0001" in screen
     assert "1.25" in screen and "45 deg" in screen
+
+
+def test_the_viewer_section_switches_between_eval_and_train_cameras() -> None:
+    panel, recorder = RecordingPanel(), Recorder()
+    viewer_section(panel, _camera_controls(select_set=recorder.action("select_set")))
+    picker = panel.only("combo", caption="  cameras")
+    assert picker.shown
+    picker.change(1)
+    assert recorder.names == ["select_set"]
+
+
+def test_the_set_picker_hides_until_there_is_a_choice() -> None:
+    panel = RecordingPanel()
+    viewer_section(panel, _camera_controls(sets=lambda: []))
+    assert not panel.only("combo", caption="  cameras").shown
+
+
+def _camera_controls(**overrides) -> CameraControls:
+    return CameraControls(**{
+        "sets": lambda: ["eval  (1)", "train  (7)"], "set_selection": lambda: 0,
+        "select_set": lambda _i: None,
+        "names": lambda: ["free fly", "cam_0001"], "selection": lambda: 1,
+        "select": lambda _i: None, "label": lambda: "cam_0001 / 148",
+        "speed": lambda: 1.25, "fovy": lambda: 45.0, **overrides})
 
 
 # --------------------------------------------------------------------------

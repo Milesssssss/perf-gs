@@ -126,13 +126,14 @@ def test_the_camera_rig_announces_a_snap() -> None:
     callback is the ONLY thing that gets the new view on screen."""
     from trainer.frontend.viewer.viewer import _CameraRig
     from trainer.data.dataset import simple_camera
+    from trainer.frontend.scene import CameraSet
 
     changes = []
     camera = simple_camera(width=8, height=8, eye=(0.0, 0.0, 0.0),
                            target=(0.0, 0.0, 1.0), up=(0.0, 1.0, 0.0),
                            fovy_degrees=60.0)
     rig = _CameraRig(fovy=60.0, render_size=(8, 8),
-                     test_cameras=[("a", camera), ("b", camera)],
+                     camera_sets=[CameraSet("eval", (("a", camera), ("b", camera)))],
                      on_change=lambda: changes.append(1))
 
     rig.snap_to(1)

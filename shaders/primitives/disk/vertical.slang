@@ -26,15 +26,18 @@ void diskForward(
 
     DiskSource source;
     source.primitives = primitives;
-    float3 color;
-    float transmittance;
-    uint processed;
-    blendForward<DiskSource>(
-        source, 0u, primitive_count, pixels[index], true,
-        index, 0u, sorted_primitive_ids, checkpoints, extinction_hardness,
+    float2 pixel_center[1] = { pixels[index] };
+    bool valid_pixel[1] = { true };
+    uint pixel_slot[1] = { index };
+    float3 color[1];
+    float transmittance[1];
+    uint processed[1];
+    blendForward<DiskSource, 1>(
+        source, 0u, primitive_count, pixel_center, valid_pixel,
+        pixel_slot, 0u, sorted_primitive_ids, checkpoints, extinction_hardness,
         color, transmittance, processed);
-    outputs[index] = float4(color, 1.0 - transmittance);
-    processed_out[index] = processed;
+    outputs[index] = float4(color[0], 1.0 - transmittance[0]);
+    processed_out[index] = processed[0];
 }
 
 [shader("compute")]

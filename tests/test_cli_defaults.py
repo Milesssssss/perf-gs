@@ -35,7 +35,7 @@ EXPECTED_DEFAULTS = {
     "downsample": 4,
     "width": None,
     "height": None,
-    "preview_every": 3000,
+    "preview_every": None,
     # Loss/PSNR sampling cadence. Now ON by default (100): it is what feeds the
     # viewer's LOSS graph and the log lines, at the cost of one re-render +
     # frame readback per tick. 0 turns it off.
@@ -46,7 +46,7 @@ EXPECTED_DEFAULTS = {
     # and the eval tick lands on the last iteration, which is the entire wait after
     # a short run "finishes". Pass --evaluation to get them back.
     "evaluation": False,
-    "eval_every": 3000,
+    "eval_every": None,
     "eval_holdout": 1,
     "eval_holdout_stride": 8,
     "psnr_curve": False,
@@ -79,7 +79,7 @@ EXPECTED_DEFAULTS = {
     "sad_structure_every": 500,
     "sad_freq_grad_threshold": 0.00002,
     "sad_split_power": 0.5,
-    "sad_max_split_factor": 8,
+    "sad_max_split_factor": 2,
     "sad_ks_scale_power": 1.0,
     "sad_structure_min_opacity": 0.1,
     "sad_opacity_cap": 0.8,

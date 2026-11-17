@@ -17,15 +17,15 @@ struct Projected2DGaussian
     float opacity_compensation; // Mip-Splatting alpha factor coef3d*coef2d (1.0 when off)
 };
 
-// Just the fields the blend backward's random (tile, depth)-order gather needs, so it does not pull
-// the full Gaussian3D and Projected2DGaussian into L2. Written by bin_count.
+// Per-view splat record the blend passes gather, precomputed once by bin_count (and sh_forward for
+// color) so the per-pixel loops evaluate only a quadratic form and one exp.
 struct BlendData
 {
     float2 mean;            // == Projected2DGaussian.mean
-    float3 cov2d;           // == Projected2DGaussian.cov2d
-    float  opacity;         // == Gaussian3D.opacity (pre-sigmoid logit)
-    float3 sh0;             // == Gaussian3D.sh0
-    float  opacity_compensation; // == Projected2DGaussian.opacity_compensation (mip)
+    float3 conic;           // conicFromCov(Projected2DGaussian.cov2d)
+    float  amplitude;       // splatAmplitude(opacity logit, Mip compensation)
+    float3 color;           // this view's color: shDC(sh0), or the SH evaluation
+    float  opacity;         // == Gaussian3D.opacity (pre-sigmoid logit); shapes opaque_core only
 };
 
 #endif // TRAINER_TYPES_SLANG

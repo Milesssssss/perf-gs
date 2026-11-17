@@ -17,7 +17,7 @@ STAGE_MAP: dict[str, tuple[str, ...]] = {
     # Per-splat setup: view transform, 2D covariance, SH evaluation, cull.
     "preprocess_projection": ("clear", "cluster_cull", "bin_count", "sh_forward"),
     # Building the per-tile splat lists: prefix scans, key emit, sort, ranges.
-    "tile_binning_sort": ("scan_tile_offsets", "bin_emit", "radix_sort",
+    "tile_binning_sort": ("depth_sort", "scan_tile_offsets", "bin_emit", "radix_sort",
                           "identify_tile_ranges", "bucket_scan"),
     "forward_raster": ("rasterize",),
     "loss": ("loss",),

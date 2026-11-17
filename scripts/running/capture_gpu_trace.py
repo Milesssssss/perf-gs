@@ -8,38 +8,15 @@ Usage: python scripts/running/capture_gpu_trace.py --scene datasets/360_v2/bicyc
 from __future__ import annotations
 
 import argparse
-import os
-import re
 import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
 
+from nsight_tools import find_nsight_tool, open_in_nsight
+
 # Steady state starts after capture_iter + 7 presents (8 warm-up frames); start the trace a bit past that.
 _WARMUP_MARGIN = 15
-
-
-def _find_ngfx_exe() -> Path | None:
-    """Locate ngfx.exe in the newest Nsight Graphics install; NGFX_EXE overrides."""
-    override = os.environ.get("NGFX_EXE")
-    if override:
-        p = Path(override)
-        return p if p.is_file() else None
-
-    nvidia_root = Path(r"C:\Program Files\NVIDIA Corporation")
-    if not nvidia_root.is_dir():
-        return None
-
-    def _ver_key(p: Path) -> list[int]:
-        return [int(x) for x in re.findall(r"\d+", p.name)] or [-1]
-
-    installs = sorted(nvidia_root.glob("Nsight Graphics *"),
-                      key=_ver_key, reverse=True)
-    for install in installs:
-        for exe in install.glob("host/*/ngfx.exe"):
-            if exe.is_file():
-                return exe
-    return None
 
 
 def main() -> int:
@@ -61,8 +38,8 @@ def main() -> int:
     ap.add_argument("--limit-to-frames", type=int, default=0,
                     help="Optional hard cap on traced frames (0 = duration only).")
     ap.add_argument("--capture-frames", type=int, default=0,
-                    help="Frozen frames the trainer presents (0 = auto: "
-                         "start-after + 1500 margin).")
+                    help="Frozen frames the trainer presents (0 = auto: the "
+                         "frames before the trace starts + 1500 margin).")
     ap.add_argument("--python", type=str, default=sys.executable,
                     help="Python interpreter to run v2_train.py with "
                          "(default: this venv's python).")
@@ -74,16 +51,18 @@ def main() -> int:
                          "Analysis view's aggregated-frame bottleneck / "
                          "expert-system advice. Pass --no-multi-pass-metrics "
                          "for a faster single-pass timeline-only trace.")
-    ap.add_argument("--architecture", type=str, default="Ampere GA10x",
+    ap.add_argument("--architecture", type=str, default="Ada",
                     help="GPU architecture the --metric-set-name applies to "
-                         "(default: Ampere GA10x = RTX 30-series). Set to your "
-                         "GPU's arch if different, e.g. 'Ada', 'Blackwell "
-                         "GB20x'.")
+                         "(default: Ada = RTX 40-series). Set to your GPU's "
+                         "arch if different, e.g. 'Ampere GA10x' (RTX "
+                         "30-series), 'Blackwell GB20x'.")
     ap.add_argument("--metric-set-name", type=str, default="Throughput Metrics",
                     help="GPU Trace metric set to collect (case sensitive). "
                          "'Throughput Metrics' feeds the Trace Analysis "
                          "bottleneck breakdown. Empty string keeps the "
                          "project's own metric set.")
+    ap.add_argument("--open", action=argparse.BooleanOptionalAction, default=True,
+                    help="Open the saved trace in Nsight Graphics when done.")
     ap.add_argument("--dry-run", action="store_true",
                     help="Print the ngfx.exe command and exit.")
     ap.add_argument("trainer_args", nargs=argparse.REMAINDER,
@@ -91,7 +70,7 @@ def main() -> int:
     args = ap.parse_args()
 
     repo = Path(__file__).resolve().parent.parent.parent
-    ngfx = _find_ngfx_exe()
+    ngfx = find_nsight_tool("ngfx.exe", "NGFX_EXE")
     if ngfx is None:
         print("[capture] ngfx.exe not found. Set NGFX_EXE or install Nsight "
               "Graphics.", file=sys.stderr)
@@ -103,8 +82,10 @@ def main() -> int:
         return 2
 
     start_after = args.capture_iter + _WARMUP_MARGIN
-    capture_frames = args.capture_frames or (start_after + 1500)
-    if capture_frames <= start_after + args.limit_to_frames:
+    # start_after counts every present; capture_iter + 7 of them come before the frozen loop.
+    frozen_before_trace = start_after - (args.capture_iter + 7)
+    capture_frames = args.capture_frames or (frozen_before_trace + 1500)
+    if capture_frames <= frozen_before_trace + args.limit_to_frames:
         print("[capture] WARNING: --capture-frames may be too small; the "
               "trainer could exit before ngfx.exe finishes the trace.",
               file=sys.stderr)
@@ -181,8 +162,12 @@ def main() -> int:
                     key=lambda p: p.stat().st_mtime, reverse=True)
     if traces:
         print(f"[capture] DONE. Trace saved: {traces[0]}")
-        print("[capture] Open it in standalone Nsight Graphics "
-              "(File > Open) — no live process needed.")
+        if args.open:
+            open_in_nsight(traces[0], ngfx)
+            print("[capture] Opened in Nsight Graphics.")
+        else:
+            print("[capture] Open it in standalone Nsight Graphics "
+                  "(File > Open) — no live process needed.")
     else:
         print(f"[capture] ngfx.exe exited ({proc.returncode}) but no "
               f".ngfx-gputrace was written to {out_dir}.", file=sys.stderr)

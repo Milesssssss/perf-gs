@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 from trainer.data.colmap import load_colmap
 from trainer.frontend.profiling.profiler import apply_profile_session_overrides
 from trainer.frontend.reporting.error_log import report_exception
+from trainer.frontend.scene import holdout_split, split_camera_sets
 from trainer.frontend.viewer.session import (
     Confirm, DatasetInfo, ERROR, KIND_COLMAP, KIND_IMAGES, OK, ResultInfo,
     Session, ToolsState, WARN, format_duration,
@@ -400,10 +401,11 @@ class TrainingHub:
         finally:
             self.app.viewer.resume_rendering()
 
-        # Every camera, not the eval split, so the whole capture can be inspected before a run.
-        self.app.viewer.attach_scene(
-            [(entry.image_name, entry.camera) for entry in dataset.images],
-            snap=True)
+        # The run's split is fixed by --eval / --eval-holdout-stride, so the preview can show it already.
+        args = self.app.args
+        test, train = holdout_split(len(dataset.images), max(args.eval_holdout_stride, 1),
+                                    bool(args.eval_holdout))
+        self.app.viewer.attach_scene(split_camera_sets(dataset.images, test, train), snap=True)
         first = dataset.images[0].camera if dataset.images else None
         info = state.snapshot().dataset
         state.dataset_ready(DatasetInfo(

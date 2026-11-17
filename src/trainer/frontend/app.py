@@ -207,14 +207,8 @@ class TrainingApplication:
 
 
     def _attach_scene_to_viewer(self) -> None:
-        """Hand the chosen scene's held-out cameras to the hub viewer's dropdown."""
-        scene = self._sceneContext
-        images = scene.colmapScene.images
-        test_cameras = [
-            (images[i].image_name, images[i].camera)
-            for i in scene.test_indices if 0 <= i < len(images)
-        ]
-        self._viewer.attach_scene(test_cameras)
+        """Hand the chosen scene's eval and training cameras to the hub viewer's pickers."""
+        self._viewer.attach_scene(self._sceneContext.camera_sets())
 
     def _run_training_and_post(self, *, hold_viewer: bool = True) -> None:
         """Train, then write the run's post-training artifacts.
@@ -440,13 +434,7 @@ class TrainingApplication:
 
     def _start_viewer(self, scene: SceneContext) -> None:
         if not self.args.no_viewer:
-            # Held-out test cameras let the viewer's C/V keys snap to the exact eval poses.
-            images = scene.colmapScene.images
-            test_cameras = [
-                (images[i].image_name, images[i].camera)
-                for i in scene.test_indices
-                if 0 <= i < len(images)
-            ]
+            # Dataset cameras let the viewer's picker and C/V keys snap to the exact train/eval poses.
             self.viewer = ViewerSession.create(
                 device=self.device,
                 width=scene.width,
@@ -454,7 +442,7 @@ class TrainingApplication:
                 fovy=getattr(self.args, "fovy", 45.0),
                 gpu_lock=self.gpu_lock,
                 pipeline=self._pipeline,
-                test_cameras=test_cameras,
+                camera_sets=scene.camera_sets(),
             )
         else:
             self.viewer = ViewerSession(None)

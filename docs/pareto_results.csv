@@ -1,43 +1,43 @@
 scene,config,label,seeds,psnr,train_s,splats_m,ssim,lpips,on_frontier,flags
-bicycle,baseline,baseline,1,24.461,24.52,3.58,0.7525,0.2465,False,
-bicycle,no_prune,no pruning,1,24.436,27.09,5.26,0.7512,0.2457,False,--prune-blend-weight 0
-bicycle,bf16,bf16,1,24.448,23.70,3.65,0.7512,0.2481,False,--adam-moments bf16
-bicycle,stbn50,STBN 50%,1,24.356,22.50,3.43,0.7450,0.2611,False,--stbn-pixel-fraction 0.5
-bicycle,stbn25,STBN 25%,1,24.231,20.54,3.32,0.7321,0.2835,False,--stbn-pixel-fraction 0.25
-bicycle,stbn10,STBN 10%,1,23.661,19.05,3.11,0.6862,0.3398,False,--stbn-pixel-fraction 0.1
-bicycle,prune,prune,1,24.545,22.33,3.77,0.7573,0.2393,True,--prune-blend-from 1000
-bicycle,prune_early,prune early,1,24.468,19.72,3.07,0.7522,0.2487,True,--prune-blend-weight 0.3 --prune-blend-from 500
-bicycle,opaque,opaque core,1,24.193,22.15,3.46,0.7416,0.2633,False,--splat-kernel opaque_core --splat-profile-power 3 --splat-profile-onset 2
-bicycle,bf16_prune,bf16+prune,1,24.526,21.76,3.85,0.7574,0.2390,True,--adam-moments bf16 --prune-blend-from 1000
-bicycle,bf16_prune_stbn50,bf16+prune+STBN 50%,1,24.418,20.13,3.69,0.7496,0.2529,False,--adam-moments bf16 --prune-blend-from 1000 --stbn-pixel-fraction 0.5
-bicycle,bf16_prune_stbn25,bf16+prune+STBN 25%,1,24.262,17.83,3.43,0.7358,0.2760,True,--adam-moments bf16 --prune-blend-from 1000 --stbn-pixel-fraction 0.25
-bicycle,bf16_prune_opaque,bf16+prune+opaque,1,24.234,18.77,3.28,0.7452,0.2563,False,--adam-moments bf16 --prune-blend-from 1000 --splat-kernel opaque_core --splat-profile-power 3 --splat-profile-onset 2
-bicycle,fastest,bf16+prune early+STBN 50%+opaque,1,24.038,15.55,2.55,0.7232,0.2942,True,--adam-moments bf16 --prune-blend-weight 0.3 --prune-blend-from 500 --stbn-pixel-fraction 0.5 --splat-kernel opaque_core --splat-profile-power 3 --splat-profile-onset 2
-room,baseline,baseline,3,30.094,34.41,2.60,0.9168,0.2833,False,
-room,no_prune,no pruning,3,30.022,40.11,4.75,0.9173,0.2814,False,--prune-blend-weight 0
-room,bf16,bf16,3,30.104,33.58,2.60,0.9167,0.2834,True,--adam-moments bf16
-room,stbn50,STBN 50%,3,29.914,31.93,2.56,0.9151,0.2866,False,--stbn-pixel-fraction 0.5
-room,stbn25,STBN 25%,3,29.981,28.42,2.51,0.9144,0.2911,True,--stbn-pixel-fraction 0.25
-room,stbn10,STBN 10%,3,29.634,26.92,2.38,0.9084,0.3050,False,--stbn-pixel-fraction 0.1
-room,prune,prune,3,29.969,28.00,2.05,0.9143,0.2893,True,--prune-blend-from 1000
-room,prune_early,prune early,3,29.747,24.45,1.65,0.9109,0.2965,True,--prune-blend-weight 0.3 --prune-blend-from 500
-room,opaque,opaque core,3,29.795,31.35,2.44,0.9137,0.2921,False,--splat-kernel opaque_core --splat-profile-power 3 --splat-profile-onset 2
-room,bf16_prune,bf16+prune,3,29.860,27.22,2.05,0.9141,0.2898,False,--adam-moments bf16 --prune-blend-from 1000
-room,bf16_prune_stbn50,bf16+prune+STBN 50%,3,29.861,25.14,2.02,0.9130,0.2931,True,--adam-moments bf16 --prune-blend-from 1000 --stbn-pixel-fraction 0.5
-room,bf16_prune_stbn25,bf16+prune+STBN 25%,3,29.618,22.07,1.96,0.9100,0.2992,True,--adam-moments bf16 --prune-blend-from 1000 --stbn-pixel-fraction 0.25
-room,bf16_prune_opaque,bf16+prune+opaque,3,29.062,24.40,1.82,0.9046,0.3025,False,--adam-moments bf16 --prune-blend-from 1000 --splat-kernel opaque_core --splat-profile-power 3 --splat-profile-onset 2
-room,fastest,bf16+prune early+STBN 50%+opaque,3,29.128,19.41,1.44,0.9035,0.3138,True,--adam-moments bf16 --prune-blend-weight 0.3 --prune-blend-from 500 --stbn-pixel-fraction 0.5 --splat-kernel opaque_core --splat-profile-power 3 --splat-profile-onset 2
-mean,baseline,,,+0.000,100.0%,,,,True,
-mean,no_prune,,,-0.049,113.5%,,,,False,
-mean,bf16,,,-0.002,97.1%,,,,True,
-mean,stbn50,,,-0.143,92.3%,,,,False,
-mean,stbn25,,,-0.172,83.2%,,,,False,
-mean,stbn10,,,-0.630,78.0%,,,,False,
-mean,prune,,,-0.021,86.2%,,,,True,
-mean,prune_early,,,-0.170,75.7%,,,,True,
-mean,opaque,,,-0.284,90.7%,,,,False,
-mean,bf16_prune,,,-0.085,83.9%,,,,True,
-mean,bf16_prune_stbn50,,,-0.138,77.6%,,,,True,
-mean,bf16_prune_stbn25,,,-0.338,68.4%,,,,True,
-mean,bf16_prune_opaque,,,-0.630,73.7%,,,,False,
-mean,fastest,,,-0.694,59.9%,,,,True,
+bicycle,baseline,baseline,1,24.519,19.40,3.61,0.7508,0.2505,False,
+bicycle,no_prune,no pruning,1,24.499,22.36,5.50,0.7504,0.2480,False,--prune-blend-weight 0
+bicycle,bf16,bf16,1,24.528,18.79,3.66,0.7510,0.2506,True,--adam-moments bf16
+bicycle,stbn50,STBN 50%,1,24.442,18.45,3.47,0.7434,0.2656,False,--stbn-pixel-fraction 0.5
+bicycle,stbn25,STBN 25%,1,24.241,16.19,3.23,0.7282,0.2901,False,--stbn-pixel-fraction 0.25
+bicycle,stbn10,STBN 10%,1,23.682,15.10,3.10,0.6817,0.3460,False,--stbn-pixel-fraction 0.1
+bicycle,prune,prune,1,24.510,17.04,3.22,0.7501,0.2548,True,--prune-blend-from 1000
+bicycle,prune_early,prune early,1,24.457,15.74,2.69,0.7468,0.2617,True,--prune-blend-weight 0.3 --prune-blend-from 500
+bicycle,opaque,opaque core,1,24.278,18.14,3.17,0.7410,0.2666,False,--splat-kernel opaque_core --splat-profile-power 3 --splat-profile-onset 2
+bicycle,bf16_prune,bf16+prune,1,24.505,16.50,3.25,0.7496,0.2552,True,--adam-moments bf16 --prune-blend-from 1000
+bicycle,bf16_prune_stbn50,bf16+prune+STBN 50%,1,24.423,15.49,3.04,0.7415,0.2712,True,--adam-moments bf16 --prune-blend-from 1000 --stbn-pixel-fraction 0.5
+bicycle,bf16_prune_stbn25,bf16+prune+STBN 25%,1,24.184,13.62,2.87,0.7249,0.2966,True,--adam-moments bf16 --prune-blend-from 1000 --stbn-pixel-fraction 0.25
+bicycle,bf16_prune_opaque,bf16+prune+opaque,1,24.253,15.49,2.71,0.7380,0.2743,False,--adam-moments bf16 --prune-blend-from 1000 --splat-kernel opaque_core --splat-profile-power 3 --splat-profile-onset 2
+bicycle,fastest,bf16+prune early+STBN 50%+opaque,1,24.010,13.08,2.15,0.7197,0.3058,True,--adam-moments bf16 --prune-blend-weight 0.3 --prune-blend-from 500 --stbn-pixel-fraction 0.5 --splat-kernel opaque_core --splat-profile-power 3 --splat-profile-onset 2
+room,baseline,baseline,3,30.105,22.09,1.98,0.9156,0.2868,False,
+room,no_prune,no pruning,3,30.364,24.61,3.13,0.9182,0.2838,True,--prune-blend-weight 0
+room,bf16,bf16,3,30.336,21.46,1.97,0.9175,0.2856,True,--adam-moments bf16
+room,stbn50,STBN 50%,3,30.275,20.91,1.94,0.9164,0.2885,True,--stbn-pixel-fraction 0.5
+room,stbn25,STBN 25%,3,30.184,18.22,1.87,0.9143,0.2939,False,--stbn-pixel-fraction 0.25
+room,stbn10,STBN 10%,3,29.888,17.08,1.75,0.9087,0.3064,False,--stbn-pixel-fraction 0.1
+room,prune,prune,3,30.132,19.54,1.68,0.9154,0.2895,False,--prune-blend-from 1000
+room,prune_early,prune early,3,30.087,18.11,1.40,0.9140,0.2931,True,--prune-blend-weight 0.3 --prune-blend-from 500
+room,opaque,opaque core,3,30.053,21.67,1.84,0.9143,0.2937,False,--splat-kernel opaque_core --splat-profile-power 3 --splat-profile-onset 2
+room,bf16_prune,bf16+prune,3,30.232,19.14,1.68,0.9158,0.2891,False,--adam-moments bf16 --prune-blend-from 1000
+room,bf16_prune_stbn50,bf16+prune+STBN 50%,3,30.233,18.13,1.64,0.9146,0.2927,True,--adam-moments bf16 --prune-blend-from 1000 --stbn-pixel-fraction 0.5
+room,bf16_prune_stbn25,bf16+prune+STBN 25%,3,30.080,15.71,1.58,0.9124,0.2980,True,--adam-moments bf16 --prune-blend-from 1000 --stbn-pixel-fraction 0.25
+room,bf16_prune_opaque,bf16+prune+opaque,3,29.829,18.55,1.49,0.9116,0.2989,False,--adam-moments bf16 --prune-blend-from 1000 --splat-kernel opaque_core --splat-profile-power 3 --splat-profile-onset 2
+room,fastest,bf16+prune early+STBN 50%+opaque,3,29.496,15.72,1.21,0.9069,0.3086,False,--adam-moments bf16 --prune-blend-weight 0.3 --prune-blend-from 500 --stbn-pixel-fraction 0.5 --splat-kernel opaque_core --splat-profile-power 3 --splat-profile-onset 2
+mean,baseline,,,+0.000,100.0%,,,,False,
+mean,no_prune,,,+0.120,113.3%,,,,False,
+mean,bf16,,,+0.120,97.0%,,,,True,
+mean,stbn50,,,+0.047,94.9%,,,,False,
+mean,stbn25,,,-0.100,83.0%,,,,False,
+mean,stbn10,,,-0.527,77.6%,,,,False,
+mean,prune,,,+0.009,88.2%,,,,False,
+mean,prune_early,,,-0.040,81.6%,,,,False,
+mean,opaque,,,-0.146,95.8%,,,,False,
+mean,bf16_prune,,,+0.057,85.8%,,,,True,
+mean,bf16_prune_stbn50,,,+0.016,81.0%,,,,True,
+mean,bf16_prune_stbn25,,,-0.180,70.7%,,,,True,
+mean,bf16_prune_opaque,,,-0.271,81.9%,,,,False,
+mean,fastest,,,-0.559,69.3%,,,,True,

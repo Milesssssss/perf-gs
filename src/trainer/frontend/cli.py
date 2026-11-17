@@ -51,14 +51,17 @@ def build_parser() -> argparse.ArgumentParser:
                     help="force render width (overrides --downsample)")
     parser.add_argument("--height", type=int, default=None,
                     help="force render height (overrides --downsample)")
-    parser.add_argument("--preview-every", type=int, default=3000)
+    parser.add_argument("--preview-every", type=int, default=None,
+                    help="preview every N iters (with --evaluation, a preview also renders "
+                         "every camera). Default: once, on the last iteration (follows --iters).")
     _shared(parser, "log_every")
     parser.add_argument("--render-all-every", type=int, default=0,
                     help="dump PNGs for ALL cameras every N iters")
     _shared(parser, "evaluation")
-    parser.add_argument("--eval-every", type=int, default=3000,
+    parser.add_argument("--eval-every", type=int, default=None,
                     help="every N iters, render ALL cameras and compute the honest "
                          "average PSNR (same metric as the final_psnr.json summary). "
+                         "Default: once, on the last iteration (follows --iters); 0 = off. "
                          "Writes results to eval_curve.jsonl in the run dir with "
                          "iter, elapsed_s (pure training wall-clock, excluding eval "
                          "time), and avg_psnr_lin/srgb/srgb_masked.")
@@ -125,9 +128,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--profile-every", type=int, default=0,
                     help="profile one full step every N iters (0 to disable)")
     parser.add_argument("--morton-every", type=int, default=0,
-                    help="Morton-order (Z-curve) re-sort of the gaussian + Adam "
-                         "buffers every N iters, PLUS once after each densify. 0 "
-                         "(default) = disabled. Improves cache locality of "
+                    help="Extra Morton-order (Z-curve) re-sorts of the gaussian + Adam "
+                         "buffers every N iters, on top of the one after each densify. "
+                         "0 (default) = only after densify. Improves cache locality of "
                          "subsequent per-splat reads (bin_count, blend backward, "
                          "adam) as the array grows large. Follows clear_tracking "
                          "(and clear_structure_scores on SAD runs) since window "
@@ -139,9 +142,8 @@ def build_parser() -> argparse.ArgumentParser:
                          "128-splat clusters (Morton-adjacent) by a per-cluster "
                          "AABB and skip clusters fully outside the view frustum. "
                          "On by default; pass --no-cluster-cull to disable. "
-                         "Requires --morton-every > 0 for the clusters to be "
-                         "spatially coherent (without it, each cluster spans the "
-                         "whole scene). Mask-in-bin_count design (no compaction, "
+                         "Relies on the Morton re-sort after each densify for the "
+                         "clusters to be spatially coherent. Mask-in-bin_count design (no compaction, "
                          "no slot remap) — every downstream pass is unaware.")
     _shared(parser, "densify_mode")
     parser.add_argument("--sad-tau-split", type=float, default=StructureConfig.tau_split,
@@ -173,7 +175,8 @@ def build_parser() -> argparse.ArgumentParser:
                     help="SAD: per-axis split factor n_k = ceil(eta_max ** power); 0.5 = sqrt (paper)")
     parser.add_argument("--sad-max-split-factor", type=int,
                     default=StructureConfig.max_split_factor,
-                    help="SAD: per-axis cap on the grid split factor n_k (SADGS max_clones_per_axis=8)")
+                    help="SAD: per-axis cap on the grid split factor n_k. The default 2 trains 17%% "
+                         "faster than SADGS's max_clones_per_axis=8 for ~0.04 dB less PSNR")
     parser.add_argument("--sad-ks-scale-power", type=float,
                     default=StructureConfig.ks_scale_power,
                     help="SAD: child scale along axis k = sigma_k / n_k**power (SADGS "
@@ -261,8 +264,10 @@ def build_parser() -> argparse.ArgumentParser:
                     default="stream",
                     help="where training targets (and SAD structure fields) live: "
                          "'stream' (default) = host RAM, uploaded inside each "
-                         "iteration's command buffer (bit-identical, no measured "
-                         "slowdown); 'gpu' = one texture per training camera.")
+                         "iteration's command buffer (bit-identical; ~0.25 ms per step "
+                         "at 1558x1039, about 2%% of a run); 'gpu' = one texture per "
+                         "training camera, plus 8 B/pixel of structure fields with "
+                         "structure-aware densification.")
     _shared(parser, "adam_moments")
     _shared(parser, "splat_kernel")
     _shared(parser, "splat_profile_power")

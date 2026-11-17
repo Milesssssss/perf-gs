@@ -120,8 +120,8 @@ PRESETS: dict[str, dict[str, Any]] = {
 
 SETTINGS: tuple[Setting, ...] = (
     Setting(PRESET, "preset", "perf", str, default="balanced", choices=tuple(PRESETS),
-            about="ultrafast: every speed knob, ~40% faster for -0.4 to -0.8 dB. perf: ~20% "
-                  "faster for under 0.1 dB. quality: +0.2 to +0.5 dB for 11-22% more time.",
+            about="ultrafast: every speed knob, 22-36% faster for -0.3 to -0.8 dB. perf: 8-21% "
+                  "faster for under 0.1 dB. quality: up to +0.3 dB for 6-12% more time.",
             help="bundle of settings for the speed/quality trade-off: 'ultrafast' = "
                  "--adam-moments bf16 --prune-blend-weight 0.3 --prune-blend-from 500 "
                  "--stbn-pixel-fraction 0.5 --splat-kernel opaque_core "
@@ -136,13 +136,13 @@ SETTINGS: tuple[Setting, ...] = (
             note="the LR decay horizon follows this"),
     Setting("lr_recipe", "learning-rate recipe", "schedule", str,
             about="quality: scale and rotation LRs start 3x higher and decay to 0.5x, "
-                  "opacity LR 0.7x. +0.2 to +0.5 dB for 11-22% more training time.",
+                  "opacity LR 0.7x. Up to +0.3 dB for 6-12% more training time.",
             default=LearningRateRecipe.DEFAULT.value,
             choices=tuple(r.value for r in LearningRateRecipe),
             help="per-parameter learning-rate plan. 'quality' starts the scale and "
                  "rotation LRs 3x higher, decays them log-linearly to 0.5x by the "
                  "last step and lowers the opacity LR to 0.7x: sharper results for "
-                 "11-22%% more training time."),
+                 "6-12%% more training time."),
     Setting("densify_mode", "strategy", "densify", str,
             about="How splats are added and removed: simple = 3DGS clone/split, "
                   "structure_aware = SAD-GS splits along image structure, none = fixed set.",
@@ -344,15 +344,14 @@ SETTINGS: tuple[Setting, ...] = (
     Setting("evaluation", "eval + final metrics", "eval", bool, default=True,
             about="Score the model on every camera during and after training. Off "
                   "finishes sooner; Export still works.",
-            help="Run the passes that render every camera: the periodic eval "
-                 "sweep (--eval-every, which lands on the LAST iteration whenever "
-                 "it divides --iters and is most of the wait after training "
-                 "'ends'), the post-training metrics pass and .ply export "
-                 "(--compute-final-metrics), and the held-out test PSNR "
-                 "(--final-test-psnr). On by default. --no-evaluation is a VETO "
-                 "over all three, so a run that only needs the trained model "
-                 "stops paying for them; it does not turn anything on that its "
-                 "own flag left off, and it does not touch the explicit "
+            help="Run the passes that render every camera: the eval sweep "
+                 "(--eval-every; by default once, on the last iteration) and the "
+                 "full-camera renders that ride on previews, the post-training "
+                 "metrics pass and .ply export (--compute-final-metrics), and the "
+                 "held-out test PSNR (--final-test-psnr). On by default. "
+                 "--no-evaluation is a VETO over all of them, so a run that only needs "
+                 "the trained model stops paying for them; it does not turn anything "
+                 "on that its own flag left off, and it does not touch the explicit "
                  "--render-all-every / --psnr-curve opt-ins.",
             note="off = no full-camera-set renders"),
     Setting("stream_every", "snapshot every N iters", "stream", int, default=10,

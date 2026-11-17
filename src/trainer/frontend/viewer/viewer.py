@@ -7,7 +7,8 @@ import math
 import os
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
+from typing import TYPE_CHECKING
 
 import numpy as np
 import slangpy as spy
@@ -33,6 +34,9 @@ from trainer.frontend.viewer.ui.sections import (
     training_section,
     viewer_section,
 )
+
+if TYPE_CHECKING:
+    from trainer.frontend.scene import CameraSet
 
 # No-scene backdrop, written straight into the non-sRGB present format, so already display-encoded.
 BACKDROP = spy.float4(0.055, 0.065, 0.080, 1.0)
@@ -259,7 +263,7 @@ class FlyCamera:
         return Camera(view_matrix=view, proj_matrix=proj, image_size=(width, height))
 
 
-#: Key tags whose motion drops the "parked on a test camera" state.
+#: Key tags whose motion drops the "parked on a dataset camera" state.
 MOVE_TAGS = frozenset({"w", "a", "s", "d", "q", "e", "r", "t"})
 ROLL_SPEED_DEG_S = 60.0
 TRAINING_SCENE_FPS = 15.0
@@ -268,44 +272,65 @@ TRAINING_SCENE_FPS = 15.0
 class _CameraRig:
 
     def __init__(self, *, fovy: float, render_size: tuple[int, int],
-                 test_cameras: list[tuple[str, Camera]] | None = None,
+                 camera_sets: Sequence[CameraSet] = (),
                  on_change: Callable[[], None] | None = None) -> None:
         self.cam = FlyCamera()
         self.fovy = float(fovy)
         self._render_size = render_size
-        self.test_cameras: list[tuple[str, Camera]] = list(test_cameras or [])
+        self.sets: tuple[CameraSet, ...] = tuple(camera_sets)
+        self.set_index = 0              # the set the dropdown and C/V cycle through
         self.index = -1                 # -1 == free-fly
         self.exact: Camera | None = None  # rendered verbatim while parked
         # Parked + training re-renders only on demand, so an unannounced snap would leave the old camera up.
         self._on_change = on_change or (lambda: None)
 
+    @property
+    def cameras(self) -> Sequence[tuple[str, Camera]]:
+        return self.sets[self.set_index].cameras if self.sets else ()
+
+    @property
+    def set_label(self) -> str:
+        return self.sets[self.set_index].label if self.sets else ""
+
+    def set_names(self) -> list[str]:
+        return [f"{s.label}  ({len(s.cameras)})" for s in self.sets]
+
+    def select_set(self, set_index: int) -> None:
+        """List another set; the view stays where it is, in free-fly."""
+        if set_index != self.set_index:
+            self.set_index = set_index
+            self.snap_to(-1)
+
     def names(self) -> list[str]:
         return ["Free-fly"] + [f"{i + 1:02d}  {name}"
-                               for i, (name, _) in enumerate(self.test_cameras)]
+                               for i, (name, _) in enumerate(self.cameras)]
 
     def selection(self) -> int:
-        """Dropdown index: 0 == free-fly, k == test camera k-1."""
+        """Dropdown index: 0 == free-fly, k == camera k-1 of the listed set."""
         return self.index + 1
 
     def label(self) -> str:
-        if self.index < 0 or not self.test_cameras:
+        if self.index < 0 or not self.cameras:
             return "free-fly"
-        name, _ = self.test_cameras[self.index]
+        name, _ = self.cameras[self.index]
         exact = "exact proj" if self.exact is not None else "fly proj"
-        return f"cam {self.index + 1}/{len(self.test_cameras)}  {name}  ({exact})"
+        return (f"{self.set_label} cam {self.index + 1}/{len(self.cameras)}  "
+                f"{name}  ({exact})")
 
-    def set_test_cameras(self, cameras, snap: bool = False) -> None:
-        self.test_cameras = list(cameras or [])
-        self.snap_to(0 if snap and self.test_cameras else -1)
+    def set_camera_sets(self, camera_sets: Sequence[CameraSet], snap: bool = False) -> None:
+        """Replace the sets, keeping the chosen one listed."""
+        self.sets = tuple(camera_sets)
+        self.set_index = min(self.set_index, max(len(self.sets) - 1, 0))
+        self.snap_to(0 if snap and self.cameras else -1)
 
     def snap_to(self, index: int) -> None:
-        """Park on test camera ``index`` (-1 => free-fly)."""
-        if index < 0 or not self.test_cameras:
+        """Park on camera ``index`` of the listed set (-1 => free-fly)."""
+        if index < 0 or not self.cameras:
             self.index, self.exact = -1, None
             self._on_change()
             return
-        index %= len(self.test_cameras)
-        name, target = self.test_cameras[index]
+        index %= len(self.cameras)
+        name, target = self.cameras[index]
         self.cam.set_from_view_matrix(target.view_matrix)  # WASD continues here
         fovy = _fovy_from_proj(target.proj_matrix)
         if fovy is not None:
@@ -314,15 +339,15 @@ class _CameraRig:
         self.exact = (target if tuple(target.image_size) == self._render_size
                       else None)
         self._on_change()
-        print(f"[Viewer] snapped to test cam {index + 1}/{len(self.test_cameras)} "
+        print(f"[Viewer] snapped to {self.set_label} cam {index + 1}/{len(self.cameras)} "
               f"({name}), exact_proj={self.exact is not None}, "
               f"fovy={self.fovy:.1f} deg")
 
     def step(self, delta: int) -> None:
-        if not self.test_cameras:
-            print("[Viewer] no test cameras available to snap to")
+        if not self.cameras:
+            print("[Viewer] no cameras in the listed set to snap to")
             return
-        self.snap_to((self.index + delta) % len(self.test_cameras))
+        self.snap_to((self.index + delta) % len(self.cameras))
 
     def leave(self) -> None:
         """Manual navigation drops the parked state (keeps the current pose)."""
@@ -345,9 +370,9 @@ class _CameraRig:
         return self.cam.get_camera(width, height, self.fovy, aspect=aspect)
 
     def current_name(self) -> str:
-        if self.index < 0 or not self.test_cameras:
+        if self.index < 0 or not self.cameras:
             return "(free-fly)"
-        return self.test_cameras[self.index][0]
+        return self.cameras[self.index][0]
 
 
 class _ShaderWatcher:
@@ -407,7 +432,7 @@ class Viewer:
                  hot_reload: bool = False, max_sort_pairs: int | None = None,
                  gpu_lock=None, sh_degree: int = 0,
                  mip_enabled: bool = False, mip_kernel_size: float = 0.3,
-                 test_cameras: list[tuple[str, Camera]] | None = None,
+                 camera_sets: Sequence[CameraSet] = (),
                  state: Session | None = None):
         self.device = device
         self.width = width
@@ -423,7 +448,7 @@ class Viewer:
         self._last_scene_s = 0.0
         self._frame_budget_off = threading.Event()
         self._rig = _CameraRig(fovy=fovy, render_size=(width, height),
-                               test_cameras=test_cameras,
+                               camera_sets=camera_sets,
                                on_change=self.invalidate_scene)
 
         import contextlib
@@ -560,7 +585,7 @@ class Viewer:
     def clear_view(self) -> None:
         with self._render_lock:      # no frame mid-read of the buffers
             self._has_data = False
-        self._rig.set_test_cameras([])
+        self._rig.set_camera_sets(())
         self._training_active = False
         print("[Viewer] view cleared")
 
@@ -601,8 +626,8 @@ class Viewer:
         if active:
             self.state.training_running()
 
-    def attach_scene(self, test_cameras, snap: bool = False) -> None:
-        self._rig.set_test_cameras(test_cameras, snap=snap)
+    def attach_scene(self, camera_sets: Sequence[CameraSet], snap: bool = False) -> None:
+        self._rig.set_camera_sets(camera_sets, snap=snap)
 
     def suspend_rendering(self) -> None:
         self._suspend.set()
@@ -689,7 +714,7 @@ class Viewer:
             img = self._pipeline.read_output_image()[..., :3]
             png = (np.clip(img, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8)
             name = self._rig.current_name()
-            label = ("testcam_" + name.replace("/", "_").replace("\\", "_")
+            label = (f"{self._rig.set_label}cam_" + name.replace("/", "_").replace("\\", "_")
                      if self._rig.index >= 0 else "freefly")
             path = os.path.abspath(f"viewer_grab_{label}.png")
             Image.fromarray(png, mode="RGB").save(path)
@@ -714,7 +739,7 @@ class Viewer:
                 .document("wheel", "move speed")
                 .document("R / T", "roll view")
                 .document("Y", "level horizon to view")
-                .document("C / V", "next / prev test camera")
+                .document("C / V", "next / prev camera")
                 .document("P", "save frame to PNG")
                 .document("F1", "show / hide panel"))
 
@@ -761,6 +786,9 @@ class Viewer:
                 show_all=lambda: view.show_all_config,
                 toggle_all=self.state.toggle_config_detail)
         viewer_section(panel, CameraControls(
+            sets=self._rig.set_names,
+            set_selection=lambda: self._rig.set_index,
+            select_set=lambda index: self._rig.select_set(int(index)),
             names=self._rig.names,
             selection=self._rig.selection,
             select=lambda index: self._rig.snap_to(int(index) - 1),

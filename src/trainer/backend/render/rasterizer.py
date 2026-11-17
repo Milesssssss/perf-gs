@@ -25,13 +25,16 @@ _CAMERA_BYTES = 144   # CameraData: two 4x4 matrices + image size, padded to 16 
 class Rasterizer:
     """Projects, bins, depth-sorts and blends the splats of one view.
 
-    Keeps the uploaded camera and depth-sorted splat ids for the backward pass.
+    Splats are depth-sorted once and their tile pairs emitted front to back, so the pair sort
+    only orders tile indices. Keeps the uploaded camera and per-tile splat ids for the backward.
     """
 
     KERNELS = {
         "clear_textures": ("rasterize/tile_binned/clear.slang", "clearTextures"),
         "clear_tile_ranges": ("rasterize/tile_binned/tile_ranges.slang", "clearTileRanges"),
         "bin_count": ("rasterize/tile_binned/bin_count.slang", "binCount"),
+        "gather_tile_counts": ("rasterize/tile_binned/depth_order.slang",
+                               "gatherTileCountsByDepth"),
         "bin_emit": ("rasterize/tile_binned/bin_emit.slang", "binEmit"),
         "identify_tile_ranges": ("rasterize/tile_binned/tile_ranges.slang", "identifyTileRanges"),
         "bucket_count": ("rasterize/tile_binned/bucket_count.slang", "bucketCount"),
@@ -58,6 +61,7 @@ class Rasterizer:
         self._sh = sh
         self._scan = scan
         self._sort = sort
+        self._depth_sort = RadixSort(commands, kernels, raster.depth_sort)
         self.config = config
         self.width = width
         self.height = height
@@ -133,6 +137,9 @@ class Rasterizer:
                 projected_2d=r.projected_2d.storage,
                 blend_data=r.blend_data.storage,
                 tile_count_per_gaussian=r.tile_count_per_gaussian.storage,
+                depth_keys=r.depth_sort.keys_lo.storage,
+                depth_ids=r.depth_sort.values.storage,
+                depth_count=r.depth_count.storage,
                 cluster_visible=r.cluster_visible.storage,
                 filter_3D=primitive.filter_3d.storage,
                 mip_enabled=1 if config.mip_enabled else 0,
@@ -148,41 +155,50 @@ class Rasterizer:
                     num_gaussians_counter=primitive.active_count.storage,
                     camera=self.camera_buffer,
                     features_rest=self._sh.features_rest.storage,
+                    tile_count_per_gaussian=r.tile_count_per_gaussian.storage,
                     blend_data=r.blend_data.storage,
                     active_sh_degree=contextual.sh_degree,
                     rest_floats=self._sh.rest_floats,
                     max_splats=capacity)
 
+        with commands.marker_group("depth_sort"):
+            _, _, depth_sorted_ids = self._depth_sort.sort(r.depth_count, key_bits=32)
+            commands.dispatch(k.gather_tile_counts, "gather_tile_counts",
+                thread_count=[capacity, 1, 1],
+                depth_sorted_ids=depth_sorted_ids.storage,
+                depth_count=r.depth_count.storage,
+                tile_count_per_gaussian=r.tile_count_per_gaussian.storage,
+                tile_count_by_depth=r.tile_count_by_depth.storage,
+                max_splats=capacity)
+
         with commands.marker_group("scan_tile_offsets"):
-            self._scan.scan(n=capacity, in_buf=r.tile_count_per_gaussian,
-                            out_buf=r.tile_offset_per_gaussian)
+            self._scan.scan(n=capacity, in_buf=r.tile_count_by_depth,
+                            out_buf=r.pair_offset_by_depth)
 
         pairs = self._sort.resources
+        pair_count = self._scan.resources.total
         with commands.marker_group("bin_emit"):
             commands.dispatch(k.bin_emit, "bin_emit",
-                thread_count=[capacity, 1, 1],
-                gaussians=primitive.values.storage,
-                num_gaussians_counter=primitive.active_count.storage,
+                thread_count=[pairs.capacity, 1, 1],
+                blend_data=r.blend_data.storage,
                 camera=self.camera_buffer,
-                projected_2d=r.projected_2d.storage,
-                tile_offset_per_gaussian=r.tile_offset_per_gaussian.storage,
-                keys_lo=pairs.keys_lo.storage,
-                keys_hi=pairs.keys_hi.storage,
+                depth_sorted_ids=depth_sorted_ids.storage,
+                depth_count=r.depth_count.storage,
+                pair_offset_by_depth=r.pair_offset_by_depth.storage,
+                pair_total=pair_count.storage,
+                tile_keys=pairs.keys_lo.storage,
                 values=pairs.values.storage,
-                cluster_visible=r.cluster_visible.storage,
-                z_near=config.z_near_cull,
                 max_sort_pairs=pairs.capacity)
 
-        pair_count = self._scan.resources.total
         with commands.marker_group("radix_sort"):
-            # Key = (tile index, 32-bit depth); the tile index needs few bits.
+            # Pairs arrive front to back, so the stable sort only needs the tile index's bits.
             tile_bits = max(1, (num_tiles - 1).bit_length())
-            _, sorted_hi, sorted_values = self._sort.sort(pair_count, key_bits=32 + tile_bits)
+            sorted_tiles, _, sorted_values = self._sort.sort(pair_count, key_bits=tile_bits)
 
         with commands.marker_group("identify_tile_ranges"):
             commands.dispatch(k.identify_tile_ranges, "identify_tile_ranges",
                 thread_count=[pairs.capacity, 1, 1],
-                keys_hi=sorted_hi.storage,
+                tile_keys=sorted_tiles.storage,
                 tile_start=r.tile_start.storage,
                 tile_end=r.tile_end.storage,
                 n_buf=pair_count.storage,
@@ -200,8 +216,10 @@ class Rasterizer:
                             out_buf=r.bucket_offsets, total_buf=r.bucket_offset_total)
 
         with commands.marker_group("rasterize"):
+            # One warp per tile, two pixels per lane, two vertically adjacent tiles per workgroup.
             commands.dispatch(k.forward, "forward",
-                thread_count=[self.num_tiles_x * TILE_WIDTH, self.num_tiles_y * TILE_HEIGHT, 1],
+                thread_count=[self.num_tiles_x * TILE_WIDTH,
+                              (self.num_tiles_y + 1) // 2 * TILE_HEIGHT, 1],
                 blend_data=r.blend_data.storage,
                 tile_start=r.tile_start.storage,
                 tile_end=r.tile_end.storage,

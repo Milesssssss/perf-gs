@@ -42,7 +42,7 @@ def _make_device_and_kernels(backend: str):
 
 
 def _radix_sort(device, kernels, keys_lo: np.ndarray, keys_hi: np.ndarray,
-                values: np.ndarray, passes: int = 8):
+                values: np.ndarray, passes: int = 8, key_words: int = 2):
     n = keys_lo.shape[0]
     # Capacity rounded up to a partition multiple; max_blocks derived from it.
     cap = max(PART_SIZE, ((n + PART_SIZE - 1) // PART_SIZE) * PART_SIZE)
@@ -105,7 +105,7 @@ def _radix_sort(device, kernels, keys_lo: np.ndarray, keys_hi: np.ndarray,
             b_pass_hist=pass_hist.storage,
             b_global_hist=global_hist.storage,
             n_buf=n_buf.storage,
-            radix_shift=radix_shift, key_word=key_word,
+            radix_shift=radix_shift, key_word=key_word, key_words=key_words,
             pass_idx=pass_idx, max_blocks=max_blocks,
         )
         src_lo, dst_lo = dst_lo, src_lo
@@ -202,3 +202,22 @@ def test_radix_sort_skips_zero_digit_passes(backend: str, passes: int) -> None:
     want = _reference_sort(keys_lo, keys_hi, values)
     for name, g, w in zip(("keys_lo", "keys_hi", "values"), got, want):
         np.testing.assert_array_equal(g, w, err_msg=name)
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+@pytest.mark.parametrize("passes", [2, 4])
+def test_radix_sort_single_word_keys_is_stable(backend: str, passes: int) -> None:
+    """32-bit keys (tile index, depth) sort on keys_lo alone; equal keys keep their input order,
+    which is what turns a depth-ordered pair list into front-to-back tile lists."""
+    device, kernels = _make_device_and_kernels(backend)
+    n = 50_000
+    rng = np.random.default_rng(passes)
+    keys_lo = rng.integers(0, 2 ** (8 * passes), size=n, dtype=np.uint32)
+    keys_hi = np.zeros(n, dtype=np.uint32)
+    values = np.arange(n, dtype=np.uint32)
+
+    got_lo, _, got_v = _radix_sort(device, kernels, keys_lo, keys_hi, values,
+                                   passes=passes, key_words=1)
+    order = np.argsort(keys_lo, kind="stable")
+    np.testing.assert_array_equal(got_lo, keys_lo[order])
+    np.testing.assert_array_equal(got_v, values[order])

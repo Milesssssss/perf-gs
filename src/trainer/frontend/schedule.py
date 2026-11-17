@@ -61,7 +61,7 @@ class TrainingSchedule:
         if c.render_all_every > 0:
             do_render_all = (it % c.render_all_every == 0) or (it == c.iterations)
         else:
-            do_render_all = do_preview
+            do_render_all = do_preview and c.render_all_on_preview
 
         do_log = (c.log_every > 0
                   and ((it % c.log_every == 0) or (it == 1) or (it == c.iterations)))

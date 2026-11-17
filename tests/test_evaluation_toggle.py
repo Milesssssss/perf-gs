@@ -13,8 +13,10 @@ what the individual flags say, and with it on each pass still obeys its own flag
 """
 from __future__ import annotations
 
+from trainer.config.resolve import RunConfig, end_of_run_cadence
 from trainer.frontend.cli import build_parser
 from trainer.frontend.reporting.outputs import RunArtifacts
+from trainer.frontend.schedule import TrainingSchedule
 from trainer.frontend.settings import BOOL, SETTINGS_MAP, group_settings
 
 # --------------------------------------------------------------------------
@@ -33,8 +35,28 @@ def test_it_is_one_shared_knob_on_both_surfaces() -> None:
 def test_default_on_means_nothing_changed_for_existing_runs() -> None:
     """A veto, not a switch: with it on, each pass still obeys its own flag."""
     args = build_parser().parse_args([])
-    assert (args.eval_every, args.compute_final_metrics, args.final_test_psnr) \
-        == (3000, False, False)
+    assert (end_of_run_cadence(args.eval_every, args.iters), args.compute_final_metrics,
+            args.final_test_psnr) == (3000, False, False)
+
+
+def _events_over(*argv):
+    args = build_parser().parse_args(list(argv))
+    schedule = TrainingSchedule(RunConfig.from_args(args, 1.0).schedule)
+    return [schedule.events_at(it) for it in range(1, args.iters + 1)]
+
+
+def test_a_longer_run_evaluates_once_at_its_own_end() -> None:
+    """The default cadences follow --iters, so nothing fires at 3000 of a 7000-step run."""
+    events = _events_over("--iters", "7000", "--evaluation")
+    for flag in ("preview", "render_all", "eval"):
+        fired = [e.iteration for e in events if getattr(e, flag)]
+        assert fired == [7000], flag
+
+
+def test_no_evaluation_stops_previews_rendering_every_camera() -> None:
+    events = _events_over("--iters", "7000", "--no-evaluation")
+    assert not any(e.render_all for e in events)
+    assert [e.iteration for e in events if e.preview] == [7000]
 
 
 # --------------------------------------------------------------------------

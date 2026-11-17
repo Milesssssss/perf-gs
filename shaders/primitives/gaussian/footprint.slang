@@ -21,15 +21,15 @@ struct GaussianFootprint : IScreenFootprint
     bool visible;       // SnugBox has extent and EllipseParams well-formed
 
     // Computes SnugBox, ellipse params and extremum offsets up front so the walk queries are pure reads.
-    static GaussianFootprint make(float2 mean_2d, float3 cov2d, float opacity_logit)
+    static GaussianFootprint make(float2 mean_2d, float3 conic, float cutoff_q)
     {
         GaussianFootprint fp;
         fp.mean_2d = mean_2d;
 
-        bool box_ok = snugBox(mean_2d, cov2d, opacity_logit, fp.aabb_min, fp.aabb_max);
+        bool box_ok = snugBox(mean_2d, conic, cutoff_q, fp.aabb_min, fp.aabb_max);
 
         EllipseParams e;
-        bool ell_ok = computeEllipseParams(cov2d, opacity_logit, e);
+        bool ell_ok = computeEllipseParams(conic, cutoff_q, e);
         computeExtremumOffsets(e, fp.x_d_args, fp.y_d_args);
         fp.e = e;
 

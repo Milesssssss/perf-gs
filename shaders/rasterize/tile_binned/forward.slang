@@ -1,7 +1,8 @@
 // Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-// Tile-binned forward rasterizer: one thread per pixel, one workgroup per tile, front-to-back.
-// Writes each pixel's early-break stop index so the backward replays the same entries.
+// Tile-binned forward rasterizer, front to back: one warp per tile with two pixels per lane (rows r and
+// r + TILE_HEIGHT / 2), so each splat load serves two pixels; a workgroup holds two vertically adjacent
+// tiles. Writes each pixel's early-break stop index so the backward replays the same entries.
 
 #include "../../common/types.slang"
 #include "../../common/math.slang"
@@ -10,10 +11,13 @@
 #include "blend_forward.slang"
 #include "common/execution.slang"
 
+static const uint PIXELS_PER_THREAD = 2u;
+static const uint TILE_ROWS_PER_PASS = TILE_HEIGHT / PIXELS_PER_THREAD;
+static const uint TILES_PER_GROUP = 2u;
+
 [shader("compute")]
-[numthreads(TILE_WIDTH, TILE_HEIGHT, 1)]
+[numthreads(TILE_WIDTH, TILE_ROWS_PER_PASS * TILES_PER_GROUP, 1)]
 void forwardRasterize(
-    uint3 dtid: SV_DispatchThreadID,
     uint3 gid: SV_GroupID,
     uint3 gtid: SV_GroupThreadID,
     // Compact blend record packed by bin_count, gathered identically by the backward.
@@ -29,39 +33,50 @@ void forwardRasterize(
     RWTexture2D<uint> gaussian_count_per_pixel,
     uniform float extinction_hardness)
 {
-    uint2 pixel = dtid.xy;
     uint2 frame_dim_px = uint2(camera[0].image_size);
+    uint2 tile_dim = uint2(TILE_WIDTH, TILE_HEIGHT);
+    uint2 num_tiles = (frame_dim_px + tile_dim - 1u) / tile_dim;
+    uint2 tile = uint2(gid.x, gid.y * TILES_PER_GROUP + gtid.y / TILE_ROWS_PER_PASS);
+    if (tile.y >= num_tiles.y) return;
 
-    uint2 num_tiles = (frame_dim_px + uint2(TILE_WIDTH, TILE_HEIGHT) - 1u)
-                      / uint2(TILE_WIDTH, TILE_HEIGHT);
-    uint tile_idx = gid.y * num_tiles.x + gid.x;
+    uint tile_idx = tile.y * num_tiles.x + tile.x;
     uint t_start = tile_start[tile_idx];
     uint t_end   = tile_end[tile_idx];
     uint tile_count = (t_end > t_start) ? (t_end - t_start) : 0;
-
-    // Row-major (stride TILE_WIDTH) slot in each bucket's TILE_AREA-entry checkpoint block.
-    uint pixel_in_tile = gtid.y * TILE_WIDTH + gtid.x;
     uint tile_bucket_base = bucket_offsets[tile_idx];
 
-    bool valid_pixel = (pixel.x < frame_dim_px.x && pixel.y < frame_dim_px.y);
-
-    float2 pixel_center = float2(pixel) + 0.5;
+    uint2 pixel[PIXELS_PER_THREAD];
+    float2 pixel_center[PIXELS_PER_THREAD];
+    bool valid_pixel[PIXELS_PER_THREAD];
+    uint pixel_in_tile[PIXELS_PER_THREAD];   // row-major slot in each bucket's checkpoint block
+    [unroll]
+    for (uint j = 0u; j < PIXELS_PER_THREAD; ++j)
+    {
+        uint2 in_tile = uint2(gtid.x, gtid.y % TILE_ROWS_PER_PASS + j * TILE_ROWS_PER_PASS);
+        pixel[j] = tile * tile_dim + in_tile;
+        pixel_center[j] = float2(pixel[j]) + 0.5;
+        valid_pixel[j] = pixel[j].x < frame_dim_px.x && pixel[j].y < frame_dim_px.y;
+        pixel_in_tile[j] = in_tile.y * TILE_WIDTH + in_tile.x;
+    }
 
     GaussianSource src;
     src.blend_data = blend_data;
 
-    float3 C;
-    float T;
-    uint processed;
-    blendForward<GaussianSource>(
+    float3 C[PIXELS_PER_THREAD];
+    float T[PIXELS_PER_THREAD];
+    uint processed[PIXELS_PER_THREAD];
+    blendForward<GaussianSource, PIXELS_PER_THREAD>(
         src, t_start, tile_count, pixel_center, valid_pixel,
         pixel_in_tile, tile_bucket_base, sorted_gaussian_ids,
         raster_checkpoints, extinction_hardness, C, T, processed);
 
-    if (!valid_pixel)
-        return;
-
-    // The backward recovers final transmittance as T = 1 - output_image.a.
-    output_image[pixel] = float4(C, 1.0 - T);
-    gaussian_count_per_pixel[pixel] = processed;
+    [unroll]
+    for (uint j = 0u; j < PIXELS_PER_THREAD; ++j)
+    {
+        if (!valid_pixel[j])
+            continue;
+        // The backward recovers final transmittance as T = 1 - output_image.a.
+        output_image[pixel[j]] = float4(C[j], 1.0 - T[j]);
+        gaussian_count_per_pixel[pixel[j]] = processed[j];
+    }
 }

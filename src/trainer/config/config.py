@@ -179,6 +179,8 @@ class ScheduleConfig:
     prune_blend_weight: float = 0.2
     # First pruning tick; 0 = the last densify tick, a single cleanup pass.
     prune_blend_from: int = 0
+    # Previews also render every camera; --no-evaluation vetoes that.
+    render_all_on_preview: bool = True
 
     @property
     def blend_prune_start(self) -> int:
@@ -209,7 +211,8 @@ class StructureConfig:
     tau_prune: float = 0.8
     grad_threshold: float = 1e-5     # SADGS is_grad_high floor
     split_power: float = 0.5         # 0.5 = sqrt (paper)
-    max_split_factor: int = 8        # SADGS max_clones_per_axis
+    # Per-axis cap on n_k. SADGS uses 8 (max_clones_per_axis); 2 trains 17% faster for 0.04 dB.
+    max_split_factor: int = 2
     # Child scale sigma_k / n_k**power: 1.0 for Mip-NeRF 360, 1.2 for T&T / Deep Blending (SADGS).
     ks_scale_power: float = 1.0
     t_opacity: float = 0.005

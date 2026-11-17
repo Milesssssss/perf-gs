@@ -40,7 +40,7 @@ float evalGaussian2D(float2 pixel, float2 mean_2d, float3 cov2d, float opacity)
 float4 snugBoxTest(float2 mean_2d, float3 cov2d, float opacity)
 {
     float2 mn, mx;
-    snugBox(mean_2d, cov2d, _opacityToLogit(opacity), mn, mx);
+    snugBox(mean_2d, conicFromCov(cov2d), splatCutoffQ(_opacityToLogit(opacity)), mn, mx);
     return float4(mn.x, mn.y, mx.x, mx.y);
 }
 
@@ -49,14 +49,15 @@ float2 accuTileRowTest(
     float2 mean_2d, float3 cov2d, float opacity,
     float row_y_bot, float row_y_top)
 {
-    float opacity_logit = _opacityToLogit(opacity);
+    float3 conic = conicFromCov(cov2d);
+    float t = splatCutoffQ(_opacityToLogit(opacity));
     EllipseParams e;
-    if (!computeEllipseParams(cov2d, opacity_logit, e))
+    if (!computeEllipseParams(conic, t, e))
         return float2(1e30, -1e30);
     float x_d_args, y_d_args;
     computeExtremumOffsets(e, x_d_args, y_d_args);
     float2 mn, mx;
-    snugBox(mean_2d, cov2d, opacity_logit, mn, mx);
+    snugBox(mean_2d, conic, t, mn, mx);
     return accuTileRowXRange(e, mean_2d.y, mn.x, mx.x, y_d_args, mean_2d,
                              row_y_bot, row_y_top);
 }

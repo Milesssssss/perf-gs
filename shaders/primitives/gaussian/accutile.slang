@@ -15,21 +15,16 @@ struct EllipseParams
     float a;  // Σ⁻¹[0][0]
     float b;  // Σ⁻¹[0][1]
     float c;  // Σ⁻¹[1][1]
-    float t;  // splatCutoffQ(opacity_logit)
+    float t;  // splatCutoffQ
 };
 
-// Same ellipse parameters snugBox uses; opacity_logit is pre-sigmoid, t comes from the splat kernel.
-bool computeEllipseParams(float3 cov2d, float opacity_logit, out EllipseParams e)
+// Same ellipse snugBox bounds: conic is the packed inverse covariance, t the splat kernel's cutoff.
+bool computeEllipseParams(float3 conic, float t, out EllipseParams e)
 {
-    float cov00 = cov2d.x;
-    float cov01 = cov2d.y;
-    float cov11 = cov2d.z;
-    float det_cov = max(cov00 * cov11 - cov01 * cov01, 1e-20);
-    float inv_det = 1.0 / det_cov;
-    e.a =  cov11 * inv_det;
-    e.b = -cov01 * inv_det;
-    e.c =  cov00 * inv_det;
-    e.t = splatCutoffQ(opacity_logit);
+    e.a = conic.x;
+    e.b = conic.y;
+    e.c = conic.z;
+    e.t = t;
     return e.t > 0.0;
 }
 

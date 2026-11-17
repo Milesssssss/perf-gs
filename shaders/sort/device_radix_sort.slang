@@ -2,7 +2,8 @@
 // Original sorting code: Copyright (c) 2024 Thomas Smith (MIT).
 
 // Reduce-then-scan device radix sort from GPUSorting (b0nes164, MIT): no forward-progress requirement.
-// Wave size >= 16, ascending; sorts (keys_lo, keys_hi, values), passes 0-3 on keys_lo, 4-7 on keys_hi.
+// Wave size >= 16, ascending, stable; sorts (keys_lo, keys_hi, values), passes 0-3 on keys_lo, 4-7 on
+// keys_hi. With key_words = 1 keys_hi is neither read nor written.
 
 #ifndef TRAINER_DEVICE_RADIX_SORT_SLANG
 #define TRAINER_DEVICE_RADIX_SORT_SLANG
@@ -610,6 +611,7 @@ void downsweep(
     StructuredBuffer<uint> n_buf,
     uniform uint radix_shift,
     uniform uint key_word,
+    uniform uint key_words,
     uniform uint pass_idx,
     uniform uint max_blocks)
 {
@@ -684,24 +686,27 @@ void downsweep(
     }
     GroupMemoryBarrierWithGroupSync();
 
-    // 9. Scatter the other key word.
-    KeyStruct otherKey;
-    uint other_key_word = 1u - key_word;
-    if (!last)
-        otherKey = loadKeysWGE16Sel(t, g, other_key_word, keys_lo_in, keys_hi_in);
-    else
-        otherKey = loadKeysPartialWGE16Sel(t, g, other_key_word, keys_lo_in, keys_hi_in, n);
-    scatterPayloadShared(offsets, otherKey);
-    GroupMemoryBarrierWithGroupSync();
-
-    if (!last)
-        scatterPayloadDeviceSel(t, digits, key_word, keys_lo_out, keys_hi_out);
-    else
+    // 9. Scatter the other key word (64-bit keys only).
+    if (key_words > 1u)
     {
-        uint final_size = n - g * PART_SIZE;
-        scatterPayloadDevicePartialSel(t, final_size, digits, key_word, keys_lo_out, keys_hi_out);
+        KeyStruct otherKey;
+        uint other_key_word = 1u - key_word;
+        if (!last)
+            otherKey = loadKeysWGE16Sel(t, g, other_key_word, keys_lo_in, keys_hi_in);
+        else
+            otherKey = loadKeysPartialWGE16Sel(t, g, other_key_word, keys_lo_in, keys_hi_in, n);
+        scatterPayloadShared(offsets, otherKey);
+        GroupMemoryBarrierWithGroupSync();
+
+        if (!last)
+            scatterPayloadDeviceSel(t, digits, key_word, keys_lo_out, keys_hi_out);
+        else
+        {
+            uint final_size = n - g * PART_SIZE;
+            scatterPayloadDevicePartialSel(t, final_size, digits, key_word, keys_lo_out, keys_hi_out);
+        }
+        GroupMemoryBarrierWithGroupSync();
     }
-    GroupMemoryBarrierWithGroupSync();
 
     // 10. Scatter the values.
     KeyStruct valuePayload;

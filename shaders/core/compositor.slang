@@ -43,15 +43,15 @@ struct Compositor
     {
 #if COMPOSITOR_HARDNESS_ONE
         {
-            float oneMinusA = 1.0 - a;
-            return dLdc * T_i - dLdCbehind / oneMinusA + dL_dA * (T_final / oneMinusA);
+            float inv_one_minus_a = 1.0 / (1.0 - a);
+            return dLdc * T_i + (dL_dA * T_final - dLdCbehind) * inv_one_minus_a;
         }
 #else
         if (hardness == 1.0)
         {
             // alpha-over: weight'=1, transmittance'/transmittance = -1/(1-a)
-            float oneMinusA = 1.0 - a;
-            return dLdc * T_i - dLdCbehind / oneMinusA + dL_dA * (T_final / oneMinusA);
+            float inv_one_minus_a = 1.0 / (1.0 - a);
+            return dLdc * T_i + (dL_dA * T_final - dLdCbehind) * inv_one_minus_a;
         }
         float beta = 1.0 - a;
         float dWeight = hardness * pow(beta, hardness - 1.0);   // weight'(a)

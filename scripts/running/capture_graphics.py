@@ -8,41 +8,18 @@ Usage: python scripts/running/capture_graphics.py --scene datasets/360_v2/bicycl
 from __future__ import annotations
 
 import argparse
-import os
-import re
 import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
+
+from nsight_tools import find_nsight_tool, open_in_nsight
 
 # Same as capture_gpu_trace.py: lands ~8 frames into the frozen steady state (after capture_iter + 7 presents).
 _WARMUP_MARGIN = 15
 
 # A resource snapshot needs one frame (--frame-count accepts 1-600).
 _FRAME_COUNT = 1
-
-
-def _find_ngfx_capture_exe() -> Path | None:
-    """Locate ngfx-capture.exe in the newest Nsight Graphics install; NGFX_CAPTURE_EXE overrides."""
-    override = os.environ.get("NGFX_CAPTURE_EXE")
-    if override:
-        p = Path(override)
-        return p if p.is_file() else None
-
-    nvidia_root = Path(r"C:\Program Files\NVIDIA Corporation")
-    if not nvidia_root.is_dir():
-        return None
-
-    def _ver_key(p: Path) -> list[int]:
-        return [int(x) for x in re.findall(r"\d+", p.name)] or [-1]
-
-    installs = sorted(nvidia_root.glob("Nsight Graphics *"),
-                      key=_ver_key, reverse=True)
-    for install in installs:
-        for exe in install.glob("host/*/ngfx-capture.exe"):
-            if exe.is_file():
-                return exe
-    return None
 
 
 def main() -> int:
@@ -77,6 +54,8 @@ def main() -> int:
                          "'where is my 20 GB going' — it exposes the full "
                          "device-memory objects the Memory view groups "
                          "resources under. Pass --no-full-gpu-allocs to skip.")
+    ap.add_argument("--open", action=argparse.BooleanOptionalAction, default=True,
+                    help="Open the saved capture in Nsight Graphics when done.")
     ap.add_argument("--dry-run", action="store_true",
                     help="Print the ngfx-capture.exe command and exit.")
     ap.add_argument("trainer_args", nargs=argparse.REMAINDER,
@@ -84,7 +63,7 @@ def main() -> int:
     args = ap.parse_args()
 
     repo = Path(__file__).resolve().parent.parent.parent
-    ngfx_capture = _find_ngfx_capture_exe()
+    ngfx_capture = find_nsight_tool("ngfx-capture.exe", "NGFX_CAPTURE_EXE")
     if ngfx_capture is None:
         print("[capture] ngfx-capture.exe not found. Set NGFX_CAPTURE_EXE or "
               "install Nsight Graphics.", file=sys.stderr)
@@ -167,7 +146,10 @@ def main() -> int:
         key=lambda p: p.stat().st_mtime, reverse=True)
     if caps:
         print(f"[capture] DONE. Capture saved: {caps[0]}")
-        print("[capture] Open it in Nsight Graphics, then Graphics Debugger -> "
+        if args.open:
+            open_in_nsight(caps[0], ngfx_capture)
+            print("[capture] Opened in Nsight Graphics.")
+        print("[capture] Graphics Debugger -> "
               "Memory to inspect VkDeviceMemory sizes / aliasing.")
     else:
         print(f"[capture] ngfx-capture.exe exited ({proc.returncode}) but no "

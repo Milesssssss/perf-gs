@@ -19,6 +19,7 @@ import numpy as np
 import pytest
 
 from trainer.data.dataset import Camera
+from trainer.frontend.scene import CameraSet
 from trainer.frontend.viewer.viewer import FlyCamera, _CameraRig
 
 
@@ -74,7 +75,7 @@ def _fake_camera(index: int):
 def test_attaching_a_scene_stays_in_free_fly_by_default() -> None:
     rig = _CameraRig(fovy=45.0, render_size=(960, 540))
 
-    rig.set_test_cameras([("a", _fake_camera(1)), ("b", _fake_camera(2))])
+    rig.set_camera_sets(_sets(eval_=("a", "b")))
 
     assert rig.index == -1
     assert rig.selection() == 0
@@ -87,7 +88,7 @@ def test_the_point_cloud_preview_parks_on_the_first_camera() -> None:
     "the dataset failed to load"."""
     rig = _CameraRig(fovy=45.0, render_size=(960, 540))
 
-    rig.set_test_cameras([("a", _fake_camera(7)), ("b", _fake_camera(9))], snap=True)
+    rig.set_camera_sets(_sets(eval_=("a", "b")), snap=True)
 
     assert rig.index == 0
     assert rig.selection() == 1
@@ -97,6 +98,39 @@ def test_the_point_cloud_preview_parks_on_the_first_camera() -> None:
 def test_snapping_an_empty_scene_falls_back_to_free_fly() -> None:
     rig = _CameraRig(fovy=45.0, render_size=(960, 540))
 
-    rig.set_test_cameras([], snap=True)
+    rig.set_camera_sets((), snap=True)
 
     assert rig.index == -1
+
+
+def test_switching_sets_lists_the_other_split_and_keeps_the_view() -> None:
+    rig = _CameraRig(fovy=45.0, render_size=(960, 540))
+    rig.set_camera_sets(_sets(eval_=("e1",), train=("t1", "t2")), snap=True)
+    pose = rig.cam.eye.copy()
+
+    rig.select_set(1)
+
+    assert rig.set_names() == ["eval  (1)", "train  (2)"]
+    assert rig.names() == ["Free-fly", "01  t1", "02  t2"]
+    assert rig.index == -1, "an index into the old set must not carry over"
+    np.testing.assert_array_equal(rig.cam.eye, pose)
+    rig.step(+1)
+    assert rig.current_name() == "t1"
+    assert rig.label().startswith("train cam 1/2")
+
+
+def test_a_new_scene_keeps_the_chosen_set_listed() -> None:
+    """The hub re-attaches at Train; a user who picked training views keeps them."""
+    rig = _CameraRig(fovy=45.0, render_size=(960, 540))
+    rig.set_camera_sets(_sets(eval_=("e1",), train=("t1",)))
+    rig.select_set(1)
+
+    rig.set_camera_sets(_sets(eval_=("e2",), train=("t2", "t3")))
+
+    assert rig.names() == ["Free-fly", "01  t2", "02  t3"]
+
+
+def _sets(*, eval_=(), train=()) -> tuple[CameraSet, CameraSet]:
+    def named(names):
+        return tuple((name, _fake_camera(i)) for i, name in enumerate(names))
+    return CameraSet("eval", named(eval_)), CameraSet("train", named(train))

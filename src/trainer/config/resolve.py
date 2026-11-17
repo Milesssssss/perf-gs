@@ -115,6 +115,11 @@ class RunConfig:
         )
 
 
+def end_of_run_cadence(every: int | None, iters: int) -> int:
+    """A pass's cadence in iterations; None (the default) runs it once, on the last step."""
+    return iters if every is None else every
+
+
 def _schedule(args: argparse.Namespace, mode: DensificationMode) -> ScheduleConfig:
     return ScheduleConfig(
         iterations=args.iters,
@@ -125,10 +130,10 @@ def _schedule(args: argparse.Namespace, mode: DensificationMode) -> ScheduleConf
         densify_mode=mode,
         sad_structure_every=args.sad_structure_every,
         sad_accum_every=args.sad_accum_every,
-        preview_every=args.preview_every,
+        preview_every=end_of_run_cadence(args.preview_every, args.iters),
         log_every=args.log_every,
         render_all_every=args.render_all_every,
-        eval_every=args.eval_every,
+        eval_every=end_of_run_cadence(args.eval_every, args.iters),
         psnr_curve_enabled=bool(args.psnr_curve),
         psnr_curve_every=args.psnr_curve_every,
         morton_every=args.morton_every,
@@ -137,6 +142,7 @@ def _schedule(args: argparse.Namespace, mode: DensificationMode) -> ScheduleConf
         eval_iters=tuple(sorted({int(v) for v in (args.eval_iters or ())})),
         prune_blend_weight=float(args.prune_blend_weight),
         prune_blend_from=int(args.prune_blend_from),
+        render_all_on_preview=bool(args.evaluation),
     )
 
 

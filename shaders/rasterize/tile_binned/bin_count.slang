@@ -1,18 +1,25 @@
 // Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-// Binning phase 1: project each live gaussian and count the tiles its ellipse touches (AccuTile).
-// The caller prefix-scans tile_count_per_gaussian into bin_emit's write offsets.
+// Binning phase 1: project each live gaussian, count the tiles its ellipse touches (AccuTile) and
+// key it by depth for the front-to-back splat sort that orders bin_emit's pairs.
 
 #include "../../common/types.slang"
 #include "../../common/math.slang"
 #include "../../primitives/gaussian/project.slang"
-#include "../../primitives/gaussian/snugbox.slang"
-#include "../../primitives/gaussian/accutile.slang"
+#include "splat_tiles.slang"
 
 // TODO: try merging this and bin_emit.slang into a single kernel.
 
 #include "common/execution.slang"
-static const uint2 TILE_DIM = uint2(TILE_WIDTH, TILE_HEIGHT);
+
+// Splats that touch no tile sort after every real depth and emit nothing.
+static const uint UNBINNED_DEPTH_KEY = 0xFFFFFFFFu;
+
+// Order-preserving uint key; valid because the bin cull guarantees depth > z_near > 0.
+uint depthToSortable(float depth)
+{
+    return asuint(depth) ^ 0x80000000u;
+}
 
 [shader("compute")]
 [numthreads(256, 1, 1)]
@@ -24,6 +31,9 @@ void binCount(
     RWStructuredBuffer<Projected2DGaussian> projected_2d,
     RWStructuredBuffer<BlendData> blend_data,          // [max_splats], compact blend gather record
     RWStructuredBuffer<uint> tile_count_per_gaussian,  // [max_splats]
+    RWStructuredBuffer<uint> depth_keys,               // [max_splats], sorted with depth_ids
+    RWStructuredBuffer<uint> depth_ids,                // [max_splats]
+    RWStructuredBuffer<uint> depth_count,              // [1] splats the depth sort orders
     StructuredBuffer<uint> cluster_visible,            // [ceil(max_splats/128)]
     StructuredBuffer<float> filter_3D,                 // [max_splats], mip 3D size (0=off)
     uniform uint mip_enabled,
@@ -37,7 +47,11 @@ void binCount(
     // Written before any early return so the scan never sees a stale count.
     tile_count_per_gaussian[gid] = 0;
 
-    if (gid >= num_gaussians_counter[0]) return;
+    uint live = min(num_gaussians_counter[0], max_splats);
+    if (gid == 0u) depth_count[0] = live;
+    if (gid >= live) return;
+    depth_keys[gid] = UNBINNED_DEPTH_KEY;
+    depth_ids[gid] = gid;
 
     // Culled slots keep stale projected_2d/blend_data, which no downstream kernel reads.
     if (cluster_visible[gid / CLUSTER_SIZE] == 0u) return;
@@ -70,57 +84,21 @@ void binCount(
     // Compact record the blend passes gather instead of gaussians + projected_2d.
     BlendData bd;
     bd.mean = mean_2d;
-    bd.cov2d = cov2d;
+    bd.conic = conicFromCov(cov2d);
+    bd.amplitude = splatAmplitude(g.opacity, comp);
+    bd.color = shDC(g.sh0);
     bd.opacity = g.opacity;
-    bd.sh0 = g.sh0;
-    bd.opacity_compensation = comp;
     blend_data[gid] = bd;
 
     if (depth_vs < z_near) return;
 
-    float2 frame_dim = camera[0].image_size;
-
-    float2 bbox_min, bbox_max;
-    if (!snugBox(mean_2d, cov2d, g.opacity, bbox_min, bbox_max))
+    // bin_emit replays this exact walk, so its pairs match the scanned offsets.
+    SplatTiles tiles;
+    if (!SplatTiles.make(bd, camera[0].image_size, tiles))
         return;
-
-    bbox_min = max(bbox_min, float2(0.0, 0.0));
-    bbox_max = min(bbox_max, frame_dim);
-    if (bbox_min.x >= bbox_max.x || bbox_min.y >= bbox_max.y)
-        return;
-
-    uint2 num_tiles = ((uint2)frame_dim + TILE_DIM - 1u) / TILE_DIM;
-    uint2 tile_min = uint2(bbox_min) / TILE_DIM;
-    uint2 tile_max = uint2(bbox_max) / TILE_DIM;
-    tile_max = min(tile_max, num_tiles - 1);
-
-    // AccuTile count; bin_emit replays this exact walk, so its writes match the scanned offsets.
-    EllipseParams e;
-    if (!computeEllipseParams(cov2d, g.opacity, e))
-        return;
-    float x_d_args, y_d_args;
-    computeExtremumOffsets(e, x_d_args, y_d_args);
-
-    uint count = 0u;
-    if (accuTileIterateRows(tile_min, tile_max))
-    {
-        for (uint ty = tile_min.y; ty <= tile_max.y; ++ty)
-        {
-            uint tx_lo, tx_hi;
-            if (accuTileRowTiles(e, mean_2d, bbox_min, bbox_max, y_d_args,
-                                 ty, tile_min.x, tile_max.x, tx_lo, tx_hi))
-                count += tx_hi - tx_lo + 1u;
-        }
-    }
-    else
-    {
-        for (uint tx = tile_min.x; tx <= tile_max.x; ++tx)
-        {
-            uint ty_lo, ty_hi;
-            if (accuTileColTiles(e, mean_2d, bbox_min, bbox_max, x_d_args,
-                                 tx, tile_min.y, tile_max.y, ty_lo, ty_hi))
-                count += ty_hi - ty_lo + 1u;
-        }
-    }
+    uint2 unused_tile;
+    uint count = tiles.walk(0xFFFFFFFFu, unused_tile);
     tile_count_per_gaussian[gid] = count;
+    if (count > 0u)
+        depth_keys[gid] = depthToSortable(depth_vs);
 }

@@ -99,13 +99,15 @@ class RadixSort:
              ) -> tuple[spy.NDBuffer, spy.NDBuffer, spy.NDBuffer]:
         """Sort the staged pairs on their low ``key_bits``; return the sorted buffers.
 
-        ``count[0]`` holds the pair count and is clamped in place to capacity.
+        ``count[0]`` holds the pair count and is clamped in place to capacity. Keys of at
+        most 32 bits live in ``keys_lo`` alone; ``keys_hi`` is then left untouched.
         """
         r = self.resources
         commands = self._commands
         src = (r.keys_lo, r.keys_hi, r.values)
         dst = (r.keys_lo_alt, r.keys_hi_alt, r.values_alt)
         max_blocks = (r.capacity + RADIX_PART_SIZE - 1) // RADIX_PART_SIZE
+        key_words = 1 if key_bits <= 32 else 2
 
         commands.dispatch(self._k.prepare_dispatch, "radix_prepare_dispatch",
             thread_count=[1, 1, 1],
@@ -144,7 +146,7 @@ class RadixSort:
                     b_pass_hist=r.pass_hist.storage,
                     b_global_hist=r.global_hist.storage,
                     n_buf=count.storage,
-                    radix_shift=radix_shift, key_word=key_word,
+                    radix_shift=radix_shift, key_word=key_word, key_words=key_words,
                     pass_idx=pass_idx, max_blocks=max_blocks)
             src, dst = dst, src
         return src

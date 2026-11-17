@@ -6,6 +6,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, TextIO
 
+from trainer.config.resolve import end_of_run_cadence
+
 if TYPE_CHECKING:
     import argparse
 
@@ -45,7 +47,8 @@ class RunArtifacts:
         profile_json = _stream("profile_log.jsonl") if args.profile_every > 0 else None
 
         # This stream also gates the loop's eval sweeps: no stream, no sweep.
-        do_eval = ((args.eval_every > 0 or bool(getattr(args, "eval_iters", None)))
+        eval_every = end_of_run_cadence(args.eval_every, args.iters)
+        do_eval = ((eval_every > 0 or bool(getattr(args, "eval_iters", None)))
                    and args.evaluation)
         eval_curve_json = _stream("eval_curve.jsonl") if do_eval else None
         psnr_curve_json = _stream("psnr_curve.jsonl") if args.psnr_curve else None

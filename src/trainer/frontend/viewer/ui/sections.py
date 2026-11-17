@@ -95,8 +95,11 @@ class Actions:
 
 @dataclass(frozen=True)
 class CameraControls:
-    """Camera readouts + the snap-camera selector."""
+    """Camera readouts + the camera-set and snap-camera selectors."""
 
+    sets: Callable[[], Sequence[str]]
+    set_selection: Callable[[], int]
+    select_set: Callable[[int], None]
     names: Callable[[], Sequence[str]]
     selection: Callable[[], int]          # 0 == free-fly, k == camera k-1
     select: Callable[[int], None]
@@ -536,6 +539,8 @@ def viewer_section(panel: Panel, controls: CameraControls) -> None:
     """Camera: what the viewport is looking through."""
     with panel.section("VIEWER", label=titled(
             "VIEWER", lambda: controls.label().split("/")[-1].strip())):
+        panel.combo("  cameras", controls.sets, controls.set_selection, controls.select_set,
+                    visible=lambda: len(controls.sets()) > 1)
         panel.combo("  view", controls.names, controls.selection, controls.select)
         panel.text(lambda: f"  {controls.label()}", mode=ELIDE_START)
         panel.text(lambda: row("  move speed", f"{controls.speed():.2f}"))

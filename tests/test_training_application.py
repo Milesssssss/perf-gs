@@ -263,15 +263,16 @@ class _FakeHubViewer:
         self.suspended_during_upload = self.suspend_depth > 0
         return int(initial_points["means"].shape[0])
 
-    def attach_scene(self, cameras, snap: bool = False) -> None:
-        self.attached = list(cameras)
+    def attach_scene(self, camera_sets, snap: bool = False) -> None:
+        self.attached = {s.label: [name for name, _cam in s.cameras] for s in camera_sets}
         self.snapped = snap
 
 
 def _hub_app(viewer: _FakeHubViewer) -> TrainingHub:
     app = object.__new__(TrainingApplication)
     app.viewer = viewer
-    app.args = Namespace(width=None, height=None, downsample=1, init_opacity=0.1)
+    app.args = Namespace(width=None, height=None, downsample=1, init_opacity=0.1,
+                         eval_holdout=1, eval_holdout_stride=2)
     return TrainingHub(app)
 
 
@@ -288,9 +289,8 @@ def test_dropping_a_colmap_dataset_previews_its_point_cloud(tmp_path) -> None:
     # Uploading writes the buffers the render thread reads.
     assert viewer.suspended_during_upload
     assert viewer.suspend_depth == 0, "rendering left suspended"
-    # EVERY camera, not the eval split — before a run you fly the whole capture.
-    assert [name for name, _cam in viewer.attached] == ["a.png", "b.png", "c.png",
-                                                        "d.png"]
+    # Every camera, split as the run will split it, so either set can be flown before Train.
+    assert viewer.attached == {"eval": ["a.png", "c.png"], "train": ["b.png", "d.png"]}
     assert viewer.snapped
     assert any("press Train" in m for m in viewer.messages)
     # ... and the panel can now say WHAT was loaded, not just that something was.

@@ -58,15 +58,15 @@ class StructureDensifier:
                  scan: PrefixScan, arena: ArenaCommitter, opacity: OpacityReset,
                  width: int, height: int, capacity: int) -> None:
         self._commands = commands
-        self._k = kernels.load(self.KERNELS)
+        self._kernels = kernels.load(self.KERNELS)
         self._primitive = primitive
-        self._adam = adam
-        self._r = resources
-        self.eta = eta
-        self._split = split
-        self._gradients = gradients
-        self._raster = raster
-        self._sh = sh
+        self._adam_resources = adam
+        self._densification_resources = resources
+        self.eta_resources = eta
+        self._split_resources = split
+        self._gradient_resources = gradients
+        self._raster_resources = raster
+        self._sh_resources = sh
         self._scan = scan
         self._arena = arena
         self._opacity = opacity
@@ -76,9 +76,9 @@ class StructureDensifier:
 
     def clear_scores(self) -> None:
         """Start a new accumulation window (after any slot permutation that dropped eta)."""
-        self._commands.dispatch(self._k.clear_scores, "clear_structure_scores",
+        self._commands.dispatch(self._kernels.clear_scores, "clear_structure_scores",
             thread_count=[self._capacity, 1, 1],
-            **self.eta.kwargs(),
+            **self.eta_resources.kwargs(),
             max_splats=self._capacity)
 
     def accumulate_scores(self, structure_tensor: spy.Texture, camera: spy.Buffer,
@@ -89,16 +89,16 @@ class StructureDensifier:
         Must run after the backward and before the statistics accumulation clears the screen
         gradient. The opacity/gradient gates matter: ungated, densification explodes.
         """
-        self._commands.dispatch(self._k.score, "score_structure_aware",
+        self._commands.dispatch(self._kernels.score, "score_structure_aware",
             thread_count=[self._capacity, 1, 1],
             gaussians=self._primitive.values.storage,
             num_gaussians_counter=self._primitive.active_count.storage,
             camera=camera,
             structure_tensor=structure_tensor,
-            tile_count_per_gaussian=self._raster.tile_count_per_gaussian.storage,
-            grad_2d_x_iter=self._gradients.screen_x.storage,
-            grad_2d_y_iter=self._gradients.screen_y.storage,
-            **self.eta.kwargs(),
+            tile_count_per_gaussian=self._raster_resources.tile_count_per_gaussian.storage,
+            grad_2d_x_iter=self._gradient_resources.screen_x.storage,
+            grad_2d_y_iter=self._gradient_resources.screen_y.storage,
+            **self.eta_resources.kwargs(),
             opacity_threshold=opacity_threshold,
             per_view_grad_thresh=float(per_view_grad_thresh),
             pass_idx=int(pass_idx) & 0xFFFF,
@@ -111,8 +111,8 @@ class StructureDensifier:
         """
         self._record_densify(cfg, min_blend_weight)
         self._commands.runtime.wait_for_submit(self._commands.last_submit_id)
-        children = int(self._split.children_sum.storage.to_numpy().view(np.uint32)[0])
-        pre_count = int(self._r.pre_count.storage.to_numpy().view(np.uint32)[0])
+        children = int(self._split_resources.children_sum.storage.to_numpy().view(np.uint32)[0])
+        pre_count = int(self._densification_resources.pre_count.storage.to_numpy().view(np.uint32)[0])
         headroom = max(self._capacity - pre_count, 0)
         overbudget = children > headroom
         if overbudget:
@@ -134,9 +134,9 @@ class StructureDensifier:
         return cfg.grad_threshold * (self._width * self._height * 3.0)
 
     def _record_densify(self, cfg: StructureConfig, min_blend_weight: float) -> None:
-        commands, k, capacity = self._commands, self._k, self._capacity
-        primitive, adam, r, split = self._primitive, self._adam, self._r, self._split
-        eta, sh, arena = self.eta.components, self._sh, self._arena
+        commands, k, capacity = self._commands, self._kernels, self._capacity
+        primitive, adam, r, split = self._primitive, self._adam_resources, self._densification_resources, self._split_resources
+        eta, sh, arena = self.eta_resources.components, self._sh_resources, self._arena
         selected_count, scan_offsets = self._scan.resources.total, self._scan.resources.work
 
         with commands.recording("densify_structure"), commands.marker_group("densify_structure"):
@@ -157,7 +157,7 @@ class StructureDensifier:
                 densify_children_sum=split.children_sum.storage,
                 gaussians=primitive.values.storage,
                 num_gaussians_counter=primitive.active_count.storage,
-                eta_n_total=self.eta.n_total.storage,
+                eta_n_total=self.eta_resources.n_total.storage,
                 eta_n_high=eta["n_high"].storage,
                 eta_n_low=eta["n_low"].storage,
                 eta_max_x=eta["max_x"].storage,
@@ -264,13 +264,13 @@ class StructureDensifier:
         def u32(buffer):
             return np.frombuffer(buffer.storage.to_numpy().tobytes(), dtype=np.uint32)[:pre_count]
 
-        eta = self.eta.components
-        n_total = u32(self.eta.n_total).astype(np.float64)
+        eta = self.eta_resources.components
+        n_total = u32(self.eta_resources.n_total).astype(np.float64)
         n_high = u32(eta["n_high"]).astype(np.float64)
         eta_max = np.maximum(u32(eta["max_x"]), np.maximum(u32(eta["max_y"]), u32(eta["max_z"])))
         eta_max = eta_max.astype(np.float64) / FIXED_POINT_SCALE
-        visible = u32(self._r.visibility_count).astype(np.float64)
-        grad = np.frombuffer(self._r.grad_mean_2d_mag.storage.to_numpy().tobytes(),
+        visible = u32(self._densification_resources.visibility_count).astype(np.float64)
+        grad = np.frombuffer(self._densification_resources.grad_mean_2d_mag.storage.to_numpy().tobytes(),
                              dtype=np.int64)[:pre_count].astype(np.float64) / FIXED_POINT_SCALE
         seen = n_total > 0
         if not seen.any():

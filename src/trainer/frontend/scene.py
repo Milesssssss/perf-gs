@@ -5,12 +5,22 @@
 from __future__ import annotations
 
 import argparse
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 import numpy as np
 
 from trainer.backend.densify.morton import morton_bounds
-from trainer.data.colmap import ColmapDataset, load_colmap
+from trainer.data.colmap import ColmapDataset, ColmapImageEntry, load_colmap
+from trainer.data.dataset import Camera
+
+
+@dataclass(frozen=True)
+class CameraSet:
+    """Named dataset poses under one label, as the viewer's camera picker lists them."""
+
+    label: str
+    cameras: tuple[tuple[str, Camera], ...]
 
 
 @dataclass(frozen=True)
@@ -26,6 +36,17 @@ class SceneContext:
     holdout_stride: int
     morton_min: np.ndarray
     morton_max: np.ndarray
+
+    def camera_sets(self) -> tuple[CameraSet, CameraSet]:
+        return split_camera_sets(self.colmapScene.images, self.test_indices, self.train_indices)
+
+
+def split_camera_sets(images: Sequence[ColmapImageEntry], test_indices: Sequence[int],
+                      train_indices: Sequence[int]) -> tuple[CameraSet, CameraSet]:
+    """The held-out eval views, then the training views."""
+    def named(indices: Sequence[int]) -> tuple[tuple[str, Camera], ...]:
+        return tuple((images[i].image_name, images[i].camera) for i in indices)
+    return CameraSet("eval", named(test_indices)), CameraSet("train", named(train_indices))
 
 
 def holdout_split(camera_count: int, stride: int,

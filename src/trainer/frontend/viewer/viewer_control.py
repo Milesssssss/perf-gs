@@ -18,7 +18,7 @@ if TYPE_CHECKING:
     import slangpy as spy
 
     from trainer.backend.render.pipeline import TrainingPipeline
-    from trainer.data.dataset import Camera
+    from trainer.frontend.scene import CameraSet
     from trainer.frontend.settings import TrainingSetup
     from trainer.frontend.viewer.viewer import Viewer
 
@@ -49,7 +49,7 @@ class ViewerSession:
         fovy: float,
         gpu_lock,
         pipeline: TrainingPipeline,
-        test_cameras: list[tuple[str, Camera]] | None = None,
+        camera_sets: tuple[CameraSet, ...] = (),
     ) -> ViewerSession:
         """Build the viewer and push the initialized gaussians without starting the render thread.
 
@@ -64,7 +64,7 @@ class ViewerSession:
             sh_degree=pipeline.appearance_config.sh_degree,
             mip_enabled=pipeline.raster_config.mip_enabled,
             mip_kernel_size=pipeline.raster_config.kernel_size,
-            test_cameras=test_cameras,
+            camera_sets=camera_sets,
             state=state,
         )
         viewer.update_gaussians(pipeline)
@@ -96,16 +96,16 @@ class ViewerSession:
             device=device, width=width, height=height,
             fovy=fovy, gpu_lock=gpu_lock,
             sh_degree=sh_degree, mip_enabled=mip_enabled,
-            mip_kernel_size=mip_kernel_size, test_cameras=None,
+            mip_kernel_size=mip_kernel_size,
             state=state,
         )
         print("[viewer] hub created (no dataset yet).")
         return cls(viewer, state)
 
-    def attach_scene(self, test_cameras, snap: bool = False) -> None:
-        """Populate the camera dropdown once a scene is available; ``snap`` also parks on the first camera."""
+    def attach_scene(self, camera_sets: tuple[CameraSet, ...], snap: bool = False) -> None:
+        """Populate the camera pickers once a scene is available; ``snap`` also parks on the first camera."""
         if self._viewer is not None:
-            self._viewer.attach_scene(test_cameras, snap=snap)
+            self._viewer.attach_scene(camera_sets, snap=snap)
 
     def preview_points(self, initial_points: dict) -> int:
         """Display a COLMAP point cloud before training; returns the number of points shown (0 with no viewer)."""

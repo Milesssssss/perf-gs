@@ -225,7 +225,7 @@ def test_full_grid_parallel_children_and_fresh_moments(backend, sh_degree) -> No
         p.primitives.write_features_rest(rest)
         p.buffers.sh.adam_rest.copy_from_numpy(
             np.full(p.max_splats * p.buffers.sh.rest_floats * 2, 0x3F800000, np.uint32))
-    cfg = StructureConfig(ks_scale_power=1.2, opacity_cap=0)
+    cfg = StructureConfig(ks_scale_power=1.2, opacity_cap=0, max_split_factor=8)
     stats = p.structure_densifier.densify(cfg)
     assert _count(p) == 512 and not stats["overbudget"]
     g = _read_gaussians(p, 512)
@@ -321,7 +321,7 @@ def test_full_controller_tick_includes_mip_timing_and_queue(backend) -> None:
     controller = DensificationController(
         pipeline=p, args=SimpleNamespace(reset_every=1200),
         densify_mode=DensificationMode.STRUCTURE_AWARE, densify_cfg=DensifyConfig(),
-        structure_cfg=StructureConfig(opacity_cap=0), extent=1,
+        structure_cfg=StructureConfig(opacity_cap=0, max_split_factor=8), extent=1,
         image_width=64, image_height=64,
         morton_world_min=np.array([-2, -2, 0], np.float32),
         morton_world_max=np.array([2, 2, 6], np.float32),

@@ -55,17 +55,15 @@ float splatFalloffExponent(float m, float opacity_logit)
 #endif
 }
 
-// Conservative Mahalanobis bound q = d^T Sigma^-1 d within which alpha can reach the 1/255 floor
-// (ignores the Mip compensation <= 1); <= 0 means the splat never reaches it.
-float splatCutoffQ(float opacity_logit)
+// Conservative Mahalanobis bound q = d^T Sigma^-1 d within which alpha can reach the 1/255 floor;
+// <= 0 means the splat never reaches it. amplitude comes from splatAmplitude.
+float splatCutoffQ(float amplitude, float opacity_logit)
 {
     // The value of m^p at which alpha falls to the floor.
-#if SPLAT_KERNEL == 1
-    float floor_exponent = log(softplus(opacity_logit) / BLEND_MIN_OPTICAL_DEPTH);
-#elif SPLAT_KERNEL == 2 || SPLAT_KERNEL == 3
-    float floor_exponent = min(opacity_logit, LOG_DENSITY_MAX) - log(BLEND_MIN_OPTICAL_DEPTH);
+#if SPLAT_KERNEL == 0
+    float floor_exponent = log(255.0 * amplitude);
 #else
-    float floor_exponent = log(255.0 * sigmoid(opacity_logit));
+    float floor_exponent = log(amplitude / BLEND_MIN_OPTICAL_DEPTH);
 #endif
 #if SPLAT_KERNEL == 3 || defined(SPLAT_PROFILE_POWER)
     return floor_exponent > 0.0
@@ -75,34 +73,46 @@ float splatCutoffQ(float opacity_logit)
 #endif
 }
 
+// Peak optical scale per splat: alpha = A*exp(-m^p) (gaussian) or 1 - exp(-A*exp(-m^p)) (density kernels).
 [Differentiable]
-float evalGaussian2DFromCov_out(
-    no_diff float2 pixel,
-    float2 mean_2d,
-    float3 cov2d,
-    float opacity_logit,
-    float opacity_compensation)   // Mip-Splatting alpha factor (differentiable; 1.0 = off)
+float splatAmplitude(float opacity_logit, float opacity_compensation)
+{
+#if SPLAT_KERNEL == 1
+    return opacity_compensation * softplus(opacity_logit);
+#elif SPLAT_KERNEL == 2 || SPLAT_KERNEL == 3
+    return opacity_compensation * exp(min(opacity_logit, LOG_DENSITY_MAX));
+#else
+    return opacity_compensation * sigmoid(opacity_logit);
+#endif
+}
+
+// Cull-time bound before projection, when the Mip compensation (<= 1) is not known yet.
+float splatCutoffQ(float opacity_logit)
+{
+    return splatCutoffQ(splatAmplitude(opacity_logit, 1.0), opacity_logit);
+}
+
+// Inverse 2D covariance in the same (00, 01, 11) packing; projection dilation keeps det > 0.
+[Differentiable]
+float3 conicFromCov(float3 cov2d)
+{
+    float inv_det = 1.0 / (cov2d.x * cov2d.z - cov2d.y * cov2d.y);
+    return float3(cov2d.z, -cov2d.y, cov2d.x) * inv_det;
+}
+
+// Alpha at a pixel from the per-splat record bin_count precomputes; the logit only shapes opaque_core.
+[Differentiable]
+float splatCoverage(no_diff float2 pixel, float2 mean_2d, float3 conic, float amplitude,
+                    float opacity_logit)
 {
     float2 d = pixel - mean_2d;
-
-    float det = cov2d.x * cov2d.z - cov2d.y * cov2d.y;
-    if (det <= 0.0)
-        return 0.0;
-
-    float inv_det = 1.0 / det;
-    float cov_inv_00 =  cov2d.z * inv_det;
-    float cov_inv_01 = -cov2d.y * inv_det;
-    float cov_inv_11 =  cov2d.x * inv_det;
-
-    float power = -0.5 * (d.x * d.x * cov_inv_00
-                        + 2.0 * d.x * d.y * cov_inv_01
-                        + d.y * d.y * cov_inv_11);
-
-    if (power > 0.0)
-        return 0.0;
-
-    // Mip-Splatting alpha; comp stays differentiable so dL/dcomp reaches scale/cov via projection_backward.
-    return sigmoid(opacity_logit) * opacity_compensation * exp(power);
+    float m = 0.5 * (conic.x * d.x * d.x + 2.0 * conic.y * d.x * d.y + conic.z * d.y * d.y);
+    float exponent = splatFalloffExponent(m, opacity_logit);
+#if SPLAT_KERNEL == 0
+    return amplitude * exp(-exponent);
+#else
+    return 1.0 - exp(-amplitude * exp(-exponent));
+#endif
 }
 
 [Differentiable]
@@ -111,32 +121,10 @@ float evalGaussian2DFromCov(
     float2 mean_2d,
     float3 cov2d,
     float opacity_logit,
-    float opacity_compensation)
+    float opacity_compensation)   // Mip-Splatting alpha factor (differentiable; 1.0 = off)
 {
-    float2 d = pixel - mean_2d;
-
-    float q =
-        cov2d.z * d.x * d.x
-        - 2.0 * cov2d.y * d.x * d.y
-        + cov2d.x * d.y * d.y;
-
-    float det =
-        cov2d.x * cov2d.z
-        - cov2d.y * cov2d.y;
-
-#if SPLAT_KERNEL == 0 && !defined(SPLAT_PROFILE_POWER)
-    return opacity_compensation * sigmoid(opacity_logit) * exp(-0.5 * q / det);
-#else
-    float exponent = splatFalloffExponent(0.5 * q / det, opacity_logit);
-#if SPLAT_KERNEL == 1
-    return 1.0 - exp(-softplus(opacity_logit) * opacity_compensation * exp(-exponent));
-#elif SPLAT_KERNEL == 2 || SPLAT_KERNEL == 3
-    return 1.0 - exp(-opacity_compensation
-                     * exp(min(opacity_logit, LOG_DENSITY_MAX) - exponent));
-#else
-    return opacity_compensation * sigmoid(opacity_logit) * exp(-exponent);
-#endif
-#endif
+    return splatCoverage(pixel, mean_2d, conicFromCov(cov2d),
+                         splatAmplitude(opacity_logit, opacity_compensation), opacity_logit);
 }
 
 #endif // TRAINER_GAUSSIAN_EVAL_SLANG

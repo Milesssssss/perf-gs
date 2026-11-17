@@ -188,6 +188,7 @@ class RasterBackward:
             num_gaussians_counter=self._primitive.active_count.storage,
             camera=self._rasterizer.camera_buffer,
             **self._gradients.seed_kwargs(),
+            grad_opacity=grads["opacity"].storage,
             grad_mean_x=grads["mean_x"].storage,
             grad_mean_y=grads["mean_y"].storage,
             grad_mean_z=grads["mean_z"].storage,

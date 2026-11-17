@@ -12,48 +12,64 @@ static const float BLEND_T_EARLY_BREAK = 1e-4;
 static const float BLEND_ALPHA_MAX = 0.99;
 static const float BLEND_ALPHA_MIN = 1.0 / 255.0;
 
-// Shared front-to-back tile blend (compositing, checkpoints, early-out) for any IPrimitiveSource.
-void blendForward<S : IPrimitiveSource>(
+// Shared front-to-back tile blend (compositing, checkpoints, early-out) for any IPrimitiveSource, over
+// N pixels of one tile that share each primitive load.
+void blendForward<S : IPrimitiveSource, let N : int>(
     S src,
     uint t_start,
     uint primitive_count,
-    no_diff float2 pixel_center,
-    bool valid_pixel,
-    uint pixel_in_tile,
+    no_diff float2 pixel_center[N],
+    bool valid_pixel[N],
+    uint pixel_in_tile[N],
     uint tile_bucket_base,
     StructuredBuffer<uint> sorted_primitive_ids,
     RWStructuredBuffer<uint2> raster_checkpoints,
     float extinction_hardness,
-    out float3 color,
-    out float transmittance,
-    out uint processed)
+    out float3 color[N],
+    out float transmittance[N],
+    out uint processed[N])
 {
-    color = float3(0.0);
-    transmittance = 1.0;
-    processed = 0u;
-
     Compositor compositor;
     compositor.hardness = extinction_hardness;
 
+    // Pixels still blending: in the frame and not yet saturated.
+    bool active[N];
+    [unroll]
+    for (int j = 0; j < N; ++j)
+    {
+        color[j] = float3(0.0);
+        transmittance[j] = 1.0;
+        processed[j] = 0u;
+        active[j] = valid_pixel[j];
+    }
+
     for (uint local_index = 0u; local_index < primitive_count; ++local_index)
     {
-        if (valid_pixel && (local_index % RASTER_BUCKET_SIZE) == 0u)
+        bool bucket_start = (local_index % RASTER_BUCKET_SIZE) == 0u;
+        uint bucket = tile_bucket_base + local_index / RASTER_BUCKET_SIZE;
+        let primitive = src.primitiveAt(sorted_primitive_ids[t_start + local_index]);
+
+        bool any_active = false;
+        [unroll]
+        for (int j = 0; j < N; ++j)
         {
-            uint bucket = tile_bucket_base + local_index / RASTER_BUCKET_SIZE;
-            raster_checkpoints[checkpointIndex(bucket, pixel_in_tile)] =
-                packCheckpoint(transmittance, color);
+            if (!active[j])
+                continue;
+            if (bucket_start)
+                raster_checkpoints[checkpointIndex(bucket, pixel_in_tile[j])] =
+                    packCheckpoint(transmittance[j], color[j]);
+
+            float alpha = min(primitive.coverage(pixel_center[j]), BLEND_ALPHA_MAX);
+            if (alpha >= BLEND_ALPHA_MIN)
+            {
+                color[j] += primitive.color() * compositor.weight(alpha) * transmittance[j];
+                transmittance[j] *= compositor.transmittance(alpha);
+                processed[j] = local_index + 1u;
+                active[j] = transmittance[j] >= BLEND_T_EARLY_BREAK;
+            }
+            any_active = any_active || active[j];
         }
-
-        uint primitive_index = sorted_primitive_ids[t_start + local_index];
-        let primitive = src.primitiveAt(primitive_index);
-        float alpha = min(primitive.coverage(pixel_center), BLEND_ALPHA_MAX);
-        if (alpha < BLEND_ALPHA_MIN)
-            continue;
-
-        color += primitive.color() * compositor.weight(alpha) * transmittance;
-        transmittance *= compositor.transmittance(alpha);
-        processed = local_index + 1u;
-        if (transmittance < BLEND_T_EARLY_BREAK)
+        if (!any_active)
             break;
     }
 }
