@@ -23,7 +23,6 @@ class RunArtifacts:
         densify_json: TextIO,
         eval_curve_json: "TextIO | None",
         psnr_curve_json: "TextIO | None",
-        bin_viz_json: "TextIO | None",
         profile_json: "TextIO | None",
     ) -> None:
         self.log_txt = log_txt
@@ -31,7 +30,6 @@ class RunArtifacts:
         self.densify_json = densify_json
         self.eval_curve_json = eval_curve_json
         self.psnr_curve_json = psnr_curve_json
-        self.bin_viz_json = bin_viz_json
         self.profile_json = profile_json
 
     @classmethod
@@ -52,21 +50,16 @@ class RunArtifacts:
                    and args.evaluation)
         eval_curve_json = _stream("eval_curve.jsonl") if do_eval else None
         psnr_curve_json = _stream("psnr_curve.jsonl") if args.psnr_curve else None
-        bin_viz_json = _stream("binviz.jsonl") if (args.debug_bin_viz and do_eval) else None
-        if args.debug_bin_viz and not do_eval:
-            print("[debug-bin-viz] ignored: it records eval views, which need "
-                  "--eval-every > 0 and --evaluation.")
 
         return cls(
             log_txt=log_txt, log_json=log_json, densify_json=densify_json, eval_curve_json=eval_curve_json,
-            psnr_curve_json=psnr_curve_json, bin_viz_json=bin_viz_json,
-            profile_json=profile_json,
+            psnr_curve_json=psnr_curve_json, profile_json=profile_json,
         )
 
     def close_all(self) -> None:
         for stream in (
             self.log_txt, self.log_json, self.densify_json, self.eval_curve_json, self.psnr_curve_json,
-            self.bin_viz_json, self.profile_json
+            self.profile_json
         ):
             if stream is not None:
                 stream.close()

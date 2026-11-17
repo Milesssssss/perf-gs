@@ -69,7 +69,7 @@ def test_construction_with_initial_state_primes_pipeline(backend: str) -> None:
     """``Pipeline(initial_state=...)`` uploads the snapshot and zeros the derived
     state (Adam, grads, tracking) in ``__init__``, so the pipeline is born ready
     to render + train with no separate priming call. Production path used by
-    create_pipeline / v1_train."""
+    create_pipeline."""
     try:
         device = create_device(backend=backend)
     except Exception as exc:

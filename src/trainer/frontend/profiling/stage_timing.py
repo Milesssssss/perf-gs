@@ -42,10 +42,6 @@ def _is_child(marker: str) -> bool:
 DEFAULT_SAMPLE_EVERY = 25
 
 
-def _empty_accumulator() -> dict[str, Any]:
-    return {"samples": 0, "markers_ms": {}, "host_ms": {}}
-
-
 class StageTimingRecorder:
     """Installs the GPU step timer on a sampled cadence and accumulates results.
     ``before_step``/``after_step`` bracket ``train_step``; disabled, every method is a no-op."""

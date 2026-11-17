@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import argparse
 import threading
-from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -374,10 +373,6 @@ def preset_values(name: str) -> dict[str, Any]:
 def group_settings(group: str) -> list[Setting]:
     """The settings of one group, in table order."""
     return [s for s in SETTINGS if s.group == group]
-
-
-def captions(settings: Sequence[Setting]) -> list[str]:
-    return [s.caption for s in settings]
 
 
 def validate() -> list[str]:

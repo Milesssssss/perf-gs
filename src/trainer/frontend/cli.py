@@ -91,14 +91,6 @@ def build_parser() -> argparse.ArgumentParser:
                          "when (it+1) %% this == 0, i.e. one iter before each densify boundary "
                          "when --densify-every divides this (default 100 aligns with the "
                          "default densify schedule).")
-    parser.add_argument("--debug-bin-viz", action="store_true",
-                    help="during the --eval-every sweep, write per-view debug "
-                         "heatmaps: a per-tile binned-splat-count map, a per-pixel "
-                         "blended-overlap map, and a per-view overlap histogram + "
-                         "stats to <run>/cams/cam_NN/binviz_* and binviz.jsonl. "
-                         "Reads buffers the forward already fills (no extra kernel) "
-                         "but adds readback + PNG encode per view, so it's off by "
-                         "default. Requires --eval-every > 0.", default=False)
     _shared(parser, "densify_every")
     _shared(parser, "densify_from")
     _shared(parser, "densify_to")
@@ -203,13 +195,10 @@ def build_parser() -> argparse.ArgumentParser:
                     help="RELATIVE-reset multiplier (SADGS opacity_reset_decay=0.1). "
                          "Only used with --sad-relative-reset.")
     parser.add_argument("--densify-diag", action="store_true",
-                    help="DIAGNOSTIC: read back GPU state around every densify "
-                         "tick and log growth trajectory, anisotropic fan-out "
-                         "distribution, eta-gate selectivity, and spatial-"
-                         "concentration (Gini) metrics to densify_diag.jsonl. "
-                         "Opt-in — adds a wait_for_idle + full buffer readback per "
-                         "densify tick (~17 ticks/run), off the hot path but not "
-                         "free. Use to debug runaway / untargeted densification.")
+                    help="when a structure-aware densify tick overflows --max-splats, "
+                         "also print its split-gate breakdown (view counts, high-view "
+                         "ratio, gradient and eta percentiles). Opt-in: it reads back "
+                         "the full eta buffers, which can be hundreds of MB.")
     parser.add_argument("--sad-match-loss-lrs", type=int, default=1,
                     help="when --densify-mode structure_aware: 1 (default) = use SADGS's loss (lambda_l2) "
                          "and per-parameter LRs so we train exactly as they do; 0 = keep our "

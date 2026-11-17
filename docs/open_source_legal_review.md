@@ -37,15 +37,9 @@ availability or reviewer permissions.
 | --- | --- | --- |
 | Verbatim INRIA metric functions, obtained through SAD-GS | [scripts/plots/image_metrics.py](../scripts/plots/image_metrics.py) | [Import provenance](https://gitlab.ea.com/seed/slang3dgstrainer/-/blob/0a4263ec5a11b5c480319adefb97f4cda628d0f2/scripts/plots/image_metrics.py#L3-12); [PSNR and SSIM functions](https://gitlab.ea.com/seed/slang3dgstrainer/-/blob/0a4263ec5a11b5c480319adefb97f4cda628d0f2/scripts/plots/image_metrics.py#L37-89) |
 | Slang port of Thomas Smith's GPUSorting | [shaders/sort/device_radix_sort.slang](../shaders/sort/device_radix_sort.slang) | [Port attribution and scope](https://gitlab.ea.com/seed/slang3dgstrainer/-/blob/0a4263ec5a11b5c480319adefb97f4cda628d0f2/shaders/sort/device_radix_sort.slang#L1-30) |
-| Adapted INRIA evaluator, retaining its copyright header | [src/trainer/frontend/evaluation/metrics.py](../src/trainer/frontend/evaluation/metrics.py) | **Pending push:** [local base-commit location](https://gitlab.ea.com/seed/slang3dgstrainer/-/blob/1a9045655b9efb0691d24cf71b55ece8a2e6eab6/src/trainer/frontend/evaluation/metrics.py#L1-105) |
 
-The evaluator was added in local commit
-`1a9045655b9efb0691d24cf71b55ece8a2e6eab6`; none of the locally known GitLab
-remote branches contains that commit. Do not present its URL as available until
-the approved branch is pushed and the link checked. The older
-`src/trainer/common/metrics.py` on those remote branches is a different file,
-not a substitute link to the copied evaluator. No commit or push is performed
-by this preparation.
+The adapted INRIA evaluator formerly at `src/trainer/frontend/evaluation/metrics.py` was
+unused and has been removed, so it needs no review.
 
 After pushing the review branch, also provide a permalink to the reviewed
 notice and refresh links if the source layout changes.
@@ -58,7 +52,6 @@ The information below is prepared for that email; **no email has been sent**.
 
 | File | Upstream and retained material | Local modifications / additions |
 | --- | --- | --- |
-| [src/trainer/frontend/evaluation/metrics.py](../src/trainer/frontend/evaluation/metrics.py) | INRIA / GRAPHDECO 2023 evaluator; original header retained | Evaluation directories are collected and sorted by numeric iteration suffix before evaluation. A scoped EA-modifications notice and license pointer have been added; the evaluator's existing body is unchanged by this release-preparation work. |
 | [scripts/plots/image_metrics.py](../scripts/plots/image_metrics.py) | PSNR and SSIM helpers explicitly marked verbatim from INRIA via SAD-GS | Local PNG loading, camera/iteration selection, holdout selection, aggregation, reporting, and CLI wrap the copied helpers. A scoped EA-wrapper notice and upstream attribution have been added; the copied functions are unchanged by this work. |
 | [shaders/sort/device_radix_sort.slang](../shaders/sort/device_radix_sort.slang) | Thomas Smith GPUSorting reduce-then-scan WGE16 path, MIT | Slang port; 64-bit key represented by two 32-bit words; Gaussian-index payload; eight radix passes; trainer-specific buffer contracts, capacity handling, GPU-resident count, and indirect-dispatch integration. A scoped EA-port notice and original copyright/license pointer have been added; shader logic is unchanged by this work. |
 
@@ -71,7 +64,7 @@ for author confirmation, not a complete upstream diff or provenance warranty.
 ## Decisions still required before publication
 
 1. **Copied INRIA code:** determine compatibility with the intended release,
-   including research/non-commercial restrictions on the evaluator and PSNR
+   including research/non-commercial restrictions on the copied PSNR
    source. Preserve the separate SSIM / Evan Su MIT provenance identified in
    Section 6 of the upstream license. A notice alone is not clearance; decide
    whether permission, replacement, or exclusion is needed.
@@ -144,7 +137,7 @@ and a harmless blank line after the notice in a formerly empty initializer.
 > headers, contribution/CLA notice, and a third-party notice covering Mip-NeRF
 > 360, Tanks & Temples, Deep Blending, dependencies, and included third-party
 > code. The file inventory above gives the source locations and modification
-> details, with one evaluator permalink still pending the review-branch push.
+> details.
 > Please review the copied INRIA components and the remaining dataset/asset
 > questions before approving publication. The Legal notification email and
 > release approval remain outstanding.

@@ -36,24 +36,18 @@ EXPECTED_DEFAULTS = {
     "width": None,
     "height": None,
     "preview_every": None,
-    # Loss/PSNR sampling cadence. Now ON by default (100): it is what feeds the
-    # viewer's LOSS graph and the log lines, at the cost of one re-render +
-    # frame readback per tick. 0 turns it off.
-    "log_every": 100,
+    # Loss/PSNR sampling for the viewer's LOSS graph and log lines; each tick re-renders. 0 = off.
+    "log_every": 0,
     "render_all_every": 0,
-    # Master veto over the whole-camera-set passes (eval sweep, final metrics +
-    # .ply, held-out test PSNR). OFF by default: those passes render every camera
-    # and the eval tick lands on the last iteration, which is the entire wait after
-    # a short run "finishes". Pass --evaluation to get them back.
-    "evaluation": False,
+    # Veto over the whole-camera-set passes (eval sweep, final metrics + .ply, test PSNR); on by default.
+    "evaluation": True,
     "eval_every": None,
     "eval_holdout": 1,
     "eval_holdout_stride": 8,
     "psnr_curve": False,
     "psnr_curve_every": 0,
-    "debug_bin_viz": False,
     "densify_every": 100,
-    "densify_from": 100,
+    "densify_from": 0,
     "densify_to": 1900,
     "n_scoring_views": 10,
     "t_opacity": 0.005,
@@ -66,7 +60,7 @@ EXPECTED_DEFAULTS = {
     "scale_reg": 0.0,
     "w_alpha": 0.0,
     "lambda_ssim": 0.2,
-    "max_splats": 10_000_000,
+    "max_splats": 7_000_000,
     "z_near_cull": 0.01,
     "profile_every": 0,
     "morton_every": 0,
@@ -123,12 +117,9 @@ EXPECTED_DEFAULTS = {
     "nsight_debug_names": None,
     "flat_bucket_backward": True,
     "backward_pixel_stride": 1,
-    # STBN sparse pixel supervision. 1.0 would be OFF (every pixel supervised,
-    # bit-identical to a build without the feature); the default samples half of
-    # each tile and scales the surviving gradients by 2 — the density the 9-scene
-    # sweep measured as free (-0.04 dB for 1.15x, see docs/stbn_pixel_sampling.md).
+    # STBN sparse supervision: 1.0 = every pixel (bit-identical to no STBN); see docs/stbn_pixel_sampling.md.
     # stbn_max_fraction 0 = the diagnostic staged-array override off.
-    "stbn_pixel_fraction": 0.5,
+    "stbn_pixel_fraction": 1.0,
     "stbn_warmup_iters": 0,
     "stbn_max_fraction": 0.0,
     "stbn_source": "nvidia",

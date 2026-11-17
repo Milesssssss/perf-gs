@@ -10,7 +10,7 @@ import time
 from collections.abc import Callable, Sequence
 
 from trainer.frontend.viewer.session import Activity, View
-from trainer.frontend.viewer.ui.panel import ELIDE_MIDDLE, ELIDE_START, Panel
+from trainer.frontend.viewer.ui.panel import ELIDE_START, Panel
 
 # Label column: wide enough for "densification" without pushing values off a ~420px panel.
 LABEL_W = 16
@@ -180,20 +180,6 @@ def confirm_block(panel: Panel, view: View, key: str, *,
     panel.button("Cancel", on_cancel, visible=shown)
 
 
-def drop_target(panel: Panel, view: View, *, on_browse=None) -> None:
-    """The empty-state affordance.
-
-    The windowing layer has no drag-enter event (only ``on_drop_files``), so it cannot light up on hover.
-    """
-    panel.spacer()
-    panel.text("      DROP A DATASET HERE")
-    panel.text("   image folder or COLMAP data")
-    panel.spacer()
-    if on_browse is not None:
-        panel.button("Browse...", on_browse, enabled=lambda: view.can_drop)
-    note(panel, "A folder of images, or one with sparse/ + images/.", lines=2)
-
-
 def section_summary(*parts: str) -> str:
     """``DENSIFICATION   structure_aware · 100-1900``: a collapsed section that still says what it holds."""
     kept = [p for p in parts if p]
@@ -236,9 +222,3 @@ def name_field(panel: Panel, label: str, value: Callable[[], str],
     """An editable short string (the export filename), captioned on the line above like every control."""
     panel.text(label, visible=visible)
     panel.input_text(value, on_change, enabled=enabled, visible=visible)
-
-
-def elide_middle_row(panel: Panel, label: str, value: Callable[[], str],
-                     *, visible=None) -> None:
-    """A long single-line value that must keep both ends (a run directory)."""
-    panel.text(lambda: row(label, str(value())), mode=ELIDE_MIDDLE, visible=visible)

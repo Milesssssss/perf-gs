@@ -156,7 +156,7 @@ def test_paired_summary_respects_direction_for_lower_is_better_metrics() -> None
     invert the perceptual conclusion while leaving PSNR looking right."""
     treatment = {("a", 1): 0.10, ("b", 1): 0.20}
     baseline = {("a", 1): 0.15, ("b", 1): 0.18}
-    result = stats.paired_summary("t", "b", "lpips_alex",
+    result = stats.paired_summary("t", "b", "lpips",
                                   treatment_values=treatment,
                                   baseline_values=baseline, resamples=200)
     assert result.higher_is_better is False
