@@ -4,7 +4,6 @@
 
 from __future__ import annotations
 
-import cv2
 import numpy as np
 import slangpy as spy
 
@@ -43,15 +42,11 @@ class TargetImages:
         """Upload ``(H, W, 3)`` sRGB into the owned target and make it active."""
         assert rgb.shape == (self.height, self.width, 3), (
             f"target shape {rgb.shape} != ({self.height}, {self.width}, 3)")
-        self._owned.copy_from_numpy(self.pack(rgb))
+        self._owned.copy_from_numpy(srgb01_to_u8(self._with_alpha(rgb)))
         self.active = self._owned
 
     def pack(self, image: np.ndarray) -> np.ndarray:
-        """Pack the host target into 8-bit RGBA for upload."""
-        if (image.dtype == np.float32 and image.size and image.shape in
-                ((self.height, self.width, 3), (self.height, self.width, 4)) and image.max() <= 1):
-            pixels = cv2.addWeighted(image, 255., image, 0., 0., dtype=cv2.CV_8U)
-            return cv2.cvtColor(pixels, cv2.COLOR_RGB2RGBA) if image.shape[2] == 3 else pixels
+        """CPU half of :meth:`create` (pure numpy, so it can run on a thread pool)."""
         if image.ndim == 3 and image.shape[2] == 4:
             assert image.shape[:2] == (self.height, self.width)
             return srgb01_to_u8(image)
@@ -102,6 +97,4 @@ class TargetImages:
         return self._structure
 
     def _with_alpha(self, rgb: np.ndarray) -> np.ndarray:
-        opaque = 255 if rgb.dtype == np.uint8 else 1
-        alpha = np.full((self.height, self.width, 1), opaque, rgb.dtype)
-        return np.concatenate([rgb, alpha], axis=-1)
+        return np.concatenate([rgb, np.ones((self.height, self.width, 1), rgb.dtype)], axis=-1)

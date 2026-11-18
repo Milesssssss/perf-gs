@@ -25,7 +25,7 @@ void binEmit(
     // Sort-pair capacity; pairs past it are dropped (the host also clamps the sort count).
     uniform uint max_sort_pairs)
 {
-    uint pair = linearThreadIndex256(dtid);
+    uint pair = dtid.x;
     if (pair >= min(pair_total[0], max_sort_pairs)) return;
 
     // Last rank whose offset is <= pair; offset[0] == 0, and empty ranks never own a pair.

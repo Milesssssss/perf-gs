@@ -8,7 +8,7 @@ from __future__ import annotations
 import argparse
 import json
 import time
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -35,7 +35,6 @@ from trainer.data.parallel import map_ordered
 from trainer.data.targets import TargetDataset
 from trainer.frontend.cli import parse_args
 from trainer.frontend.densification import DensificationController
-from trainer.frontend.lattice import TrainingLattice, last_lattice_step, needs_lattice_scores, needs_native_scores
 from trainer.frontend.evaluation import run_report as run_report_module
 from trainer.frontend.evaluation.evaluation import (
     eval_test_psnr_srgb,
@@ -113,7 +112,7 @@ class TrainingRuntime:
 class TrainingApplication:
     """Owns the prepare -> train -> finish lifecycle of one experiment."""
 
-    def __init__(self, args: argparse.Namespace, *, slang_sessions: SlangSessions | None = None) -> None:
+    def __init__(self, args: argparse.Namespace) -> None:
         self.args = args
         self.run_name = args.run_name or datetime.now().strftime("%Y%m%d_%H%M%S")
         self.paths = RunPaths.create(self.run_name)
@@ -126,7 +125,7 @@ class TrainingApplication:
         self.config: RunConfig | None = None
 
         self.device: Any = None
-        self.slang_sessions = slang_sessions
+        self.slang_sessions: SlangSessions | None = None
         self.gpu_lock: Any = None
         self.pipeline: TrainingPipeline | None = None
         self.viewer: ViewerSession | None = None
@@ -334,9 +333,8 @@ class TrainingApplication:
     def _create_device(self) -> None:
         """Create the GPU device and shared queue lock.
         Separate from the pipeline so the hub can start before a dataset is chosen."""
-        if self.slang_sessions is None:
-            self.slang_sessions = SlangSessions(create_training_device(self.args))
-        self.device = self.slang_sessions.device
+        self.device = create_training_device(self.args)
+        self.slang_sessions = SlangSessions(self.device)
         self.gpu_lock = create_gpu_queue_lock(viewer_enabled=not self.args.no_viewer)
 
     def slang_session(self) -> Any:
@@ -345,16 +343,15 @@ class TrainingApplication:
 
     def _create_pipeline_for_scene(self, scene: SceneContext) -> None:
         """Build the training pipeline for a loaded scene (device must exist)."""
-        kernels = self.slang_sessions.kernels_for(shader_specialization(self.args))
+        session = self.slang_session()
         self.pipeline = create_pipeline(
             device=self.device,
             gpu_lock=self.gpu_lock,
             scene=scene,
-            max_splats=self._plan_memory(scene, kernels.session),
-            max_sort_pairs=self.args.max_sort_pairs,
+            max_splats=self._plan_memory(scene, session),
             config=self._config,
             initial_state=scene.colmapScene.initial_points,
-            kernels=kernels,
+            slang_session=session,
         )
         strength = getattr(self.args, "lens_strength", None)
         self._pipeline.rasterizer.natural_vignetting = self.args.natural_vignetting if strength is None else strength
@@ -371,16 +368,12 @@ class TrainingApplication:
         module = _module_for_reflection(self.device, session)
         target_bytes = 0 if self._stream_targets else (
             len(scene.train_indices) * scene.width * scene.height
-            * (4 + (8 if structure and needs_native_scores(args) else 0)))
-        if last_lattice_step(args):
-            # One packed phase target, plus the SAD builder's ten float4 images and half4 field.
-            builder_bytes = 168 if structure and needs_lattice_scores(args) else 0
-            target_bytes += (scene.width // args.lattice_stride) * (scene.height // args.lattice_stride) * (4 + builder_bytes)
+            * (4 + (8 if structure else 0)))
 
         def cost(capacity: int) -> int:
             shape = {"max_splats": capacity, "width": scene.width,
                      "height": scene.height, "sh_degree": args.sh_degree}
-            total = estimate_pipeline_bytes(module, structure_aware=structure, max_sort_pairs=args.max_sort_pairs, **shape)
+            total = estimate_pipeline_bytes(module, structure_aware=structure, **shape)
             if not args.no_viewer:
                 total += estimate_pipeline_bytes(module, viewer_only=True, **shape)
             return total + target_bytes
@@ -415,7 +408,7 @@ class TrainingApplication:
         indices = self._sceneContext.train_indices
         # Streamed fields are derived per step on the GPU, never stored.
         resident_fields = (self._densify_mode == DensificationMode.STRUCTURE_AWARE
-                           and not self._stream_targets and needs_native_scores(self.args))
+                           and not self._stream_targets)
         bytes_per_pixel = 4 + (8 if resident_fields else 0)
         planned_bytes = len(indices) * self._sceneContext.width * self._sceneContext.height * bytes_per_pixel
         where = "host RAM" if self._stream_targets else "GPU"
@@ -437,7 +430,7 @@ class TrainingApplication:
     def _structure_fields(self) -> dict[int, Any]:
         """Structure-tensor field of each training view, built from its target.
         Streamed targets map every view to the builder; fields are then derived per scoring step."""
-        if self._densify_mode != DensificationMode.STRUCTURE_AWARE or not needs_native_scores(self.args):
+        if self._densify_mode != DensificationMode.STRUCTURE_AWARE:
             return {}
         scene = self._sceneContext
         builder = StructureTensor(self.device, scene.width, scene.height)
@@ -772,7 +765,6 @@ class TrainingLoop:
                              if pipeline.stbn_config.enabled else None)
 
         self.training_step = 0
-        self.lattice = None
         self.gaussian_count = scene.initial_gaussian_count
         self.eval_time_total = 0.0
         self.psnr_curve_records: list[dict] = []
@@ -844,9 +836,6 @@ class TrainingLoop:
         self.runtime.viewer.set_training_active(True)
         self.started_at = time.time()
         self.runtime.reporter.start(self.started_at)
-        if last_lattice_step(self.args):
-            self.lattice = TrainingLattice(self)
-            self.runtime.pipeline.bound_render_work(self.runtime.pipeline.primitives.count())
 
     def _should_continue(self) -> bool:
         return (
@@ -865,16 +854,6 @@ class TrainingLoop:
         self.training_step += 1
         camera_index = self.sampler.next()
         camera_entry = self.scene.colmapScene.images[camera_index]
-        score = self._should_accumulate_structure(self.training_step)
-        width, height = self.scene.width, self.scene.height
-        if self.lattice is not None and self.training_step <= last_lattice_step(self.args):
-            camera_entry = self.lattice.activate(camera_entry, camera_index, self.args.seed)
-            structure = self.lattice.structure if score else None
-            width, height = camera_entry.camera.image_size
-        else:
-            if self.lattice is not None:
-                self.lattice.restore()
-            structure = self.structure_textures[camera_index] if score else None
         learning_rates = self.learning_rates.at(self.training_step - 1)
         if self.args.lr_recipe == LearningRateRecipe.SHORT:
             pipeline = self.runtime.pipeline
@@ -892,9 +871,9 @@ class TrainingLoop:
                 hardness_value=(self.extinction_hardness_schedule.at(self.training_step) if self.extinction_hardness_schedule is not None else 1.0),
                 sh_degree=(self.appearance_schedule.at(self.training_step) if self.appearance_schedule is not None else int(self.args.sh_degree)),
                 densification_variables=DensificationProperties(
-                    structure_tensor_texture=structure,
+                    structure_tensor_texture=self.structure_textures[camera_index] if self._should_accumulate_structure(self.training_step) else None,
                     # TODO: normalize the hyperparameters instead of rescaling this threshold here.
-                    structure_kwargs={"per_view_grad_thresh": (self.args.sad_freq_grad_threshold * width * height * 3.0) if score else None},
+                    structure_kwargs={"per_view_grad_thresh": (self.args.sad_freq_grad_threshold * self.scene.width * self.scene.height * 3.0) if self._should_accumulate_structure(self.training_step) else None},
                     track_blend_weight=self._tracks_blend_weight(self.training_step),
                     track_screen_grad=self._tracks_screen_grad(self.training_step),
                 ),
@@ -937,9 +916,6 @@ class TrainingLoop:
                 context.step_number, events, self.gaussian_count)
             self.gaussian_count = outcome.count
             self.runtime.reporter.report_densify(outcome)
-            if self.lattice is not None:
-                count = outcome.stats.get('final_count')
-                pipeline.bound_render_work(pipeline.primitives.count() if count is None else count)
 
         if events.opacity_reset:
             pipeline.opacity_reset.reset(self.densify_config)
@@ -960,11 +936,6 @@ class TrainingLoop:
             pipeline.mip_filter.compute()
 
     def _produce_observations(self, context: IterationContext) -> bool:
-        events = context.events
-        if self.lattice is not None and (events.eval or events.psnr_curve or events.render_all or
-                                         (context.step_number > 1 and (events.log or events.preview))):
-            self.lattice.restore()
-            context = replace(context, camera_entry=self.scene.colmapScene.images[context.camera_index])
         self.runtime.viewer.checkpoint()
         self.runtime.reporter.report_throughput(context)
 
@@ -1076,9 +1047,6 @@ class TrainingLoop:
                 state.end_activity()
 
     def _complete_training_loop(self) -> TrainingResult:
-        if self.lattice is not None:
-            self.lattice.restore()
-            self.runtime.pipeline.bound_render_work(self.runtime.pipeline.max_splats)
         # Training is done, so give the viewer the GPU back before the held-out PSNR pass.
         self.runtime.viewer.set_training_active(False)
         self.runtime.pipeline.runtime.wait_for_idle()

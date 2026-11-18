@@ -12,7 +12,6 @@ import slangpy as spy
 
 from trainer.backend.compute.algorithms import PrefixScan, RadixSort
 from trainer.backend.compute.device import SHADERS_DIR
-from trainer.backend.compute.execution import TILE_HEIGHT, TILE_WIDTH
 from trainer.backend.compute.gpu import CommandRecorder, GpuRuntime
 from trainer.backend.compute.kernels import KernelLibrary
 from trainer.backend.densify.morton import MortonReorder
@@ -61,10 +60,10 @@ def default_sort_pairs(max_splats: int, viewer_only: bool = False) -> int:
 
 def estimate_pipeline_bytes(module: spy.Module, *, max_splats: int, width: int,
                             height: int, sh_degree: int, structure_aware: bool = False,
-                            viewer_only: bool = False, max_sort_pairs: int | None = None) -> int:
+                            viewer_only: bool = False) -> int:
     """Base GPU bytes a pipeline of this shape allocates (no GPU work)."""
     sizes = {"max_splats": max_splats, "width": width, "height": height,
-             "max_sort_pairs": max_sort_pairs or default_sort_pairs(max_splats, viewer_only),
+             "max_sort_pairs": default_sort_pairs(max_splats, viewer_only),
              "sh_rest_floats": sh_rest_coeffs(sh_degree) * 3}
     if not viewer_only:
         sizes["structure_aware"] = structure_aware
@@ -97,16 +96,13 @@ class TrainingPipeline:
         use_flat_bucket_backward: bool = True,
         densify_mode: DensificationMode = DensificationMode.SIMPLE,
         slang_session: spy.SlangSession | None = None,
-        kernels: KernelLibrary | None = None,
     ) -> None:
         self.device = device
-        self.kernels = kernels if kernels is not None else KernelLibrary(device, slang_session)
-        if self.kernels.device is not device or (slang_session is not None and self.kernels.session is not slang_session):
-            raise ValueError("The kernel library must belong to the pipeline's device and Slang session")
-        self.slang_session = self.kernels.session
+        self.slang_session = device.slang_session if slang_session is None else slang_session
         self.gpu_lock = gpu_lock if gpu_lock is not None else contextlib.nullcontext()
         self.runtime = GpuRuntime(device, self.gpu_lock)
         self.commands = CommandRecorder(self.runtime)
+        self.kernels = KernelLibrary(device, self.slang_session)
         self.width = width
         self.height = height
         self.max_splats = max_splats
@@ -236,29 +232,6 @@ class TrainingPipeline:
 
     def set_active_sh_degree(self, degree: int) -> None:
         self.active_sh_degree = max(0, min(int(degree), self.appearance_config.sh_degree))
-
-    def bound_render_work(self, count: int) -> None:
-        """Only slots in the live prefix can be rasterized until the next topology change."""
-        if not 0 <= count <= self.max_splats:
-            raise ValueError(f"Invalid live count {count} for capacity {self.max_splats}")
-        # Thread zero still publishes the depth count for an empty scene.
-        self.rasterizer._capacity = self.backward._capacity = max(1, count)
-
-    def set_training_viewport(self, targets: TargetImages, raster_config: RasterConfig) -> None:
-        """Use an in-bounds training viewport without reallocating native-resolution buffers."""
-        w, h = targets.width, targets.height
-        self.targets = targets
-        self.width, self.height = w, h
-        self.rasterizer.width, self.rasterizer.height = w, h
-        self.rasterizer.num_tiles_x = (w + TILE_WIDTH - 1) // TILE_WIDTH
-        self.rasterizer.num_tiles_y = (h + TILE_HEIGHT - 1) // TILE_HEIGHT
-        self.rasterizer.config = raster_config
-        self.loss._width, self.loss._height = w, h
-        self.optimizer._pixels = float(w * h)
-        self.densify_stats._frame = spy.float2(w, h)
-        self.simple_densifier.width, self.simple_densifier.height = w, h
-        if self.structure_densifier is not None:
-            self.structure_densifier._width, self.structure_densifier._height = w, h
 
     def set_extinction_hardness(self, hardness: float) -> None:
         self.extinction_hardness = float(hardness)

@@ -3,8 +3,6 @@
 // Post-sort per-tile [tile_start, tile_end) ranges in the sorted pair array; empty tiles have
 // start == end, so the caller must clear both before identifyTileRanges.
 
-#include "common/execution.slang"
-
 [shader("compute")]
 [numthreads(256, 1, 1)]
 void clearTileRanges(
@@ -30,7 +28,7 @@ void identifyTileRanges(
     StructuredBuffer<uint> n_buf,
     uniform uint num_tiles)
 {
-    uint i = linearThreadIndex256(dtid);
+    uint i = dtid.x;
     uint n = n_buf[0];
     if (i >= n) return;
 

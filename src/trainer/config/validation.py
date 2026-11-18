@@ -26,14 +26,8 @@ def validate_training_config(args: argparse.Namespace, *, n_cams: int, n_train: 
 
     if args.iters < 1:
         raise ConfigError(f"--iters must be >= 1, got {args.iters}.")
-    if args.lattice_stride < 1 or args.lattice_until < 0:
-        raise ConfigError("Lattice stride must be positive and its last training step must be nonnegative.")
     if args.max_splats < 1:
         raise ConfigError(f"--max-splats must be >= 1, got {args.max_splats}.")
-    # The radix sort dispatches one group per 2,048 keys along a single GPU dimension.
-    max_pairs = 65_535 * 2_048
-    if args.max_sort_pairs is not None and not 1 <= args.max_sort_pairs <= max_pairs:
-        raise ConfigError(f"--max-sort-pairs must be between 1 and {max_pairs:,}.")
 
     # densify_every is a modulo divisor of the schedule, not a "disable" value.
     if args.densify_every < 1:

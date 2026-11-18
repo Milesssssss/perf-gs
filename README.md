@@ -17,8 +17,6 @@ A fast, modular and efficient Slang-based 3DGS trainer.
 An extensible 3D Gaussian Splatting [[1]](#ref-3dgs) trainer written in [Slang](https://shader-slang.org) and driven from Python through [SlangPy](https://slangpy.shader-slang.org).<br>
 On an RTX 4080, the 3,000-step SH3 recipe with adaptive lens falloff reaches **27.786 dB and 27.780 dB** on the nine Mip-NeRF 360 scenes at seeds 42 and 1. In a paired seed-42 comparison, the recipe took **40.84 seconds per scene including setup**, versus **38.77 seconds for stock** (+5.33%). The recipe supervises every pixel, initializes extra Gaussians from stereo matches, and fits the lens response once from training photos. [Results](#mip-nerf-360-at-3000-steps) · [Training command](docs/mipnerf360_3k.md#reproduce-the-benchmark) · [Mip-NeRF 360](#ref-mipnerf360)
 
-The faster SH2 recipe averages **27.371 dB in 14.94 seconds of training per scene** on the same benchmark, or **17.92 seconds including setup**. Its SSIM is 0.8091 and its VGG LPIPS is 0.2750, versus 0.8158 and 0.2464 for stock SH3. [SH2 training command](docs/mipnerf360_3k.md#faster-training-on-staggered-pixels)
-
 The trainer runs without CUDA and can be integrated with a PyTorch frontend.
 
 <p align="center">
@@ -51,26 +49,20 @@ By writing the kernels in Slang and having the whole system driven by slangpy, w
 
 ### Mip-NeRF 360 at 3,000 steps
 
-Each row weights the nine scenes equally and uses the same 246 held-out views on an RTX 4080. The SH3 recipes supervise every benchmark pixel. Stock uses the balanced preset. The fixed and adaptive SH3 recipes share stereo initialization, a short learning-rate schedule and pruning settings. Fixed falloff uses the same cos⁴ law for every camera. Adaptive falloff fits its strength from each reconstruction’s training views.
+Each row is an equal-weight mean over nine scenes on an RTX 4080. All recipes use full-pixel supervision and the same 246 held-out views. Stock uses the balanced preset. The fixed and adaptive recipes use the same stereo initialization, short learning-rate schedule and pruning settings. The fixed model uses the same cos⁴ law for every camera. The adaptive model fits its strength from each reconstruction’s training views.
 
-| Seed | Recipe (SH3 unless marked) | PSNR ↑ (dB) | SSIM ↑ | VGG LPIPS ↓ | Train loop | Setup + train |
+| Seed | SH3 recipe | PSNR ↑ (dB) | SSIM ↑ | VGG LPIPS ↓ | Train loop | Setup + train |
 | ---: | --- | ---: | ---: | ---: | ---: | ---: |
 | 42 | Stock | 26.959 | 0.8158 | 0.2465 | 32.28 s | 37.14 s |
 | 42 | Previous tuned | 27.185 | 0.8226 | 0.2423 | 30.80 s | — |
 | 42 | Fixed falloff + stereo | 27.775 | **0.8280** | **0.2405** | 33.17 s | 39.04 s |
 | 42 | Adaptive falloff + stereo | **27.786** | 0.8279 | 0.2406 | 35.34 s | 41.57 s |
-| 42 | Staggered pixels + stereo SH2 | 27.370 | 0.8089 | 0.2750 | **14.97 s** | **18.08 s** |
 | 1 | Stock | 26.993 | 0.8159 | 0.2463 | 32.42 s | 37.73 s |
 | 1 | Previous tuned | 27.179 | 0.8223 | 0.2423 | 31.25 s | 36.74 s |
 | 1 | Fixed falloff + stereo | 27.741 | 0.8277 | 0.2407 | 33.86 s | 40.67 s |
 | 1 | Adaptive falloff + stereo | **27.780** | **0.8279** | **0.2405** | 33.91 s | 40.33 s |
-| 1 | Staggered pixels + stereo SH2 | 27.371 | 0.8094 | 0.2749 | **14.92 s** | **17.77 s** |
 
 Setup includes image preparation, stereo initialization where enabled, and the adaptive fit (0.12 seconds per scene on average). Compared with the archived stock timings, setup plus training took 11.9% and 6.9% longer with adaptive falloff, and 5.1% and 7.8% longer with fixed falloff. The seed-42 archive records only loop time for the previous tune. All timings exclude held-out scoring.
-
-The staggered SH2 runs use one pixel per 2×2 block for 2,775 updates and the full benchmark image for the last 225. The individual training loops ranged from 12.86 to 17.47 seconds. Each batch includes its first cold scene, shares a GPU device and compiled shaders, and starts each scene with fresh Gaussians and optimizer state. Setup plus training excludes one-time Python startup and held-out scoring.
-
-Across both seeds, SH2 scored 0.395 dB above stock, with 0.0067 lower SSIM and 0.0286 higher VGG LPIPS. The SH2 sweep used native CPU SSIM and calibrated FP32 GPU VGG LPIPS at the benchmark resolution. [Training and timing protocol](docs/mipnerf360_3k.md#faster-training-on-staggered-pixels)
 
 In a separate seed-42 timing run, stock and adaptive alternated on the same GPU for each of the nine scenes. Setup plus training averaged **38.77 s stock and 40.84 s adaptive (+5.33%)**. The training loop alone averaged 33.48 s and 34.49 s (+3.02%). Three scenes exceeded 8% including setup. [Paired timings by scene](docs/mipnerf360_3k_timing.csv)
 
@@ -86,7 +78,7 @@ On Tanks & Temples truck, `--auto-lens` reached **27.264 dB**, versus 26.023 dB 
 
 ### Quality and training time
 
-Each dataset mean weights scenes equally. The default rows use one run per scene from the original balanced-preset sweep. The Mip-NeRF 360 stereo recipes average seeds 42 and 1. All runs use 3,000 steps, structure-aware densification and Mip-Splatting, with every eighth view held out for PSNR, SSIM and LPIPS. The evaluation images are quarter resolution outdoors and half resolution indoors for Mip-NeRF 360, 979×545 for train and 978×545 for truck in Tanks & Temples, and native resolution for Deep Blending. [Default sweep](docs/benchmark_results.csv) · [Two-seed measurements](docs/mipnerf360_3k_results.csv) · [SSIM](#ref-ssim) · [LPIPS](#ref-lpips)
+Each dataset mean weights scenes equally. The default rows use one run per scene from the original balanced-preset sweep. The fixed and adaptive rows average seeds 42 and 1. All runs use 3,000 steps, full-pixel supervision, structure-aware densification and Mip-Splatting, with every eighth view held out for PSNR, SSIM and LPIPS. Mip-NeRF 360 uses quarter resolution outdoors and half resolution indoors, Tanks & Temples uses 979×545 for train and 978×545 for truck, and Deep Blending uses native resolution. [Default sweep](docs/benchmark_results.csv) · [Two-seed measurements](docs/mipnerf360_3k_results.csv) · [SSIM](#ref-ssim) · [LPIPS](#ref-lpips)
 
 | Dataset | Recipe | PSNR | SSIM | LPIPS | Train loop (seconds) |
 | --- | ---: | ---: | ---: | ---: | ---: |
@@ -94,7 +86,6 @@ Each dataset mean weights scenes equally. The default rows use one run per scene
 | Mip-NeRF 360 | Default SH3 (1 run) | 26.96 | 0.816 | 0.247 | 31.0 |
 | Mip-NeRF 360 | Fixed falloff + stereo SH3 (2-seed mean) | 27.76 | 0.828 | 0.241 | 33.5 |
 | Mip-NeRF 360 | Adaptive falloff + stereo SH3 (2-seed mean) | 27.78 | 0.828 | 0.241 | 34.6 |
-| Mip-NeRF 360 | Staggered pixels + stereo SH2 (2-seed mean) | 27.37 | 0.809 | 0.275 | 14.9 |
 | Tanks & Temples | Default SH0 (1 run) | 22.49 | 0.837 | 0.230 | 15.6 |
 | Tanks & Temples | Default SH3 (1 run) | 23.07 | 0.850 | 0.210 | 22.0 |
 | Deep Blending | Default SH0 (1 run) | 29.21 | 0.904 | 0.334 | 13.6 |
@@ -103,14 +94,14 @@ Each dataset mean weights scenes equally. The default rows use one run per scene
 In the original sweep, switching from SH0 to SH3 adds 0.6 dB on Mip-NeRF 360 and Tanks & Temples and 0.2 dB on Deep Blending, for 24–41% more training time. Its higher bands train at 6× the 3DGS learning rate (0.015/20). At SH0 the outdoor Mip-NeRF 360 scenes took 18–26 seconds and the indoor scenes took 22–28 seconds.
 
 <p align="center">
-  <img src="assets/timing_sweep.png" alt="Training-loop time per scene for default SH0 and SH3, with the two-seed SH3 falloff and staggered SH2 recipes on Mip-NeRF 360" width="95%">
+  <img src="assets/timing_sweep.png" alt="Training-loop time per scene for default SH0 and SH3, with the two-seed fixed and adaptive SH3 recipes on Mip-NeRF 360" width="95%">
   <br>
-  <img src="assets/psnr_sweep.png" alt="Held-out PSNR per scene for default SH0 and SH3, with the two-seed SH3 falloff and staggered SH2 recipes on Mip-NeRF 360" width="95%">
+  <img src="assets/psnr_sweep.png" alt="Held-out PSNR per scene for default SH0 and SH3, with the two-seed fixed and adaptive SH3 recipes on Mip-NeRF 360" width="95%">
 </p>
 
 ### Training time and GPU memory
 
-VRAM is the process’s local GPU memory immediately after the training loop, before held-out evaluation. In the matched two-seed Mip-NeRF 360 runs, the fixed and adaptive recipes each used **6.14 GiB**, compared with **4.13 GiB** for staggered SH2 and **9.24 GiB** for stock.
+VRAM is the process’s local GPU memory immediately after the training loop, before held-out evaluation. In the matched two-seed Mip-NeRF 360 runs, the fixed and adaptive recipes each used **6.14 GiB**, compared with **9.24 GiB** for stock.
 
 | Dataset | Recipe | Train loop (seconds) | Splats (millions) | VRAM (GiB) |
 | --- | ---: | ---: | ---: | ---: |
@@ -118,7 +109,6 @@ VRAM is the process’s local GPU memory immediately after the training loop, be
 | Mip-NeRF 360 | Default SH3 (1 run) | 31.0 | 2.83 | 9.2 |
 | Mip-NeRF 360 | Fixed falloff + stereo SH3 (2-seed mean) | 33.5 | 3.08 | 6.1 |
 | Mip-NeRF 360 | Adaptive falloff + stereo SH3 (2-seed mean) | 34.6 | 3.09 | 6.1 |
-| Mip-NeRF 360 | Staggered pixels + stereo SH2 (2-seed mean) | 14.9 | 2.10 | 4.1 |
 | Tanks & Temples | Default SH0 (1 run) | 15.6 | 1.57 | 5.5 |
 | Tanks & Temples | Default SH3 (1 run) | 22.0 | 1.60 | 9.0 |
 | Deep Blending | Default SH0 (1 run) | 13.6 | 2.15 | 5.6 |

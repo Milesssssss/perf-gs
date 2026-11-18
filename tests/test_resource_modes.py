@@ -83,13 +83,16 @@ def test_training_loop_runs_with_mode_specific_resources(device, mode, tmp_path,
     scene = write_colmap_scene(tmp_path / "scene", views=[
         (f"{i}.png", 16, 16, 20.0) for i in range(4)])
     args = build_parser().parse_args([
-        "--scene", str(scene), "--no-viewer", "--iters", "3", "--max-splats", "64", "--max-sort-pairs", "512",
+        "--scene", str(scene), "--no-viewer", "--iters", "3", "--max-splats", "64",
         "--width", "16", "--height", "16", "--eval-holdout-stride", "2",
         "--no-evaluation", "--no-write-ground-truths", "--preview-every", "0",
         "--densify-mode", mode.value, "--densify-from", "0", "--densify-to", "3",
         "--densify-every", "1", "--sad-accum-every", "1", "--sad-structure-every", "1",
     ])
     monkeypatch.setattr("trainer.frontend.app.create_training_device", lambda _args: device)
+    # Keep the real factory and training loop, with a tiny sort-pair capacity.
+    monkeypatch.setattr("trainer.frontend.factory.TrainingPipeline",
+                        lambda **kwargs: TrainingPipeline(max_sort_pairs=512, **kwargs))
     app = TrainingApplication(args)
     app.prepare_training_context()
     try:

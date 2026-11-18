@@ -11,7 +11,6 @@ from typing import Any
 import slangpy as spy
 
 from trainer.backend.compute.device import create_device, create_slang_session
-from trainer.backend.compute.kernels import KernelLibrary
 from trainer.backend.render.pipeline import TrainingPipeline
 from trainer.backend.render.stbn_table import pixels_per_tile
 from trainer.config.config import ShaderSpecialization
@@ -72,35 +71,27 @@ class SlangSessions:
     settings on the hub's one device. The device's own session serves the defines it has."""
 
     def __init__(self, device: spy.Device) -> None:
-        self.device = device
+        self._device = device
         own = device.slang_session.desc.compiler_options.defines
-        self._libraries = {frozenset(own.items()): KernelLibrary(device, device.slang_session)}
+        self._sessions = {frozenset(own.items()): device.slang_session}
 
     def session_for(self, spec: ShaderSpecialization) -> spy.SlangSession:
-        return self.kernels_for(spec).session
-
-    def kernels_for(self, spec: ShaderSpecialization) -> KernelLibrary:
-        """Compiled programs on this device; scene buffers belong to each pipeline."""
         defines = shader_defines(spec) or {}
         key = frozenset(defines.items())
-        if key not in self._libraries:
-            session = create_slang_session(self.device, defines)
-            self._libraries[key] = KernelLibrary(self.device, session)
-        return self._libraries[key]
+        if key not in self._sessions:
+            self._sessions[key] = create_slang_session(self._device, defines)
+        return self._sessions[key]
 
 
 def create_pipeline(*, device: spy.Device, gpu_lock: Any, scene: SceneContext,
                     max_splats: int, config: RunConfig,
-                    max_sort_pairs: int | None = None,
                     initial_state: dict | None = None,
-                    slang_session: spy.SlangSession | None = None,
-                    kernels: KernelLibrary | None = None) -> TrainingPipeline:
+                    slang_session: spy.SlangSession | None = None) -> TrainingPipeline:
     return TrainingPipeline(
         device=device,
         width=scene.width,
         height=scene.height,
         max_splats=max_splats,
-        max_sort_pairs=max_sort_pairs,
         gpu_lock=gpu_lock,
         raster_config=config.raster,
         loss_config=config.loss,
@@ -110,5 +101,4 @@ def create_pipeline(*, device: spy.Device, gpu_lock: Any, scene: SceneContext,
         initial_state=initial_state,
         densify_mode=config.densify_mode,
         slang_session=slang_session,
-        kernels=kernels,
     )
