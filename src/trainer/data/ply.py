@@ -7,6 +7,8 @@ from pathlib import Path
 import numpy as np
 from plyfile import PlyData, PlyElement
 
+_VIGNETTING_COMMENT = "trainer natural_vignetting_v1 cos4_srgb_2.2"
+
 _PLY_REQUIRED_FIELDS = (
     "x", "y", "z",
     "scale_0", "scale_1", "scale_2",
@@ -16,7 +18,7 @@ _PLY_REQUIRED_FIELDS = (
 )
 
 
-def load_ply(path: str | Path) -> dict[str, np.ndarray]:
+def load_ply(path: str | Path) -> dict[str, np.ndarray | bool | None]:
     path = Path(path)
     if not path.exists():
         raise FileNotFoundError(f"ply not found: {path}")
@@ -69,6 +71,7 @@ def load_ply(path: str | Path) -> dict[str, np.ndarray]:
                          .transpose(0, 2, 1).reshape(n, rest_floats))
 
     return {
+        **({"natural_vignetting": True} if _VIGNETTING_COMMENT in ply.comments else {}),
         "means": means,
         "log_scales": log_scales,
         "rot_quats": rot_quats,
@@ -79,7 +82,7 @@ def load_ply(path: str | Path) -> dict[str, np.ndarray]:
 
 
 def write_gaussian_ply(gaussians: np.ndarray, path: str | Path,
-                       features_rest: np.ndarray | None = None) -> None:
+                       features_rest: np.ndarray | None = None, *, natural_vignetting: bool = False) -> None:
     mean = gaussians["mean"]
     log_scale = gaussians["log_scale"]
     rot_quat = gaussians["rot_quat"]
@@ -129,4 +132,4 @@ def write_gaussian_ply(gaussians: np.ndarray, path: str | Path,
     records["rot_3"] = rot_quat[:, 3]
 
     elem = PlyElement.describe(records, "vertex")
-    PlyData([elem], text=False).write(str(path))
+    PlyData([elem], text=False, comments=[_VIGNETTING_COMMENT] if natural_vignetting else []).write(str(path))

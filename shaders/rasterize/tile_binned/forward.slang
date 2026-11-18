@@ -76,7 +76,7 @@ void forwardRasterize(
         if (!valid_pixel[j])
             continue;
         // The backward recovers final transmittance as T = 1 - output_image.a.
-        output_image[pixel[j]] = float4(C[j], 1.0 - T[j]);
+        output_image[pixel[j]] = float4(C[j] * camera[0].lensGain(pixel[j]), 1.0 - T[j]);
         gaussian_count_per_pixel[pixel[j]] = processed[j];
     }
 }

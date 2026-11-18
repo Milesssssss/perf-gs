@@ -63,6 +63,7 @@ class Rasterizer:
         self._sort = sort
         self._depth_sort = RadixSort(commands, kernels, raster.depth_sort)
         self.config = config
+        self.natural_vignetting = False
         self.width = width
         self.height = height
         self.num_tiles_x = num_tiles_x
@@ -88,7 +89,7 @@ class Rasterizer:
         data[0:16] = camera.view_matrix.flatten()
         data[16:32] = camera.proj_matrix.flatten()
         data[32:34] = np.array([self.width, self.height], dtype=np.float32)
-        data[34:36] = 0.0
+        data[34:36] = self.natural_vignetting, 0.0
         self.camera_buffer.copy_from_numpy(np.ascontiguousarray(data.view(np.uint8)))
 
     def record(self, camera: Camera, contextual: IterationContextualVariables) -> None:

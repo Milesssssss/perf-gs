@@ -558,6 +558,7 @@ class Viewer:
                          dst.primitive.filter_3d.storage, count, src.max_splats)
         encoder.upload_buffer_data(dst.primitive.active_count.storage, 0, np.array([count], dtype=np.uint32))
         self.runtime.submit(batch)
+        self._pipeline.rasterizer.natural_vignetting = train_pipeline.rasterizer.natural_vignetting
         self._pipeline.set_active_sh_degree(train_pipeline.active_sh_degree)
         self._pipeline.set_extinction_hardness(train_pipeline.extinction_hardness)
         self._has_data = count > 0
@@ -577,6 +578,7 @@ class Viewer:
                     opacities=initial_points["opacities"],
                     color_logits=initial_points["color_logits"],
                 )
+            self._pipeline.rasterizer.natural_vignetting = False
             self._pipeline.set_active_sh_degree(0)
             self._has_data = count > 0
         self.invalidate_scene()

@@ -117,12 +117,13 @@ def _buffers(*, capacity: int = CAPACITY, sh: bool = False):
 
 
 def _snapshot(*, live: int, viewer_capacity: int = CAPACITY, sh: bool = False,
-              mip: bool = False, active_sh_degree: int = 0, hardness: float = 1.0):
+              mip: bool = False, active_sh_degree: int = 0, hardness: float = 1.0, vignetting: bool = False):
     """Run the real ``update_gaussians`` against fakes; return (encoder, viewer)."""
     encoder = _Encoder()
     pipeline = SimpleNamespace(
         buffers=_buffers(capacity=viewer_capacity, sh=sh),
         raster_config=SimpleNamespace(mip_enabled=mip),
+        rasterizer=SimpleNamespace(natural_vignetting=False),
         set_active_sh_degree=lambda degree: None,
         set_extinction_hardness=lambda value: setattr(pipeline, "hardness", value),
         resize=lambda capacity, _pairs: setattr(
@@ -147,7 +148,7 @@ def _snapshot(*, live: int, viewer_capacity: int = CAPACITY, sh: bool = False,
         invalidations=invalidations,
     )
     view_buffers = pipeline.buffers
-    train = SimpleNamespace(buffers=_buffers(sh=sh), max_splats=CAPACITY,
+    train = SimpleNamespace(rasterizer=SimpleNamespace(natural_vignetting=vignetting), buffers=_buffers(sh=sh), max_splats=CAPACITY,
                             primitives=SimpleNamespace(count=lambda: live),
                             active_sh_degree=active_sh_degree, extinction_hardness=hardness)
     Viewer.update_gaussians(viewer, train)
@@ -214,3 +215,8 @@ def test_a_snapshot_invalidates_the_rendered_scene() -> None:
 def test_snapshot_carries_nondefault_extinction_hardness() -> None:
     _, viewer, _ = _snapshot(live=1_000, hardness=2.5)
     assert viewer._pipeline.hardness == 2.5
+
+
+def test_snapshot_restores_lens_response_after_a_viewer_grow():
+    _, viewer, _ = _snapshot(live=15, viewer_capacity=10, vignetting=True)
+    assert viewer._pipeline.rasterizer.natural_vignetting

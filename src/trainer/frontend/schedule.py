@@ -5,12 +5,13 @@ events fire at iteration ``it``, with no GPU or I/O so its invariants are unit-t
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, replace
 
 import numpy as np
 
 from trainer.config.config import (
-    AdamLRs, AppearanceConfig, IterationContextualVariables, IterationEvents,
+    AdamLRs, AppearanceConfig, IterationContextualVariables, IterationEvents, LossConfig,
 )
 from trainer.config.config import ScheduleConfig
 from trainer.config.config_types import DensificationMode
@@ -125,6 +126,19 @@ class LearningRateSchedule:
                        mean=_log_lerp(self._mean_init, self._mean_final, step, self._mean_steps),
                        scale=self._base.scale * factor,
                        rot=self._base.rot * factor)
+
+    def short_objective(self, step: int, rates: AdamLRs, loss: LossConfig) -> tuple[AdamLRs, LossConfig]:
+        """Apply the short training recipe to the scheduled rates and base loss (one-based step)."""
+        progress = (step - 1) / self._iterations
+        phase = max(0.0, (step / self._iterations - 0.73) / (1 - 0.73))
+        weight = 0.5 - 0.5 * math.cos(math.pi * phase)
+        geometry, appearance = 0.08 ** weight, 0.6 ** weight
+        color_decay = 0.3 ** progress
+        rates = replace(rates, mean=2 * rates.mean * geometry, scale=rates.scale * geometry,
+                        rot=rates.rot * 3 * (1 / 6) ** progress * geometry,
+                        opacity=rates.opacity * 0.7 * color_decay * appearance,
+                        color=rates.color * color_decay * appearance, sh_rest=rates.sh_rest * color_decay * appearance)
+        return rates, replace(loss, l2_weight=loss.l2_weight * (1 + 1.5 * weight))
 
 
 def _log_lerp(start: float, end: float, step: int, steps: int) -> float:

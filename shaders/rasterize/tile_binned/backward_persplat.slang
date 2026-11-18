@@ -197,11 +197,12 @@ void backwardRasterizePerSplat(
 #endif
     if (my_pixel_valid)
     {
-        gs_dLdC[tid]      = dL_dC_texture[my_pixel];
+        float gain = camera[0].lensGain(my_pixel);
+        gs_dLdC[tid]      = dL_dC_texture[my_pixel] * float4(gain.xxx, 1.0);
         // T_final = 1 - alpha (forward wrote output_image.a = 1-T).
         float4 out_px     = output_image[my_pixel];
         gs_Tfinal[tid]    = 1.0 - out_px.a;
-        gs_Ctotal[tid]    = out_px.rgb;
+        gs_Ctotal[tid]    = out_px.rgb / gain;
         gs_processed[tid] = gaussian_count_per_pixel[my_pixel];
     }
     else
@@ -597,6 +598,12 @@ void backwardRasterizePerBucket(
     Compositor comp;
     comp.hardness = extinction_hardness;
 
+    // The warp shares this 8x8 tile. Compute two gains per lane and reuse them for every visit.
+    uint2 origin = uint2(tile_origin_x, tile_origin_y);
+    uint2 first = origin + uint2(lane % TILE_WIDTH, lane / TILE_WIDTH);
+    float2 gainPair = float2(camera[0].lensGain(first),
+                             camera[0].lensGain(first + uint2(0u, RASTER_BUCKET_SIZE / TILE_WIDTH)));
+
     // Visit slot k is pixel phase + k * STRIDE (or the k-th STBN sample) and checkpoint k. PIXELS_PER_STEP
     // slots per iteration: their loads and wave scans are independent, so they hide each other's latency.
 #if STBN_ENABLED
@@ -653,6 +660,11 @@ void backwardRasterizePerBucket(
             unpackCheckpoint(gs_checkpoints[warp_idx][slot[j]], T_checkpoint[j], C_checkpoint[j]);
             dLdC4[j] = dL_dC_texture[pixel[j]];
             C_total[j] = output_image[pixel[j]];
+            uint2 local = pixel[j] - origin;
+            uint index = local.y * TILE_WIDTH + local.x;
+            float gain = WaveReadLaneAt(index < RASTER_BUCKET_SIZE ? gainPair.x : gainPair.y, index % RASTER_BUCKET_SIZE);
+            dLdC4[j].rgb *= gain;
+            C_total[j].rgb /= gain;  // Checkpoints and splat colors are in scene space.
             dLdC_c[j] = dot(dLdC4[j].rgb, c_i);
             dLdC_C_checkpoint[j] = dot(dLdC4[j].rgb, C_checkpoint[j]);
 

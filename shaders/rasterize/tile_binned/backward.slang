@@ -94,7 +94,7 @@ void backwardRasterize(
 
     float2 pixel_center = float2(pixel) + 0.5;
     float4 dL_dC_full = valid_pixel ? dL_dC_texture[pixel] : float4(0.0);
-    float3 dL_dC = dL_dC_full.rgb;
+    float3 dL_dC = dL_dC_full.rgb * camera[0].lensGain(pixel);
     float dL_dA = dL_dC_full.a;
 
     // Final transmittance T = 1 - alpha (forward wrote output_image.a = 1-T).

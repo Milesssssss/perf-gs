@@ -29,6 +29,7 @@ EXPECTED_DEFAULTS = {
     "preset": "balanced",
     "iters": 3000,
     "lr_recipe": "default",
+    "stereo_init": False,
     # 0 == follow --iters (app._resolve_position_lr_max_steps). It used to be a
     # hard 3000 that silently disagreed with any other --iters.
     "position_lr_max_steps": 0,
@@ -107,6 +108,7 @@ EXPECTED_DEFAULTS = {
     "sh_band_interval": 0,
     "sample_mode": "sadgs",
     "run_name": None,
+    "natural_vignetting": False,
     "init_opacity": 0.1,
     "grow_scale3d": 0.001,
     "opacity_reset_value": 0.01,

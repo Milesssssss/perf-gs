@@ -46,6 +46,7 @@ class LearningRateRecipe(str, Enum):
     """Per-parameter learning-rate plan (CLI ``--lr-recipe``)."""
     DEFAULT = "default"
     QUALITY = "quality"
+    SHORT = "short"
 
 
 def resolve_blend_kind(*, extinction_hardness: float) -> BlendKind:

@@ -75,6 +75,10 @@ def load_scene_context(args: argparse.Namespace) -> SceneContext:
 
     stride = max(args.eval_holdout_stride, 1)
     test_indices, train_indices = holdout_split(camera_count, stride, bool(args.eval_holdout))
+    if getattr(args, "stereo_init", False) and initial_count < args.max_splats:
+        from trainer.data.stereo import DEFAULT_SEED_LIMIT, seed_from_stereo
+        limit = min(DEFAULT_SEED_LIMIT, args.max_splats - initial_count)
+        initial_count += seed_from_stereo(colmap_scene, train_indices, limit=limit)
     if args.eval_holdout:
         print(f"[eval] holdout protocol ON (stride={stride}): "
               f"{len(train_indices)} train / {len(test_indices)} test cameras. "

@@ -2,11 +2,15 @@
 
 """Regenerate the README's Results figures and tables from the benchmark runs (missing runs are left blank).
 
+To regenerate only the PSNR and training-time figures from the two published CSVs:
+    python scripts/plots/plot_readme_results.py --overview-only
+
 Ours: grid below over all 13 scenes, each at its 3DGS eval resolution (dense fp32 adds --run-report --eval-lpips; readme_conv adds --run-report --save-test-renders --eval-iters 100 200 ... 3000); SADGS: run_counterparts.sh.
     python scripts/running/eval_sweep.py --axis stbn-pixel-fraction --values 1.0,0.5,0.25,0.1,0.02 --name readme_sh0_fp32 --no-plot --extra --sh-degree 0 --adam-moments fp32 --eval-every 0 --preview-every 0 --no-write-ground-truths
 """
 from __future__ import annotations
 
+import argparse
 import csv
 import json
 import re
@@ -25,6 +29,8 @@ TRAIN = REPO / "outputs" / "train"
 SADGS = REPO / "outputs" / "sadgs_counterparts"
 ASSETS = REPO / "assets"
 CSV_OUT = REPO / "docs" / "benchmark_results.csv"
+OPTICS_CSV = REPO / "docs" / "mipnerf360_3k_results.csv"
+FIXED_RECIPE_LABEL = "Fixed falloff + stereo SH3 (2-seed mean)"
 REPORT = REPO / "outputs" / "readme_results"
 
 DATASETS: dict[str, tuple[str, ...]] = {
@@ -62,7 +68,7 @@ class Result:
     ssim: float | None
     lpips: float | None
     seconds: float | None
-    splats: int | None
+    splats: int | float | None
     vram_gib: float | None
     # Image downsample factor the run trained and was evaluated at.
     downsample: int | None
@@ -196,16 +202,55 @@ def _style(ax) -> None:
         ax.spines[spine].set_visible(False)
 
 
-def _series(grid: Grid) -> list[tuple[str, str, dict[str, Result | None]]]:
-    """(label, color, per-scene result) for each SH degree."""
-    return [(f"SH{sh}", COLORS[sh], {s: grid.dense(sh, s) for s in SCENES})
-            for sh in SH_DEGREES]
+def load_published_defaults(path: Path) -> Grid:
+    """The historical full-pixel, fp32 baseline for the overview figures."""
+    dense = {}
+    with path.open(newline="", encoding="utf-8-sig") as handle:
+        for row in csv.DictReader(handle):
+            if (row["method"], row["adam_moments"], row["pixel_fraction"]) == ("ours", "fp32", DENSE):
+                dense[int(row["sh"]), "fp32", row["scene"], DENSE] = Result(
+                    float(row["psnr"]), float(row["ssim"]) if row["ssim"] else None,
+                    float(row["lpips"]) if row["lpips"] else None, float(row["seconds"]),
+                    int(row["splats"]) if row["splats"] else None,
+                    float(row["vram_gib"]) if row["vram_gib"] else None, int(row["downsample"]))
+    return Grid(dense, {}, {}, {})
+
+
+def load_fixed_optics(path: Path) -> dict[str, Result]:
+    """Only report a scene when both designated seeds have all four measurements."""
+    fields = ("psnr_db", "ssim", "vgg_lpips", "train_loop_s")
+    seeds = ("42", "1")
+    scenes = DATASETS["Mip-NeRF 360"]
+    runs = {}
+    if path.is_file():
+        with path.open(newline="", encoding="utf-8-sig") as handle:
+            for row in csv.DictReader(handle):
+                if row["recipe"] != "optics-fast" or row["seed"] not in seeds or row["scene"] not in scenes:
+                    continue
+                key = row["scene"], row["seed"]
+                if key in runs or row["steps"] != "3000":
+                    raise ValueError(f"Unexpected or duplicate benchmark cell {key} in {path}")
+                values = tuple(float(row[f]) if row[f] else np.nan for f in fields)
+                if np.isfinite(values).all():
+                    splats = int(row["final_gaussians"]) if row.get("final_gaussians") else None
+                    vram_gib = _gib(int(row["vram_usage_bytes"])) if row.get("vram_usage_bytes") else None
+                    runs[key] = Result(*values, splats, vram_gib, None)
+    averaged = {}
+    for scene in scenes:
+        if all((scene, seed) in runs for seed in seeds):
+            pair = [runs[scene, seed] for seed in seeds]
+            averaged[scene] = Result(*(mean_of(pair, field) for field in Result.__dataclass_fields__))
+    missing = [scene for scene in scenes if scene not in averaged]
+    if missing:
+        print("No complete fixed-optics seed pair for " + ", ".join(missing))
+    return averaged
 
 
 def plot_scene_bars(grid: Grid, field: str, ylabel: str, title: str, fmt: str, out: Path,
-                    from_zero: bool = True) -> None:
+                    from_zero: bool = True, *, optics: dict[str, Result] | None = None) -> None:
     """Per-scene bars plus dataset averages: Mip-NeRF 360 on the first row, the other datasets on the second."""
-    series = _series(grid)
+    defaults = [(f"Historical default SH{sh} (1 run)", COLORS[sh], {s: grid.dense(sh, s) for s in SCENES})
+                for sh in SH_DEGREES]
     rows = [("Mip-NeRF 360",), ("Tanks & Temples", "Deep Blending")]
     groups = []
     for names in rows:
@@ -215,7 +260,6 @@ def plot_scene_bars(grid: Grid, field: str, ylabel: str, title: str, fmt: str, o
             row.append((f"{name} average", DATASETS[name]))
         groups.append(row)
     slots = max(len(row) for row in groups)
-    width = 0.8 / len(series)
     # Sized so the text stays legible when the README scales the figure to its width.
     with plt.rc_context({"font.size": 13}):
         fig, axes = plt.subplots(len(rows), 1, figsize=(12, 10), dpi=130, sharey=True,
@@ -223,8 +267,12 @@ def plot_scene_bars(grid: Grid, field: str, ylabel: str, title: str, fmt: str, o
         drawn = []
         for ax, row in zip(axes, groups):
             x = np.arange(len(row))
+            series = list(defaults)
+            if ax is axes[0] and optics:
+                series.append((FIXED_RECIPE_LABEL, "#009E73", optics))
+            width = 0.82 / len(series)
             for index, (label, color, by_scene) in enumerate(series):
-                values = [mean_of([by_scene[s] for s in scenes], field) for _, scenes in row]
+                values = [mean_of([by_scene.get(s) for s in scenes], field) for _, scenes in row]
                 drawn += [v for v in values if v is not None]
                 offset = (index - (len(series) - 1) / 2) * width
                 ax.bar(x + offset, [np.nan if v is None else v for v in values], width,
@@ -234,7 +282,7 @@ def plot_scene_bars(grid: Grid, field: str, ylabel: str, title: str, fmt: str, o
                     if value is not None:
                         ax.annotate(fmt.format(value), (xv, value), xytext=(0, 3),
                                     textcoords="offset points", ha="center", va="bottom",
-                                    rotation=90, fontsize=12, color=INK)
+                                    rotation=90, fontsize=10 if len(series) > 2 else 12, color=INK)
             for i, (label, scenes) in enumerate(row):
                 if len(scenes) > 1:
                     ax.axvline(i - 0.5, color="#bbbbbb", lw=1.0, ls="--", zorder=1)
@@ -248,7 +296,7 @@ def plot_scene_bars(grid: Grid, field: str, ylabel: str, title: str, fmt: str, o
         bottom = 0.0 if from_zero else np.floor(min(drawn)) - 1
         # Headroom for the rotated value labels.
         axes[0].set_ylim(bottom, max(drawn) + 0.2 * (max(drawn) - bottom))
-        axes[-1].legend(frameon=False, loc="center right")
+        axes[-1].legend(*axes[0].get_legend_handles_labels(), frameon=False, loc="center right", fontsize=11)
         fig.suptitle(title, fontsize=14)
         fig.savefig(out)
     plt.close(fig)
@@ -380,29 +428,35 @@ def _table(header: list[str], rows: list[list[str]], align: str = "---:") -> str
     return "\n".join(lines + [_row(r) for r in rows])
 
 
-def cost_table(grid: Grid) -> str:
+def _dataset_runs(grid: Grid, optics: dict[str, Result] | None, name: str):
+    scenes = DATASETS[name]
+    for sh in SH_DEGREES:
+        yield f"Default SH{sh} (1 run)", [grid.dense(sh, s) for s in scenes]
+    if name == "Mip-NeRF 360" and optics:
+        yield FIXED_RECIPE_LABEL, [optics.get(s) for s in scenes]
+
+
+def cost_table(grid: Grid, optics: dict[str, Result] | None = None) -> str:
     """Per dataset and SH degree: training time, splat count and GPU memory."""
     rows = []
-    for name, scenes in DATASETS.items():
-        for sh in SH_DEGREES:
-            runs = [grid.dense(sh, s) for s in scenes]
-            rows.append([name, f"SH{sh}", _cell(mean_of(runs, "seconds"), "{:.1f}"),
+    for name in DATASETS:
+        for label, runs in _dataset_runs(grid, optics, name):
+            rows.append([name, label, _cell(mean_of(runs, "seconds"), "{:.1f}"),
                          _cell(_millions(mean_of(runs, "splats")), "{:.2f}"),
                          _cell(mean_of(runs, "vram_gib"), "{:.1f}")])
-    return _table(["Dataset", "SH", "Time (seconds)", "Splats (millions)", "VRAM (GiB)"], rows)
+    return _table(["Dataset", "Recipe", "Train loop (seconds)", "Splats (millions)", "VRAM (GiB)"], rows)
 
 
-def dataset_quality_table(grid: Grid) -> str:
+def dataset_quality_table(grid: Grid, optics: dict[str, Result] | None = None) -> str:
     """Per dataset and SH degree: held-out quality and training time."""
     rows = []
-    for name, scenes in DATASETS.items():
-        for sh in SH_DEGREES:
-            runs = [grid.dense(sh, s) for s in scenes]
-            rows.append([name, f"SH{sh}", _cell(mean_of(runs, "psnr"), "{:.2f}"),
+    for name in DATASETS:
+        for label, runs in _dataset_runs(grid, optics, name):
+            rows.append([name, label, _cell(mean_of(runs, "psnr"), "{:.2f}"),
                          _cell(mean_of(runs, "ssim"), "{:.3f}"),
                          _cell(mean_of(runs, "lpips"), "{:.3f}"),
                          _cell(mean_of(runs, "seconds"), "{:.1f}")])
-    return _table(["Dataset", "SH", "PSNR", "SSIM", "LPIPS", "Time (seconds)"], rows)
+    return _table(["Dataset", "Recipe", "PSNR", "SSIM", "LPIPS", "Train loop (seconds)"], rows)
 
 
 def _millions(value: float | None) -> float | None:
@@ -494,25 +548,34 @@ def write_summary_csv(grid: Grid, out: Path) -> None:
 
 
 def main() -> int:
-    grid = Grid.load()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--overview-only", action="store_true",
+                        help="regenerate only psnr_sweep.png and timing_sweep.png from the published CSVs")
+    args = parser.parse_args()
+    grid = load_published_defaults(CSV_OUT) if args.overview_only else Grid.load()
     if not grid.ours:
         print("no benchmark runs found")
         return 1
+    optics = load_fixed_optics(OPTICS_CSV)
+    plot_scene_bars(grid, "psnr", "Held-out PSNR (dB, sRGB)",
+                    "Held-out PSNR after 3,000 steps, full pixel supervision",
+                    "{:.2f}", ASSETS / "psnr_sweep.png", from_zero=False, optics=optics)
+    plot_scene_bars(grid, "seconds", "Training loop (seconds)",
+                    "Training-loop time for 3,000 steps on an RTX 4080",
+                    "{:.1f}", ASSETS / "timing_sweep.png", optics=optics)
+    if args.overview_only:
+        print(dataset_quality_table(grid, optics))
+        print(cost_table(grid, optics))
+        return 0
     REPORT.mkdir(parents=True, exist_ok=True)
-    plot_scene_bars(grid, "psnr", "held-out PSNR (dB, sRGB)",
-                    "Held-out PSNR per scene (3000 iterations, every pixel supervised)",
-                    "{:.2f}", ASSETS / "psnr_sweep.png", from_zero=False)
-    plot_scene_bars(grid, "seconds", "training time (seconds)",
-                    "Training time per scene (3000 iterations, RTX 4080)",
-                    "{:.1f}", ASSETS / "timing_sweep.png")
     plot_vram(grid, ASSETS / "vram.png")
     plot_convergence(ASSETS / "convergence.png")
     plot_stbn_convergence(ASSETS / "stbn_convergence.png")
     plot_qualitative(ASSETS / "stbn_qualitative.jpg")
     write_summary_csv(grid, CSV_OUT)
     tables = [
-        "## Quality and training time", dataset_quality_table(grid),
-        "## Time and memory", cost_table(grid),
+        "## Quality and training time", dataset_quality_table(grid, optics),
+        "## Time and memory", cost_table(grid, optics),
         "## STBN SH0", stbn_table(grid, 0),
         "## STBN SH3", stbn_table(grid, 3),
         "## Adam moment precision", precision_table(grid),

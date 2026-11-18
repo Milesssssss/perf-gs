@@ -20,7 +20,7 @@ import math
 import numpy as np
 import pytest
 
-from trainer.config.config import AdamLRs
+from trainer.config.config import AdamLRs, LossConfig
 from trainer.frontend.schedule import (
     ExtinctionHardnessSchedule,
     LearningRateSchedule,
@@ -196,3 +196,23 @@ def test_stbn_density_disabled_target_never_ramps() -> None:
     assert schedule.at(1) == 1.0
     assert schedule.at(250) == 1.0
     assert schedule.at(500) == 1.0
+
+
+@pytest.mark.parametrize(("step", "weight"), [(1, 0.0), (1501, 0.0), (2190, 0.0), (2595, 0.5), (3000, 1.0)])
+def test_short_objective_matches_the_three_thousand_step_recipe(step, weight):
+    base = AdamLRs(scale=0.01, rot=0.002, opacity=0.05)
+    loss = LossConfig(l2_weight=9, ssim_weight=0.22, alpha_weight=0.1)
+    schedule = LearningRateSchedule(base, 2.4, 3000, 3000, (1, 1))
+    ordinary = schedule.at(step - 1)
+    rates, objective = schedule.short_objective(step, ordinary, loss)
+    progress = (step - 1) / 3000
+    geometry = 0.08 ** weight
+    color = 0.3 ** progress * 0.6 ** weight
+    assert rates.mean == pytest.approx(2 * ordinary.mean * geometry)
+    assert rates.scale == pytest.approx(ordinary.scale * geometry)
+    assert rates.rot == pytest.approx(base.rot * 3 * (1 / 6) ** progress * geometry)
+    assert rates.opacity == pytest.approx(base.opacity * 0.7 * color)
+    assert rates.color == pytest.approx(base.color * color)
+    assert rates.sh_rest == pytest.approx(base.sh_rest * color)
+    assert objective.l2_weight == pytest.approx(loss.l2_weight * (1 + 1.5 * weight))
+    assert (objective.ssim_weight, objective.alpha_weight) == (loss.ssim_weight, loss.alpha_weight)

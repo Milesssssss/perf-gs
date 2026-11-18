@@ -141,7 +141,7 @@ SETTINGS: tuple[Setting, ...] = (
             help="per-parameter learning-rate plan. 'quality' starts the scale and "
                  "rotation LRs 3x higher, decays them log-linearly to 0.5x by the "
                  "last step and lowers the opacity LR to 0.7x: sharper results for "
-                 "6-12%% more training time."),
+                 "6-12%% more training time. The short recipe cools appearance and rotation LRs, then ramps L2."),
     Setting("densify_mode", "strategy", "densify", str,
             about="How splats are added and removed: simple = 3DGS clone/split, "
                   "structure_aware = SAD-GS splits along image structure, none = fixed set.",

@@ -245,8 +245,10 @@ class TrainingPipeline:
 
     def load_snapshot(self, means: np.ndarray, log_scales: np.ndarray,
                       rot_quats: np.ndarray, opacities: np.ndarray,
-                      color_logits: np.ndarray, features_rest: np.ndarray | None = None) -> None:
+                      color_logits: np.ndarray, features_rest: np.ndarray | None = None,
+                      natural_vignetting: bool = False) -> None:
         """Replace every primitive and reset the optimizer state it invalidates."""
+        self.rasterizer.natural_vignetting = natural_vignetting
         self.set_gaussians(means, log_scales, rot_quats, opacities, color_logits)
         self.optimizer.clear_state()
         self.optimizer.reset()

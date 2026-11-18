@@ -28,7 +28,7 @@ from trainer.config.config import (
     IterationContextualVariables,
     StbnVariables,
 )
-from trainer.config.config_types import DensificationMode
+from trainer.config.config_types import DensificationMode, LearningRateRecipe
 from trainer.config.resolve import RunConfig, shader_specialization
 from trainer.config.validation import validate_training_config
 from trainer.data.parallel import map_ordered
@@ -344,6 +344,7 @@ class TrainingApplication:
             initial_state=scene.colmapScene.initial_points,
             slang_session=session,
         )
+        self._pipeline.rasterizer.natural_vignetting = self.args.natural_vignetting
         self._pipeline.mip_filter.set_cameras(
             [scene.colmapScene.images[i].camera for i in scene.train_indices])
 
@@ -844,6 +845,10 @@ class TrainingLoop:
         camera_index = self.sampler.next()
         camera_entry = self.scene.colmapScene.images[camera_index]
         learning_rates = self.learning_rates.at(self.training_step - 1)
+        if self.args.lr_recipe == LearningRateRecipe.SHORT:
+            pipeline = self.runtime.pipeline
+            learning_rates, pipeline.loss.config = self.learning_rates.short_objective(
+                self.training_step, learning_rates, pipeline.loss_config)
 
         return IterationContext(
             step_number=self.training_step,

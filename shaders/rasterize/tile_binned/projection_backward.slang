@@ -63,9 +63,15 @@ void projectionBackward(
         grad_conic_a[gid] = int64_t(0); grad_conic_b[gid] = int64_t(0);
         grad_conic_c[gid] = int64_t(0); grad_amplitude[gid] = int64_t(0);
     }
+    else
+    {
+        grad_mean_x[gid] = 0; grad_mean_y[gid] = 0; grad_mean_z[gid] = 0;
+        grad_log_scale_x[gid] = 0; grad_log_scale_y[gid] = 0; grad_log_scale_z[gid] = 0;
+        grad_rot_w[gid] = 0; grad_rot_x[gid] = 0; grad_rot_y[gid] = 0; grad_rot_z[gid] = 0;
+        return;
+    }
     float2 grad_mean2d = float2(fromFixed(seed_mean_x), fromFixed(seed_mean_y));
-    float3 grad_conic = float3(
-        fromFixed(seed_conic_a), fromFixed(seed_conic_b), fromFixed(seed_conic_c));
+    float3 grad_conic = float3(fromFixed(seed_conic_a), fromFixed(seed_conic_b), fromFixed(seed_conic_c));
 
     Gaussian3D g = gaussians[gid];
 
