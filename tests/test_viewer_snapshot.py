@@ -196,6 +196,22 @@ def test_sh_and_mip_buffers_follow_the_same_count() -> None:
     assert sizes[view_buffers.primitive.filter_3d.storage] == 2_000 * 4
 
 
+def test_showing_raw_points_clears_only_the_live_mip_filter():
+    _, viewer, buffers = _snapshot(live=6, viewer_capacity=8, mip=True, vignetting=True)
+    footprints = np.arange(1, 9, dtype=np.float32)
+    def upload(values):
+        footprints[:len(values)] = values
+    buffers.primitive.filter_3d.storage.copy_from_numpy = upload
+    viewer._pipeline.set_gaussians = lambda **kwargs: None
+    count = 3
+    points = {key: np.ones((count, lanes), dtype=np.float32)
+              for key, lanes in (("means", 3), ("log_scales", 3), ("rot_quats", 4), ("color_logits", 3))}
+    points["opacities"] = np.ones(count, dtype=np.float32)
+    assert Viewer.preview_points(viewer, points) == count
+    np.testing.assert_array_equal(footprints, [0, 0, 0, 4, 5, 6, 7, 8])
+    assert viewer._pipeline.rasterizer.natural_vignetting is False
+
+
 def test_nothing_is_copied_before_the_first_splat_exists() -> None:
     encoder, viewer, _ = _snapshot(live=0)
     assert encoder.copies == []

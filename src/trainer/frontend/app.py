@@ -152,10 +152,10 @@ class TrainingApplication:
         self._start_profiler()
         self._create_training_services()
 
-    def _prepare_scene(self, scene_dir) -> None:
+    def _prepare_scene(self, scene_dir, prepared=None) -> None:
         """Load the scene and resolve what depends on it; not the device, pipeline or viewer."""
         self.args.scene = str(scene_dir)
-        self.scene_context = scene = load_scene_context(self.args)
+        self.scene_context = scene = load_scene_context(self.args, prepared)
         validate_training_config(self.args, n_cams=scene.camera_count,
                                  n_train=len(scene.train_indices),
                                  n_test=len(scene.test_indices))
@@ -179,7 +179,7 @@ class TrainingApplication:
 
     def _begin_repeat_run(self) -> None:
         """For a repeat hub run, rotate the output dir and free the previous run's GPU resources."""
-        if self.runtime is None:
+        if self.runtime is None and not (self.paths.root / "config.json").exists():
             return
         self._rotate_run_dir()
         self._release_run_resources()

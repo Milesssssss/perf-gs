@@ -26,7 +26,6 @@ from trainer.frontend.viewer.session import (
     KIND_NONE,
     MATCHERS,
     DatasetState,
-    ResultState,
     ToolsState,
     TrainingState,
     View,
@@ -43,7 +42,6 @@ from trainer.frontend.viewer.ui.components import (
     confirm_block,
     inline_error,
     metric,
-    name_field,
     note,
     path_row,
     row,
@@ -51,9 +49,6 @@ from trainer.frontend.viewer.ui.components import (
     status_line,
     titled,
     toasts,
-)
-from trainer.frontend.viewer.ui.components import (
-    actions as action_rows,
 )
 from trainer.frontend.viewer.ui.panel import ELIDE_START, Panel, bullets
 
@@ -72,7 +67,8 @@ class Actions:
     select_matcher: Callable[[int], None] = lambda _i: None
     set_recon_cuda: Callable[[bool], None] = lambda _v: None
     new_dataset: Callable[[], None] = lambda: None
-    clear_session: Callable[[], None] = lambda: None
+    configure_next_run: Callable[[], None] = lambda: None
+    back_to_result: Callable[[], None] = lambda: None
     # training
     start_training: Callable[[], None] = lambda: None
     restart_training: Callable[[], None] = lambda: None
@@ -81,7 +77,6 @@ class Actions:
     stop: Callable[[], None] = lambda: None
     # result
     export: Callable[[], None] = lambda: None
-    set_export_name: Callable[[str], None] = lambda _n: None
     reveal_export: Callable[[], None] | None = None
     # pending confirmations (one at a time, resolved by the section that owns it)
     confirm: Callable[[], None] = lambda: None
@@ -111,9 +106,12 @@ class CameraControls:
 
 def header(panel: Panel, view: View) -> None:
     """Always-visible, non-collapsible state header: badge, state, next step, activity, acknowledgements."""
-    panel.text(lambda: f"{badge(view.status_badge)}  {view.state_label}", lines=2)
+    panel.text(lambda: section_summary(badge(view.status_badge),
+               view.dataset.name if view.hub and view.has_result and not view.next_run_setup
+               else view.state_label), lines=2)
     note(panel, lambda: view.next_step(), lines=2,
-         visible=lambda: bool(view.next_step()) and (not view.hub or view.primary_action not in ("drop", "train")))
+         visible=lambda: bool(view.next_step()) and (not view.hub or
+                         (not view.has_result and view.primary_action not in ("drop", "train"))))
     activity_block(panel, lambda: view.activity)
     toasts(panel, view)
     panel.spacer()
@@ -128,7 +126,8 @@ def dataset_section(panel: Panel, view: View, actions: Actions) -> None:
     confirm_block(panel, view, "dataset", on_confirm=actions.confirm,
                   on_alt=actions.confirm_alt, on_cancel=actions.cancel)
     with panel.section("DATASET", label=titled("DATASET", lambda: view.dataset.name),
-                       visible=lambda: view.dataset_state == DatasetState.READY and not view.training_live):
+                       visible=lambda: view.dataset_state == DatasetState.READY
+                       and not view.training_live and not view.has_result):
         _dataset_details(panel, view)
 
 
@@ -213,13 +212,15 @@ def training_section(panel: Panel, view: View, actions: Actions, setup: Training
         return str(state)
 
     if setup is not None:
-        def choose() -> bool:
-            return view.trainable and not view.training_live
-
         for key in RUN_SETTINGS:
-            _setting_widget(panel, view, setup, SETTINGS_MAP[key], actions, visible=choose)
+            _setting_widget(panel, view, setup, SETTINGS_MAP[key], actions, visible=lambda: view.show_run_settings)
         panel.button("Start Training", actions.start_training, enabled=lambda: view.can_start_training,
-                     visible=lambda: choose() and not view.has_result)
+                     visible=lambda: view.show_run_settings and not view.has_result)
+        panel.button(lambda: "Start with new settings" if view.result.stale_config else "Start from point cloud",
+                     actions.restart_training, enabled=lambda: view.can_restart_training,
+                     visible=lambda: view.next_run_setup and view.confirm is None)
+        panel.button("Back to trained model", actions.back_to_result,
+                     visible=lambda: view.next_run_setup and view.confirm is None)
     with (panel.section("TRAINING", label=titled("TRAINING", summary)) if setup is None else nullcontext()):
         if setup is None:
             _training_idle(panel, view, actions)
@@ -325,63 +326,25 @@ def _appearance_text(view: View) -> str:
 
 
 def result_section(panel: Panel, view: View, actions: Actions) -> None:
-    """What exists now; after a run its actions (export, train again, move on) live here, not under DATASET."""
-    def summary() -> str:
-        if view.result_state == ResultState.NONE:
-            return "none"
-        if view.result_state == ResultState.INITIALIZED:
-            return "initial points"
-        return section_summary(view.result.quality(),
-                               "exported" if view.result_state == ResultState.EXPORTED
-                               else "not exported")
+    """Keep saving the finished model separate from configuring its replacement."""
+    def finished() -> bool:
+        return view.has_result and not view.next_run_setup and view.confirm is None
 
-    name_field(panel, "Export name", lambda: view.export_name, actions.set_export_name,
-               enabled=lambda: view.can_export, visible=lambda: view.has_result)
-    panel.button("Export PLY", actions.export, enabled=lambda: view.can_export,
-                 visible=lambda: view.has_result)
-    with panel.section("RESULT", label=titled("RESULT", summary),
-                       visible=lambda: view.has_result or bool(view.result_error)):
-        _result_body(panel, view, actions)
-        inline_error(panel, lambda: view.result_error, title="Export failed")
-        confirm_block(panel, view, "result", on_confirm=actions.confirm,
-                      on_alt=actions.confirm_alt, on_cancel=actions.cancel)
-
-
-def _result_body(panel: Panel, view: View, actions: Actions) -> None:
-    def got() -> bool:
-        return view.has_result
-
-    panel.text(lambda: f"{GLYPHS['ok']} " + ("Exported"
-               if view.result_state == ResultState.EXPORTED else "Training complete"),
-               visible=got)
-    note(panel, lambda: view.result.summary(), lines=1, visible=got)
-    note(panel, lambda: view.result.quality(), lines=1, visible=got)
-    note(panel, lambda: f"{GLYPHS['warn']} Parameters changed since this run — "
-         f"Train Again will not reproduce it.", lines=3,
-         visible=lambda: got() and view.result.stale_config)
-
-    path_row(panel, f"  {GLYPHS['ok']} written", lambda: view.result.exported_path,
-             visible=lambda: bool(view.result.exported_path))
-    metric(panel, "  size", lambda: f"{view.result.exported_mb:,.1f} MB",
-           visible=lambda: view.result.exported_mb > 0)
+    panel.text(lambda: section_summary(view.result.summary(), view.result.quality()),
+               lines=2, visible=finished)
+    panel.button("Export PLY...", actions.export, enabled=lambda: view.can_export, visible=finished)
+    path_row(panel, "Saved", lambda: view.result.exported_path,
+             visible=lambda: finished() and bool(view.result.exported_path))
     if actions.reveal_export is not None:
         panel.button("Show in folder", actions.reveal_export,
-                     enabled=lambda: bool(view.result.exported_path) and not view.busy,
-                     visible=lambda: bool(view.result.exported_path))
-
-    panel.spacer()
-    action_rows(
-        panel,
-        primary=[("Train Again (fresh run)", actions.restart_training,
-                  lambda: view.can_restart_training, got),
-                 ("Load New Dataset", actions.new_dataset,
-                  lambda: view.can_drop, got)],
-        secondary=[("Clear Session", actions.clear_session,
-                    lambda: view.can_clear, got)],
-    )
-    note(panel, "Train Again discards this reconstruction and optimizes the same "
-                "dataset from scratch with the current parameters.", lines=3,
-         visible=got)
+                     visible=lambda: finished() and bool(view.result.exported_path))
+    panel.button("Set up another run", actions.configure_next_run,
+                 enabled=lambda: view.can_restart_training, visible=finished)
+    panel.button("Open another dataset...", actions.new_dataset, enabled=lambda: view.can_drop,
+                 visible=finished)
+    inline_error(panel, lambda: view.result_error, title="Export failed")
+    confirm_block(panel, view, "result", on_confirm=actions.confirm,
+                  on_alt=actions.confirm_alt, on_cancel=actions.cancel)
 
 
 RUN_SETTINGS = ("preset", "iters")
@@ -393,7 +356,7 @@ def configuration_section(panel: Panel, view: View, setup: TrainingSetup,
                           toggle_all: Callable[[bool], None]) -> None:
     """Detailed settings for the next run; the main controls sit beside Start Training."""
     def available() -> bool:
-        return view.trainable and not view.training_live
+        return view.show_run_settings
 
     panel.checkbox("Advanced training settings", show_all, toggle_all, visible=available)
     for group_key, title in GROUPS:

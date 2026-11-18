@@ -579,8 +579,12 @@ class Viewer:
                     opacities=initial_points["opacities"],
                     color_logits=initial_points["color_logits"],
                 )
+                if count and self._pipeline.raster_config.mip_enabled:
+                    self._pipeline.buffers.primitive.filter_3d.storage.copy_from_numpy(
+                        np.zeros(count, dtype=np.float32))
             self._pipeline.rasterizer.natural_vignetting = False
             self._pipeline.set_active_sh_degree(0)
+            self._pipeline.set_extinction_hardness(1.0)
             self._has_data = count > 0
         self.invalidate_scene()
         return count
@@ -754,14 +758,14 @@ class Viewer:
             select_matcher=self.state.set_matcher_index,
             set_recon_cuda=self.state.set_recon_cuda,
             new_dataset=lambda: self.state.request("new_dataset"),
-            clear_session=lambda: self.state.request("clear"),
+            configure_next_run=lambda: self.state.request("configure_next_run"),
+            back_to_result=lambda: self.state.request("back_to_result"),
             start_training=lambda: self.state.request("train"),
             restart_training=lambda: self.state.request("restart"),
             pause=self.pause_training,
             resume=self.resume_training,
             stop=self.request_stop_training,
             export=lambda: self.state.request("export"),
-            set_export_name=self.state.set_export_name,
             reveal_export=lambda: self.state.request("reveal"),
             confirm=lambda: self.state.request("confirm"),
             confirm_alt=lambda: self.state.request("confirm_alt"),

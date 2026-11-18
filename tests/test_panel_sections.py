@@ -50,14 +50,13 @@ def _session() -> Session:
 
 def _actions(recorder: Recorder) -> Actions:
     """Every action wired to a recorder, so a click is observable."""
-    names = ("install_tools", "reconstruct", "new_dataset", "clear_session",
+    names = ("install_tools", "reconstruct", "new_dataset", "configure_next_run", "back_to_result",
              "start_training", "restart_training", "pause", "resume", "stop",
              "export", "confirm", "confirm_alt", "cancel", "on_config_change",
              "clear_log", "browse", "reveal_export")
     kwargs = {name: recorder.action(name) for name in names}
     kwargs["select_matcher"] = recorder.action("select_matcher")
     kwargs["set_recon_cuda"] = recorder.action("set_recon_cuda")
-    kwargs["set_export_name"] = recorder.action("set_export_name")
     kwargs["toggle_log"] = recorder.action("toggle_log")
     return Actions(**kwargs)
 
@@ -364,52 +363,40 @@ def test_a_training_failure_is_reported_in_the_training_section() -> None:
 # result: export / retrain / move on
 # --------------------------------------------------------------------------
 
-def test_a_finished_run_presents_the_result_and_its_next_actions() -> None:
+def test_finished_model_actions_and_setup_are_separate():
     session = _session()
-    panel, view, _ = build(session, "result")
+    panel, view, recorder = build(session)
     ready(session)
     trained(session)
     view.sample()
-    screen = panel.screen()
-    assert "+ Training complete" in screen
-    assert "30,000 iterations · 1m 34s" in screen
-    assert "7.82M splats" in screen
-    assert panel.visible_buttons() == ["Export PLY", "Train Again (fresh run)",
-                                       "Load New Dataset", "Clear Session"]
-
-
-def test_train_again_says_what_it_does_rather_than_being_ambiguous() -> None:
-    session = _session()
-    panel, view, _ = build(session, "result")
-    ready(session)
-    trained(session)
+    assert "30,000 iterations · 1m 34s" in panel.screen() and "7.82M splats" in panel.screen()
+    assert panel.visible_buttons() == ["Export PLY...", "Set up another run", "Open another dataset..."]
+    assert "Advanced training settings" not in panel.screen()
+    panel.find("Set up another run").click()
+    assert recorder.names == ["configure_next_run"]
+    session.show_next_run_setup(True)
     view.sample()
-    screen = panel.screen()
-    assert "Train Again (fresh run)" in screen
-    assert "discards this reconstruction" in screen
-    assert "from scratch" in screen
+    assert "Preset" in panel.screen() and "Iterations" in panel.screen()
+    assert panel.visible_buttons() == ["Start from point cloud", "Back to trained model"]
+    panel.find("Back to trained model").click()
+    assert recorder.names[-1] == "back_to_result"
+    session.show_next_run_setup(False)
+    view.sample()
+    assert "Export PLY..." in panel.visible_buttons()
 
 
-def test_exporting_names_the_file_and_reports_where_it_went() -> None:
+def test_export_opens_a_save_dialog_and_reports_the_saved_path():
     session = _session()
     panel, view, recorder = build(session, "result")
     ready(session)
     trained(session)
-    session.set_export_name("kitchen_30000.ply")
     view.sample()
-    field = panel.of("input_text")[0]
-    assert field.info["value"]() == "kitchen_30000.ply"
-    panel.find("Export PLY").click()
+    panel.find("Export PLY...").click()
     assert recorder.names == ["export"]
-
     session.result_exported("D:/out/kitchen_30000.ply", 412.5)
     view.sample()
-    screen = panel.screen()
-    assert "+ Exported" in screen
-    assert "D:/out/kitchen_30000.ply" in screen
-    assert "412.5 MB" in screen
+    assert "D:/out/kitchen_30000.ply" in panel.screen()
     assert "Show in folder" in panel.visible_buttons()
-
 
 def test_an_export_failure_appears_next_to_the_export_button() -> None:
     session = _session()
@@ -422,15 +409,15 @@ def test_an_export_failure_appears_next_to_the_export_button() -> None:
     assert "x Export failed" in screen and "permission denied" in screen
 
 
-def test_a_stale_result_warns_that_the_parameters_moved_on() -> None:
+def test_changed_settings_apply_to_the_next_run():
     session = _session()
-    panel, view, _ = build(session, "result")
+    panel, view, _ = build(session)
     ready(session)
     trained(session)
+    session.show_next_run_setup(True)
     session.mark_config_edited()
     view.sample()
-    assert "! Parameters changed since this run" in panel.screen()
-
+    assert "Start with new settings" in panel.visible_buttons()
 
 def test_the_result_section_is_quiet_before_anything_is_trained() -> None:
     session = _session()
@@ -477,7 +464,7 @@ def test_a_restart_question_appears_in_the_result_section() -> None:
     panel.find("Discard and restart").click()
     assert recorder.names == ["confirm"]
     # ... and the actions it is about are not clickable underneath it.
-    assert not panel.find("Export PLY").enabled
+    assert not panel.find("Export PLY...").enabled
 
 
 def test_a_question_without_an_alternative_offers_only_two_answers() -> None:

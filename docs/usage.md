@@ -46,7 +46,10 @@ python -m trainer.frontend.app --hub
 
 1. Click **Open dataset folder...** and choose a folder, or drop it into the window. A COLMAP scene with `images/` and `sparse/` is ready to train. With photos only, click **Install reconstruction tools** if prompted, then **Reconstruct to COLMAP** to estimate the camera poses and initial points.
 2. Choose a **Preset** and set **Iterations**, then click **Start Training**. Open **Advanced training settings** to adjust individual controls. The viewer shows the reconstruction and training progress.
-3. When training finishes, click **Export PLY** to save the model. You can then drop another dataset or train the same scene again.
+3. When training finishes, choose **Export PLY...** to save the model. The dialog lets you pick the filename and destination. On platforms without a save dialog, the hub uses the run directory.
+4. **Set up another run** previews the original point cloud with the current settings. Keep them or edit the preset and iteration count, then start training. **Back to trained model** restores the finished view. To switch scenes, choose **Open another dataset...**. If starting or switching would replace an unsaved model, you can export it first in the same action.
+
+The hub reuses the cameras and original point cloud it loaded for the preview. Each new run builds its own training split and stereo seeds. On bicycle with the balanced preset and an RTX 4080, the Start handler reached the first optimizer step in **3.03 s**, down from **5.18 s** with a second COLMAP load and reference PNG export. Each figure averages two offscreen runs with the scene already open. The diagnostics log records setup time for your own run.
 
 ## Evaluation and PLY export
 

@@ -32,6 +32,7 @@ class _TrainerParser(argparse.ArgumentParser):
         preset = self.parse_known_args(args, argparse.Namespace(**vars(namespace)))[0].preset
         for key, value in preset_values(preset).items():
             vars(namespace).setdefault(key, value)
+        vars(namespace).setdefault("evaluation", None)  # Preserve an explicit --no-evaluation.
         result = super().parse_args(args, namespace)
         if result.evaluation is None:
             # A requested report or checkpoint enables only the requested measurements.
@@ -80,7 +81,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--render-all-every", type=int, default=0,
                     help="dump PNGs for ALL cameras every N iters")
     _shared(parser, "evaluation")
-    parser.set_defaults(evaluation=None)  # Distinguish an explicit veto from no switch.
     parser.add_argument("--eval-every", type=int, default=None,
                     help="every N iters, render ALL cameras and compute the honest "
                          "average PSNR (same metric as the final_psnr.json summary). "

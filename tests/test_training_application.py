@@ -326,6 +326,40 @@ def test_the_sparse_model_is_parsed_with_rendering_suspended(
     assert viewer.suspend_depth == 0, "rendering left suspended"
 
 
+def test_preview_cache_reuses_pristine_points_and_tracks_loader_inputs(tmp_path, monkeypatch):
+    from trainer.frontend import scene
+    from trainer.data import stereo
+
+    path = write_colmap_scene(tmp_path / "registered")
+    hub = _hub_app(_FakeHubViewer())
+    hub._hub_preview_scene(str(path))
+    imported = hub._cached_colmap(str(path))
+    assert imported is not None
+    args = hub.app.args
+    args.scene = str(path)
+    args.stereo_init, args.max_splats = True, 64
+    args.densify_from, args.densify_to, args.densify_every = 0, 3, 1
+    def reject_reparse(*args, **kwargs):
+        raise AssertionError("Starting from preview unexpectedly reopened the COLMAP files")
+    monkeypatch.setattr(scene, "load_colmap", reject_reparse)
+    def add_point(dataset, train_indices, limit):
+        assert train_indices == [1, 3]
+        for k, value in dataset.initial_points.items():
+            dataset.initial_points[k] = np.concatenate((value, value[:1]))
+        return 1
+    monkeypatch.setattr(stereo, "seed_from_stereo", add_point)
+    for _ in range(2):
+        run = scene.load_scene_context(args, hub._cached_colmap(str(path)))
+        assert run.initial_gaussian_count == 9
+        assert len(imported.initial_points["means"]) == 8
+    args.init_opacity = 0.2
+    assert hub._cached_colmap(str(path)) is None
+    args.init_opacity = 0.1
+    assert hub._cached_colmap(str(path)) is imported
+    (path / "sparse/0/points3D.txt").unlink()
+    assert hub._cached_colmap(str(path)) is None
+
+
 def test_a_dataset_the_loader_rejects_leaves_the_hub_alive(tmp_path) -> None:
     """A preview failure must not kill the process — the user still has to be able
     to drop a different folder or reconstruct again."""
@@ -341,6 +375,23 @@ def test_a_dataset_the_loader_rejects_leaves_the_hub_alive(tmp_path) -> None:
     assert snap.dataset_state is DatasetState.ERROR
     assert snap.dataset_error
     assert snap.can_drop, "the hub must still accept another folder"
+
+
+def test_preview_cache_tracks_native_photo_size_and_directory_choice(tmp_path):
+    scene = write_colmap_scene(tmp_path / "photos", [(f"{i}.png", 32, 24, 30) for i in range(4)])
+    hub = _hub_app(_FakeHubViewer())
+    hub.app.args.downsample = 2
+    hub._hub_preview_scene(str(scene))
+    assert hub._cached_colmap(str(scene)).image_dir.name == "images"
+    photos = scene / "images_2"
+    photos.mkdir()
+    first = photos / "0.png"
+    Image.new("RGB", (16, 12)).save(first)
+    assert hub._cached_colmap(str(scene)) is None
+    hub._hub_preview_scene(str(scene))
+    assert hub._cached_colmap(str(scene)).images[0].camera.image_size == (16, 12)
+    Image.new("RGB", (15, 11), color=(100, 200, 50)).save(first)
+    assert hub._cached_colmap(str(scene)) is None
 
 
 # --- STBN --------------------------------------------------------------------

@@ -1,16 +1,16 @@
 # PERF-GS
 
-PERF-GS trains 3D Gaussian Splatting models from COLMAP scenes. Python drives the training loop through SlangPy, and the same Slang shaders handle rendering, optimization, and densification on Vulkan and D3D12 without CUDA.
+PERF-GS trains 3D Gaussian Splatting models from COLMAP scenes. Python drives the training loop through SlangPy, and the same Slang shaders handle rendering, optimization, and densification on Vulkan and D3D12.
 
 ## Mip-NeRF 360 at 3,000 steps
 
 | Preset | Train loop | Launch to saved PLY | PSNR ↑ | SSIM ↑ | VGG LPIPS ↓ |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| Ultrafast | 17.40 s | 32.38 s | 27.14 dB | 0.7937 | 0.2565 |
-| Balanced candidate | 24.49 s | 38.80 s | 27.34 dB | 0.8131 | 0.2229 |
+| Ultrafast | 17.62 s | 31.28 s | 27.13 dB | 0.7936 | 0.2567 |
+| Balanced | 25.97 s | 41.30 s | 27.39 dB | 0.8143 | 0.2229 |
 | Quality | 33.85 s | 49.56 s | 27.78 dB | 0.8275 | 0.2011 |
 
-Times are per scene on an RTX 4080 using Vulkan. Ultrafast and the balanced candidate used the earlier PLY writer. All runs use the stored `images_4` photos outdoors and `images_2` indoors for training and evaluation. Graphdeco’s RGB8 evaluator scores all 246 held-out views at seed 42. [Benchmark recipe](docs/mipnerf360_3k.md#reproduce-the-benchmark) · [Full results and plots](docs/benchmarks.md)
+Nine-scene means on an RTX 4080 using Vulkan, seed 42. Training and evaluation use the stored `images_4` photos outdoors and `images_2` indoors. Graphdeco’s RGB8 evaluator scores all 246 held-out views. Saved-PLY time includes a disk sync. [Benchmark recipe](docs/mipnerf360_3k.md#reproduce-the-benchmark) · [Full results and timing details](docs/benchmarks.md)
 
 <p align="center">
   <img src="assets/teaser.jpg" alt="A held-out view of the Mip-NeRF 360 bicycle scene" width="80%">
@@ -26,7 +26,7 @@ python -m pip install -e .
 python -m trainer.frontend.app --hub
 ```
 
-Click **Open dataset folder...** or drop your COLMAP scene into the window. Choose a preset, click **Start Training**, then **Export PLY** to save the result. [Using the hub with a folder of photos](docs/usage.md#interactive-hub)
+Click **Open dataset folder...** or drop your COLMAP scene into the window. Choose a preset, click **Start Training**, then **Export PLY...** to choose where to save the model. [Using the hub](docs/usage.md#interactive-hub)
 
 **Headless example** — train garden with the default `balanced` preset.
 

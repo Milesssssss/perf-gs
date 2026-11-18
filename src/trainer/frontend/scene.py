@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 
@@ -59,14 +59,13 @@ def holdout_split(camera_count: int, stride: int,
             [i for i in range(camera_count) if i % stride != 0])
 
 
-def load_scene_context(args: argparse.Namespace) -> SceneContext:
-    colmap_scene = load_colmap(
-        args.scene,
-        width=args.width,
-        height=args.height,
-        downsample=args.downsample,
-        init_opacity=args.init_opacity,
-    )
+def load_scene_context(args: argparse.Namespace, prepared: ColmapDataset | None = None) -> SceneContext:
+    if prepared is None:
+        colmap_scene = load_colmap(args.scene, width=args.width, height=args.height,
+                                  downsample=args.downsample, init_opacity=args.init_opacity)
+    else:
+        # Stereo appends by replacing arrays in this dictionary. Each run starts from the imported cloud.
+        colmap_scene = replace(prepared, initial_points=prepared.initial_points.copy())
     camera_count = len(colmap_scene.images)
     initial_count = colmap_scene.initial_points["means"].shape[0]
     width, height = colmap_scene.images[0].camera.image_size

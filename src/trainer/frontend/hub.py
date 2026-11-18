@@ -6,9 +6,10 @@ from __future__ import annotations
 import os
 import time
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import TYPE_CHECKING
 
-from trainer.data.colmap import load_colmap
+from trainer.data.colmap import ColmapDataset, _find_sparse_dir, load_colmap
 from trainer.frontend.profiling.profiler import apply_profile_session_overrides
 from trainer.frontend.reporting.error_log import report_exception
 from trainer.frontend.scene import holdout_split, split_camera_sets
@@ -35,6 +36,38 @@ class TrainingHub:
     def __init__(self, app: TrainingApplication) -> None:
         self.app = app
         self._pending_drop: str | None = None
+        self._scene_cache: tuple[tuple, ColmapDataset] | None = None
+
+    def _colmap_key(self, scene_dir, dataset):
+        args = self.app.args
+        path = Path(scene_dir).resolve()
+        sparse, fmt = _find_sparse_dir(path)
+        sources = {path / "images", path / f"images_{dataset.downsample}"}
+        if args.downsample is None:
+            sources.update((path / "images_2", path / "poses_bounds.npy"))
+        photos = dataset.image_dir
+        if photos.is_dir() and photos.name != "images" and (args.width is None or args.height is None):
+            sample = min((p for p in photos.iterdir() if p.suffix.lower() in (".jpg", ".jpeg", ".png")), default=None)
+            if sample is not None:
+                sources.add(sample)
+        if sparse is not None:
+            suffix = "txt" if fmt == "text" else "bin"
+            sources.update(sparse / f"{name}.{suffix}" for name in ("cameras", "images", "points3D"))
+        stamps = []
+        for source in sorted(sources):
+            if source.exists():
+                stat = source.stat()
+                stamps.append((source, stat.st_size, stat.st_mtime_ns))
+        return path, args.width, args.height, args.downsample, args.init_opacity, tuple(stamps)
+
+    def _cached_colmap(self, scene_dir: str) -> ColmapDataset | None:
+        if self._scene_cache is not None:
+            try:
+                if self._scene_cache[0] == self._colmap_key(scene_dir, self._scene_cache[1]):
+                    return self._scene_cache[1]
+            except OSError:
+                pass  # A moved or concurrently reconstructed dataset must go through the loader.
+        return None
 
     def run(self) -> None:
         """Run the interactive hub until the window closes; a session outlives its runs.
@@ -96,11 +129,12 @@ class TrainingHub:
             if command in ("confirm", "confirm_alt"):
                 command = state.take_confirm(accept=True,
                                              alt=command == "confirm_alt")
-                if command == "export" and self._pending_drop is not None:
-                    # "Export first" must not then destroy the result by continuing the load.
-                    self._pending_drop = None
-                    state.notify("Exporting first - drop the dataset again after",
-                                 WARN)
+                if command in ("export_then_load", "export_then_train"):
+                    if self._hub_export_ply():
+                        command = "load_dropped" if command == "export_then_load" else "train!"
+                    else:
+                        self._pending_drop = None
+                        command = None
             elif command == "cancel":
                 state.take_confirm(accept=False)
                 self._pending_drop = None
@@ -115,10 +149,17 @@ class TrainingHub:
                 self._hub_export_ply()
             elif command == "reveal":
                 self._hub_reveal_export()
-            elif command == "clear":
-                self._hub_request_clear()
-            elif command == "clear!":
-                self._hub_clear_session()
+            elif command == "configure_next_run" and state.snapshot().can_restart_training:
+                scene = self._cached_colmap(state.scene_dir)
+                if scene is None:
+                    self._hub_preview_scene(state.scene_dir)
+                    scene = self._cached_colmap(state.scene_dir)
+                else:
+                    self.app.viewer.preview_points(scene.initial_points)
+                state.show_next_run_setup(scene is not None)
+            elif command == "back_to_result" and state.snapshot().next_run_setup:
+                self.app.viewer.push_snapshot(self.app._pipeline)
+                state.show_next_run_setup(False)
             elif command in ("browse", "new_dataset"):
                 from slangpy import platform
                 try:
@@ -131,7 +172,7 @@ class TrainingHub:
             elif command == "load_dropped":
                 self._hub_load_pending_drop()
             elif command in ("train", "restart"):
-                scene = self._hub_request_training(command)
+                scene = self._hub_request_training()
                 if scene is not None:
                     return scene
             elif command == "train!":
@@ -144,16 +185,14 @@ class TrainingHub:
         state = self.app._viewer.state
         if state.snapshot().has_result:
             self._pending_drop = path
-            unexported = state.snapshot().unexported
+            if not state.snapshot().unexported:
+                self._hub_load_pending_drop()
+                return
             state.ask(Confirm(
-                key="dataset", title="Load a new dataset?",
-                body=("The current reconstruction has not been exported and will "
-                      "be discarded." if unexported else
-                      "The current reconstruction will be cleared."),
-                command="load_dropped", confirm_label="Discard and load",
-                alt_label="Export first" if unexported else "",
-                alt_command="export" if unexported else ""))
-            state.notify("Current reconstruction would be replaced", WARN)
+                key="dataset", title="Save the current model?",
+                body=f"Opening {Path(path).name} will replace the model in memory.",
+                command="export_then_load", confirm_label="Export and open",
+                alt_label="Open without saving", alt_command="load_dropped"))
             return
         self._hub_load_dataset(path)
 
@@ -169,6 +208,7 @@ class TrainingHub:
         """INSPECTING -> detected -> (LOADING) -> READY / ERROR."""
         from trainer.frontend.reconstruction import classify_dataset
 
+        self._scene_cache = None
         state = self.app._viewer.state
         state.dataset_inspecting(path)
         state.log(f"dropped {path}")
@@ -186,37 +226,21 @@ class TrainingHub:
                              "folder of images, or one with sparse/ + images/.")
         state.notify("Could not load dataset", ERROR)
 
-    def _hub_request_training(self, command: str) -> "str | None":
-        """Start or restart. A restart discards a finished result, so it asks."""
+    def _hub_request_training(self) -> "str | None":
+        """Start from the original points after resolving any unsaved model."""
         state = self.app._viewer.state
         snap = state.snapshot()
         if not snap.trainable:
             state.notify("No trainable scene yet", WARN)
             return None
-        if command == "restart" and snap.has_result:
+        if snap.unexported:
             state.ask(Confirm(
-                key="result", title="Restart training?",
-                body=("This reconstruction has not been exported. Training again "
-                      "discards it and optimizes the same dataset from scratch."
-                      if snap.unexported else
-                      "The current reconstruction is discarded and training "
-                      "restarts from scratch on the same dataset."),
-                command="train!", confirm_label="Discard and restart",
-                alt_label="Export first" if snap.unexported else "",
-                alt_command="export" if snap.unexported else ""))
+                key="result", title="Save the current model?",
+                body="The new run starts from the original point cloud and replaces the model in memory.",
+                command="export_then_train", confirm_label="Export and train",
+                alt_label="Train without saving", alt_command="train!"))
             return None
         return state.scene_dir
-
-    def _hub_request_clear(self) -> None:
-        state = self.app._viewer.state
-        if state.snapshot().unexported:
-            state.ask(Confirm(
-                key="result", title="Clear the session?",
-                body="This reconstruction has not been exported and will be lost.",
-                command="clear!", confirm_label="Discard and clear",
-                alt_label="Export first", alt_command="export"))
-            return
-        self._hub_clear_session()
 
     def _hub_train_scene(self, scene_dir: str, setup) -> None:
         """Build and train one run on ``scene_dir``, feeding the running viewer.
@@ -224,9 +248,10 @@ class TrainingHub:
         state = self.app._viewer.state
         print(f"[hub] training on {scene_dir}")
         # Acknowledge the click first: scene load, pipeline build and uploads precede iteration 1.
+        started = time.perf_counter()
         state.reset_for_new_run()
-        state.training_initializing(self.app.args.iters)
-        state.begin_activity("Loading scene and building the pipeline")
+        state.training_initializing(setup.get("iters"))
+        state.begin_activity("Preparing training images and GPU buffers")
         self.app.viewer.clear_stop_request()
         state.log(f"preparing training on {scene_dir}")
         self.app.viewer.suspend_rendering()
@@ -234,7 +259,7 @@ class TrainingHub:
             self.app._begin_repeat_run()
             # The panel's settings must become the run's args before anything reads them.
             self._apply_hub_setup(setup)
-            self.app._prepare_scene(scene_dir)
+            self.app._prepare_scene(scene_dir, self._cached_colmap(scene_dir))
             self.app._create_pipeline_for_scene(self.app._sceneContext)
             self.app._prepare_textures()
             self.app._start_profiler()
@@ -247,6 +272,7 @@ class TrainingHub:
 
         self.app._attach_scene_to_viewer()
         self.app.viewer.push_snapshot(self.app._pipeline)  # show the initial gaussians
+        state.log(f"Ready to train after {time.perf_counter() - started:.2f} s of setup")
         try:
             self.app._run_training_and_post(hold_viewer=False)
         except Exception as error:                     # noqa: BLE001
@@ -259,11 +285,13 @@ class TrainingHub:
             iterations=stats.step, target_iterations=stats.total,
             wall_s=stats.elapsed_s, splats=stats.gaussians,
             run_dir=str(self.app.paths.root)))
-        state.set_export_name(f"{self.app.paths.root.name}.ply")
+        auto_export = self.app.paths.root / "output.ply"
+        if (self.app.args.save_ply or self.app.args.compute_final_metrics) and auto_export.is_file():
+            state.result_exported(str(auto_export.resolve()), auto_export.stat().st_size / 1024**2)
         state.notify(f"Training stopped at iteration {stats.step:,}" if stopped
                      else f"Training complete in "
                           f"{format_duration(stats.elapsed_s)}", OK)
-        state.log(f"training finished — .ply export goes to {self.app.paths.root}")
+        state.log("Training finished")
 
     def _hub_run_failed(self, what: str, error: Exception) -> None:
         """Report a failed hub run and leave the session usable."""
@@ -272,27 +300,44 @@ class TrainingHub:
         state.notify(f"Training failed while {what}", ERROR)
         report_exception(f"[hub] {what} failed", error, state)
 
-    def _hub_export_ply(self) -> None:
-        """Write the trained gaussians to ``<run>/output.ply`` from the panel."""
+    def _hub_export_ply(self) -> bool:
+        """Choose a destination before downloading the trained model from the GPU."""
+        from slangpy import platform
         from trainer.backend.export import save_ply
 
         state = self.app._viewer.state
         if self.app.pipeline is None:
             state.result_failed("Nothing to export yet - train a scene first.")
             state.notify("Nothing to export", WARN)
-            return
-        path = self.app.paths.root / (state.export_name or "output.ply")
+            return False
+        try:
+            path = platform.save_file_dialog([platform.FileDialogFilter("Gaussian model", "*.ply")])
+        except (AttributeError, OSError, RuntimeError):
+            path = self.app.paths.root / "output.ply"
+            if path.exists():
+                state.result_failed(f"Save dialog unavailable. A model already exists at {path}.")
+                return False
+        if not path:
+            return False
+        if path.suffix.lower() != ".ply":
+            path = path.with_name(path.name + ".ply")
+            if path.exists():
+                state.result_failed(f"{path.name} already exists. Select that file to replace it.")
+                return False
         state.begin_activity(f"Exporting {path.name}")
         state.log(f"exporting {path.name} …")
         # save_ply reads back the gaussian buffers, so the render thread must be off the queue.
         self.app.viewer.suspend_rendering()
         try:
-            save_ply(self.app._pipeline, path)
+            with TemporaryDirectory(dir=path.parent) as staging:
+                pending = Path(staging) / path.name
+                save_ply(self.app._pipeline, pending)
+                pending.replace(path)
         except Exception as error:                     # noqa: BLE001
             state.result_failed(f"Could not write {path}: {error}")
             state.notify("Export failed", ERROR)
             report_exception("[hub] export failed", error, state)
-            return
+            return False
         finally:
             self.app.viewer.resume_rendering()
         size_mb = path.stat().st_size / (1024 * 1024)
@@ -300,6 +345,7 @@ class TrainingHub:
         state.notify(f"Exported {path.name}", OK)
         state.log(f"exported {size_mb:,.1f} MB -> {path.resolve()}")
         print(f"[hub] exported {path.resolve()} ({size_mb:,.1f} MB)")
+        return True
 
     def _hub_reveal_export(self) -> None:
         """Open the exported file's folder in the OS file manager.
@@ -319,6 +365,7 @@ class TrainingHub:
     def _hub_clear_session(self, *, notify: bool = True) -> None:
         """Forget the dataset and the finished run so the hub can start over.
         The window, device, installed tools and log survive."""
+        self._scene_cache = None
         state = self.app._viewer.state
         self.app.viewer.suspend_rendering()
         try:
@@ -373,6 +420,7 @@ class TrainingHub:
         if not source:
             state.notify("No dataset to reconstruct", WARN)
             return
+        self._scene_cache = None
         state.dataset_reconstructing()
         out = Path(source) / "reconstruction"
         result = reconstruct(tools, source, out, matcher=state.matcher,
@@ -390,6 +438,7 @@ class TrainingHub:
     def _hub_preview_scene(self, scene_dir: str) -> None:
         """Show the dataset's SfM points before Train so a bad reconstruction is visible early.
         Best-effort: a scene the loader rejects leaves the hub usable."""
+        self._scene_cache = None
         state = self.app._viewer.state
         state.dataset_loading("Reading the COLMAP model")
         state.log("loading the SfM point cloud …")
@@ -405,6 +454,7 @@ class TrainingHub:
                 init_opacity=self.app.args.init_opacity,
             )
             shown = self.app.viewer.preview_points(dataset.initial_points)
+            self._scene_cache = self._colmap_key(scene_dir, dataset), dataset
         except Exception as error:                    # noqa: BLE001
             state.dataset_failed(str(error))
             state.notify("Could not load dataset", ERROR)

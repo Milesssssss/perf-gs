@@ -318,7 +318,7 @@ class Snapshot:
     confirm: Confirm | None = None
     matcher: str = MATCHERS[0]
     recon_cuda: bool = True
-    export_name: str = "output.ply"
+    next_run_setup: bool = False
     log: tuple[str, ...] = ()
     # Panel disclosure as opt-in visibility: the toolkit cannot collapse a header programmatically.
     show_all_config: bool = False
@@ -357,6 +357,11 @@ class Snapshot:
         return bool(self.dataset.scene_dir) and self.dataset_state == DatasetState.READY
 
     @property
+    def show_run_settings(self) -> bool:
+        return (self.trainable and not self.training_live and self.confirm is None
+                and (not self.has_result or self.next_run_setup))
+
+    @property
     def state_label(self) -> str:
         """The session in one line: the subject, not the operation (the badge and activity say that)."""
         if self.dataset_state in _DATASET_BUSY:
@@ -371,10 +376,13 @@ class Snapshot:
         if self.training_state in _TRAINING_BUSY:
             return self.dataset.name or "training"
         # Export is the more recent news than the completion that preceded it.
+        if self.next_run_setup:
+            return "original point cloud"
         if self.result_state == ResultState.EXPORTED:
             return "result exported"
         if self.training_state == TrainingState.COMPLETED:
-            return "training complete"
+            return ("training stopped" if self.result.iterations < self.result.target_iterations
+                    else "training complete")
         if self.trainable:
             return "ready to train"
         if self.dataset_state == DatasetState.READY:
@@ -394,8 +402,12 @@ class Snapshot:
                                   TrainingState.STOPPING, TrainingState.FINALIZING,
                                   TrainingState.PAUSED, TrainingState.FAILED):
             return self.training_state.upper()
+        if self.next_run_setup:
+            return "SETUP"
         if self.training_state == TrainingState.COMPLETED:
-            return "COMPLETE"
+            if self.result_state == ResultState.EXPORTED:
+                return "EXPORTED"
+            return "STOPPED" if self.result.iterations < self.result.target_iterations else "COMPLETE"
         if self.has_dataset:
             return "READY"
         return "EMPTY"
@@ -566,11 +578,6 @@ class Session:
         with self._lock:
             return self._snap.dataset.path
 
-    @property
-    def export_name(self) -> str:
-        with self._lock:
-            return self._snap.export_name
-
     # Render thread: post intent.
 
     def drop(self, path: str) -> None:
@@ -603,10 +610,9 @@ class Session:
         with self._lock:
             self._snap = replace(self._snap, recon_cuda=bool(enabled))
 
-    def set_export_name(self, name: str) -> None:
+    def show_next_run_setup(self, shown: bool) -> None:
         with self._lock:
-            self._snap = replace(self._snap, export_name=str(name).strip()
-                                 or "output.ply")
+            self._snap = replace(self._snap, next_run_setup=shown)
 
     def toggle_config_detail(self, shown: bool) -> None:
         with self._lock:
@@ -791,7 +797,7 @@ class Session:
             self._snap = replace(self._snap,
                                  training_state=TrainingState.COMPLETED,
                                  result_state=ResultState.TRAINED, result=result,
-                                 result_error="", activity=Activity())
+                                 result_error="", next_run_setup=False, activity=Activity())
 
     def training_failed(self, reason: str) -> None:
         with self._lock:
@@ -855,7 +861,7 @@ class Session:
                 training_state=TrainingState.IDLE, training_error="",
                 stats=TrainingStats(), loss_history=(),
                 result_state=ResultState.NONE, result=ResultInfo(),
-                result_error="", activity=Activity(), confirm=None)
+                result_error="", next_run_setup=False, activity=Activity(), confirm=None)
 
     def reset_for_new_run(self) -> None:
         """Between runs on the same dataset: drop the previous run's numbers and result, keep the dataset."""
@@ -865,7 +871,7 @@ class Session:
                 self._snap, training_state=TrainingState.IDLE, training_error="",
                 stats=TrainingStats(), loss_history=(),
                 result_state=ResultState.NONE, result=ResultInfo(),
-                result_error="", confirm=None)
+                result_error="", next_run_setup=False, confirm=None)
 
     def log(self, message: str) -> None:
         with self._lock:

@@ -191,34 +191,7 @@ def titled(title: str, summary: Callable[[], str]) -> Callable[[], str]:
     return lambda: f"{title}      {summary()}" if summary() else title
 
 
-def actions(panel: Panel, primary: Sequence[tuple], secondary: Sequence[tuple] = ()) -> None:
-    """A primary action row and, below a blank line, the secondary ones (with no colour, distance is hierarchy).
-
-    Each entry is ``(label, callback, enabled_getter[, visible_getter])``.
-    """
-    for entry in primary:
-        _action(panel, entry)
-    if secondary:
-        panel.spacer()
-        for entry in secondary:
-            _action(panel, entry)
-
-
-def _action(panel: Panel, entry: tuple) -> None:
-    label, callback, enabled, *rest = (*entry, None)[:4]
-    panel.button(label, callback, enabled=enabled,
-                 **({"visible": rest[0]} if rest and rest[0] is not None else {}))
-
-
 def path_row(panel: Panel, label: str, path: Callable[[], str], *, visible=None) -> None:
     """A filesystem path, elided at the start so the identifying leaf survives."""
     panel.text(lambda: f"{label}", visible=visible)
     panel.text(lambda: f"  {path()}", mode=ELIDE_START, visible=visible)
-
-
-def name_field(panel: Panel, label: str, value: Callable[[], str],
-               on_change: Callable[[str], None], *, enabled=None,
-               visible=None) -> None:
-    """An editable short string (the export filename), captioned on the line above like every control."""
-    panel.text(label, visible=visible)
-    panel.input_text(value, on_change, enabled=enabled, visible=visible)

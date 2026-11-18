@@ -2,17 +2,25 @@
 
 ## Current presets
 
-Each preset uses 3,000 steps on all nine Mip-NeRF 360 scenes. Training and evaluation use the stored `images_4` photographs outdoors and `images_2` indoors. Each scene contributes equally to the mean, with 246 held-out views per seed. Training-loop time starts after scene preparation. Setup plus training also includes image loading, stereo initialization and target preparation. Both times exclude final evaluation. [Benchmark commands](mipnerf360_3k.md#reproduce-the-benchmark) · [Per-scene preset measurements](mipnerf360_3k_presets.csv)
+All three presets train for 3,000 steps on the nine Mip-NeRF 360 scenes at seed 42. Training and evaluation use the stored `images_4` photos outdoors and `images_2` indoors. Graphdeco’s RGB8 evaluator scores all 246 held-out views. Each scene contributes equally to every mean. [Benchmark commands](mipnerf360_3k.md#reproduce-the-benchmark) · [Per-scene metrics and timing](mipnerf360_3k_presets.csv)
 
-| Preset | Seeds | Train loop | Setup + training | Launch to PLY | PSNR ↑ | SSIM ↑ | VGG LPIPS ↓ |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| Ultrafast | 1 | 17.40 s | 27.04 s | 32.38 s | 27.14 dB | 0.7937 | 0.2565 |
-| Balanced candidate | 1 | 24.49 s | 32.11 s | 38.80 s | 27.34 dB | 0.8131 | 0.2229 |
-| Quality | 1 | 33.85 s | 41.25 s | 49.56 s | 27.78 dB | 0.8275 | 0.2011 |
+| Preset | Train loop | Launch to saved PLY | PSNR ↑ | SSIM ↑ | VGG LPIPS ↓ |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Ultrafast | 17.62 s | 31.28 s | 27.13 dB | 0.7936 | 0.2567 |
+| Balanced | 25.97 s | 41.30 s | 27.39 dB | 0.8143 | 0.2229 |
+| Quality | 33.85 s | 49.56 s | 27.78 dB | 0.8275 | 0.2011 |
 
-Launch to PLY includes fresh process startup, training and export through the native PLY writer, with the file flushed to disk before held-out scoring. The reference RGB8 evaluator scores PSNR, SSIM and VGG LPIPS per held-out view. [Scoring and timing commands](mipnerf360_3k.md#reproduce-the-benchmark)
+![Training-loop time, PSNR, SSIM and VGG LPIPS for all three presets on each of the nine scenes](../assets/mipnerf360_3k_presets.png)
 
-The ultrafast measurement uses the selected full-resolution recipe on the reference snapshot based on `269556b`, with the capacity-preserving split and exact draw dispatch. It finished with an average of 1.43 million Gaussians. Its 32.38 s launch-to-PLY measurement uses the earlier exporter, which wrote fewer fields than the current native Mip PLY. The balanced candidate predates the revised split and draw dispatch. The quality row uses the current model and PLY writer and finished with 3.08 million Gaussians on average. All three sweeps use seed 42.
+| Preset | Setup + train loop | Launch to model | Launch to closed PLY | Launch to exit | Launch to synced PLY | Gaussians |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Ultrafast | — | 28.30 s | 30.38 s | 31.24 s | 31.28 s | 1.43 M |
+| Balanced | — | 36.32 s | 40.39 s | 41.24 s | 41.30 s | 2.07 M |
+| Quality | 41.25 s | 43.57 s | — | — | 49.56 s | 3.08 M |
+
+The train loop starts after image loading, stereo initialization and target setup. Launch clocks start at process creation. “Launch to model” ends when the trained Gaussians are ready, before export. The README’s saved-PLY clock ends at disk sync. The ultrafast and balanced writers closed the file before process exit, and the timing harness synced it just afterward. Quality synced the PLY before held-out evaluation. Dashes mark clocks without observations on all nine scenes.
+
+The ultrafast and balanced scores come from replaying the exact timed PLY files. Quality uses the same native renderer to save the held-out images after export. We selected the ultrafast timing runs before scoring using the external GPU process log. A separate viewer was open during two runs in the initial repeat, which averaged 18.78 s per training loop across all nine scenes. The table uses the uncontended runs for those two scenes. The CSV records each selected run name. [Saved-model replay check](mipnerf360_3k.md#reproduce-the-benchmark)
 
 The benchmark machine ran Windows on a 32-core Ryzen Threadripper PRO 5975WX with 128 GiB of RAM and an RTX 4080 16 GB (driver 610.60). Python 3.11.9 and SlangPy 0.42.0 ran the Vulkan trainer. Stereo matching ran on the CPU. The independent CUDA evaluation used PyTorch 2.10.0+cu128 and torchvision 0.25.0.
 

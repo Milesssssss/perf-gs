@@ -230,10 +230,11 @@ def plot_presets():
     rows = read_csv("mipnerf360_3k_presets.csv")
     presets = [("ultrafast", BLUE, "o"), ("balanced", ORANGE, "D"), ("quality", TEAL, "s")]
     means = {}
-    metrics = ["train_loop_s", "psnr_db", "vgg_lpips"]
+    metrics = ["train_loop_s", "psnr_db", "ssim", "vgg_lpips"]
     legend = []
-    print("| Preset | Seeds | Train loop | Setup + training | Launch to model | PSNR ↑ | SSIM ↑ | VGG LPIPS ↓ |")
-    print("| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |")
+    timings = []
+    print("| Preset | Train loop | Launch to saved PLY | PSNR ↑ | SSIM ↑ | VGG LPIPS ↓ |")
+    print("| --- | ---: | ---: | ---: | ---: | ---: |")
     for preset, color, marker in presets:
         selected = [r for r in rows if r["preset"] == preset]
         seeds = sorted({r["seed"] for r in selected})
@@ -244,38 +245,45 @@ def plot_presets():
             if (len(sample) != len(SCENES) or {r["scene"] for r in sample} != set(SCENES)
                     or sum(int(r["heldout_views"]) for r in sample) != 246):
                 raise ValueError(f"Incomplete {preset} sample at seed {seed}")
-        count = len(seeds)
         legend.append(handle(color, marker, preset.title()))
         for scene in SCENES:
             scene_rows = [r for r in selected if r["scene"] == scene]
             means[preset, scene] = [fmean(float(r[key]) for r in scene_rows) for key in metrics]
-        avg = {key: fmean(float(r[key]) for r in selected) for key in [*metrics, "ssim"]}
-        setup_times = [float(r["setup_plus_train_loop_s"]) for r in selected if r["setup_plus_train_loop_s"]]
-        setup = f"{fmean(setup_times):.2f} s" if len(setup_times) == len(selected) else "—"
-        model_times = [float(r["launch_to_model_s"]) for r in selected if r["launch_to_model_s"]]
-        ready = f"{fmean(model_times):.2f} s" if len(model_times) == len(selected) else "—"
-        print(f"| {preset.title()} | {count} | {avg['train_loop_s']:.2f} s | {setup} | {ready} | "
+        avg = {key: fmean(float(r[key]) for r in selected) for key in metrics}
+        clocks = []
+        for key in ("setup_plus_train_loop_s", "launch_to_model_s", "launch_to_closed_ply_s",
+                    "launch_to_process_exit_s", "launch_to_synced_ply_s"):
+            values = [float(r[key]) for r in selected if r[key]]
+            clocks.append(f"{fmean(values):.2f} s" if len(values) == len(selected) else "—")
+        print(f"| {preset.title()} | {avg['train_loop_s']:.2f} s | {clocks[-1]} | "
               f"{avg['psnr_db']:.2f} dB | {avg['ssim']:.4f} | {avg['vgg_lpips']:.4f} |")
+        splats = fmean(int(r["final_gaussians"]) for r in selected) / 1e6
+        timings.append([preset.title(), *clocks, f"{splats:.2f} M"])
 
     if len(legend) < len(presets):
         return
-    fig = Figure(figsize=(9.8, 4.8))
-    axes = fig.subplots(1, 3, sharey=True)
-    fig.subplots_adjust(left=.13, right=.975, top=.68, bottom=.085, wspace=.2)
+    print("\n| Preset | Setup + train loop | Launch to model | Launch to closed PLY | Launch to exit | Launch to synced PLY | Gaussians |")
+    print("| --- | ---: | ---: | ---: | ---: | ---: | ---: |")
+    for cells in timings:
+        print("| " + " | ".join(cells) + " |")
+    fig = Figure(figsize=(11, 4.8))
+    axes = fig.subplots(1, 4, sharey=True)
+    fig.subplots_adjust(left=.105, right=.975, top=.68, bottom=.085, wspace=.24)
     seed_text = ", ".join(str(n) for n in sorted({int(r["seed"]) for r in rows}))
     heading(fig, "Training presets on Mip-NeRF 360",
-            f"3,000 steps on an RTX 4080 at seed {seed_text}. Quality is the Graphdeco RGB8 mean for each scene.")
+            f"3,000 steps on an RTX 4080 at seed {seed_text}. Image metrics are Graphdeco RGB8 scene means.")
     fig.legend(handles=legend, loc="upper left", bbox_to_anchor=(.025, .827), labelcolor=INK,
                frameon=False, ncol=3, fontsize=10, handletextpad=.15, columnspacing=1.5)
-    titles = ["Train loop (s) ↓", "PSNR (dB) ↑", "VGG LPIPS ↓"]
+    titles = ["Train loop (s) ↓", "PSNR (dB) ↑", "SSIM ↑", "VGG LPIPS ↓"]
     for metric_index, (ax, title) in enumerate(zip(axes, titles)):
         frame(ax)
         ax.set_title(title, loc="left", fontsize=12, color=INK, weight="bold", pad=8)
         for i, scene in enumerate(SCENES):
             values = [means[preset, scene][metric_index] for preset, _, _ in presets]
-            ax.plot([min(values), max(values)], [i, i], color=RULE, lw=1.6)
-            for value, (_, color, marker) in zip(values, presets):
-                ax.scatter(value, i, color=color, marker=marker, s=32, edgecolor="white",
+            heights = [i-.14, i, i+.14]
+            ax.plot(values, heights, color=RULE, lw=1.3)
+            for value, height, (_, color, marker) in zip(values, heights, presets):
+                ax.scatter(value, height, color=color, marker=marker, s=32, edgecolor="white",
                            linewidth=.5, zorder=3)
         ax.set_ylim(len(SCENES)-.45, -.55)
         ax.margins(x=.09)

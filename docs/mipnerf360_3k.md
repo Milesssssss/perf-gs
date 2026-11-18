@@ -41,7 +41,7 @@ Measure-Command {
 }
 ```
 
-The published optimizer loop and setup-plus-training clocks exclude process startup, final PLY writing and held-out scoring. A fresh process may still reuse the filesystem and shader disk caches. Graphdeco’s `full_eval.py` times its training commands including model saves. Compare times only when their hardware and timing boundaries agree. [Upstream timing script](https://github.com/graphdeco-inria/gaussian-splatting/blob/54c035f7834b564019656c3e3fcc3646292f727d/full_eval.py)
+`Measure-Command` stops at process exit. The training log records the optimizer loop under `train_complete.train_wall_s`, and the benchmark CSV distinguishes model readiness, PLY closure, process exit and a completed file sync. In the clean training-only CLI, the writer closes the PLY before exit and the timing harness syncs it immediately afterward. The quality run synced its PLY before scoring held-out views. Fresh processes may reuse filesystem and shader disk caches. Graphdeco’s `full_eval.py` times its training commands including model saves. [Per-scene timing boundaries](mipnerf360_3k_presets.csv) · [Upstream timing script](https://github.com/graphdeco-inria/gaussian-splatting/blob/54c035f7834b564019656c3e3fcc3646292f727d/full_eval.py)
 
 ## Earlier SH3 comparison
 
