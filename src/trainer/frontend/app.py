@@ -162,6 +162,15 @@ class TrainingApplication:
         self.config = RunConfig.from_args(self.args, scene.extent)
         self._write_resolved_config()
         self._prepare_target_dataset()
+        if getattr(self.args, "auto_lens", False):
+            start = time.perf_counter()
+            from trainer.data.lens_calibration import fit_lens_strength
+            indices = {scene.colmapScene.images[i].image_name: i for i in scene.train_indices}
+            strength, count = fit_lens_strength(Path(scene_dir), indices, self.targets.srgb)
+            self.args.lens_strength = strength
+            self._write_resolved_config()
+            print("[auto-lens] " + json.dumps(dict(beta=strength, fit_contrasts=count,
+                                                  total_wall_s=time.perf_counter() - start)), flush=True)
 
     def start_training(self) -> None:
         self.prepare_training_context()
@@ -344,7 +353,8 @@ class TrainingApplication:
             initial_state=scene.colmapScene.initial_points,
             slang_session=session,
         )
-        self._pipeline.rasterizer.natural_vignetting = self.args.natural_vignetting
+        strength = getattr(self.args, "lens_strength", None)
+        self._pipeline.rasterizer.natural_vignetting = self.args.natural_vignetting if strength is None else strength
         self._pipeline.mip_filter.set_cameras(
             [scene.colmapScene.images[i].camera for i in scene.train_indices])
 

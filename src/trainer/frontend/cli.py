@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 from collections.abc import Sequence
 
+from trainer.common.lens import parse_strength
 from trainer.config.config import (
     DensifyConfig,
     LossConfig,
@@ -281,6 +282,10 @@ def build_parser() -> argparse.ArgumentParser:
                          "PSNR comparison that isolates the renderer from the data order.")
     parser.add_argument("--run-name", type=str, default=None)
     parser.add_argument("--stereo-init", action="store_true", help="triangulate additional seeds from training views")
+    lens = parser.add_mutually_exclusive_group()
+    lens.add_argument("--auto-lens", action="store_true", help="fit lens falloff from shared training landmarks")
+    lens.add_argument("--lens-strength", type=parse_strength, default=None,
+                        help="strength of cos-fourth lens falloff: 0 = flat, 1 = natural; overrides --natural-vignetting")
     parser.add_argument("--natural-vignetting", action="store_true", help="render the lens cos-fourth response in sRGB")
     parser.add_argument("--init-opacity", type=float, default=0.1, help="initial opacity for all splats")
     parser.add_argument("--grow-scale3d", type=float, default=0.001,

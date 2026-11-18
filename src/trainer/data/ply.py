@@ -7,7 +7,20 @@ from pathlib import Path
 import numpy as np
 from plyfile import PlyData, PlyElement
 
+from trainer.common.lens import parse_strength
+
 _VIGNETTING_COMMENT = "trainer natural_vignetting_v1 cos4_srgb_2.2"
+_STRENGTH_COMMENT = "trainer natural_vignetting_strength_v2 "
+
+
+def _lens_metadata(comments):
+    values = [parse_strength(c[len(_STRENGTH_COMMENT):]) for c in comments if c.startswith(_STRENGTH_COMMENT)]
+    if _VIGNETTING_COMMENT in comments:
+        values.append(True)
+    if len(values) > 1:
+        raise ValueError("Ambiguous Gaussian PLY lens metadata")
+    return {"natural_vignetting": values[0]} if values else {}
+
 
 _PLY_REQUIRED_FIELDS = (
     "x", "y", "z",
@@ -18,7 +31,7 @@ _PLY_REQUIRED_FIELDS = (
 )
 
 
-def load_ply(path: str | Path) -> dict[str, np.ndarray | bool | None]:
+def load_ply(path: str | Path) -> dict[str, np.ndarray | float | None]:
     path = Path(path)
     if not path.exists():
         raise FileNotFoundError(f"ply not found: {path}")
@@ -71,7 +84,7 @@ def load_ply(path: str | Path) -> dict[str, np.ndarray | bool | None]:
                          .transpose(0, 2, 1).reshape(n, rest_floats))
 
     return {
-        **({"natural_vignetting": True} if _VIGNETTING_COMMENT in ply.comments else {}),
+        **_lens_metadata(ply.comments),
         "means": means,
         "log_scales": log_scales,
         "rot_quats": rot_quats,
@@ -82,7 +95,7 @@ def load_ply(path: str | Path) -> dict[str, np.ndarray | bool | None]:
 
 
 def write_gaussian_ply(gaussians: np.ndarray, path: str | Path,
-                       features_rest: np.ndarray | None = None, *, natural_vignetting: bool = False) -> None:
+                       features_rest: np.ndarray | None = None, *, natural_vignetting: float = 0.0) -> None:
     mean = gaussians["mean"]
     log_scale = gaussians["log_scale"]
     rot_quat = gaussians["rot_quat"]
@@ -132,4 +145,10 @@ def write_gaussian_ply(gaussians: np.ndarray, path: str | Path,
     records["rot_3"] = rot_quat[:, 3]
 
     elem = PlyElement.describe(records, "vertex")
-    PlyData([elem], text=False, comments=[_VIGNETTING_COMMENT] if natural_vignetting else []).write(str(path))
+    strength = parse_strength(natural_vignetting)
+    comments = []
+    if strength == 1:
+        comments.append(_VIGNETTING_COMMENT)
+    elif strength:
+        comments.append(_STRENGTH_COMMENT + repr(strength))
+    PlyData([elem], text=False, comments=comments).write(str(path))

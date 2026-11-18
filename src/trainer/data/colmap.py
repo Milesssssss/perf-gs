@@ -170,7 +170,7 @@ def _parse_cameras_bin(path: Path) -> dict[int, dict]:
     return cameras
 
 
-def _parse_images_bin(path: Path) -> list[dict]:
+def _parse_images_bin(path: Path, track_names: set[str] | None = None) -> list[dict]:
     import struct
     entries: list[dict] = []
     with path.open("rb") as f:
@@ -188,15 +188,24 @@ def _parse_images_bin(path: Path) -> list[dict]:
                     break
                 name_bytes += c
             name = name_bytes.decode("utf-8")
-            # Skip 2D points (num_points2D * (x, y, point3D_id)).
+            # Only calibration needs registered observations, and only for its sampled train views.
             num_points2d = struct.unpack("<Q", f.read(8))[0]
-            f.read(num_points2d * 24)  # 2 doubles + 1 int64
+            tracks = {}
+            if track_names is not None and name in track_names:
+                dtype = np.dtype([("xy", "<f8", 2), ("id", "<i8")])
+                features = np.frombuffer(f.read(num_points2d * 24), dtype)
+                tracks["tracks"] = features[features["id"] >= 0]
+            elif track_names is None:
+                f.read(num_points2d * 24)
+            else:
+                f.seek(num_points2d * 24, 1)
             entries.append({
                 "image_id": image_id,
                 "qw": qw, "qx": qx, "qy": qy, "qz": qz,
                 "tx": tx, "ty": ty, "tz": tz,
                 "camera_id": camera_id,
                 "name": name,
+                **tracks,
             })
     return entries
 

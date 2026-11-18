@@ -16,6 +16,7 @@ from trainer.backend.memory.buffers import (
     RasterResources,
     SphericalHarmonicsResources,
 )
+from trainer.common.lens import COS4_SRGB_EXPONENT
 from trainer.config.config import IterationContextualVariables, RasterConfig
 from trainer.data.dataset import Camera
 
@@ -63,7 +64,7 @@ class Rasterizer:
         self._sort = sort
         self._depth_sort = RadixSort(commands, kernels, raster.depth_sort)
         self.config = config
-        self.natural_vignetting = False
+        self.natural_vignetting: float = 0.0  # Existing False/True map to flat/full strength.
         self.width = width
         self.height = height
         self.num_tiles_x = num_tiles_x
@@ -89,7 +90,7 @@ class Rasterizer:
         data[0:16] = camera.view_matrix.flatten()
         data[16:32] = camera.proj_matrix.flatten()
         data[32:34] = np.array([self.width, self.height], dtype=np.float32)
-        data[34:36] = self.natural_vignetting, 0.0
+        data[34:36] = COS4_SRGB_EXPONENT * self.natural_vignetting, 0.0
         self.camera_buffer.copy_from_numpy(np.ascontiguousarray(data.view(np.uint8)))
 
     def record(self, camera: Camera, contextual: IterationContextualVariables) -> None:

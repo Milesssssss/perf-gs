@@ -609,7 +609,7 @@ void backwardRasterizePerBucket(
 #if STBN_ENABLED
     uint slot_count = visit_count;
 #else
-    uint slot_count = STAGED_PIXELS;
+    uint slot_count = STAGED_PIXELS; //unless we have the stochastic stride on, this is == TILE_AREA
 #endif
     [loop]
     for (uint v = 0u; v < slot_count; v += PIXELS_PER_STEP)

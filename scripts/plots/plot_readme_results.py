@@ -30,7 +30,10 @@ SADGS = REPO / "outputs" / "sadgs_counterparts"
 ASSETS = REPO / "assets"
 CSV_OUT = REPO / "docs" / "benchmark_results.csv"
 OPTICS_CSV = REPO / "docs" / "mipnerf360_3k_results.csv"
-FIXED_RECIPE_LABEL = "Fixed falloff + stereo SH3 (2-seed mean)"
+OPTICS_RECIPES = {
+    "optics-fast": ("Fixed falloff + stereo SH3 (2-seed mean)", "#009E73"),
+    "optics-adaptive": ("Adaptive falloff + stereo SH3 (2-seed mean)", "#AA4499"),
+}
 REPORT = REPO / "outputs" / "readme_results"
 
 DATASETS: dict[str, tuple[str, ...]] = {
@@ -216,8 +219,8 @@ def load_published_defaults(path: Path) -> Grid:
     return Grid(dense, {}, {}, {})
 
 
-def load_fixed_optics(path: Path) -> dict[str, Result]:
-    """Only report a scene when both designated seeds have all four measurements."""
+def load_published_optics(path: Path) -> dict[str, dict[str, Result]]:
+    """Pair the seeds for each scene and publish the adaptive recipe after both sweeps finish."""
     fields = ("psnr_db", "ssim", "vgg_lpips", "train_loop_s")
     seeds = ("42", "1")
     scenes = DATASETS["Mip-NeRF 360"]
@@ -225,29 +228,31 @@ def load_fixed_optics(path: Path) -> dict[str, Result]:
     if path.is_file():
         with path.open(newline="", encoding="utf-8-sig") as handle:
             for row in csv.DictReader(handle):
-                if row["recipe"] != "optics-fast" or row["seed"] not in seeds or row["scene"] not in scenes:
+                if row["recipe"] not in OPTICS_RECIPES or row["seed"] not in seeds or row["scene"] not in scenes:
                     continue
-                key = row["scene"], row["seed"]
+                key = row["recipe"], row["scene"], row["seed"]
                 if key in runs or row["steps"] != "3000":
                     raise ValueError(f"Unexpected or duplicate benchmark cell {key} in {path}")
                 values = tuple(float(row[f]) if row[f] else np.nan for f in fields)
+                runs[key] = None
                 if np.isfinite(values).all():
                     splats = int(row["final_gaussians"]) if row.get("final_gaussians") else None
                     vram_gib = _gib(int(row["vram_usage_bytes"])) if row.get("vram_usage_bytes") else None
                     runs[key] = Result(*values, splats, vram_gib, None)
-    averaged = {}
-    for scene in scenes:
-        if all((scene, seed) in runs for seed in seeds):
-            pair = [runs[scene, seed] for seed in seeds]
-            averaged[scene] = Result(*(mean_of(pair, field) for field in Result.__dataclass_fields__))
-    missing = [scene for scene in scenes if scene not in averaged]
-    if missing:
-        print("No complete fixed-optics seed pair for " + ", ".join(missing))
-    return averaged
+    published = {}
+    for recipe in OPTICS_RECIPES:
+        averaged = {}
+        for scene in scenes:
+            pair = [runs.get((recipe, scene, seed)) for seed in seeds]
+            if all(result is not None for result in pair):
+                averaged[scene] = Result(*(mean_of(pair, field) for field in Result.__dataclass_fields__))
+        if averaged and (recipe == "optics-fast" or len(averaged) == len(scenes)):
+            published[recipe] = averaged
+    return published
 
 
 def plot_scene_bars(grid: Grid, field: str, ylabel: str, title: str, fmt: str, out: Path,
-                    from_zero: bool = True, *, optics: dict[str, Result] | None = None) -> None:
+                    from_zero: bool = True, *, optics: dict[str, dict[str, Result]] | None = None) -> None:
     """Per-scene bars plus dataset averages: Mip-NeRF 360 on the first row, the other datasets on the second."""
     defaults = [(f"Historical default SH{sh} (1 run)", COLORS[sh], {s: grid.dense(sh, s) for s in SCENES})
                 for sh in SH_DEGREES]
@@ -269,7 +274,7 @@ def plot_scene_bars(grid: Grid, field: str, ylabel: str, title: str, fmt: str, o
             x = np.arange(len(row))
             series = list(defaults)
             if ax is axes[0] and optics:
-                series.append((FIXED_RECIPE_LABEL, "#009E73", optics))
+                series.extend((*OPTICS_RECIPES[recipe], values) for recipe, values in optics.items())
             width = 0.82 / len(series)
             for index, (label, color, by_scene) in enumerate(series):
                 values = [mean_of([by_scene.get(s) for s in scenes], field) for _, scenes in row]
@@ -428,15 +433,16 @@ def _table(header: list[str], rows: list[list[str]], align: str = "---:") -> str
     return "\n".join(lines + [_row(r) for r in rows])
 
 
-def _dataset_runs(grid: Grid, optics: dict[str, Result] | None, name: str):
+def _dataset_runs(grid: Grid, optics: dict[str, dict[str, Result]] | None, name: str):
     scenes = DATASETS[name]
     for sh in SH_DEGREES:
         yield f"Default SH{sh} (1 run)", [grid.dense(sh, s) for s in scenes]
     if name == "Mip-NeRF 360" and optics:
-        yield FIXED_RECIPE_LABEL, [optics.get(s) for s in scenes]
+        for recipe, values in optics.items():
+            yield OPTICS_RECIPES[recipe][0], [values.get(s) for s in scenes]
 
 
-def cost_table(grid: Grid, optics: dict[str, Result] | None = None) -> str:
+def cost_table(grid: Grid, optics: dict[str, dict[str, Result]] | None = None) -> str:
     """Per dataset and SH degree: training time, splat count and GPU memory."""
     rows = []
     for name in DATASETS:
@@ -447,7 +453,7 @@ def cost_table(grid: Grid, optics: dict[str, Result] | None = None) -> str:
     return _table(["Dataset", "Recipe", "Train loop (seconds)", "Splats (millions)", "VRAM (GiB)"], rows)
 
 
-def dataset_quality_table(grid: Grid, optics: dict[str, Result] | None = None) -> str:
+def dataset_quality_table(grid: Grid, optics: dict[str, dict[str, Result]] | None = None) -> str:
     """Per dataset and SH degree: held-out quality and training time."""
     rows = []
     for name in DATASETS:
@@ -528,23 +534,51 @@ def _csv_values(result: Result) -> list:
     return [round(v, 4) if isinstance(v, float) else v for v in asdict(result).values()]
 
 
+def _summary_rows(grid: Grid):
+    for (sh, precision, scene, fraction), result in sorted(grid.ours.items()):
+        yield ["ours", "RTX 4080", str(sh), precision, scene, fraction, *_csv_values(result)]
+    for (sh, preset, scene), result in sorted(grid.presets.items()):
+        if preset != "balanced":  # already written above as the dense fp32 cell
+            run = run_dir(f"readme_presets_sh{sh}", scene, preset)
+            config = _read_json(run / "config.json") or {}
+            fraction = config.get("cli_args", {}).get("stbn_pixel_fraction")
+            yield [f"ours --preset {preset}", "RTX 4080", str(sh), PRESETS[preset], scene,
+                   fraction, *_csv_values(result)]
+    for (sh, scene), result in sorted(grid.sadgs.items()):
+        yield ["sadgs", "RTX 4080", str(sh), "fp32", scene, DENSE, *_csv_values(result)]
+    for scene, result in sorted(grid.reference.items()):
+        yield ["sadgs", "RTX 3090", "0", "fp32", scene, DENSE, *_csv_values(result)]
+
+
 def write_summary_csv(grid: Grid, out: Path) -> None:
-    """Every cell; ``gpu`` says where its time and memory were measured."""
-    with out.open("w", newline="") as handle:
+    """Refresh measured fields while retaining published results absent from a local archive."""
+    header = ["method", "gpu", "sh", "adam_moments", "scene", "pixel_fraction",
+              *Result.__dataclass_fields__]
+
+    def cell_key(row):
+        # Preset runs sweep the named preset. Their pixel fraction is recorded metadata.
+        return tuple(row[:5] if row[0].startswith("ours --preset ") else row[:6])
+
+    rows = {}
+    if out.is_file():
+        with out.open(newline="", encoding="utf-8-sig") as handle:
+            reader = csv.reader(handle)
+            if next(reader, None) != header:
+                raise ValueError(f"Unexpected benchmark columns in {out}")
+            for row in reader:
+                key = cell_key(row)
+                if key in rows or len(row) != len(header):
+                    raise ValueError(f"Duplicate or malformed benchmark cell {key} in {out}")
+                rows[key] = row
+    for row in _summary_rows(grid):
+        key = cell_key(row)
+        if key in rows:
+            row = [old if new is None else new for old, new in zip(rows[key], row)]
+        rows[key] = row
+    with out.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.writer(handle)
-        writer.writerow(["method", "gpu", "sh", "adam_moments", "scene", "pixel_fraction",
-                         *Result.__dataclass_fields__])
-        for (sh, precision, scene, fraction), result in sorted(grid.ours.items()):
-            writer.writerow(["ours", "RTX 4080", sh, precision, scene, fraction,
-                             *_csv_values(result)])
-        for (sh, preset, scene), result in sorted(grid.presets.items()):
-            if preset != "balanced":  # already written above as the dense fp32 cell
-                writer.writerow([f"ours --preset {preset}", "RTX 4080", sh, PRESETS[preset],
-                                 scene, DENSE, *_csv_values(result)])
-        for (sh, scene), result in sorted(grid.sadgs.items()):
-            writer.writerow(["sadgs", "RTX 4080", sh, "fp32", scene, DENSE, *_csv_values(result)])
-        for scene, result in sorted(grid.reference.items()):
-            writer.writerow(["sadgs", "RTX 3090", 0, "fp32", scene, DENSE, *_csv_values(result)])
+        writer.writerow(header)
+        writer.writerows(rows.values())
 
 
 def main() -> int:
@@ -556,7 +590,7 @@ def main() -> int:
     if not grid.ours:
         print("no benchmark runs found")
         return 1
-    optics = load_fixed_optics(OPTICS_CSV)
+    optics = load_published_optics(OPTICS_CSV)
     plot_scene_bars(grid, "psnr", "Held-out PSNR (dB, sRGB)",
                     "Held-out PSNR after 3,000 steps, full pixel supervision",
                     "{:.2f}", ASSETS / "psnr_sweep.png", from_zero=False, optics=optics)

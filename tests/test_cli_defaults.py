@@ -108,7 +108,7 @@ EXPECTED_DEFAULTS = {
     "sh_band_interval": 0,
     "sample_mode": "sadgs",
     "run_name": None,
-    "natural_vignetting": False,
+    "natural_vignetting": False, "lens_strength": None, "auto_lens": False,
     "init_opacity": 0.1,
     "grow_scale3d": 0.001,
     "opacity_reset_value": 0.01,

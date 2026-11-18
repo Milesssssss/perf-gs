@@ -35,7 +35,8 @@ python scripts/running/v2_train.py ... --stbn-pixel-fraction 0.25 --stbn-source 
 
 # re-measure the whole trade-off yourself (9 scenes x 5 densities, ~2.5 h)
 python scripts/running/eval_sweep.py \
-    --axis stbn-pixel-fraction --values 1,0.75,0.5,0.25,0.1
+    --axis stbn-pixel-fraction --values 1,0.75,0.5,0.25,0.1 \
+    --name stbn_quarter_resolution --extra --downsample 4
 ```
 
 ---
@@ -44,8 +45,8 @@ python scripts/running/eval_sweep.py \
 
 **All 9 Mip-NeRF 360 scenes, 3000 iters, quarter-res, structure-aware densify,
 mip-splatting, seed 42, RTX 3090, held-out test PSNR (the paper metric).** Full
-data in `outputs/eval_sweep/stbn_density/` (reproduce with
-`scripts/running/eval_sweep.py --axis stbn-pixel-fraction --values 1,0.75,0.5,0.25,0.1`):
+data from the original run is in `outputs/eval_sweep/stbn_density/`. The
+quick-start sweep above selects quarter resolution for both indoor and outdoor scenes.
 
 | rho | PSNR (avg of 9) | vs dense | train time | speedup |
 |---|---|---|---|---|

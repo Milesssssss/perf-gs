@@ -1,10 +1,11 @@
 # Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-"""Render the two camera-response figures from the checked-in 3,000-step benchmark CSVs.
+"""Render camera-response comparisons from the checked-in 3,000-step benchmark CSVs.
 
 Run `python scripts/plots/plot_camera_results.py` from the repository root.
 """
 import csv
+from math import isfinite
 from pathlib import Path
 from statistics import fmean
 
@@ -45,13 +46,11 @@ def save(fig, name):
     fig.savefig(ROOT / "assets" / name, dpi=160, facecolor="white")
 
 
-def plot_mip360():
-    rows = read_csv("mipnerf360_3k_results.csv")
-    data = {(r["recipe"], int(r["seed"]), r["scene"]): r for r in rows}
+def plot_comparison(data, recipe, baseline, title, subtitle, note, filename):
     fig = Figure(figsize=(10.6, 5.65))
     axes = fig.subplots(1, 3, sharey=True)
     fig.subplots_adjust(left=.146, right=.975, top=.733, bottom=.125, wspace=.23)
-    heading(fig, "Mip-NeRF 360 at 3,000 steps", "Fixed camera falloff + stereo minus the previous tuned recipe, paired by scene and seed.")
+    heading(fig, title, subtitle)
     fig.legend(handles=[handle(BLUE, "o", "Seed 42"), handle(ORANGE, "D", "Seed 1", False)],
                loc="upper right", bbox_to_anchor=(.983, .974), frameon=False, ncol=2,
                handletextpad=.2, columnspacing=.75, labelcolor=INK, fontsize=10)
@@ -66,8 +65,8 @@ def plot_mip360():
         ax.axhline(8.58, color=RULE, lw=1.2)
         deltas = {}
         for seed in (42, 1):
-            values = [scale * (float(data["optics-fast", seed, scene][key]) -
-                               float(data["previous-tuned", seed, scene][key])) for scene in SCENES]
+            values = [scale * (float(data[recipe, seed, scene][key]) -
+                               float(data[baseline, seed, scene][key])) for scene in SCENES]
             deltas[seed] = values + [fmean(values)]
         y = [*range(len(SCENES)), 9.35]
         for i, a, b in zip(y, deltas[42], deltas[1]):
@@ -80,8 +79,36 @@ def plot_mip360():
         ax.xaxis.set_major_locator(MaxNLocator(nbins=5, steps=[1, 2, 2.5, 5, 10]))
     axes[0].set_yticks(y, [s.title() for s in SCENES] + ["Nine-scene mean"])
     axes[0].get_yticklabels()[-1].set_weight("bold")
-    fig.text(.035, .035, "Zero marks the previous recipe. Flowers has higher LPIPS on both seeds.", color=MUTED, size=10)
-    save(fig, "mipnerf360_3k_results.png")
+    fig.text(.035, .035, note, color=MUTED, size=10)
+    save(fig, filename)
+
+
+def plot_mip360():
+    rows = read_csv("mipnerf360_3k_results.csv")
+    data = {}
+    for row in rows:
+        key = row["recipe"], int(row["seed"]), row["scene"]
+        if key in data:
+            raise ValueError(f"Duplicate benchmark row: {key}")
+        data[key] = row
+    plot_comparison(data, "optics-fast", "previous-tuned", "Mip-NeRF 360 at 3,000 steps",
+                    "Fixed camera falloff + stereo minus the previous tuned recipe, paired by scene and seed.",
+                    "Zero marks the previous recipe. Flowers has higher LPIPS on both seeds.",
+                    "mipnerf360_3k_results.png")
+    for scene in SCENES:
+        for seed in (42, 1):
+            adaptive = data.get(("optics-adaptive", seed, scene))
+            if adaptive is None or any(not adaptive[k] or not isfinite(float(adaptive[k]))
+                                       for k in ("psnr_db", "ssim", "vgg_lpips", "train_loop_s")):
+                print("Adaptive plot awaits both complete nine-scene sweeps.")
+                return
+            fixed = data["optics-fast", seed, scene]
+            if adaptive["steps"] != "3000" or adaptive["heldout_views"] != fixed["heldout_views"]:
+                raise ValueError(f"Adaptive and fixed protocols differ for {scene}, seed {seed}")
+    plot_comparison(data, "optics-adaptive", "optics-fast", "Adaptive versus fixed camera falloff",
+                    "Adaptive minus fixed falloff on Mip-NeRF 360, with stereo and 3,000 steps for both recipes.",
+                    "Zero marks the fixed falloff result. The nine-scene mean gives each scene equal weight.",
+                    "mipnerf360_3k_adaptive_vs_fixed.png")
 
 
 def plot_calibration():
@@ -130,6 +157,76 @@ def plot_calibration():
     save(fig, "camera_falloff_results.png")
 
 
+def plot_paired_timing():
+    try:
+        rows = read_csv("mipnerf360_3k_timing.csv")
+    except FileNotFoundError:
+        return
+    times = {}
+    for row in rows:
+        if row["arm"] not in ("stock", "adaptive") or row["seed"] != "42":
+            continue
+        key = row["arm"], row["scene"]
+        if key in times:
+            raise ValueError(f"Duplicate timing run: {key}")
+        loop, total = float(row["train_s"]), float(row["setup_plus_train_s"])
+        if not (isfinite(loop) and isfinite(total) and 0 < loop <= total):
+            raise ValueError(f"Invalid timing for {key}")
+        times[key] = loop, total
+    expected = {(arm, scene) for arm in ("stock", "adaptive") for scene in SCENES}
+    if times.keys() != expected:
+        raise ValueError("The paired timing figure requires one complete stock and adaptive sweep.")
+
+    for arm in ("stock", "adaptive"):
+        pairs = [times[arm, scene] for scene in SCENES]
+        times[arm, "mean"] = tuple(fmean(column) for column in zip(*pairs))
+    fig = Figure(figsize=(10.6, 5.85))
+    ax, table = fig.subplots(1, 2, gridspec_kw={"width_ratios": [1.45, 1]}, sharey=True)
+    fig.subplots_adjust(left=.148, right=.968, top=.733, bottom=.135, wspace=.14)
+    heading(fig, "Paired training time on Mip-NeRF 360",
+            "Stock and adaptive runs alternated on one RTX 4080. Each scene used 3,000 steps and seed 42.")
+    frame(ax)
+    ax.text(0, 1.15, "Change from stock (%)", transform=ax.transAxes, color=INK, size=12, weight="bold")
+    ax.legend(handles=[handle(TEAL, "o", "Setup + train"), handle(BLUE, "D", "Train loop only", False)],
+              loc="lower left", bbox_to_anchor=(-.02, 1.005), frameon=False, ncol=2,
+              handletextpad=.15, columnspacing=.8, borderaxespad=0, labelcolor=INK, fontsize=10)
+    ax.axvline(0, color=MUTED, lw=1)
+    ax.axvline(8, color=ORANGE, lw=1.1, ls="--")
+    ax.text(8, .975, "8% threshold", transform=ax.get_xaxis_transform(), color=ORANGE,
+            ha="center", va="top", size=9, bbox={"facecolor": "white", "edgecolor": "none", "pad": 1})
+    table.set_axis_off()
+    table.set_xlim(0, 1)
+    table.text(0, 1.15, "Setup + training", transform=table.transAxes, color=INK, size=12, weight="bold")
+    columns = (.23, .60, .99)
+    for x, label in zip(columns, ("Stock (s)", "Adaptive (s)", "Change")):
+        table.text(x, 1.045, label, transform=table.transAxes, ha="right", color=MUTED, size=10)
+
+    y = [*range(len(SCENES)), 9.35]
+    for scene, height in zip((*SCENES, "mean"), y):
+        stock_loop, stock_total = times["stock", scene]
+        adaptive_loop, adaptive_total = times["adaptive", scene]
+        loop_delta = 100 * (adaptive_loop / stock_loop - 1)
+        total_delta = 100 * (adaptive_total / stock_total - 1)
+        ax.plot([loop_delta, total_delta], [height+.07, height-.07], color=RULE, lw=1.5)
+        ax.scatter(loop_delta, height+.07, marker="D", facecolors="white", edgecolors=BLUE,
+                   s=31, linewidths=1.4, zorder=3)
+        ax.scatter(total_delta, height-.07, color=TEAL, s=46, zorder=4)
+        for x, label in zip(columns, (f"{stock_total:.2f}", f"{adaptive_total:.2f}", f"{total_delta:+.2f}%")):
+            table.text(x, height, label, ha="right", va="center", color=INK, size=11,
+                       weight="bold" if scene == "mean" else "normal")
+    for panel in (ax, table):
+        panel.axhline(8.58, color=RULE, lw=1.2)
+    ax.set_ylim(9.85, -.95)
+    ax.set_yticks(y, [s.title() for s in SCENES] + ["Nine-scene mean"])
+    ax.get_yticklabels()[-1].set_weight("bold")
+    ax.margins(x=.1)
+    ax.xaxis.set_major_locator(MaxNLocator(nbins=6, steps=[1, 2, 2.5, 5, 10]))
+    fig.text(.035, .036, "Positive values mean longer runs. The mean compares the two nine-scene average times.",
+             color=MUTED, size=10)
+    save(fig, "mipnerf360_3k_paired_timing.png")
+
+
 if __name__ == "__main__":
     plot_mip360()
     plot_calibration()
+    plot_paired_timing()
