@@ -452,14 +452,13 @@ def test_the_store_opens_on_the_cli_defaults():
 def test_choosing_a_preset_applies_it_and_balanced_restores_the_defaults():
     setup = TrainingSetup()
     preset = SETTINGS_MAP["preset"]
-    setup.set_index("preset", preset.choice_index("ultrafast"))
-    assert (setup.get("stbn_pixel_fraction"), setup.get("splat_kernel")) == (0.5, "opaque_core")
-    setup.set_index("preset", preset.choice_index("perf"))
-    assert (setup.get("adam_moments"), setup.get("prune_blend_from")) == ("bf16", 1000)
-    assert (setup.get("stbn_pixel_fraction"), setup.get("splat_kernel")) == (1.0, "gaussian")
-    setup.set_index("preset", preset.choice_index("quality"))
-    assert (setup.get("adam_moments"), setup.get("lr_recipe")) == ("fp32", "quality")
-    setup.set_index("preset", preset.choice_index("balanced"))
+    assert preset.choices == ("ultrafast", "balanced", "quality")
+    setup.set("splat_kernel", "opaque_core")
+    setup.set("lr_recipe", "default")
+    for name in ("ultrafast", "quality", "balanced"):
+        setup.set_index("preset", preset.choice_index(name))
+        cli = build_parser().parse_args(["--preset", name])
+        assert setup.values() == {s.setting_name: getattr(cli, s.setting_name) for s in SETTINGS}
     assert setup.values() == TrainingSetup().values()
 
 
@@ -495,7 +494,7 @@ def test_setup_round_trips_through_the_real_cli_args():
     setup.set("lambda_ssim", 0.5)
     changes = setup.apply_to(args)
     assert (args.iters, args.lambda_ssim) == (9000, pytest.approx(0.5))
-    assert changes == ["iters: 7,000 -> 9,000", "lambda_ssim: 0.200 -> 0.500"]
+    assert changes == ["iters: 7,000 -> 9,000", "lambda_ssim: 0.300 -> 0.500"]
 
 
 def test_setting_coerce_clamps_instead_of_rejecting():

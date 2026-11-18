@@ -68,7 +68,7 @@ class PrimitiveIO:
 
     def read(self) -> np.ndarray:
         """The live primitives as layout-dtype records."""
-        raw = self.storage.values.to_numpy().tobytes()
+        raw = self.storage.values.to_numpy()
         return np.frombuffer(raw, dtype=self.dtype)[:self.count()].copy()
 
     def clear_features_rest(self) -> None:
@@ -88,6 +88,6 @@ class PrimitiveIO:
 
     def read_features_rest(self, n: int) -> np.ndarray:
         """``(n, rest_floats)`` SH rest coefficients of the first n slots."""
-        packed = np.frombuffer(self.sh.features_rest.to_numpy().tobytes(),
+        packed = np.frombuffer(self.sh.features_rest.to_numpy(),
                                dtype=np.uint32)[:n * self.sh.feat_uints]
         return unpack_features_rest(packed, n, self.sh.rest_floats)

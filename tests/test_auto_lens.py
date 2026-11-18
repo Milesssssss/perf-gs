@@ -83,8 +83,11 @@ def test_missing_sparse_model_uses_identity(tmp_path):
 
 
 def test_cli_selects_calibrated_or_manual_strength():
-    assert not parse_args([]).auto_lens
+    assert parse_args([]).auto_lens
+    assert not parse_args(['--no-auto-lens']).auto_lens
+    assert not parse_args(['--natural-vignetting']).auto_lens
     assert parse_args(['--auto-lens']).auto_lens
     assert parse_args(['--lens-strength', '.65']).lens_strength == .65
+    assert not parse_args(['--lens-strength', '.65']).auto_lens
     with pytest.raises(SystemExit):
         parse_args(['--auto-lens', '--lens-strength', '.65'])

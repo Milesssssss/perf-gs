@@ -96,8 +96,17 @@ RENDER_FPS_FRAMES = 60
 BOOTSTRAP_RESAMPLES = 10000
 BOOTSTRAP_SEED = 20260818
 
-# Identical for every cell (default zero STBN warmup); --evaluation is required because it vetoes --final-test-psnr.
+# Keep the published ablations on their original control when trainer presets change.
+REFERENCE_TRAINING_ARGS = (
+    "--max-splats", "7000000", "--adam-moments", "fp32",
+    "--lr-recipe", "default", "--no-stereo-init", "--no-auto-lens", "--lambda-ssim", "0.2",
+    "--sad-lambda-l2", "2", "--densify-from", "0", "--prune-blend-from", "0",
+    "--prune-scale3d", "0.1", "--grad-thresh", "0.0005", "--sad-tau-split", "0.8",
+)
+
+# Identical evaluation settings for every cell (default zero STBN warmup).
 BASE_ARGS: tuple[str, ...] = (
+    *REFERENCE_TRAINING_ARGS,
     "--sh-degree", "3",
     "--densify-mode", "structure_aware",
     "--mip-splatting",

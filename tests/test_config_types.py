@@ -54,13 +54,13 @@ def test_schedule_config_from_args_defaults() -> None:
     args = build_parser().parse_args([])
     sc = RunConfig.from_args(args, 1.0).schedule
     assert sc.iterations == 3000
-    assert (sc.densify_from, sc.densify_to, sc.densify_every) == (0, 1900, 100)
+    assert (sc.densify_from, sc.densify_to, sc.densify_every) == (100, 1900, 100)
     assert sc.reset_every == 1200
     assert sc.densify_mode == DensificationMode.STRUCTURE_AWARE
     assert sc.sad_structure_every == 500
     assert sc.sad_accum_every == 10
-    assert sc.preview_every == 3000
-    assert sc.eval_every == 3000
+    assert sc.preview_every == 0
+    assert sc.eval_every == 0
     assert sc.mip_enabled is True
     assert sc.psnr_curve_enabled is False
     assert sc.psnr_curve_every == 0

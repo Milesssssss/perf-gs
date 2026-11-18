@@ -71,8 +71,8 @@ def build(session: Session, which: str = "all"):
         header(panel, view)
     if which in ("all", "dataset"):
         dataset_section(panel, view, actions)
-    if which in ("all", "training"):
-        training_section(panel, view, actions)
+    if which in ("all", "training", "configuration"):
+        training_section(panel, view, actions, session.setup)
     if which in ("all", "result"):
         result_section(panel, view, actions)
     if which in ("all", "configuration"):
@@ -111,22 +111,19 @@ def trained(session: Session) -> None:
 def test_the_empty_state_is_a_drop_target_and_says_what_is_accepted() -> None:
     panel, _, _ = build(_session(), "dataset")
     screen = panel.screen()
-    assert "DROP A DATASET HERE" in screen
-    assert "image folder or COLMAP data" in screen
-    assert "sparse/" in screen                      # what a COLMAP folder needs
+    assert "Open dataset folder..." in screen
+    assert "drop a COLMAP scene or a folder of photos" in screen
 
 
-def test_the_header_leads_with_the_state_and_the_next_step() -> None:
+def test_the_header_names_the_state() -> None:
     panel, _, _ = build(_session(), "header")
     screen = panel.screen()
     assert "[ EMPTY ]" in screen
-    assert "Drop a dataset folder onto the window to begin." in screen
 
 
 def test_nothing_actionable_is_offered_before_a_dataset_exists() -> None:
     panel, _, _ = build(_session())
-    assert panel.visible_buttons() == ["Browse...", "Start Training"]
-    assert not panel.find("Start Training").enabled
+    assert panel.visible_buttons() == ["Open dataset folder..."]
 
 
 # --------------------------------------------------------------------------
@@ -159,7 +156,7 @@ def test_a_ready_dataset_shows_a_card_not_a_path_dump() -> None:
     ready(session)
     view.sample()
     screen = panel.screen()
-    assert "+ kitchen" in screen
+    assert "kitchen" in panel.of("section")[0].label
     assert "COLMAP reconstruction" in screen
     assert "148 images · 1920x1080 · 1.70M points" in screen
     assert "D:/data/kitchen" in screen              # the path is still available
@@ -224,11 +221,24 @@ def test_start_training_is_the_primary_action_on_a_ready_dataset() -> None:
     panel, view, recorder = build(session, "training")
     ready(session)
     view.sample()
-    assert "Ready to train." in panel.screen()
+    assert panel.screen().splitlines()[:3] == ["Preset", "Iterations", "Start Training"]
     button = panel.find("Start Training")
     assert button.shown and button.enabled
     button.click()
     assert recorder.names == ["start_training"]
+
+
+def test_ready_scene_can_change_preset_without_opening_advanced_settings() -> None:
+    session = _session()
+    ready(session)
+    panel, _, recorder = build(session)
+    preset = panel.only("combo", caption="Preset")
+    assert preset.shown and preset.enabled
+    preset.change(0)
+    assert session.setup.get("preset") == "ultrafast"
+    assert session.setup.get("stbn_pixel_fraction") == 0.25
+    assert session.setup.get("max_splats") == 1_850_000
+    assert "on_config_change" in recorder.names
 
 
 def test_the_run_status_carries_every_number_in_one_block() -> None:
@@ -427,7 +437,7 @@ def test_the_result_section_is_quiet_before_anything_is_trained() -> None:
     panel, view, _ = build(session, "result")
     ready(session)
     view.sample()
-    assert "No reconstruction yet." in panel.screen()
+    assert panel.screen() == ""
     assert panel.visible_buttons() == []
 
 
@@ -490,11 +500,11 @@ def test_a_question_without_an_alternative_offers_only_two_answers() -> None:
 def test_the_common_parameters_are_visible_and_the_rest_are_behind_a_toggle() -> None:
     session = _session()
     panel, view, _ = build(session, "configuration")
+    ready(session)
+    view.sample()
     screen = panel.screen()
-    assert "Applies to the next run." in screen
-    for key in ("iters", "densify_mode", "sh_degree", "lambda_ssim"):
-        assert SETTINGS_MAP[key].caption in screen
-    # The full table is hidden until asked for.
+    assert "Preset" in screen and "Iterations" in screen
+    assert "Advanced training settings" in screen and "SSIM weight" not in screen
     groups = [w for w in panel.of("section") if w.label.startswith("SCHEDULE")]
     assert groups and not groups[0].shown
 
@@ -515,16 +525,21 @@ def test_every_editable_parameter_is_offered_exactly_once() -> None:
 def test_every_parameter_says_what_it_does() -> None:
     session = _session()
     panel, view, _ = build(session, "configuration")
+    ready(session)
     session.toggle_config_detail(True)
     view.sample()
     screen = panel.screen()
     for setting in SETTINGS:
-        assert setting.about and setting.about in screen, setting.setting_name
+        if setting.setting_name in ("iters", "preset"):
+            assert setting.caption.capitalize() in screen
+        else:
+            assert setting.about and setting.about in screen, setting.setting_name
 
 
 def test_a_parameter_edit_writes_the_store_and_marks_the_result_stale() -> None:
     session = _session()
     panel, view, recorder = build(session, "configuration")
+    ready(session)
     session.toggle_config_detail(True)
     view.sample()
     field = next(w for w in panel.of("drag_int") if w.info["value"]() == 3000)
@@ -543,7 +558,7 @@ def test_parameters_grey_out_while_a_run_consumes_them() -> None:
     controls = [w for w in panel.widgets
                 if w.kind in ("combo", "drag_int", "drag_float")]
     assert controls and not any(w.enabled for w in controls)
-    assert "Locked while a run is training." in panel.screen()
+    assert not any(w.shown for w in controls)
 
 
 def test_a_collapsed_group_still_says_what_it_holds() -> None:
@@ -684,16 +699,12 @@ def test_the_loss_section_plots_what_the_reporter_published() -> None:
     assert "-80% over the window" in panel.of("section")[0].label
 
 
-def test_the_empty_graph_says_why_it_is_empty() -> None:
-    """--log-every 0 is the default, so this is the state most runs start in: the
-    graph must not read as broken."""
+def test_hub_hides_loss_until_samples_exist() -> None:
     session = _session()
     panel, view, _ = build(session, "loss")
     view.sample()
-    screen = panel.screen()
-    assert "no samples" in panel.of("section")[0].label
-    assert "--log-every 50" in screen
-    assert "#" not in screen
+    assert not panel.of("section")[0].shown
+    assert panel.screen() == ""
 
 
 def test_history_is_bounded_and_belongs_to_its_run() -> None:

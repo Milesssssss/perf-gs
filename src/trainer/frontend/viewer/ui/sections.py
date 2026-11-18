@@ -7,6 +7,7 @@ No section derives policy: a button's ``enabled`` is a ``can_*`` property, never
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
+from contextlib import nullcontext
 from dataclasses import dataclass
 
 from trainer.frontend.settings import (
@@ -111,7 +112,8 @@ class CameraControls:
 def header(panel: Panel, view: View) -> None:
     """Always-visible, non-collapsible state header: badge, state, next step, activity, acknowledgements."""
     panel.text(lambda: f"{badge(view.status_badge)}  {view.state_label}", lines=2)
-    note(panel, lambda: view.next_step(), lines=3)
+    note(panel, lambda: view.next_step(), lines=2,
+         visible=lambda: bool(view.next_step()) and (not view.hub or view.primary_action not in ("drop", "train")))
     activity_block(panel, lambda: view.activity)
     toasts(panel, view)
     panel.spacer()
@@ -119,36 +121,26 @@ def header(panel: Panel, view: View) -> None:
 
 def dataset_section(panel: Panel, view: View, actions: Actions) -> None:
     """What am I working on — and, when nothing is loaded, the way to begin."""
-    def summary() -> str:
-        if not view.has_dataset:
-            return "empty"
-        info = view.dataset
-        if view.dataset_state == DatasetState.ERROR:
-            return "failed"
-        if view.dataset_state != DatasetState.READY:
-            return str(view.dataset_state)
-        return section_summary(info.name, info.summary())
-
-    with panel.section("DATASET", label=titled("DATASET", summary)):
-        _dataset_empty(panel, view, actions)
-        _dataset_working(panel, view)
-        _dataset_ready(panel, view, actions)
-        _dataset_error(panel, view, actions)
-        confirm_block(panel, view, "dataset", on_confirm=actions.confirm,
-                      on_alt=actions.confirm_alt, on_cancel=actions.cancel)
+    _dataset_empty(panel, view, actions)
+    _dataset_working(panel, view)
+    _dataset_error(panel, view, actions)
+    _reconstruction_controls(panel, view, actions)
+    confirm_block(panel, view, "dataset", on_confirm=actions.confirm,
+                  on_alt=actions.confirm_alt, on_cancel=actions.cancel)
+    with panel.section("DATASET", label=titled("DATASET", lambda: view.dataset.name),
+                       visible=lambda: view.dataset_state == DatasetState.READY and not view.training_live):
+        _dataset_details(panel, view)
 
 
 def _dataset_empty(panel: Panel, view: View, actions: Actions) -> None:
     def empty() -> bool:
         return view.dataset_state == DatasetState.EMPTY
 
-    panel.text("      DROP A DATASET HERE", visible=empty)
-    panel.text("   image folder or COLMAP data", visible=empty)
     if actions.browse is not None:
-        panel.button("Browse...", actions.browse,
-                     enabled=lambda: view.can_drop, visible=empty)
-    note(panel, "A folder of images, or one with sparse/ + images/.",
-         lines=2, visible=empty)
+        panel.button("Open dataset folder...", actions.browse, enabled=lambda: view.can_drop,
+                     visible=lambda: empty() or (view.dataset_state == DatasetState.READY
+                                                 and not view.has_result and not view.training_live))
+    note(panel, "You can also drop a COLMAP scene or a folder of photos here.", lines=2, visible=empty)
 
 
 def _dataset_working(panel: Panel, view: View) -> None:
@@ -163,20 +155,20 @@ def _dataset_working(panel: Panel, view: View) -> None:
                visible=lambda: working() and view.dataset.kind != KIND_NONE)
 
 
-def _dataset_ready(panel: Panel, view: View, actions: Actions) -> None:
-    def ready() -> bool:
-        return view.dataset_state == DatasetState.READY
+def _dataset_details(panel: Panel, view: View) -> None:
+    panel.text(lambda: section_summary(view.dataset.kind_label, view.dataset.summary()), lines=2)
+    panel.text(lambda: view.dataset.path, mode=ELIDE_START)
 
+    # Name the derived scene, so "148 images" and the trained scene agree.
+    path_row(panel, "  reconstructed scene", lambda: view.dataset.scene_dir,
+             visible=lambda: bool(view.dataset.scene_dir)
+             and view.dataset.kind == KIND_IMAGES)
+
+
+def _reconstruction_controls(panel: Panel, view: View, actions: Actions) -> None:
     def needs_recon() -> bool:
-        # COLMAP controls only mean anything for images not yet reconstructed.
-        return (ready() and view.dataset.kind == KIND_IMAGES
+        return (view.dataset_state == DatasetState.READY and view.dataset.kind == KIND_IMAGES
                 and not view.dataset.scene_dir)
-
-    panel.text(lambda: f"{GLYPHS['ok']} {view.dataset.name}", visible=ready)
-    note(panel, lambda: view.dataset.kind_label, lines=1, visible=ready)
-    note(panel, lambda: view.dataset.summary(), lines=2,
-         visible=lambda: ready() and bool(view.dataset.summary()))
-    path_row(panel, "  folder", lambda: view.dataset.path, visible=ready)
 
     metric(panel, "  tools", lambda: str(view.tools_state), visible=needs_recon)
     panel.combo("  feature matcher", list(MATCHERS),
@@ -193,11 +185,6 @@ def _dataset_ready(panel: Panel, view: View, actions: Actions) -> None:
     panel.button("Reconstruct to COLMAP", actions.reconstruct,
                  enabled=lambda: view.can_reconstruct, visible=needs_recon)
 
-    # Name the derived scene, so "148 images" and the trained scene agree.
-    path_row(panel, "  reconstructed scene", lambda: view.dataset.scene_dir,
-             visible=lambda: ready() and bool(view.dataset.scene_dir)
-             and view.dataset.kind == KIND_IMAGES)
-
 
 def _dataset_error(panel: Panel, view: View, actions: Actions) -> None:
     def failed() -> bool:
@@ -211,7 +198,7 @@ def _dataset_error(panel: Panel, view: View, actions: Actions) -> None:
                      enabled=lambda: view.can_drop, visible=failed)
 
 
-def training_section(panel: Panel, view: View, actions: Actions) -> None:
+def training_section(panel: Panel, view: View, actions: Actions, setup: TrainingSetup | None = None) -> None:
     """What is happening right now: one coherent run status, then its controls."""
     def summary() -> str:
         state = view.training_state
@@ -225,8 +212,17 @@ def training_section(panel: Panel, view: View, actions: Actions) -> None:
             return "failed"
         return str(state)
 
-    with panel.section("TRAINING", label=titled("TRAINING", summary)):
-        _training_idle(panel, view, actions)
+    if setup is not None:
+        def choose() -> bool:
+            return view.trainable and not view.training_live
+
+        for key in RUN_SETTINGS:
+            _setting_widget(panel, view, setup, SETTINGS_MAP[key], actions, visible=choose)
+        panel.button("Start Training", actions.start_training, enabled=lambda: view.can_start_training,
+                     visible=lambda: choose() and not view.has_result)
+    with (panel.section("TRAINING", label=titled("TRAINING", summary)) if setup is None else nullcontext()):
+        if setup is None:
+            _training_idle(panel, view, actions)
         _training_live(panel, view, actions)
         inline_error(panel, lambda: view.training_error, title="Training failed")
         confirm_block(panel, view, "training", on_confirm=actions.confirm,
@@ -339,11 +335,12 @@ def result_section(panel: Panel, view: View, actions: Actions) -> None:
                                "exported" if view.result_state == ResultState.EXPORTED
                                else "not exported")
 
-    with panel.section("RESULT", label=titled("RESULT", summary)):
-        panel.text("No reconstruction yet.",
-                   visible=lambda: view.result_state == ResultState.NONE)
-        note(panel, "Initial points are on screen — nothing has been trained yet.",
-             lines=2, visible=lambda: view.result_state == ResultState.INITIALIZED)
+    name_field(panel, "Export name", lambda: view.export_name, actions.set_export_name,
+               enabled=lambda: view.can_export, visible=lambda: view.has_result)
+    panel.button("Export PLY", actions.export, enabled=lambda: view.can_export,
+                 visible=lambda: view.has_result)
+    with panel.section("RESULT", label=titled("RESULT", summary),
+                       visible=lambda: view.has_result or bool(view.result_error)):
         _result_body(panel, view, actions)
         inline_error(panel, lambda: view.result_error, title="Export failed")
         confirm_block(panel, view, "result", on_confirm=actions.confirm,
@@ -363,11 +360,6 @@ def _result_body(panel: Panel, view: View, actions: Actions) -> None:
          f"Train Again will not reproduce it.", lines=3,
          visible=lambda: got() and view.result.stale_config)
 
-    name_field(panel, "  export as", lambda: view.export_name,
-               actions.set_export_name, enabled=lambda: view.can_export,
-               visible=got)
-    panel.button("Export PLY", actions.export, enabled=lambda: view.can_export,
-                 visible=got)
     path_row(panel, f"  {GLYPHS['ok']} written", lambda: view.result.exported_path,
              visible=lambda: bool(view.result.exported_path))
     metric(panel, "  size", lambda: f"{view.result.exported_mb:,.1f} MB",
@@ -392,49 +384,25 @@ def _result_body(panel: Panel, view: View, actions: Actions) -> None:
          visible=got)
 
 
-# The knobs shown as the section's own summary, in the order a user reads them.
-SUMMARY_KEYS = ("iters", "densify_mode", "sh_degree", "lambda_ssim")
+RUN_SETTINGS = ("preset", "iters")
 
 
 def configuration_section(panel: Panel, view: View, setup: TrainingSetup,
                           actions: Actions, *,
                           show_all: Callable[[], bool],
                           toggle_all: Callable[[bool], None]) -> None:
-    """What the next run will use: the common knobs, then the full grouped table behind one toggle.
+    """Detailed settings for the next run; the main controls sit beside Start Training."""
+    def available() -> bool:
+        return view.trainable and not view.training_live
 
-    The toggle gates visibility because this toolkit cannot open or close a Group programmatically.
-    """
-    def summary() -> str:
-        return section_summary(*(_setting_text(setup, key) for key in SUMMARY_KEYS[:3]))
-
-    with panel.section("CONFIGURATION", label=titled("CONFIGURATION", summary)):
-        note(panel, lambda: ("Applies to the next run." if view.can_configure
-                             else "Locked while a run is training."), lines=2)
-        for key in SUMMARY_KEYS:
-            _summary_row(panel, setup, key)
-        panel.checkbox("  show all parameters", show_all, toggle_all)
-        for group_key, title in GROUPS:
-            settings = group_settings(group_key)
-            if not settings:
-                continue
-            with panel.section(title, label=titled(
-                    title, lambda s=settings: _group_summary(setup, s)),
-                    visible=show_all):
+    panel.checkbox("Advanced training settings", show_all, toggle_all, visible=available)
+    for group_key, title in GROUPS:
+        settings = [s for s in group_settings(group_key) if s.setting_name not in RUN_SETTINGS]
+        if settings:
+            with panel.section(title, label=titled(title, lambda s=settings: _group_summary(setup, s)),
+                               visible=lambda: available() and show_all()):
                 for setting in settings:
                     _setting_widget(panel, view, setup, setting, actions)
-
-
-def _summary_row(panel: Panel, setup: TrainingSetup, key: str) -> None:
-    setting = SETTINGS_MAP.get(key)
-    if setting is None:
-        return
-    panel.text(lambda s=setting: row(f"  {s.caption}",
-                                     s.display(setup.get(s.setting_name))))
-
-
-def _setting_text(setup: TrainingSetup, key: str) -> str:
-    setting = SETTINGS_MAP.get(key)
-    return "" if setting is None else setting.display(setup.get(setting.setting_name))
 
 
 def _group_summary(setup: TrainingSetup, settings: Sequence[Setting]) -> str:
@@ -444,7 +412,7 @@ def _group_summary(setup: TrainingSetup, settings: Sequence[Setting]) -> str:
 
 
 def _setting_widget(panel: Panel, view: View, setup: TrainingSetup,
-                    setting: Setting, actions: Actions) -> None:
+                    setting: Setting, actions: Actions, *, visible: Callable[[], bool] | None = None) -> None:
     """One parameter row, chosen by the setting's kind.
 
     The ``s=setting`` defaults capture by value, since these lambdas outlive the loop that builds them.
@@ -467,16 +435,22 @@ def _setting_widget(panel: Panel, view: View, setup: TrainingSetup,
         note(panel, setting.about, lines=3)
         note(panel, setting.note, lines=2, visible=lambda: bool(setting.note))
         return
-    _caption(panel, setting)
-    note(panel, setting.about, lines=3)
+    binds = {"enabled": editable}
+    if visible is None:
+        _caption(panel, setting)
+        note(panel, setting.about, lines=3)
+        caption = ""
+    else:
+        caption = setting.caption.capitalize()
+        binds["visible"] = visible
     if setting.kind == CHOICE:
-        panel.combo("", setting.choice_labels(),
+        panel.combo(caption, setting.choice_labels(),
                     lambda s=setting: setup.index_of(s.setting_name),
-                    write_index, enabled=editable)
+                    write_index, **binds)
     elif setting.kind == INT:
-        panel.drag_int("", lambda s=setting: int(setup.get(s.setting_name)),
+        panel.drag_int(caption, lambda s=setting: int(setup.get(s.setting_name)),
                        write, minimum=int(setting.minimum), maximum=int(setting.maximum),
-                       speed=setting.speed, enabled=editable)
+                       speed=setting.speed, **binds)
     elif setting.kind == FLOAT:
         panel.drag_float("", lambda s=setting: float(setup.get(s.setting_name)),
                          write, minimum=float(setting.minimum),
@@ -505,7 +479,8 @@ def loss_section(panel: Panel, view: View, *, rows: int = 10) -> None:
             return "no samples"
         return section_summary(f"{history[-1][1]:.5f}", _loss_trend(history))
 
-    with panel.section("LOSS", label=titled("LOSS", summary)):
+    with panel.section("LOSS", label=titled("LOSS", summary),
+                       visible=lambda: not view.hub or bool(view.loss_history)):
         note(panel, "Rolling MSE of a re-render of the SAMPLED camera, every "
                     "--log-every iters. Not a dataset metric.",
              lines=3, visible=lambda: bool(view.loss_history))
@@ -535,10 +510,10 @@ def _loss_trend(history: Sequence[tuple[int, float]]) -> str:
     return f"{delta:+.0f}% over the window"
 
 
-def viewer_section(panel: Panel, controls: CameraControls) -> None:
+def viewer_section(panel: Panel, controls: CameraControls, *, visible=lambda: True) -> None:
     """Camera: what the viewport is looking through."""
     with panel.section("VIEWER", label=titled(
-            "VIEWER", lambda: controls.label().split("/")[-1].strip())):
+            "VIEWER", lambda: controls.label().split("/")[-1].strip()), visible=visible):
         panel.combo("  cameras", controls.sets, controls.set_selection, controls.select_set,
                     visible=lambda: len(controls.sets()) > 1)
         panel.combo("  view", controls.names, controls.selection, controls.select)
@@ -547,9 +522,9 @@ def viewer_section(panel: Panel, controls: CameraControls) -> None:
         panel.text(lambda: row("  field of view", f"{controls.fovy():.0f} deg"))
 
 
-def controls_section(panel: Panel, entries: Sequence[tuple[str, str]]) -> None:
+def controls_section(panel: Panel, entries: Sequence[tuple[str, str]], *, visible=lambda: True) -> None:
     """Key bindings, taken from the InputMap itself (see ``InputMap.describe``)."""
-    with panel.section("CONTROLS"):
+    with panel.section("CONTROLS", visible=visible):
         panel.text(bullets(entries), lines=max(1, len(entries)) + 2)
 
 

@@ -29,6 +29,27 @@ def _write_scene(root, views=VIEWS):
     return write_colmap_scene(root, views)
 
 
+@pytest.mark.parametrize("root, scene, requested, expected", [
+    ("360_v2", "room", None, 2),
+    ("360_v2", "bicycle", None, 4),
+    ("360_v2", "room", 1, 1),
+    ("my_capture", "room", None, 4),
+    ("relocated_dataset", "room", None, 2),
+])
+def test_training_resolution_uses_benchmark_pyramid(tmp_path, root, scene, requested, expected):
+    path = _write_scene(tmp_path / root / scene, [("a.png", 100, 80, 120.0)])
+    if root == "relocated_dataset":
+        np.save(path / "poses_bounds.npy", np.zeros((1, 17)))
+    for factor in (2, 4):
+        directory = path / f"images_{factor}"
+        directory.mkdir()
+        cv2.imwrite(str(directory / "a.png"), np.zeros((80 // factor, 100 // factor, 3), np.uint8))
+    dataset = load_colmap(path, downsample=requested)
+    assert dataset.downsample == expected
+    assert dataset.image_dir.name == ("images" if expected == 1 else f"images_{expected}")
+    assert dataset.images[0].camera.image_size == (100 // expected, 80 // expected)
+
+
 def test_mixed_camera_sizes_load_at_the_most_common_size(tmp_path) -> None:
     scene = _write_scene(tmp_path / "recon")
 

@@ -24,16 +24,36 @@ def _shared(parser: argparse.ArgumentParser, dest: str) -> None:
     SETTINGS_MAP[dest].add_to(parser)
 
 
+class _TrainerParser(argparse.ArgumentParser):
+    def parse_args(self, args: Sequence[str] | None = None,
+                   namespace: argparse.Namespace | None = None) -> argparse.Namespace:
+        """Fill in the chosen preset before argparse applies explicit flags."""
+        namespace = argparse.Namespace() if namespace is None else namespace
+        preset = self.parse_known_args(args, argparse.Namespace(**vars(namespace)))[0].preset
+        for key, value in preset_values(preset).items():
+            vars(namespace).setdefault(key, value)
+        result = super().parse_args(args, namespace)
+        if result.evaluation is None:
+            # A requested report or checkpoint enables only the requested measurements.
+            requested = result.run_report or result.final_test_psnr or result.compute_final_metrics
+            result.evaluation = bool(requested or result.eval_iters or (result.eval_every or 0) > 0
+                                     or result.eval_lpips)
+            if result.eval_every is None and (requested or result.eval_iters):
+                result.eval_every = 0
+        if result.scene is None and not result.hub:
+            result.scene = "datasets/360_v2/bicycle"
+        if result.lens_strength is not None or result.natural_vignetting:
+            result.auto_lens = False
+        return result
+
+
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
-    """Parse with the chosen --preset's settings as defaults, so explicit flags still win."""
-    parser = build_parser()
-    preset = getattr(parser.parse_known_args(argv)[0], PRESET)
-    parser.set_defaults(**preset_values(preset))
-    return parser.parse_args(argv)
+    return build_parser().parse_args(argv)
+
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--scene", type=str, default="datasets/360_v2/bicycle")
+    parser = _TrainerParser()
+    parser.add_argument("--scene", help="scene folder to train or open in the hub")
     _shared(parser, PRESET)
     _shared(parser, "iters")
     _shared(parser, "lr_recipe")
@@ -45,24 +65,26 @@ def build_parser() -> argparse.ArgumentParser:
                          "reaches the final LR. Pass a positive value to pin it "
                          "independently of --iters (e.g. to reproduce a 30k-step "
                          "decay in a short run).")
-    parser.add_argument("--downsample", type=int, default=4,
+    parser.add_argument("--downsample", type=int, default=None,
                     help="downsample factor (1=full res, 2=half, 4=quarter). "
-                         "Uses images_N dir if it exists, otherwise resizes on load.")
+                         "Defaults to 2 for indoor Mip-NeRF 360 scenes and 4 otherwise. "
+                         "Uses images_N if available, otherwise resizes on load.")
     parser.add_argument("--width", type=int, default=None,
                     help="force render width (overrides --downsample)")
     parser.add_argument("--height", type=int, default=None,
                     help="force render height (overrides --downsample)")
-    parser.add_argument("--preview-every", type=int, default=None,
-                    help="preview every N iters (with --evaluation, a preview also renders "
-                         "every camera). Default: once, on the last iteration (follows --iters).")
+    parser.add_argument("--preview-every", type=int, default=0,
+                    help="sample training-view loss and PSNR every N iterations (default: off). "
+                         "With evaluation enabled, previews also render every camera.")
     _shared(parser, "log_every")
     parser.add_argument("--render-all-every", type=int, default=0,
                     help="dump PNGs for ALL cameras every N iters")
     _shared(parser, "evaluation")
+    parser.set_defaults(evaluation=None)  # Distinguish an explicit veto from no switch.
     parser.add_argument("--eval-every", type=int, default=None,
                     help="every N iters, render ALL cameras and compute the honest "
                          "average PSNR (same metric as the final_psnr.json summary). "
-                         "Default: once, on the last iteration (follows --iters); 0 = off. "
+                         "With --evaluation, defaults to the last iteration; 0 = off. "
                          "Writes results to eval_curve.jsonl in the run dir with "
                          "iter, elapsed_s (pure training wall-clock, excluding eval "
                          "time), and avg_psnr_lin/srgb/srgb_masked.")
@@ -75,7 +97,8 @@ def build_parser() -> argparse.ArgumentParser:
                          "every other multiple, and each sweep renders and "
                          "scores the entire held-out set. Default none.")
     parser.add_argument("--eval", dest="eval_holdout", type=int, default=1,
-                    help="1 (default) = on and holdout; 0 = train on all")
+                    help="hold out every Nth camera from training (1, default) or train on all (0). "
+                         "The split is independent of metric collection.")
     parser.add_argument("--eval-holdout-stride", type=int, default=8,
                     help="holdout stride for --eval (3DGS llffhold=8). Test set is "
                          "cameras where index %% stride == 0.")
@@ -102,7 +125,7 @@ def build_parser() -> argparse.ArgumentParser:
                          "splat down to the reset value, so a floor above it prunes the "
                          "entire scene the instant reset fires. 3DGS: prune 0.005 < reset 0.01.")
     parser.add_argument("--t-big-scale", type=float, default=0.1)
-    parser.add_argument("--prune-scale3d", type=float, default=0.1,
+    parser.add_argument("--prune-scale3d", type=float, default=1.0,
                     help="prune splats whose max 3D scale exceeds this * scene_extent "
                          "(gsplat prune_scale3d). Only active after the first opacity reset.")
     _shared(parser, "prune_blend_weight")
@@ -139,7 +162,7 @@ def build_parser() -> argparse.ArgumentParser:
                          "clusters to be spatially coherent. Mask-in-bin_count design (no compaction, "
                          "no slot remap) — every downstream pass is unaware.")
     _shared(parser, "densify_mode")
-    parser.add_argument("--sad-tau-split", type=float, default=StructureConfig.tau_split,
+    parser.add_argument("--sad-tau-split", type=float, default=0.64,
                     help="SAD split_ratio_threshold: split if high_ratio (fraction of views "
                          "with scalar eta>1) exceeds this AND the gradient is high (SADGS 0.8)")
     parser.add_argument("--sad-tau-prune", type=float, default=StructureConfig.tau_prune,
@@ -204,15 +227,12 @@ def build_parser() -> argparse.ArgumentParser:
                     help="when --densify-mode structure_aware: 1 (default) = use SADGS's loss (lambda_l2) "
                          "and per-parameter LRs so we train exactly as they do; 0 = keep our "
                          "own loss/LR defaults and only swap the densification strategy.")
-    parser.add_argument("--sad-lambda-l2", type=float, default=2.0,
+    parser.add_argument("--sad-lambda-l2", type=float, default=6.0,
                     help="SADGS additive L2 loss weight (their opt.lambda_l2). Applied when "
                          "--densify-mode structure_aware and --sad-match-loss-lrs (else --lambda-l2 is used).")
     parser.add_argument("--lambda-l2", type=float, default=LossConfig.l2_weight,
                     help="additive L2 loss weight for non-SAD runs (0 = pure L1(+SSIM))")
-    parser.add_argument("--grad-thresh", type=float, default=0.0005,
-                    help="2D-gradient densification threshold. gsplat uses 0.0002 for "
-                         "vanilla grad and ~0.0008 for absgrad; our accumulator is an "
-                         "abs-sum (absgrad-like), so 0.0008 matches. Lower = more growth.")
+    _shared(parser, "grad_thresh")
     parser.add_argument("--no-viewer", action="store_true", help="disable live viewer stream")
     parser.add_argument("--launch-viewer", action="store_true",
                     help="DEPRECATED / no-op: the live viewer is now in-process "
@@ -223,12 +243,8 @@ def build_parser() -> argparse.ArgumentParser:
                          "button is pressed (or Enter here). Lets you inspect "
                          "the init before training begins. No-op with --no-viewer.")
     parser.add_argument("--hub", action="store_true",
-                    help="Launch the interactive viewer HUB instead of training "
-                         "immediately: bring up the viewer with no dataset, then "
-                         "drag-drop a dataset folder and choose Reconstruct "
-                         "(images-only, via GLOMAP/COLMAP) or Train (a COLMAP "
-                         "dataset) from the UI. CLI training (--scene ...) is "
-                         "unchanged; without --hub the trainer behaves as before.")
+                    help="open the interactive training hub to choose a dataset and preset, "
+                         "train and export a PLY. Add --scene PATH to open a dataset directly.")
     parser.add_argument("--glomap-bin", type=str, default=None,
                     help="Path to a glomap executable (global SfM mapper). Falls "
                          "back to $GLOMAP_PATH, the copy under .recon-tools/, then "
@@ -250,14 +266,7 @@ def build_parser() -> argparse.ArgumentParser:
                          "the budget Windows (DXGI) grants the process; no limit "
                          "where that is unavailable. --max-splats is lowered "
                          "(with a warning) when it would not fit.")
-    parser.add_argument("--image-residency", choices=("gpu", "stream"),
-                    default="stream",
-                    help="where training targets (and SAD structure fields) live: "
-                         "'stream' (default) = host RAM, uploaded inside each "
-                         "iteration's command buffer (bit-identical; ~0.25 ms per step "
-                         "at 1558x1039, about 2%% of a run); 'gpu' = one texture per "
-                         "training camera, plus 8 B/pixel of structure fields with "
-                         "structure-aware densification.")
+    _shared(parser, "image_residency")
     _shared(parser, "adam_moments")
     _shared(parser, "splat_kernel")
     _shared(parser, "splat_profile_power")
@@ -281,9 +290,11 @@ def build_parser() -> argparse.ArgumentParser:
                          "without replacement), batch_size=1. Use for a like-for-like "
                          "PSNR comparison that isolates the renderer from the data order.")
     parser.add_argument("--run-name", type=str, default=None)
-    parser.add_argument("--stereo-init", action="store_true", help="triangulate additional seeds from training views")
+    parser.add_argument("--stereo-init", action=argparse.BooleanOptionalAction, default=True,
+                        help="triangulate additional seeds from training views")
     lens = parser.add_mutually_exclusive_group()
-    lens.add_argument("--auto-lens", action="store_true", help="fit lens falloff from shared training landmarks")
+    lens.add_argument("--auto-lens", action=argparse.BooleanOptionalAction, default=True,
+                      help="fit lens falloff from shared training landmarks by default")
     lens.add_argument("--lens-strength", type=parse_strength, default=None,
                         help="strength of cos-fourth lens falloff: 0 = flat, 1 = natural; overrides --natural-vignetting")
     parser.add_argument("--natural-vignetting", action="store_true", help="render the lens cos-fourth response in sRGB")
@@ -414,6 +425,8 @@ def build_parser() -> argparse.ArgumentParser:
                          "Lightweight: renders just the test cams, no full "
                          "per-camera PNG dump / PLY. Does not affect train_wall_s.")
     parser.add_argument("--compute-final-metrics", action="store_true", default=False)
+    parser.add_argument("--save-ply", action="store_true",
+                        help="write output.ply after training, even with --no-evaluation")
     parser.add_argument("--run-report", action="store_true", default=False,
                     help="After the timed loop, write run_report.json: PER-VIEW "
                          "held-out PSNR/SSIM (not just the mean), the timing "
@@ -424,7 +437,7 @@ def build_parser() -> argparse.ArgumentParser:
                          "test_psnr.json keeps its schema. Renders only the "
                          "held-out cams (no .ply, no full camera dump), and runs "
                          "after train_wall_s is frozen, so it cannot move a "
-                         "training number. Needs --evaluation.")
+                         "training number.")
     parser.add_argument("--save-test-renders", action="store_true", default=False,
                     help="With --run-report, also write each held-out render to "
                          "<run>/test_renders/cam_NNNN.png. Lets LPIPS (and "
@@ -438,7 +451,7 @@ def build_parser() -> argparse.ArgumentParser:
                          "frame), so it reports per-frame latency rather than "
                          "pipelined throughput.")
     parser.add_argument("--eval-lpips", action="store_true", default=False,
-                    help="Also compute LPIPS (AlexNet) on the held-out split — "
+                    help="Also compute VGG LPIPS on the held-out split — "
                          "in the --eval-every/--eval-iters sweeps and in "
                          "--run-report. Needs torch + the lpips package; when "
                          "they are missing the column is null (never silently "
@@ -447,15 +460,8 @@ def build_parser() -> argparse.ArgumentParser:
                          "timed, ~50 ms/view, and it lands inside the "
                          "already-excluded observation window.")
     parser.add_argument("--write-ground-truths",
-                    action=argparse.BooleanOptionalAction, default=True,
-                    help="Dump one cams/cam_NN/gt.png per camera at startup (on "
-                         "by default — it is the reference the cams/iter_*.png "
-                         "renders are read against). Pass "
-                         "--no-write-ground-truths for a sweep: the GT is "
-                         "identical across every run of a scene, so writing it "
-                         "per run costs hundreds of MB per cell for bytes that "
-                         "are already on disk. Only skip it if something else "
-                         "owns a copy.")
+                    action=argparse.BooleanOptionalAction, default=False,
+                    help="write a reference PNG for each camera at startup (default: off).")
     parser.add_argument("--stage-timing-every", type=int, default=0,
                     help="SAMPLED per-stage GPU timing: install the timestamp "
                          "timer on one iteration in N and write "

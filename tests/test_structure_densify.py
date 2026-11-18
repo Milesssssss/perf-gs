@@ -261,6 +261,25 @@ def test_overbudget_drops_children_without_implicit_percentiles(
 
 
 @pytest.mark.parametrize("backend", BACKENDS)
+@pytest.mark.parametrize("sh_degree", [0, 3])
+@pytest.mark.parametrize("mode", ["structure", "simple"])
+def test_full_budget_preserves_unsplittable_parent(backend, sh_degree, mode) -> None:
+    p = _setup(backend, max_splats=1, sh_degree=sh_degree)
+    _one_gaussian(p, scale=0.3, opacity=0.7)
+    _set_eta(p, 0, n_total=10, n_high=10, eta_max=(64, 64, 64))
+    before = _read_gaussians(p, 1).copy()
+    if mode == "structure":
+        stats = p.structure_densifier.densify(StructureConfig(dense_scale=0, opacity_cap=0))
+        assert stats["overbudget"]
+    else:
+        p.simple_densifier.run(DensifyConfig(), grad_thresh=0, scale_thresh=0,
+                               allow_scale_prune=False, carry_eta=True)
+        assert _read_eta(p, 1)["n_total"][0] == 10
+    assert _count(p) == 1
+    np.testing.assert_array_equal(_read_gaussians(p, 1), before)
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
 def test_clones_count_toward_requested_tail_growth(backend, capsys) -> None:
     p = _setup(backend, max_splats=1)
     _one_gaussian(p)

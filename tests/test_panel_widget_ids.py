@@ -53,7 +53,7 @@ def _build_real_panel(device) -> Panel:
     actions = _AnyAction()
     sections_module.header(panel, view)
     sections_module.dataset_section(panel, view, actions)
-    sections_module.training_section(panel, view, actions)
+    sections_module.training_section(panel, view, actions, session.setup)
     sections_module.result_section(panel, view, actions)
     sections_module.configuration_section(
         panel, view, session.setup, actions,

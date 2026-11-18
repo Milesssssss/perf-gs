@@ -22,6 +22,25 @@ def _lens_metadata(comments):
     return {"natural_vignetting": values[0]} if values else {}
 
 
+_MIP_COMMENT = "trainer mip_kernel_size_v1 "
+
+
+def _mip_metadata(comments, verts, opacity_logits, rest_floats):
+    headers = [c[len(_MIP_COMMENT):].split() for c in comments if c.startswith(_MIP_COMMENT)]
+    if not headers:
+        return {}
+    if len(headers) != 1 or len(headers[0]) != 2 or "filter_3D" not in verts.dtype.names:
+        raise ValueError("Invalid Gaussian PLY Mip metadata")
+    kernel, degree = float(headers[0][0]), int(headers[0][1])
+    footprint = np.asarray(verts["filter_3D"], dtype=np.float32)
+    if (not np.isfinite(kernel) or kernel < 0 or degree < 0 or degree > 3
+            or ((degree + 1)**2 - 1) * 3 > rest_floats or not np.all(np.isfinite(footprint))
+            or np.any(footprint < 0)):
+        raise ValueError("Invalid Gaussian PLY Mip filter, kernel size, or active SH degree")
+    return dict(filter_3d=footprint, mip_kernel_size=kernel, active_sh_degree=degree,
+                opacity_logits=opacity_logits)
+
+
 _PLY_REQUIRED_FIELDS = (
     "x", "y", "z",
     "scale_0", "scale_1", "scale_2",
@@ -85,6 +104,7 @@ def load_ply(path: str | Path) -> dict[str, np.ndarray | float | None]:
 
     return {
         **_lens_metadata(ply.comments),
+        **_mip_metadata(ply.comments, verts, opacity_logit, len(rest_names)),
         "means": means,
         "log_scales": log_scales,
         "rot_quats": rot_quats,
@@ -95,58 +115,47 @@ def load_ply(path: str | Path) -> dict[str, np.ndarray | float | None]:
 
 
 def write_gaussian_ply(gaussians: np.ndarray, path: str | Path,
-                       features_rest: np.ndarray | None = None, *, natural_vignetting: float = 0.0) -> None:
-    mean = gaussians["mean"]
-    log_scale = gaussians["log_scale"]
-    rot_quat = gaussians["rot_quat"]
-    opacity_logit = gaussians["opacity"].astype(np.float32)
-    f_dc = gaussians["sh0"].astype(np.float32)
-
+                       features_rest: np.ndarray | None = None, *, natural_vignetting: float = 0.0,
+                       filter_3d: np.ndarray | None = None, mip_kernel_size: float = 0.1,
+                       active_sh_degree: int = 0) -> None:
     n = len(gaussians)
-    f_rest = None
-    if features_rest is not None and features_rest.size > 0:
-        rest_floats = features_rest.shape[1]
-        # coeff-major [coeff*3 + channel] -> channel-major [channel, coeff].
-        f_rest = (features_rest.reshape(n, rest_floats // 3, 3)
-                  .transpose(0, 2, 1).reshape(n, rest_floats).astype(np.float32))
-
+    rest_floats = features_rest.shape[1] if features_rest is not None and features_rest.size else 0
     dtype = [
         ("x", "f4"), ("y", "f4"), ("z", "f4"),
         ("nx", "f4"), ("ny", "f4"), ("nz", "f4"),
         ("f_dc_0", "f4"), ("f_dc_1", "f4"), ("f_dc_2", "f4"),
     ]
-    if f_rest is not None:
-        dtype += [(f"f_rest_{i}", "f4") for i in range(f_rest.shape[1])]
+    dtype += [(f"f_rest_{i}", "f4") for i in range(rest_floats)]
     dtype += [
         ("opacity", "f4"),
         ("scale_0", "f4"), ("scale_1", "f4"), ("scale_2", "f4"),
         ("rot_0", "f4"), ("rot_1", "f4"), ("rot_2", "f4"), ("rot_3", "f4"),
     ]
-    records = np.empty(len(gaussians), dtype=dtype)
-    records["x"] = mean[:, 0]
-    records["y"] = mean[:, 1]
-    records["z"] = mean[:, 2]
-    records["nx"] = 0.0
-    records["ny"] = 0.0
-    records["nz"] = 0.0
-    records["f_dc_0"] = f_dc[:, 0]
-    records["f_dc_1"] = f_dc[:, 1]
-    records["f_dc_2"] = f_dc[:, 2]
-    if f_rest is not None:
-        for i in range(f_rest.shape[1]):
-            records[f"f_rest_{i}"] = f_rest[:, i]
-    records["opacity"] = opacity_logit
-    records["scale_0"] = log_scale[:, 0]
-    records["scale_1"] = log_scale[:, 1]
-    records["scale_2"] = log_scale[:, 2]
-    records["rot_0"] = rot_quat[:, 0]
-    records["rot_1"] = rot_quat[:, 1]
-    records["rot_2"] = rot_quat[:, 2]
-    records["rot_3"] = rot_quat[:, 3]
+    if filter_3d is not None:
+        dtype.append(("filter_3D", "f4"))
+    # The vertex consists entirely of packed float32 columns in the order above.
+    records = np.empty(n, dtype=dtype)
+    fields = records.view(np.float32).reshape(n, len(dtype))
+    fields[:, :3] = gaussians["mean"]
+    fields[:, 3:6] = 0.0  # unused normals
+    fields[:, 6:9] = gaussians["sh0"]
+    opacity = 9 + rest_floats
+    if rest_floats:
+        # Trainer SH coefficients are coefficient-major. PLY stores each channel contiguously.
+        coefficients = rest_floats // 3
+        fields[:, 9:opacity].reshape(n, 3, coefficients)[:] = (
+            features_rest.reshape(n, coefficients, 3).transpose(0, 2, 1))
+    records["opacity"] = gaussians["opacity"]
+    fields[:, opacity + 1:opacity + 4] = gaussians["log_scale"]
+    fields[:, opacity + 4:opacity + 8] = gaussians["rot_quat"]
+    if filter_3d is not None:
+        records["filter_3D"] = filter_3d
 
     elem = PlyElement.describe(records, "vertex")
     strength = parse_strength(natural_vignetting)
     comments = []
+    if filter_3d is not None:
+        comments.append(f"{_MIP_COMMENT}{mip_kernel_size!r} {active_sh_degree}")
     if strength == 1:
         comments.append(_VIGNETTING_COMMENT)
     elif strength:

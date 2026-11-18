@@ -52,8 +52,7 @@ def run_post_training(
 
     metrics = args.compute_final_metrics and args.evaluation
     if args.compute_final_metrics and not args.evaluation:
-        print("[post-training] --no-evaluation: skipping the final metrics pass "
-              "and the .ply export.")
+        print("[post-training] --no-evaluation: skipping final metrics.")
 
 
     if args.psnr_curve:
@@ -65,7 +64,6 @@ def run_post_training(
         checkpoint()
         pipeline.mip_filter.compute()
 
-    print("computing final per-camera metrics...")
     per_cam: list[dict] = []
     total_mse_lin = 0.0
     total_mse_srgb = 0.0
@@ -73,6 +71,7 @@ def run_post_training(
     n_mask_used = 0
 
     if metrics:
+        print("computing final per-camera metrics...")
         progress("rendering every camera", 0.25)
         render_all_cameras(pipeline, scene, args.iters, cams_dir,
                            checkpoint=checkpoint)
@@ -156,12 +155,6 @@ def run_post_training(
         }
         (run_dir / "final_psnr.json").write_text(json.dumps(summary, indent=2))
 
-        ply_path = run_dir / "output.ply"
-        progress("writing the .ply", 0.92)
-        checkpoint()
-        save_ply(pipeline, ply_path)
-
-        print(f"done in {time.time() - t_start:.1f}s")
         if args.eval_holdout:
             print(f"TEST PSNR sRGB (paper):  {summary['psnr_srgb']:6.2f} dB  "
                 f"<- mean of per-image dB over {summary['n_test_cams']} held-out views "
@@ -179,5 +172,12 @@ def run_post_training(
         print(f"PSNR linear:             {summary['psnr_linear']:6.2f} dB  (test split, mean per-image)")
         print(f"  [legacy dB-of-mean-MSE, all cams: {summary['all_psnr_srgb_db_of_mean_mse']:.2f} dB — NOT the paper metric]")
         print(f"final gaussian count:    {summary['final_n_gaussians']}")
-        print(f"saved ply:               {ply_path}")
         print(f"run dir: {run_dir}")
+
+    if metrics or args.save_ply:
+        ply_path = run_dir / "output.ply"
+        progress("writing the .ply", 0.92)
+        checkpoint()
+        save_ply(pipeline, ply_path)
+        print(f"saved ply:               {ply_path}")
+        print(f"done in {time.time() - t_start:.1f}s")

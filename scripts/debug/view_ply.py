@@ -43,13 +43,14 @@ def main() -> None:
     pipeline = TrainingPipeline(device=device, width=args.width, height=args.height,
                         max_splats=max(args.max_splats, n),
                         appearance_config=AppearanceConfig(sh_degree=sh_degree),
-                        initial_state=data)
+                        initial_state=data, viewer_only=True)
     if sh_degree > 0:
-        pipeline.set_active_sh_degree(sh_degree)
+        pipeline.set_active_sh_degree(data.get("active_sh_degree", sh_degree))
 
     viewer = Viewer(device, width=args.width, height=args.height,
                     max_splats=max(args.max_splats, n), hot_reload=True,
-                    sh_degree=sh_degree)
+                    sh_degree=sh_degree, mip_enabled=pipeline.raster_config.mip_enabled,
+                    mip_kernel_size=pipeline.raster_config.kernel_size)
     viewer.update_gaussians(pipeline)
     # Static view: suppress the panel's "press Start Training" hint.
     viewer.set_training_active(True)

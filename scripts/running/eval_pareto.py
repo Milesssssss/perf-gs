@@ -13,13 +13,14 @@ import subprocess
 import sys
 
 from eval_sweep import REPO, train_run
+from paper_suite.config import REFERENCE_TRAINING_ARGS
 
-# README protocol at SH0, with SSIM/LPIPS in the run report.
-COMMON = ["--sh-degree", "0", "--eval-every", "0", "--preview-every", "0",
+# SH0 benchmark protocol in docs/benchmarks.md, with SSIM/LPIPS in the run report.
+COMMON = [*REFERENCE_TRAINING_ARGS, "--sh-degree", "0", "--eval-every", "0", "--preview-every", "0",
           "--no-write-ground-truths", "--run-report", "--eval-lpips"]
 
 BF16 = ["--adam-moments", "bf16"]
-# The default already prunes once at the last densify step; these prune from earlier on.
+# The reference prunes once at the last densify step; these prune earlier.
 PRUNE = ["--prune-blend-from", "1000"]
 PRUNE_EARLY = ["--prune-blend-weight", "0.3", "--prune-blend-from", "500"]
 NO_PRUNE = ["--prune-blend-weight", "0"]

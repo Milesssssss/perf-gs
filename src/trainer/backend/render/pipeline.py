@@ -30,7 +30,7 @@ from trainer.backend.render.mip_filter import MipFilter
 from trainer.backend.render.rasterizer import Rasterizer
 from trainer.backend.render.stbn_mask import StbnMask
 from trainer.backend.render.targets import TargetImages
-from trainer.common.sh import sh_rest_coeffs
+from trainer.common.sh import sh_degree_from_rest_floats, sh_rest_coeffs
 from trainer.config.config import (
     AdamLRs,
     AppearanceConfig,
@@ -110,12 +110,17 @@ class TrainingPipeline:
         self.viewer_only = viewer_only
         self.shared_data_module = _module_for_reflection(device, self.slang_session)
 
+        if raster_config is None and initial_state and "mip_kernel_size" in initial_state:
+            raster_config = RasterConfig(mip_enabled=True, kernel_size=initial_state["mip_kernel_size"])
         raster_config = raster_config or RasterConfig()
         if viewer_only and raster_config.cluster_cull:
             raster_config = replace(raster_config, cluster_cull=False)
         self.raster_config = raster_config
         self.loss_config = loss_config or LossConfig()
         self.regularization_config = regularization_config or RegularizationConfig()
+        rest = (initial_state or {}).get("features_rest")
+        if appearance_config is None and rest is not None and "active_sh_degree" in initial_state:
+            appearance_config = AppearanceConfig(sh_degree=sh_degree_from_rest_floats(rest.shape[1]))
         self.appearance_config = appearance_config or AppearanceConfig()
         self.stbn_config = stbn_config or StbnConfig()
         self.use_persplat_backward = use_persplat_backward
@@ -134,8 +139,9 @@ class TrainingPipeline:
 
         if initial_state is not None:
             self.load_snapshot(**initial_state)
-            self.optimizer.zero_grad()
-            self.densify_stats.clear()
+            if not self.viewer_only:
+                self.optimizer.zero_grad()
+                self.densify_stats.clear()
         if self.structure_densifier is not None:
             self.structure_densifier.clear_scores()
 
@@ -246,23 +252,34 @@ class TrainingPipeline:
     def load_snapshot(self, means: np.ndarray, log_scales: np.ndarray,
                       rot_quats: np.ndarray, opacities: np.ndarray,
                       color_logits: np.ndarray, features_rest: np.ndarray | None = None,
-                      natural_vignetting: float = 0.0) -> None:
-        """Replace every primitive and reset the optimizer state it invalidates."""
+                      natural_vignetting: float = 0.0, filter_3d: np.ndarray | None = None,
+                      mip_kernel_size: float | None = None, active_sh_degree: int | None = None,
+                      opacity_logits: np.ndarray | None = None, *, reset_optimizer: bool = True) -> None:
+        """Replace all primitives. Offline rendering can skip resetting unused optimizer buffers."""
         self.rasterizer.natural_vignetting = natural_vignetting
-        self.set_gaussians(means, log_scales, rot_quats, opacities, color_logits)
-        self.optimizer.clear_state()
-        self.optimizer.reset()
+        if filter_3d is not None:
+            self.buffers.primitive.filter_3d.storage.copy_from_numpy(np.ascontiguousarray(filter_3d))
+        if active_sh_degree is not None:
+            self.set_active_sh_degree(active_sh_degree)
+        self.set_gaussians(means, log_scales, rot_quats, opacities, color_logits, opacity_logits)
+        if not self.viewer_only and reset_optimizer:
+            self.optimizer.clear_state()
+            self.optimizer.reset()
         if self.buffers.sh_enabled:
-            self.primitives.clear_features_rest()
+            if (not self.viewer_only and reset_optimizer) or features_rest is None:
+                self.primitives.clear_features_rest()
             self.primitives.write_features_rest(features_rest)
 
     def set_gaussians(self, means: np.ndarray, log_scales: np.ndarray,
                       rot_quats: np.ndarray, opacities: np.ndarray,
-                      color_logits: np.ndarray) -> None:
+                      color_logits: np.ndarray, opacity_logits: np.ndarray | None = None) -> None:
         """Upload primitives without touching optimizer state (valid on the viewer)."""
-        self.primitives.write(gaussian_records(
+        records = gaussian_records(
             self.primitives.dtype, means=means, log_scales=log_scales,
-            rot_quats=rot_quats, opacities=opacities, color_logits=color_logits))
+            rot_quats=rot_quats, opacities=opacities, color_logits=color_logits)
+        if opacity_logits is not None:
+            records["opacity"] = opacity_logits
+        self.primitives.write(records)
 
     def resize(self, max_splats: int, max_sort_pairs: int | None = None) -> None:
         """Re-allocate a render-only pipeline for ``max_splats``; contents are lost."""

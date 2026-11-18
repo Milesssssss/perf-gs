@@ -77,7 +77,7 @@ void splitAndClone(
     RWStructuredBuffer<Gaussian3D> gaussians,
     RWStructuredBuffer<AdamState> adam_state,
     RWStructuredBuffer<uint> num_gaussians_counter,
-    StructuredBuffer<uint> action,
+    RWStructuredBuffer<uint> action,
     // Pre-dispatch count snapshot (snapshotCount), so bumping the counter can't race the bounds check.
     StructuredBuffer<uint> pre_count_buf,
     uniform uint max_splats)
@@ -99,11 +99,13 @@ void splitAndClone(
 
         uint tail;
         InterlockedAdd(num_gaussians_counter[0], 1u, tail);
-        if (tail < max_splats)
+        if (tail >= max_splats)
         {
-            gaussians[tail] = c2;
-            adam_state[tail] = _zero_adam();
+            action[i] = ACTION_KEEP;
+            return;
         }
+        gaussians[tail] = c2;
+        adam_state[tail] = _zero_adam();
         gaussians[i] = c1;
         adam_state[i] = _zero_adam();
     }
@@ -129,7 +131,7 @@ void splitAndCloneSH(
     RWStructuredBuffer<Gaussian3D> gaussians,
     RWStructuredBuffer<AdamState> adam_state,
     RWStructuredBuffer<uint> num_gaussians_counter,
-    StructuredBuffer<uint> action,
+    RWStructuredBuffer<uint> action,
     StructuredBuffer<uint> pre_count_buf,
     RWStructuredBuffer<uint> features_rest,
     RWStructuredBuffer<uint> adam_rest,
@@ -152,12 +154,14 @@ void splitAndCloneSH(
 
         uint tail;
         InterlockedAdd(num_gaussians_counter[0], 1u, tail);
-        if (tail < max_splats)
+        if (tail >= max_splats)
         {
-            gaussians[tail] = c2;
-            adam_state[tail] = _zero_adam();
-            shInheritRest(tail, i, rest_floats, max_splats, features_rest, adam_rest);
+            action[i] = ACTION_KEEP;
+            return;
         }
+        gaussians[tail] = c2;
+        adam_state[tail] = _zero_adam();
+        shInheritRest(tail, i, rest_floats, max_splats, features_rest, adam_rest);
         // Child-1 overwrites the parent slot: keep its features_rest, fresh Adam.
         gaussians[i] = c1;
         adam_state[i] = _zero_adam();

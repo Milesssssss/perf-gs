@@ -336,7 +336,7 @@ def build_report(
         "scene": {
             "width": int(scene_context.width),
             "height": int(scene_context.height),
-            "downsample": int(args.downsample),
+            "downsample": scene_context.colmapScene.downsample,
             "n_cams": int(scene_context.camera_count),
             "n_train": len(scene_context.train_indices),
             "n_test": len(scene_context.test_indices),

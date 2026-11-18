@@ -47,10 +47,7 @@ def pack_features_rest(features: np.ndarray) -> np.ndarray:
 
 def unpack_features_rest(packed: np.ndarray, n: int, rest_floats: int) -> np.ndarray:
     """Inverse of :func:`pack_features_rest`."""
-    words = np.ascontiguousarray(packed, dtype=np.uint32).reshape(n, sh_feature_uints(rest_floats))
-    lo = (words & 0xFFFF).astype(np.uint16).view(np.float16).astype(np.float32)
-    hi = (words >> 16).astype(np.uint16).view(np.float16).astype(np.float32)
-    out = np.empty((n, words.shape[1] * 2), np.float32)
-    out[:, 0::2] = lo
-    out[:, 1::2] = hi
-    return out[:, :rest_floats]
+    # Each word stores the low half first. The last half can be padding.
+    words = np.ascontiguousarray(packed, dtype="<u4")
+    halves = words.view("<f2").reshape(n, 2 * sh_feature_uints(rest_floats))
+    return halves[:, :rest_floats].astype(np.float32)

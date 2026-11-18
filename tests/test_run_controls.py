@@ -104,6 +104,18 @@ PASSES = ("camera_dump", "test_psnr", "eval_sweep", "test_report", "render_fps",
           "final_metrics")
 
 
+def test_save_ply_without_scoring(tmp_path, monkeypatch):
+    saved = []
+    monkeypatch.setattr(post_training, "save_ply", lambda pipeline, path: saved.append(path))
+    post_training.run_post_training(
+        pipeline=None, scene=None,
+        args=SimpleNamespace(profile_run=False, compute_final_metrics=False, evaluation=False,
+                             save_ply=True, psnr_curve=False, mip_splatting=True),
+        run_dir=tmp_path, cams_dir=tmp_path, targets_srgb=[], targets_linear=None,
+        test_indices=[], stride=8, n_cams=0, train_wall_s=0, completed_iters=3, t_start=time.time())
+    assert saved == [tmp_path / "output.ply"]
+
+
 @pytest.mark.parametrize("kind", PASSES)
 @pytest.mark.parametrize("stop_after", [1, 3])
 def test_stop_interrupts_each_camera_pass_without_publishing_partial_scores(
@@ -256,7 +268,7 @@ def _application(tmp_path, viewer, pipeline, events):
     app.runtime = SimpleNamespace(
         pipeline=pipeline, viewer=app.viewer,
         profiler=SimpleNamespace(close=lambda: events.append("profiler closed")),
-        artifacts=SimpleNamespace(close_all=lambda: events.append("artifacts closed")))
+        artifacts=SimpleNamespace(log_json=io.StringIO(), close_all=lambda: events.append("artifacts closed")))
     result = TrainingResult(iterations=3, wall_time_seconds=1.0,
                             psnr_curve=[], started_at=time.time())
     app.build_training_loop = lambda: SimpleNamespace(launch_training_loop=lambda: result)
@@ -276,6 +288,16 @@ def test_final_psnr_and_run_report_use_the_viewer_checkpoint(want_report, tmp_pa
     assert pipeline.rendered == [0]
     assert not (tmp_path / "test_psnr.json").exists()
     assert not (tmp_path / "run_report.json").exists()
+
+
+def test_final_psnr_separates_training_and_heldout_sort_overflows(tmp_path) -> None:
+    viewer, pipeline = _viewer(), _Pipeline()
+    app = _application(tmp_path, viewer, pipeline, [])
+    app._memory_summary = {"sort_overflows": 2}
+    pipeline.buffers.sort.stats.to_numpy = lambda: np.array([9, 3], dtype=np.uint32)
+    app._write_final_test_psnr(app.build_training_loop().launch_training_loop())
+    report = json.loads((tmp_path / "test_psnr.json").read_text())
+    assert (report["sort_overflows"], report["heldout_sort_overflows"]) == (2, 1)
 
 
 def test_stopping_final_evaluation_retains_the_pipeline_and_closes_resources(

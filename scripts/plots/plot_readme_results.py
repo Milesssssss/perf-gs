@@ -1,6 +1,6 @@
 # Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-"""Regenerate the README's Results figures and tables from the benchmark runs (missing runs are left blank).
+"""Regenerate the figures and tables in docs/benchmarks.md from the benchmark runs (missing runs are left blank).
 
 To regenerate only the PSNR and training-time figures from the two published CSVs:
     python scripts/plots/plot_readme_results.py --overview-only
@@ -265,7 +265,7 @@ def plot_scene_bars(grid: Grid, field: str, ylabel: str, title: str, fmt: str, o
             row.append((f"{name} average", DATASETS[name]))
         groups.append(row)
     slots = max(len(row) for row in groups)
-    # Sized so the text stays legible when the README scales the figure to its width.
+    # Keep the text legible when the documentation scales the figure to its width.
     with plt.rc_context({"font.size": 13}):
         fig, axes = plt.subplots(len(rows), 1, figsize=(12, 10), dpi=130, sharey=True,
                                  layout="constrained")

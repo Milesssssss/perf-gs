@@ -232,6 +232,8 @@ class TrainingApplication:
             return
         
         self._memory_summary = self._report_memory()
+        self._training_runtime.artifacts.log_json.write(
+            json.dumps({"event": "training_memory", **self._memory_summary}) + "\n")
 
         viewer = self._training_runtime.viewer
         pipeline = self._training_runtime.pipeline
@@ -239,11 +241,9 @@ class TrainingApplication:
         try:
             with viewer.unthrottled():
                 viewer.checkpoint()
-                self._publish_finalize("held-out test PSNR", 0.05)
                 self._write_final_test_psnr(result)
 
                 viewer.checkpoint()
-                self._publish_finalize("final metrics", 0.15)
                 run_post_training(
                     progress=self._publish_finalize,
                     checkpoint=viewer.checkpoint,
@@ -326,8 +326,7 @@ class TrainingApplication:
             height=scene.height,
             use_alpha=self.args.w_alpha > 0,
         )
-        # The per-cam GT is the reference for cams/ renders; sweeps caching it per scene opt out.
-        if getattr(self.args, "write_ground_truths", True):
+        if self.args.write_ground_truths:
             self.targets.write_ground_truths(self.paths.cameras)
 
     def _create_device(self) -> None:
@@ -568,6 +567,7 @@ class TrainingApplication:
             "cli_args": dict(vars(self.args)),
             "resolved": {
                 "densify_mode": resolved.densify_mode.value,
+                "downsample": sceneContext.colmapScene.downsample,
                 "width": sceneContext.width,
                 "height": sceneContext.height,
                 "n_cams": sceneContext.camera_count,
@@ -594,6 +594,7 @@ class TrainingApplication:
                 or not (self.args.final_test_psnr or want_report)):
             return
 
+        self._publish_finalize("Scoring held-out views", 0.05)
         sceneContext = self._sceneContext
         # One render pass serves both files: the mean of the per-view metrics is the paper metric.
         per_view: list[dict] = []
@@ -621,6 +622,8 @@ class TrainingApplication:
 
         self._training_runtime.viewer.checkpoint()
         active_s = max(0.0, result.wall_time_seconds - result.observation_seconds)
+        _, overflows = self._pipeline.buffers.sort.stats.to_numpy().view(np.uint32)
+        self._memory_summary["heldout_sort_overflows"] = int(overflows) - self._memory_summary["sort_overflows"]
 
         if self.args.final_test_psnr:
             (self.paths.root / "test_psnr.json").write_text(json.dumps({
@@ -663,6 +666,7 @@ class TrainingApplication:
                 },
                 process_started_at=_PROCESS_STARTED_AT,
             )
+            report["memory"].update(self._memory_summary)
             if result.stage_timing is not None:
                 report["stage_timing"] = result.stage_timing.summary()
             path = run_report_module.write_run_report(report, self.paths.root)

@@ -10,9 +10,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from trainer.config.config import (
-    AppearanceConfig,
     CompositorConfig,
-    LossConfig,
     ScheduleConfig,
     ShaderSpecialization,
     StbnConfig,
@@ -108,35 +106,29 @@ class Setting:
 PRESET = "preset"
 # Each preset's settings; explicit flags (or later panel edits) still override them.
 PRESETS: dict[str, dict[str, Any]] = {
-    "ultrafast": {"adam_moments": "bf16", "prune_blend_weight": 0.3, "prune_blend_from": 500,
-                  "stbn_pixel_fraction": 0.5, "splat_kernel": SplatKernel.OPAQUE_CORE.value,
-                  "splat_profile_power": 3.0, "splat_profile_onset": 2.0},
-    "perf": {"adam_moments": "bf16", "prune_blend_from": 1000},
+    "ultrafast": {"max_splats": 1_850_000, "sh_band_interval": 500,
+                  "stbn_pixel_fraction": 0.25, "image_residency": "gpu",
+                  "densify_to": 1600, "grad_thresh": 0.00060,
+                  "prune_blend_from": 650, "prune_blend_weight": 0.25},
     "balanced": {},
-    "quality": {"lr_recipe": LearningRateRecipe.QUALITY.value},
+    "quality": {"max_splats": 5_600_000, "sh_degree": 3},
 }
 
 
 SETTINGS: tuple[Setting, ...] = (
     Setting(PRESET, "preset", "perf", str, default="balanced", choices=tuple(PRESETS),
-            about="ultrafast: every speed knob, 22-36% faster for -0.3 to -0.8 dB. perf: 8-21% "
-                  "faster for under 0.1 dB. quality: up to +0.3 dB for 6-12% more time.",
-            help="bundle of settings for the speed/quality trade-off: 'ultrafast' = "
-                 "--adam-moments bf16 --prune-blend-weight 0.3 --prune-blend-from 500 "
-                 "--stbn-pixel-fraction 0.5 --splat-kernel opaque_core "
-                 "--splat-profile-power 3 --splat-profile-onset 2, 'perf' = "
-                 "--adam-moments bf16 --prune-blend-from 1000, 'quality' = "
-                 "--lr-recipe quality, 'balanced' = the defaults. Explicit flags "
-                 "override the preset."),
+            about="Ultrafast samples fewer gradients. Balanced and quality use every pixel. "
+                  "Quality fits a larger model with more view-dependent color coefficients.",
+            help="training speed and detail: ultrafast, balanced (default), or quality. "
+                 "Explicit flags override preset settings."),
     # The mean-LR decay horizon is deliberately not a setting: it follows --iters.
     Setting("iters", "iterations", "schedule", int, default=3000,
             about="Training steps. More steps reach higher quality but take longer.",
             minimum=100, maximum=200_000, speed=25,
             note="the LR decay horizon follows this"),
     Setting("lr_recipe", "learning-rate recipe", "schedule", str,
-            about="quality: scale and rotation LRs start 3x higher and decay to 0.5x, "
-                  "opacity LR 0.7x. Up to +0.3 dB for 6-12% more training time.",
-            default=LearningRateRecipe.DEFAULT.value,
+            about="The short recipe cools geometry and appearance updates toward the end of training.",
+            default=LearningRateRecipe.SHORT.value,
             choices=tuple(r.value for r in LearningRateRecipe),
             help="per-parameter learning-rate plan. 'quality' starts the scale and "
                  "rotation LRs 3x higher, decays them log-linearly to 0.5x by the "
@@ -153,7 +145,10 @@ SETTINGS: tuple[Setting, ...] = (
                  "'structure_aware' = SAD-GS anisotropic grid-split "
                  "(arXiv 2604.28016) with an interleaved AbsGS gradient filler on "
                  "the non-structure densify ticks."),
-    Setting("densify_from", "first densify iter", "densify", int, default=0,
+    Setting("grad_thresh", "gradient threshold", "densify", float, default=0.00058,
+            minimum=0.0, maximum=0.05, speed=0.00001, fmt="%.6f",
+            about="Minimum accumulated 2D gradient for clone/split densification. Lower values grow more splats."),
+    Setting("densify_from", "first densify iter", "densify", int, default=100,
             about="First iteration that adds or removes splats.",
             minimum=0, maximum=200_000, speed=25),
     Setting("densify_to", "last densify iter", "densify", int, default=1900,
@@ -169,11 +164,11 @@ SETTINGS: tuple[Setting, ...] = (
             help="opacity-reset interval. Big-scale prune is disabled until after "
                  "the first reset.",
             minimum=0, maximum=200_000, speed=25, note="0 = never reset"),
-    Setting("max_splats", "splat capacity", "densify", int, default=7_000_000,
+    Setting("max_splats", "splat capacity", "densify", int, default=2_600_000,
             about="Most splats the model may grow to. GPU memory for this many is "
                   "reserved up front, and it is lowered if it does not fit.",
             minimum=100_000, maximum=100_000_000, speed=50_000),
-    Setting("lambda_ssim", "SSIM weight", "loss", float, default=LossConfig.ssim_weight,
+    Setting("lambda_ssim", "SSIM weight", "loss", float, default=0.3,
             about="Weight of the structural-similarity (SSIM) term in the loss; the "
                   "rest is per-pixel error.",
             help="SSIM loss weight (3DGS default 0.2); 0 = pure L2",
@@ -189,12 +184,12 @@ SETTINGS: tuple[Setting, ...] = (
                  "0 = off (no samples, empty graph).",
             minimum=0, maximum=10_000, speed=10, note="0 = off"),
 
-    Setting("sh_degree", "SH degree", "appearance", int, default=AppearanceConfig.sh_degree,
+    Setting("sh_degree", "SH degree", "appearance", int, default=2,
             about="View-dependent colour (spherical harmonics) for shine and "
                   "reflections. SH3: about +0.3 dB, but ~40% slower and more memory.",
             choices=(0, 1, 2, 3),
             help="Spherical-harmonics degree for view-dependent color (classic "
-                 "3DGS). 0 (default) = view-independent SH band-0 (DC) only, the "
+                 "3DGS). 0 = view-independent SH band-0 (DC) only, the "
                  "original bit-identical path. 1-3 enables higher bands, stored in "
                  "a separate features_rest buffer allocated only when >0, activated "
                  "one band every --sh-band-interval iters (oneupSHdegree)."),
@@ -283,7 +278,11 @@ SETTINGS: tuple[Setting, ...] = (
                  "starting dense is the cheap hedge. 0 (default) = the target "
                  "fraction from step 1. No-op at --stbn-pixel-fraction 1.0.",
             minimum=0, maximum=20_000, speed=10, note="0 = no ramp"),
-    Setting("adam_moments", "Adam moments", "perf", str, default="fp32",
+    Setting("image_residency", "training images", "perf", str, default="stream",
+            about="Streaming saves GPU memory. Keeping all training images on the GPU saves transfer time.",
+            choices=("stream", "gpu"), help="stream training images and structure fields "
+            "from host RAM or keep them on the GPU to reduce per-step transfers."),
+    Setting("adam_moments", "Adam moments", "perf", str, default="bf16",
             about="Precision of the optimizer state. bf16: the same quality with "
                   "0.7-1.7 GiB less memory, and slightly faster.",
             choices=("fp32", "bf16"),
@@ -303,9 +302,9 @@ SETTINGS: tuple[Setting, ...] = (
     Setting("prune_blend_from", "blend-weight prune from iter", "perf", int,
             about="Iteration where that pruning starts; 0 = one pass at the last densify "
                   "step (12% faster, same quality). From 1000: 27% faster, -0.04 dB.",
-            default=ScheduleConfig.prune_blend_from,
+            default=900,
             help="first densify tick that applies --prune-blend-weight; 0 "
-                 "(default) = only the last densify tick (--densify-to). The "
+                 "= only the last densify tick (--densify-to). The "
                  "tick right after an opacity reset is always skipped: the "
                  "reset itself depresses every blend weight.",
             minimum=0, maximum=200_000, speed=25, note="0 = last densify step"),
@@ -340,19 +339,11 @@ SETTINGS: tuple[Setting, ...] = (
                  "passes the onset. 0 (default) = ramp with the opacity "
                  "itself.",
             minimum=-20.0, maximum=20.0, speed=0.05, fmt="%.2f", note="opaque_core only"),
-    Setting("evaluation", "eval + final metrics", "eval", bool, default=True,
-            about="Score the model on every camera during and after training. Off "
-                  "finishes sooner; Export still works.",
-            help="Run the passes that render every camera: the eval sweep "
-                 "(--eval-every; by default once, on the last iteration) and the "
-                 "full-camera renders that ride on previews, the post-training "
-                 "metrics pass and .ply export (--compute-final-metrics), and the "
-                 "held-out test PSNR (--final-test-psnr). On by default. "
-                 "--no-evaluation is a VETO over all of them, so a run that only needs "
-                 "the trained model stops paying for them; it does not turn anything "
-                 "on that its own flag left off, and it does not touch the explicit "
-                 "--render-all-every / --psnr-curve opt-ins.",
-            note="off = no full-camera-set renders"),
+    Setting("evaluation", "Evaluate image quality", "eval", bool, default=False,
+            about="Render and score the camera set after training. Export is available either way.",
+            help="Run an evaluation sweep on the last step. Off by default. "
+                 "Individual metric flags also opt in. --no-evaluation disables sweeps, "
+                 "held-out reports and final metrics."),
     Setting("stream_every", "snapshot every N iters", "stream", int, default=10,
             about="How often this viewer gets a fresh copy of the splats while training.",
             help="push a gaussian snapshot to the in-process viewer every "
@@ -365,8 +356,10 @@ SETTINGS_MAP: dict[str, Setting] = {s.setting_name: s for s in SETTINGS}
 
 
 def preset_values(name: str) -> dict[str, Any]:
-    """Every setting any preset touches: this preset's value, else the setting's default."""
-    touched = {dest for bundle in PRESETS.values() for dest in bundle}
+    """Restore the common recipe and apply the selected tier's overrides."""
+    touched = {"lr_recipe", "adam_moments", "lambda_ssim", "densify_from", "prune_blend_weight",
+               "splat_kernel", "splat_profile_power", "splat_profile_onset"}
+    touched.update(dest for bundle in PRESETS.values() for dest in bundle)
     return {dest: SETTINGS_MAP[dest].default for dest in touched} | PRESETS[name]
 
 

@@ -35,7 +35,8 @@ GRAD_SCALAR_COMPONENTS = (
 GRAD_2D_SEED_COMPONENTS = ("mean2d_x", "mean2d_y", "conic_a", "conic_b", "conic_c", "amplitude")
 ETA_ACCUM_COMPONENTS = ("n_high", "n_low", "max_x", "max_y", "max_z")
 
-DEFAULT_MAX_SORT_PAIRS = 12_000_000
+# Full-resolution indoor training can exceed 15.5M splat/tile pairs in one view.
+DEFAULT_MAX_SORT_PAIRS = 16_776_960
 
 
 def ceil_div(a: int, b: int) -> int:

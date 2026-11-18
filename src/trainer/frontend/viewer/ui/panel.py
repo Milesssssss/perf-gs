@@ -54,7 +54,7 @@ class _TextBlock:
 
     def refresh(self, width: float) -> None:
         shown = True if self._gate is None else bool(self._gate())
-        value = self._getter()
+        value = self._getter() if shown else ""
         value = "" if value is None else str(value)
         if self._cache == (value, width, shown):
             return

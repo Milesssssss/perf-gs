@@ -55,6 +55,12 @@ def test_structure_aware_runs_match_sadgs_loss_and_lrs() -> None:
     assert config.scale_rotation_lr_decay == (1.0, 1.0)
 
 
+def test_hub_uses_the_chooser_unless_a_scene_is_supplied() -> None:
+    assert _args("--hub").scene is None
+    assert _args("--hub", "--scene", "my_scene").scene == "my_scene"
+    assert _args().scene == "datasets/360_v2/bicycle"
+
+
 def test_quality_recipe_lowers_the_opacity_lr_and_decays_scale_and_rotation() -> None:
     config = RunConfig.from_args(
         _args("--densify-mode", "structure_aware", "--lr-recipe", "quality"), 1.0)
@@ -63,13 +69,21 @@ def test_quality_recipe_lowers_the_opacity_lr_and_decays_scale_and_rotation() ->
 
 
 def test_presets_supply_defaults_that_explicit_flags_override() -> None:
-    perf = parse_args(["--preset", "perf"])
-    assert (perf.adam_moments, perf.prune_blend_from) == ("bf16", 1000)
-    assert parse_args(["--adam-moments", "fp32", "--preset", "perf"]).adam_moments == "fp32"
-    assert parse_args(["--preset", "quality"]).lr_recipe == "quality"
-    ultrafast = parse_args(["--preset", "ultrafast"])
-    assert (ultrafast.stbn_pixel_fraction, ultrafast.splat_kernel) == (0.5, "opaque_core")
-    assert vars(parse_args([])) == vars(build_parser().parse_args([]))
+    parser = build_parser()
+    for name, pixels, sh, splats in (
+        ("ultrafast", 0.25, 2, 1_850_000),
+        ("balanced", 1.0, 2, 2_600_000),
+        ("quality", 1.0, 3, 5_600_000),
+    ):
+        args = parser.parse_args(["--preset", name])
+        assert (args.stbn_pixel_fraction, args.sh_degree, args.max_splats) == (pixels, sh, splats)
+        assert args.width is None and args.height is None and args.downsample is None
+        assert args.auto_lens and args.stereo_init and args.lr_recipe == "short"
+    assert parse_args(["--stbn-pixel-fraction", "1", "--preset", "ultrafast"]).stbn_pixel_fraction == 1
+    assert parse_args(["--preset", "quality", "--max-splats", "500000"]).max_splats == 500000
+    assert vars(parse_args([])) == vars(parser.parse_args(["--preset", "balanced"]))
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--preset", "perf"])
 
 
 def test_other_modes_keep_the_default_loss_and_lrs() -> None:

@@ -111,8 +111,13 @@ class RecordingPanel:
 
     @contextlib.contextmanager
     def section(self, title: str, **binds):
-        self.widgets.append(Declared("section", title=title, label=title, binds=binds))
+        section = Declared("section", title=title, label=title, binds=binds)
+        self.widgets.append(section)
+        first = len(self.widgets)
         yield
+        for child in self.widgets[first:]:
+            visible = child.binds.get("visible")
+            child.binds["visible"] = lambda gate=visible: section.shown and (gate is None or gate())
 
     def text(self, value="", *, lines=1, mode="wrap", visible=None) -> None:
         self.widgets.append(Declared("text", value=value, lines=lines, mode=mode,

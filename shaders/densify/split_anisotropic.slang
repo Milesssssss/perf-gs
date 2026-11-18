@@ -73,7 +73,8 @@ void prepareParent(uint i, uint lane, uint act,
 uint survivingChildren(uint total, uint max_splats)
 {
     uint headroom = s_tail < max_splats ? max_splats - s_tail : 0u;
-    return 1u + min(total - 1u, headroom);
+    // A split needs a second slot. Keep the parent intact if the budget is full.
+    return headroom == 0u ? 0u : 1u + min(total - 1u, headroom);
 }
 
 [shader("compute")]

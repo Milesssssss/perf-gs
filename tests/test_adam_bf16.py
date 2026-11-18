@@ -162,7 +162,7 @@ def test_a_hub_run_turns_bf16_on_after_the_device_exists(backend, tmp_path, monk
     scene = write_colmap_scene(tmp_path / "scene", views=[
         (f"{i}.png", 16, 16, 20.0) for i in range(4)])
     args = build_parser().parse_args([
-        "--scene", str(scene), "--backend", backend, "--no-viewer", "--iters", "4",
+        "--scene", str(scene), "--backend", backend, "--adam-moments", "fp32", "--no-viewer", "--iters", "4",
         "--max-splats", "64", "--width", "16", "--height", "16",
         "--eval-holdout-stride", "2", "--no-evaluation", "--no-write-ground-truths",
         "--preview-every", "0",

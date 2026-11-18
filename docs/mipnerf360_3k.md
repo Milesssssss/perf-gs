@@ -1,5 +1,50 @@
 # Mip-NeRF 360 at 3,000 steps
 
+## Reproduce the benchmark
+
+Install the trainer, activate its Python environment and fetch all nine scenes with `python scripts/data/download_mipnerf360.py --set all`. For presets with sparse pixel supervision, first run `python scripts/data/download_stbn.py` to obtain the NVIDIA scalar blue-noise masks. [Preset settings and asset terms](usage.md#training)
+
+Run this PowerShell sweep on an idle GPU. It launches one process per scene and preset at seed 42. Both training and held-out evaluation use `images_4` outdoors and `images_2` indoors at their stored dimensions. Stereo initialization uses a separate 672-pixel-wide working image for up to 28 training-camera anchors and can add up to 256,000 starting points. Its cost belongs to setup.
+
+```powershell
+foreach ($preset in 'ultrafast', 'balanced', 'quality') {
+  python scripts/running/eval_sweep.py --axis seed --values 42 --iters 3000 `
+    --name "mip360_3k_preset_$preset" --no-plot --extra --preset $preset `
+    --eval-every 0 --preview-every 0 --no-write-ground-truths --run-report --save-test-renders
+}
+```
+
+The sweep reuses completed runs by name. Choose a new name or pass `--force` if a cached run lacks the saved test PNGs. For the reference scores, use CUDA PyTorch, torchvision, tqdm and the pretrained VGG and LPIPS weights. These PowerShell commands prepare Graphdeco’s directory layout, pair each RGB8 render with the original photo decoded by Pillow, and score every held-out image. The model-directory argument can also be passed directly to the reference checkout’s `python metrics.py -m` command. [Graphdeco reference evaluation](https://github.com/graphdeco-inria/gaussian-splatting/blob/54c035f7834b564019656c3e3fcc3646292f727d/metrics.py)
+
+```powershell
+git clone https://github.com/graphdeco-inria/gaussian-splatting.git outputs/graphdeco_reference
+git -C outputs/graphdeco_reference checkout 54c035f7834b564019656c3e3fcc3646292f727d
+$models = foreach ($run in Get-ChildItem outputs/train -Directory -Filter 'sweep_mip360_3k_preset_*') {
+  $model = "outputs/graphdeco_input/$($run.Name)"
+  python scripts/running/prepare_graphdeco.py $run.FullName $model | Out-Host
+  if ($LASTEXITCODE -ne 0) { throw "Could not prepare $model" }
+  $model
+}
+python scripts/running/score_graphdeco.py --graphdeco outputs/graphdeco_reference $models
+```
+
+To score the model from a timed, training-only run, use `--no-evaluation --save-ply` as shown below. Then run `python scripts/running/prepare_graphdeco.py RUN MODEL --ply RUN/output.ply`, substituting the training directory for `RUN` and a fresh output directory for `MODEL`. The converter uses the training log and configuration, restores the PLY’s 3D filter, and renders the registered held-out cameras. Use the same reference scoring command on `MODEL`. Replaying the quality preset’s 4,102,802-splat bicycle PLY at seed 42 reproduced all 76,261,050 RGB8 channel values across its 25 held-out views.
+
+Each model directory contains `results.json` and `per_view.json`. Aggregate the nine scene means with equal weight for each seed. The reference evaluates saved RGB8 images and passes values in [0, 1] to its VGG LPIPS implementation. The wrapper caches the reference VGG network between images. On one indoor and one outdoor held-out view, its PSNR, SSIM and LPIPS matched the standalone upstream script exactly. The trainer’s historical study below scores the floating-point renders and passes values in [−1, 1] to its LPIPS evaluator. [Per-scene preset measurements](mipnerf360_3k_presets.csv) · [Historical float-image measurements](mipnerf360_3k_results.csv)
+
+For elapsed training time including process startup and final PLY export, run each scene in a fresh process and time it externally, using the same `--downsample` setting. Specify the scene path, preset and seed for each measurement. The example shows PowerShell timing for outdoor garden.
+
+```powershell
+Measure-Command {
+  python -m trainer.frontend.app --scene datasets/360_v2/garden --downsample 4 --preset quality --seed 42 `
+    --no-viewer --no-evaluation --save-ply --no-write-ground-truths --preview-every 0 --eval-every 0
+}
+```
+
+The published optimizer loop and setup-plus-training clocks exclude process startup, final PLY writing and held-out scoring. A fresh process may still reuse the filesystem and shader disk caches. Graphdeco’s `full_eval.py` times its training commands including model saves. Compare times only when their hardware and timing boundaries agree. [Upstream timing script](https://github.com/graphdeco-inria/gaussian-splatting/blob/54c035f7834b564019656c3e3fcc3646292f727d/full_eval.py)
+
+## Earlier SH3 comparison
+
 The compact SH3 recipe starts with the supplied COLMAP point cloud, adds up to 256,000 stereo matches verified in a third training view, and uses the `short` learning-rate and loss schedule. The original fixed-falloff implementation in commit `c28a801` added 188 lines and removed 15 across `src/` and `shaders/` relative to `d6209e7`. Adaptive calibration adds another 164 lines and removes 14 relative to that commit. Together, the measured recipe and lens changes add 341 production lines and remove 18.
 
 With fixed falloff on an RTX 4080 the two nine-scene means were **27.775 dB** (seed 42) and **27.741 dB** (seed 1). Room gained 1.288 and 1.062 dB over the previous tuned recipe. Bicycle gained 0.250 and 0.214 dB. LPIPS improved on six scenes at both seeds. It rose by about 0.012 on flowers and by less than 0.001 on bicycle and garden. [Per-scene changes at both seeds](../assets/mipnerf360_3k_results.png) · [All scene measurements](mipnerf360_3k_results.csv)
@@ -12,11 +57,9 @@ The comparison below uses the middle held-out camera in bicycle and room on seed
 
 ![Held-out bicycle and room images with full-resolution crops comparing the two recipes to the photographs](../assets/mipnerf360_3k_heldout.png)
 
-## Reproduce the benchmark
+### Reproduce the earlier SH3 comparison
 
-From the repository root, activate the trainer environment and fetch all nine scenes with `python scripts/data/download_mipnerf360.py --set all`. Native VGG LPIPS requires `torch`, `torchvision`, `lpips` and the pretrained VGG weights. To check the evaluator before starting, run `python -c "from trainer.common import perceptual; assert perceptual.load('vgg')"`.
-
-Run the sweep on an idle GPU. This PowerShell command trains each scene once per seed and writes a full held-out report for each run.
+Use a checkout of revision `20b9ecd` for these two commands. At that revision `perf` and `balanced` supply the historical defaults. The adaptive configuration became the current `quality` preset. This PowerShell command trains each scene once per seed.
 
 ```powershell
 python scripts/running/eval_sweep.py --axis seed --values '42,1' --iters 3000 `
@@ -60,7 +103,7 @@ For the fixed model, exported PLYs carry the comment `trainer natural_vignetting
 
 ## Adapting the falloff to other cameras
 
-`--auto-lens` fits one shared strength `b` per single-camera reconstruction. It samples up to 28 decoded training images, finds landmarks seen in two views, and compares pairs of landmarks at different radii. Taking differences in log brightness cancels a shared exposure offset within each image and the intrinsic brightness of each landmark across images. A robust fit reduces the influence of occlusions and view-dependent highlights. The renderer uses `(1 + x² + y²)^(-2 b / 2.2)` during training, evaluation and PLY playback. A strength of zero gives a flat response and one gives the fixed model above. To supply a known strength, use `--lens-strength` in place of `--auto-lens`.
+All current presets fit one shared strength `b` per single-camera reconstruction with `--auto-lens`. The fitter samples up to 28 decoded training images, finds landmarks seen in two views, and compares pairs of landmarks at different radii. Taking differences in log brightness cancels a shared exposure offset within each image and the intrinsic brightness of each landmark across images. A robust fit reduces the influence of occlusions and view-dependent highlights. The renderer uses `(1 + x² + y²)^(-2 b / 2.2)` during training, evaluation and PLY playback. To override the fit, use `--lens-strength 0` for a flat response, `--lens-strength 1` for the fixed model above, or supply another known strength.
 
 For landmark $p$ in view $i$, write its log brightness as $L_{ip}=R_p+E_i+bG_{ip}$, where $R_p$ is landmark brightness, $E_i$ is exposure and $G_{ip}=(-2/2.2)\log(1+x^2+y^2)$. Two views $i,j$ of two shared landmarks $p,q$ give
 
@@ -96,4 +139,4 @@ python scripts/plots/plot_camera_results.py
 python scripts/plots/plot_readme_results.py --overview-only
 ```
 
-The first command writes the per-scene fixed and adaptive quality comparisons, the paired stock-versus-adaptive timing plot and the four-scene lens comparison. The second regenerates the PSNR and training-loop overview plots and prints the dataset quality and resource tables. [Historical sweep](benchmark_results.csv) · [3,000-step measurements](mipnerf360_3k_results.csv) · [Paired timings](mipnerf360_3k_timing.csv) · [Lens measurements](camera_falloff_results.csv)
+The first command prints the current preset table and plots per-scene results. It also writes the fixed and adaptive quality comparisons, the paired stock-versus-adaptive timing plot and the four-scene lens comparison. The second regenerates the historical PSNR and training-loop overview plots and prints the corresponding quality and resource tables. [Preset measurements](mipnerf360_3k_presets.csv) · [Historical sweep](benchmark_results.csv) · [SH3 lens study](mipnerf360_3k_results.csv) · [Paired timings](mipnerf360_3k_timing.csv) · [Lens measurements](camera_falloff_results.csv)

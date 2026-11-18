@@ -35,5 +35,9 @@ def save_ply(pipeline: TrainingPipeline, path: str | Path) -> None:
         raise ValueError("pipeline has 0 gaussians; nothing to save")
     features_rest = (pipeline.primitives.read_features_rest(len(gaussians))
                      if pipeline.buffers.sh_enabled else None)
-    write_gaussian_ply(gaussians, path, features_rest=features_rest,
+    config = pipeline.rasterizer.config
+    footprints = (pipeline.buffers.primitive.filter_3d.to_numpy().view(np.float32)[:len(gaussians)]
+                  if config.mip_enabled else None)
+    write_gaussian_ply(gaussians, path, features_rest=features_rest, filter_3d=footprints,
+                       mip_kernel_size=config.kernel_size, active_sh_degree=pipeline.active_sh_degree,
                        natural_vignetting=pipeline.rasterizer.natural_vignetting)

@@ -3,7 +3,7 @@
 """Sweep one training flag across the Mip-NeRF 360 scenes; collect PSNR + time.
 
 Each cell is a cached fresh subprocess; run on an idle GPU, since train_wall_s is wall-clock.
-Scenes train at their 3DGS eval resolution (Mip-NeRF 360 indoor at half, outdoor at quarter).
+Mip-NeRF 360 training and evaluation both use half resolution indoors and quarter resolution outdoors.
 Usage: python scripts/running/eval_sweep.py --axis stbn-pixel-fraction --values 1,0.75,0.5,0.25,0.1
 """
 from __future__ import annotations
@@ -24,10 +24,8 @@ DEFAULT_SCENES = ["bicycle", "flowers", "garden", "stump", "treehill",
                   "bonsai", "counter", "kitchen", "room"]
 DATASET_ROOTS = ["360_v2", "360_extra_scenes", "tandt", "db"]
 
-# Published eval config; --evaluation is required because it vetoes --final-test-psnr.
+# The sweep opts into evaluation and records held-out PSNR.
 BASE_ARGS = [
-    "--densify-mode", "structure_aware",
-    "--mip-splatting",
     "--seed", "42",
     "--no-viewer",
     "--log-every", "0",

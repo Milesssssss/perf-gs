@@ -34,6 +34,7 @@ def _progress_relay(state: Session, parser):
 class TrainingHub:
     def __init__(self, app: TrainingApplication) -> None:
         self.app = app
+        self._pending_drop: str | None = None
 
     def run(self) -> None:
         """Run the interactive hub until the window closes; a session outlives its runs.
@@ -69,8 +70,11 @@ class TrainingHub:
                            glomap_bin=self.app.args.glomap_bin,
                            recon_cuda=self.app.args.recon_cuda)
         state.tools(ToolsState.READY if tools.is_ready() else ToolsState.MISSING)
-        state.notify("Viewer ready - drop a dataset folder", OK)
-        print("[hub] viewer up — drag a dataset folder onto the window.")
+        if self.app.args.scene:
+            self._hub_dropped(str(self.app.args.scene))
+        else:
+            state.notify("Open or drop a dataset folder", OK)
+        print("[hub] viewer ready.")
 
         while True:
             scene_dir = self._hub_choose_scene(tools)
@@ -92,13 +96,14 @@ class TrainingHub:
             if command in ("confirm", "confirm_alt"):
                 command = state.take_confirm(accept=True,
                                              alt=command == "confirm_alt")
-                if command == "export" and getattr(self, "_pending_drop", None):
+                if command == "export" and self._pending_drop is not None:
                     # "Export first" must not then destroy the result by continuing the load.
-                    self.app._pending_drop = None
+                    self._pending_drop = None
                     state.notify("Exporting first - drop the dataset again after",
                                  WARN)
             elif command == "cancel":
                 state.take_confirm(accept=False)
+                self._pending_drop = None
                 state.notify("Cancelled", OK)
                 command = None
 
@@ -114,8 +119,15 @@ class TrainingHub:
                 self._hub_request_clear()
             elif command == "clear!":
                 self._hub_clear_session()
-            elif command == "new_dataset":
-                state.notify("Drop the next dataset onto the window", OK)
+            elif command in ("browse", "new_dataset"):
+                from slangpy import platform
+                try:
+                    folder = platform.choose_folder_dialog()
+                except (AttributeError, OSError, RuntimeError):
+                    state.notify("Folder picker unavailable. Drop a dataset folder onto the window.", WARN)
+                else:
+                    if folder:
+                        self._hub_dropped(str(folder))
             elif command == "load_dropped":
                 self._hub_load_pending_drop()
             elif command in ("train", "restart"):
@@ -131,7 +143,7 @@ class TrainingHub:
         """Load a dropped folder, asking first if it would replace an existing result."""
         state = self.app._viewer.state
         if state.snapshot().has_result:
-            self.app._pending_drop = path
+            self._pending_drop = path
             unexported = state.snapshot().unexported
             state.ask(Confirm(
                 key="dataset", title="Load a new dataset?",
@@ -147,7 +159,7 @@ class TrainingHub:
 
     def _hub_load_pending_drop(self) -> None:
         """The confirmed half of :meth:`_hub_dropped`."""
-        path, self.app._pending_drop = getattr(self, "_pending_drop", None), None
+        path, self._pending_drop = self._pending_drop, None
         if path is None:
             return
         self._hub_clear_session(notify=False)

@@ -63,9 +63,9 @@ def test_hardness_one_specialization_emits_define() -> None:
 
 
 def test_specialization_compiles_hardness_away_only_when_target_le_one() -> None:
-    on = shader_specialization(_parse("--extinction-hardness", "1"))
+    on = shader_specialization(_parse("--adam-moments", "fp32", "--extinction-hardness", "1"))
     assert shader_defines(on) == {"COMPOSITOR_HARDNESS_ONE": "1"}
-    off = shader_specialization(_parse("--extinction-hardness", "2"))
+    off = shader_specialization(_parse("--adam-moments", "fp32", "--extinction-hardness", "2"))
     assert shader_defines(off) is None
 
 
@@ -104,7 +104,7 @@ def test_device_factory_passes_resolved_specialization(monkeypatch) -> None:
         return sentinel
 
     monkeypatch.setattr("trainer.frontend.factory.create_device", fake_create_device)
-    # Hardness > 1 keeps the compositor's runtime path, so only the stride is defined.
+    # Hardness > 1 keeps the compositor's runtime path. Balanced uses bf16 moments.
     args = _parse("--backward-pixel-stride", "2", "--extinction-hardness", "2")
 
     assert create_training_device(args) is sentinel
@@ -113,7 +113,7 @@ def test_device_factory_passes_resolved_specialization(monkeypatch) -> None:
         # --nsight-debug-names defaults to off unless --capture-external.
         "enable_debug": False,
         "shader_debug_info": False,
-        "defines": {"BACKWARD_PIXEL_STRIDE": "2u"},
+        "defines": {"BACKWARD_PIXEL_STRIDE": "2u", "ADAM_MOMENTS_BF16": "1"},
     }
 
 
@@ -148,7 +148,7 @@ def test_pipeline_factory_separates_configuration_ownership(monkeypatch) -> None
     )
     assert captured["densify_mode"] == DensificationMode.STRUCTURE_AWARE
     assert captured["loss_config"] == LossConfig(
-        alpha_weight=0.4, ssim_weight=0.2, l2_weight=1.5)
+        alpha_weight=0.4, ssim_weight=0.3, l2_weight=1.5)
     assert captured["regularization_config"] == RegularizationConfig(
         opacity_weight=0.03, scale_weight=0.07)
     assert captured["appearance_config"] == AppearanceConfig(

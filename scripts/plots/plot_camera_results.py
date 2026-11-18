@@ -226,7 +226,66 @@ def plot_paired_timing():
     save(fig, "mipnerf360_3k_paired_timing.png")
 
 
+def plot_presets():
+    rows = read_csv("mipnerf360_3k_presets.csv")
+    presets = [("ultrafast", BLUE, "o"), ("balanced", ORANGE, "D"), ("quality", TEAL, "s")]
+    means = {}
+    metrics = ["train_loop_s", "psnr_db", "vgg_lpips"]
+    legend = []
+    print("| Preset | Seeds | Train loop | Setup + training | Launch to model | PSNR ↑ | SSIM ↑ | VGG LPIPS ↓ |")
+    print("| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |")
+    for preset, color, marker in presets:
+        selected = [r for r in rows if r["preset"] == preset]
+        seeds = sorted({r["seed"] for r in selected})
+        if not seeds:
+            continue
+        for seed in seeds:
+            sample = [r for r in selected if r["seed"] == seed]
+            if (len(sample) != len(SCENES) or {r["scene"] for r in sample} != set(SCENES)
+                    or sum(int(r["heldout_views"]) for r in sample) != 246):
+                raise ValueError(f"Incomplete {preset} sample at seed {seed}")
+        count = len(seeds)
+        legend.append(handle(color, marker, preset.title()))
+        for scene in SCENES:
+            scene_rows = [r for r in selected if r["scene"] == scene]
+            means[preset, scene] = [fmean(float(r[key]) for r in scene_rows) for key in metrics]
+        avg = {key: fmean(float(r[key]) for r in selected) for key in [*metrics, "ssim"]}
+        setup_times = [float(r["setup_plus_train_loop_s"]) for r in selected if r["setup_plus_train_loop_s"]]
+        setup = f"{fmean(setup_times):.2f} s" if len(setup_times) == len(selected) else "—"
+        model_times = [float(r["launch_to_model_s"]) for r in selected if r["launch_to_model_s"]]
+        ready = f"{fmean(model_times):.2f} s" if len(model_times) == len(selected) else "—"
+        print(f"| {preset.title()} | {count} | {avg['train_loop_s']:.2f} s | {setup} | {ready} | "
+              f"{avg['psnr_db']:.2f} dB | {avg['ssim']:.4f} | {avg['vgg_lpips']:.4f} |")
+
+    if len(legend) < len(presets):
+        return
+    fig = Figure(figsize=(9.8, 4.8))
+    axes = fig.subplots(1, 3, sharey=True)
+    fig.subplots_adjust(left=.13, right=.975, top=.68, bottom=.085, wspace=.2)
+    seed_text = ", ".join(str(n) for n in sorted({int(r["seed"]) for r in rows}))
+    heading(fig, "Training presets on Mip-NeRF 360",
+            f"3,000 steps on an RTX 4080 at seed {seed_text}. Quality is the Graphdeco RGB8 mean for each scene.")
+    fig.legend(handles=legend, loc="upper left", bbox_to_anchor=(.025, .827), labelcolor=INK,
+               frameon=False, ncol=3, fontsize=10, handletextpad=.15, columnspacing=1.5)
+    titles = ["Train loop (s) ↓", "PSNR (dB) ↑", "VGG LPIPS ↓"]
+    for metric_index, (ax, title) in enumerate(zip(axes, titles)):
+        frame(ax)
+        ax.set_title(title, loc="left", fontsize=12, color=INK, weight="bold", pad=8)
+        for i, scene in enumerate(SCENES):
+            values = [means[preset, scene][metric_index] for preset, _, _ in presets]
+            ax.plot([min(values), max(values)], [i, i], color=RULE, lw=1.6)
+            for value, (_, color, marker) in zip(values, presets):
+                ax.scatter(value, i, color=color, marker=marker, s=32, edgecolor="white",
+                           linewidth=.5, zorder=3)
+        ax.set_ylim(len(SCENES)-.45, -.55)
+        ax.margins(x=.09)
+        ax.xaxis.set_major_locator(MaxNLocator(nbins=5))
+    axes[0].set_yticks(range(len(SCENES)), [s.title() for s in SCENES])
+    save(fig, "mipnerf360_3k_presets.png")
+
+
 if __name__ == "__main__":
     plot_mip360()
     plot_calibration()
     plot_paired_timing()
+    plot_presets()

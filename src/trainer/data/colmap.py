@@ -25,6 +25,7 @@ class ColmapDataset:
     image_dir: Path
     initial_points: dict[str, np.ndarray]
     scene_extent: float = 1.0              # bounding sphere radius
+    downsample: int = 1
 
 
 def _quat_wxyz_to_rotmat(q: np.ndarray) -> np.ndarray:
@@ -234,10 +235,21 @@ def load_colmap(
     scene_dir: Path | str,
     width: int | None = None,
     height: int | None = None,
-    downsample: int = 1,
+    downsample: int | None = 1,
     init_opacity: float = 0.1,
 ) -> ColmapDataset:
     scene_dir = Path(scene_dir)
+    if downsample is None:
+        # The Mip-NeRF 360 benchmark uses half resolution indoors and quarter outdoors.
+        downsample = 4
+        path = scene_dir.resolve()
+        if path.name.lower() in {"bonsai", "counter", "kitchen", "room"}:
+            known_root = path.parent.name.lower() in {"360_v2", "mipnerf360", "mipnerf360_v2"}
+            released_scene = (path / "poses_bounds.npy").is_file() and (path / "images_2").is_dir()
+            if known_root or released_scene or all((path.parent / s).is_dir() for s in ("bicycle", "garden", "stump")):
+                downsample = 2
+    if downsample < 1:
+        raise ValueError("--downsample must be at least 1")
 
     if downsample > 1 and (scene_dir / f"images_{downsample}").exists():
         img_dir = scene_dir / f"images_{downsample}"
@@ -360,6 +372,7 @@ def load_colmap(
         image_dir=img_dir,
         initial_points=initial_points,
         scene_extent=scene_extent,
+        downsample=downsample,
     )
 
 

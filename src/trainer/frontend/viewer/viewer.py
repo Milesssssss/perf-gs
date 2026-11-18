@@ -443,6 +443,7 @@ class Viewer:
         self.sh_degree = sh_degree
         self.state = state if state is not None else Session()
         self._hub = self.state.mode == MODE_HUB
+        self._show_camera_controls = not self._hub
         self._scene_dirty = threading.Event()
         self._scene_dirty.set()
         self._last_scene_s = 0.0
@@ -747,7 +748,7 @@ class Viewer:
 
     def _panel_actions(self) -> Actions:
         return Actions(
-            browse=None,          # no file dialog in this windowing layer
+            browse=lambda: self.state.request("browse"),
             install_tools=lambda: self.state.request("install_tools"),
             reconstruct=lambda: self.state.request("reconstruct"),
             select_matcher=self.state.set_matcher_index,
@@ -771,22 +772,31 @@ class Viewer:
         )
 
     def _build_panel(self, view, keys: InputMap) -> Panel:
-        panel = Panel(self.device, title="Scatto-GS trainer", anchor="left",
+        panel = Panel(self.device, title="PERF-GS", anchor="left",
                       thickness=430.0, min_thickness=380.0)
         actions = self._panel_actions()
         header(panel, view)
 
         if self._hub:
             dataset_section(panel, view, actions)
-
-        training_section(panel, view, actions)
-        loss_section(panel, view)
-        if self._hub:
             result_section(panel, view, actions)
+        training_section(panel, view, actions, self.state.setup if self._hub else None)
+        if self._hub:
             configuration_section(
                 panel, view, self.state.setup, actions,
                 show_all=lambda: view.show_all_config,
                 toggle_all=self.state.toggle_config_detail)
+        loss_section(panel, view)
+        def has_scene() -> bool:
+            return not self._hub or view.trainable or view.has_result
+
+        if self._hub:
+            panel.checkbox("Camera controls and shortcuts", False,
+                           lambda enabled: setattr(self, "_show_camera_controls", enabled), visible=has_scene)
+
+        def camera_controls_open() -> bool:
+            return has_scene() and self._show_camera_controls
+
         viewer_section(panel, CameraControls(
             sets=self._rig.set_names,
             set_selection=lambda: self._rig.set_index,
@@ -797,13 +807,13 @@ class Viewer:
             label=self._rig.label,
             speed=lambda: self._rig.cam.speed,
             fovy=lambda: self._rig.fovy,
-        ))
-        controls_section(panel, keys.describe())
+        ), visible=camera_controls_open)
+        controls_section(panel, keys.describe(), visible=camera_controls_open)
         diagnostics_section(panel, view, actions, show=lambda: view.show_log)
         return panel
 
     def _run_inner(self):
-        window = spy.Window(width=self.width, height=self.height, title="Scatto-GS")
+        window = spy.Window(width=self.width, height=self.height, title="PERF-GS")
 
         surface = self.device.create_surface(window)
         present_format = _linear_present_format(surface)
