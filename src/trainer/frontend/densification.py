@@ -52,12 +52,14 @@ class DensificationController:
         self._densify_cfg = densify_cfg
         self._structure_cfg = structure_cfg
         self._extent = extent
-        self._image_width = image_width
-        self._image_height = image_height
+        self.set_image_size(image_width, image_height)
         self._morton_world_min = morton_world_min
         self._morton_world_max = morton_world_max
         self._extinction_hardness_schedule = extinction_hardness_schedule
         self._queue_limiter = queue_limiter
+
+    def set_image_size(self, width: int, height: int) -> None:
+        self._image_width, self._image_height = width, height
 
     def run(self, it: int, ev: "IterationEvents", cur_n_gaussians: int) -> DensifyOutcome:
         """Execute one densify tick and return its outcome; reporting is the caller's job."""

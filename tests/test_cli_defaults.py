@@ -28,6 +28,8 @@ EXPECTED_DEFAULTS = {
     "scene": "datasets/360_v2/bicycle",
     "preset": "balanced",
     "iters": 3000,
+    "lattice_stride": 1,
+    "lattice_until": 2600,
     "lr_recipe": "default",
     "stereo_init": False,
     # 0 == follow --iters (app._resolve_position_lr_max_steps). It used to be a
@@ -62,6 +64,7 @@ EXPECTED_DEFAULTS = {
     "w_alpha": 0.0,
     "lambda_ssim": 0.2,
     "max_splats": 7_000_000,
+    "max_sort_pairs": None,
     "z_near_cull": 0.01,
     "profile_every": 0,
     "morton_every": 0,

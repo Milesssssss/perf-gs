@@ -52,6 +52,10 @@ def build_parser() -> argparse.ArgumentParser:
                     help="force render width (overrides --downsample)")
     parser.add_argument("--height", type=int, default=None,
                     help="force render height (overrides --downsample)")
+    parser.add_argument("--lattice-stride", type=int, default=1,
+                        help="sample one rotating native pixel per NxN block during training; 1 uses every pixel")
+    parser.add_argument("--lattice-until", type=int, default=2600,
+                        help="last lattice training step; final training step and evaluation use the full frame")
     parser.add_argument("--preview-every", type=int, default=None,
                     help="preview every N iters (with --evaluation, a preview also renders "
                          "every camera). Default: once, on the last iteration (follows --iters).")
@@ -115,6 +119,7 @@ def build_parser() -> argparse.ArgumentParser:
                     help="alpha loss weight; set > 0 for RGBA targets (e.g. 1.0)")
     _shared(parser, "lambda_ssim")
     _shared(parser, "max_splats")
+    parser.add_argument("--max-sort-pairs", type=int, help="Training renderer's splat–tile pair capacity; defaults to a budget derived from --max-splats.")
     parser.add_argument("--z-near-cull", type=float, default=RasterConfig.z_near_cull,
                     help="view-space depth floor for bin cull; raise for scenes "
                          "where points can land near a camera pose (e.g. 0.2)")

@@ -12,7 +12,6 @@ from _pipeline_testkit import TestPipeline
 from trainer.backend.compute.device import create_device
 from trainer.backend.memory.buffers import GRAD_SCALAR_COMPONENTS
 from trainer.backend.optimize.adam import AdamOptimizer
-from trainer.backend.render.pipeline import TrainingPipeline
 from trainer.config.config import AdamLRs, AppearanceConfig, LossConfig
 from trainer.data.dataset import simple_camera
 from trainer.frontend.app import TrainingApplication
@@ -132,7 +131,7 @@ def test_bf16_training_run_with_sh_and_densification(backend, tmp_path, monkeypa
         (f"{i}.png", 16, 16, 20.0) for i in range(4)])
     args = build_parser().parse_args([
         "--scene", str(scene), "--backend", backend, "--adam-moments", "bf16",
-        "--sh-degree", "1", "--no-viewer", "--iters", "4", "--max-splats", "64",
+        "--sh-degree", "1", "--no-viewer", "--iters", "4", "--max-splats", "64", "--max-sort-pairs", "512",
         "--width", "16", "--height", "16", "--eval-holdout-stride", "2",
         "--no-evaluation", "--no-write-ground-truths",
         "--preview-every", "0", "--densify-mode", "structure_aware", "--densify-from", "0",
@@ -140,8 +139,6 @@ def test_bf16_training_run_with_sh_and_densification(backend, tmp_path, monkeypa
         "--sad-structure-every", "2",
     ])
     monkeypatch.setattr("trainer.frontend.app.available_bytes", lambda *_: None)
-    monkeypatch.setattr("trainer.frontend.factory.TrainingPipeline",
-                        lambda **kwargs: TrainingPipeline(max_sort_pairs=512, **kwargs))
     app = TrainingApplication(args)
     app.prepare_training_context()
     try:
@@ -163,13 +160,11 @@ def test_a_hub_run_turns_bf16_on_after_the_device_exists(backend, tmp_path, monk
         (f"{i}.png", 16, 16, 20.0) for i in range(4)])
     args = build_parser().parse_args([
         "--scene", str(scene), "--backend", backend, "--no-viewer", "--iters", "4",
-        "--max-splats", "64", "--width", "16", "--height", "16",
+        "--max-splats", "64", "--max-sort-pairs", "512", "--width", "16", "--height", "16",
         "--eval-holdout-stride", "2", "--no-evaluation", "--no-write-ground-truths",
         "--preview-every", "0",
     ])
     monkeypatch.setattr("trainer.frontend.app.available_bytes", lambda *_: None)
-    monkeypatch.setattr("trainer.frontend.factory.TrainingPipeline",
-                        lambda **kwargs: TrainingPipeline(max_sort_pairs=512, **kwargs))
     create_device_then = TrainingApplication._create_device
 
     def device_then_panel(app) -> None:

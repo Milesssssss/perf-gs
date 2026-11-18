@@ -33,6 +33,7 @@ OPTICS_CSV = REPO / "docs" / "mipnerf360_3k_results.csv"
 OPTICS_RECIPES = {
     "optics-fast": ("Fixed falloff + stereo SH3 (2-seed mean)", "#009E73"),
     "optics-adaptive": ("Adaptive falloff + stereo SH3 (2-seed mean)", "#AA4499"),
+    "lattice-fast": ("Staggered pixels + stereo SH2 (2-seed mean)", "#332288"),
 }
 REPORT = REPO / "outputs" / "readme_results"
 
@@ -220,7 +221,7 @@ def load_published_defaults(path: Path) -> Grid:
 
 
 def load_published_optics(path: Path) -> dict[str, dict[str, Result]]:
-    """Pair the seeds for each scene and publish the adaptive recipe after both sweeps finish."""
+    """Pair each scene's seeds and publish new recipes when both nine-scene sweeps finish."""
     fields = ("psnr_db", "ssim", "vgg_lpips", "train_loop_s")
     seeds = ("42", "1")
     scenes = DATASETS["Mip-NeRF 360"]
@@ -592,7 +593,7 @@ def main() -> int:
         return 1
     optics = load_published_optics(OPTICS_CSV)
     plot_scene_bars(grid, "psnr", "Held-out PSNR (dB, sRGB)",
-                    "Held-out PSNR after 3,000 steps, full pixel supervision",
+                    "Held-out PSNR after 3,000 training steps",
                     "{:.2f}", ASSETS / "psnr_sweep.png", from_zero=False, optics=optics)
     plot_scene_bars(grid, "seconds", "Training loop (seconds)",
                     "Training-loop time for 3,000 steps on an RTX 4080",

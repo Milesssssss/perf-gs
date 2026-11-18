@@ -82,6 +82,8 @@ def test_a_run_compiles_in_the_session_of_its_own_specialization() -> None:
     assert session is not device.slang_session
     assert session.desc.compiler_options.defines == shader_defines(opaque)
     assert sessions.session_for(opaque) is session
+    assert sessions.kernels_for(opaque) is sessions.kernels_for(opaque)
+    assert sessions.kernels_for(opaque) is not sessions.kernels_for(launch)
     device.close()
 
 

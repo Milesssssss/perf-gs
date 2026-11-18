@@ -31,7 +31,7 @@ class Rasterizer:
     """
 
     KERNELS = {
-        "clear_textures": ("rasterize/tile_binned/clear.slang", "clearTextures"),
+        "prepare_pair_args": ("densify/copy_active.slang", "prepareActiveCopyArgs"),
         "clear_tile_ranges": ("rasterize/tile_binned/tile_ranges.slang", "clearTileRanges"),
         "bin_count": ("rasterize/tile_binned/bin_count.slang", "binCount"),
         "gather_tile_counts": ("rasterize/tile_binned/depth_order.slang",
@@ -100,11 +100,6 @@ class Rasterizer:
         num_tiles, capacity = self.num_tiles, self._capacity
 
         with commands.marker_group("clear"):
-            commands.dispatch(k.clear_textures, "clear_textures",
-                thread_count=[self.width, self.height, 1],
-                output_image=r.output_image,
-                gaussian_count_per_pixel=r.gaussian_count_per_pixel,
-                frame_dim=spy.uint2(self.width, self.height))
             commands.dispatch(k.clear_tile_ranges, "clear_tile_ranges",
                 thread_count=[num_tiles, 1, 1],
                 tile_start=r.tile_start.storage,
@@ -180,8 +175,12 @@ class Rasterizer:
         pairs = self._sort.resources
         pair_count = self._scan.resources.total
         with commands.marker_group("bin_emit"):
-            commands.dispatch(k.bin_emit, "bin_emit",
-                thread_count=[pairs.capacity, 1, 1],
+            # Depth sorting finished; its indirect buffer can serve both pair kernels.
+            args = r.depth_sort.dispatch_args
+            commands.dispatch(k.prepare_pair_args, "pair_dispatch_args", thread_count=[1, 1, 1],
+                count_buf=pair_count.storage, dispatch_args=args.storage,
+                record_words=1, max_splats=pairs.capacity)
+            commands.dispatch_indirect(k.bin_emit, "bin_emit", args,
                 blend_data=r.blend_data.storage,
                 camera=self.camera_buffer,
                 depth_sorted_ids=depth_sorted_ids.storage,
@@ -198,8 +197,7 @@ class Rasterizer:
             sorted_tiles, _, sorted_values = self._sort.sort(pair_count, key_bits=tile_bits)
 
         with commands.marker_group("identify_tile_ranges"):
-            commands.dispatch(k.identify_tile_ranges, "identify_tile_ranges",
-                thread_count=[pairs.capacity, 1, 1],
+            commands.dispatch_indirect(k.identify_tile_ranges, "identify_tile_ranges", args,
                 tile_keys=sorted_tiles.storage,
                 tile_start=r.tile_start.storage,
                 tile_end=r.tile_end.storage,

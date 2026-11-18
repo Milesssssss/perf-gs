@@ -15,7 +15,7 @@ from trainer.backend.compute.device import create_device
 from trainer.backend.densify.structure_tensor import StructureTensor
 from trainer.backend.memory import budget
 from trainer.backend.platform.dxgi import query_video_memory
-from trainer.backend.render.pipeline import TrainingPipeline, estimate_pipeline_bytes
+from trainer.backend.render.pipeline import estimate_pipeline_bytes
 from trainer.config.config import AdamLRs, LossConfig
 from trainer.data.dataset import simple_camera
 from trainer.frontend.app import TrainingApplication
@@ -150,35 +150,36 @@ def test_viewer_grows_to_the_snapshot(device) -> None:
     assert viewer._pipeline.read_output_image()[..., 3].max() > 0
 
 
-def _train_scene(device, tmp_path, monkeypatch, residency: str) -> np.ndarray:
+def _train_scene(device, tmp_path, monkeypatch, residency: str, stride: int) -> np.ndarray:
     scene = write_colmap_scene(tmp_path / residency, views=[
         (f"{i}.png", 16, 16, 20.0) for i in range(4)])
     args = build_parser().parse_args([
-        "--scene", str(scene), "--no-viewer", "--iters", "4", "--max-splats", "64",
+        "--scene", str(scene), "--no-viewer", "--iters", "4", "--max-splats", "64", "--max-sort-pairs", "512",
         "--width", "16", "--height", "16", "--eval-holdout-stride", "2",
         "--no-evaluation", "--no-write-ground-truths", "--preview-every", "0",
         "--densify-mode", "structure_aware", "--densify-from", "0", "--densify-to", "4",
         "--densify-every", "1", "--sad-accum-every", "1", "--sad-structure-every", "2",
         "--image-residency", residency, "--run-name", residency,
+        "--lattice-stride", str(stride), "--lattice-until", "3",
     ])
     monkeypatch.setattr("trainer.frontend.app.create_training_device", lambda _args: device)
     # Earlier tests' devices count against this process's DXGI budget.
     monkeypatch.setattr("trainer.frontend.app.available_bytes", lambda *_: None)
-    monkeypatch.setattr("trainer.frontend.factory.TrainingPipeline",
-                        lambda **kwargs: TrainingPipeline(max_sort_pairs=512, **kwargs))
     app = TrainingApplication(args)
     app.prepare_training_context()
     try:
         assert app._stream_targets == (residency == "stream")
         app.build_training_loop().launch_training_loop()
         app.pipeline.runtime.wait_for_idle()
+        assert app.pipeline.iteration == 4 and (app.pipeline.width, app.pipeline.height) == (16, 16)
         return app.pipeline.buffers.primitive.values.to_numpy().copy()
     finally:
         app.runtime.artifacts.close_all()
 
 
-def test_streamed_training_matches_resident(device, tmp_path, monkeypatch) -> None:
+@pytest.mark.parametrize("stride", [1, 2])
+def test_streamed_training_matches_resident(device, tmp_path, monkeypatch, stride) -> None:
     monkeypatch.chdir(tmp_path)
-    resident = _train_scene(device, tmp_path, monkeypatch, "gpu")
-    streamed = _train_scene(device, tmp_path, monkeypatch, "stream")
+    resident = _train_scene(device, tmp_path, monkeypatch, "gpu", stride)
+    streamed = _train_scene(device, tmp_path, monkeypatch, "stream", stride)
     np.testing.assert_array_equal(resident, streamed)

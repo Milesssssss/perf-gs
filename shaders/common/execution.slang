@@ -17,4 +17,13 @@ static const uint RADIX_GLOBAL_HIST_SIZE = 2048;
 static const uint SCAN_BLOCK_SIZE = 1024;
 static const uint RASTER_BUCKET_SIZE = 32;
 
+// Indirect linear dispatches tile workgroups over X and Y to stay within the 65535-group X limit.
+static const uint LINEAR_DISPATCH_WIDTH = 65535;
+
+uint linearThreadIndex256(uint3 thread)
+{
+    uint row = thread.y * (LINEAR_DISPATCH_WIDTH * 256u);
+    return row + min(thread.x, 0xffffffffu - row);  // Ignore padded lanes beyond uint range.
+}
+
 #endif // TRAINER_EXECUTION_SLANG

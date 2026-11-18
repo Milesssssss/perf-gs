@@ -40,6 +40,33 @@ Read `outputs/train/sweep_mip360_3k_adaptive_<scene>_<seed>/run_report.json` and
 
 A separate fixed-falloff run through the ordinary CLI on bicycle at seed 1 scored 25.569 dB, 0.78175 SSIM and 0.22669 LPIPS over all 25 held-out views. The timed fixed-falloff sweep run at that seed scored 25.573 dB, 0.78179 and 0.22666.
 
+### Faster training on staggered pixels
+
+Across two seeds and all nine Mip-NeRF 360 scenes, the RTX 4080 averaged **14.944 seconds of optimization per scene at 27.371 dB**. Seed 42 measured 14.970 s and 27.370 dB. Seed 1 measured 14.918 s and 27.371 dB. Loading the scene, fitting the lens, preparing the stereo initialization and setting up the GPU brought the respective means to 18.075 s and 17.770 s. The measurements used Vulkan on Windows with a Threadripper PRO 5975WX. Four scenes in each seed took more than 15 seconds of optimization. [Per-scene measurements](mipnerf360_3k_results.csv)
+
+The staggered-pixel recipe averaged **0.80912 SSIM and 0.27497 VGG LPIPS**. The full-pixel adaptive SH3 recipe averaged **0.82792 and 0.24054** on those same held-out images. Higher SSIM and lower LPIPS favor the full-pixel recipe. Bicycle shows the difference clearly in the metrics. At seed 42 its LPIPS was 0.291 with staggered pixels and 0.230 with stock SH3.
+
+The SH2 speed recipe trains on one native image pixel from each 2×2 block through step 2,775. Each visit to a training camera selects the next of the four pixel positions. The projected camera and the target use the same pixel centers, and the renderer divides the 2D filter variance by four in the reduced pixel coordinates. The last 225 updates use the full benchmark image, including any odd edge row or column. All held-out images use the original benchmark resolution. The recipe retains the adaptive lens and stereo initialization.
+
+The batch command below starts each scene from its own COLMAP reconstruction, with fresh optimizer state and targets. It creates the GPU device once and reuses compiled shaders across scenes. Run it in a fresh process for each seed. The timed runs used the order below and included the first scene with an empty in-process shader cache. Add `--run-report --eval-lpips` to score SSIM and full-resolution VGG LPIPS after training. To export the trained Gaussians as `output.ply`, add `--compute-final-metrics`. Evaluation and export run after the optimizer timer stops.
+
+```powershell
+python scripts/running/train_batch.py --prefix mip360_lattice_s42 `
+  --scenes bicycle,room,flowers,bonsai,garden,treehill,stump,counter,kitchen -- `
+  --seed 42 --iters 3000 --preset perf --sh-degree 2 --sh-band-interval 500 `
+  --lr-recipe short --stereo-init --auto-lens --sad-lambda-l2 6 --lambda-ssim 0.3 `
+  --prune-scale3d 1 --prune-blend-weight 0.20 --grad-thresh 0.00058 `
+  --densify-from 100 --prune-blend-from 900 --sad-tau-split 0.64 `
+  --max-splats 2800000 --max-sort-pairs 24000000 --image-residency gpu `
+  --lattice-stride 2 --lattice-until 2775
+```
+
+For seed 1, set `--seed 1` and use a new prefix. Each scene's `batch_timing.json` records the GPU-drained optimizer loop, setup plus that loop, and wall time including held-out scoring and teardown. Including Python imports and argument processing once per batch brings the two-seed setup-plus-training mean to 18.181 s per scene. The benchmark starts from the supplied COLMAP inputs. The ordinary CLI also accepts the two lattice flags. All built-in presets default to `--lattice-stride 1`.
+
+All 18 published runs recorded zero training sort overflows with the 24-million-pair allocation. The batch command also records `sort_overflows_through_evaluation` after rendering the held-out views. A nonzero count means some tile–splat pairs were dropped.
+
+The fast runs include a renderer change that dispatches pair emission and tile-range lookup over the live pair count. The forward pass also writes empty pixels directly, which removes a separate image clear. Historical full-pixel rows retain their originally measured times, so their timing differences include both renderer and training-recipe changes.
+
 ## Scoring and timing
 
 Both seeds use the same split. Sorting images by name and holding out indices 0, 8, 16, … gives 246 held-out views across nine scenes. Stereo matching and optimizer updates use training views. Indoor scenes use half resolution and outdoor scenes use quarter resolution. The benchmark scenes informed recipe selection.
@@ -47,6 +74,8 @@ Both seeds use the same split. Sorting images by name and holding out indices 0,
 For each seed, take the unweighted mean of the nine scene reports’ `quality.psnr_srgb`, `quality.ssim_srgb` and `quality.lpips`. Each scene averages per-image scores on full-frame, clipped floating-point sRGB. PSNR is averaged in dB, SSIM uses all RGB channels, and VGG LPIPS uses each image at evaluation resolution.
 
 Both the fixed and adaptive comparisons use the native CPU evaluator. For adaptive falloff, 128 held-out renders were scored directly during reporting and 364 from saved full-precision render/target pairs. On those 364, independent scoring reproduced PSNR and SSIM exactly and differed by at most 0.00000006 VGG LPIPS per image. Across all 492 fixed-falloff renders, an independent FP32 GPU VGG evaluation differed by at most 0.00000009 LPIPS per image. The per-scene CSV also includes a separate seed-42 SfM-only variant. It disables stereo initialization, increases the L2 loss weight from 6 to 9 and reduces the blend-pruning weight from 0.20 to 0.15. The CSV identifies the evaluator used for each run. [Per-scene results](mipnerf360_3k_results.csv)
+
+For the staggered-pixel runs, the native trainer measured PSNR on each full held-out view. The independent scorer used the saved float32 renders and targets, checked every camera ID and target checksum against the reference split, and recomputed per-image PSNR and SSIM. VGG LPIPS used the calibrated FP32 evaluator above at the full evaluation resolution. Final evaluation and perceptual scoring are outside the training clock.
 
 `timing.train_wall_s` measures the optimizer loop through the final GPU drain. Stereo initialization, image loading and target preparation precede that clock. For a setup-inclusive training comparison, time `TrainingApplication.prepare_training_context()` through a GPU drain and add `train_wall_s`. `timing.process_wall_s` also includes final held-out evaluation, including VGG. Use the same timing boundary for both recipes.
 
