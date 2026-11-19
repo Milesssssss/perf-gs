@@ -26,6 +26,14 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
+## FastGS and SAD-GS benchmark patches
+
+Copyright (c) 2025 fastgs. The FastGS portions of the optional benchmark
+patches use the MIT permission notice and disclaimer reproduced above.
+Both upstream repositories also include the original Graphdeco license
+reproduced below. The SkipGS benchmark uses the separately installed
+controller, copyright (c) 2026 ESIC-FAN-Lab, under the MIT license. [FastGS license](https://github.com/fastgs/FastGS/blob/44e02a5c1d5e9ed64d2ecd4af1cbba14ac92150f/LICENSE) · [SAD-GS license](https://github.com/LinjieLyu/SADGS/blob/029814fb5ed773e4a794cec5115951a64f610ab8/LICENSE) · [SkipGS license](https://github.com/ASU-ESIC-FAN-Lab/SkipGS/blob/d69d9605a18d0f6e5e493ea3d25dfd158849c63e/LICENSE)
+
 ## For use of INIRA/GRAPHDECO 3D
 
 Copyright (C) 2023, Inria. GRAPHDECO research group. All rights reserved.

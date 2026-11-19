@@ -7,19 +7,20 @@ Install the trainer, activate its Python environment and fetch all nine scenes w
 Run this PowerShell sweep on an idle GPU. It launches one process per scene and preset at seed 42. Both training and held-out evaluation use `images_4` outdoors and `images_2` indoors at their stored dimensions. Stereo initialization uses a separate 672-pixel-wide working image for up to 28 training-camera anchors and can add up to 256,000 starting points. Its cost belongs to setup.
 
 ```powershell
+$gpuTag = (nvidia-smi -i 0 --query-gpu=name --format=csv,noheader).Trim() -replace '\s+', '_'
 foreach ($preset in 'ultrafast', 'balanced', 'quality') {
   python scripts/running/eval_sweep.py --axis seed --values 42 --iters 3000 `
-    --name "mip360_3k_preset_$preset" --no-plot --extra --preset $preset `
+    --name "mip360_3k_${gpuTag}_$preset" --no-plot --extra --preset $preset `
     --eval-every 0 --preview-every 0 --no-write-ground-truths --run-report --save-test-renders
 }
 ```
 
-The sweep reuses completed runs by name. Choose a new name or pass `--force` if a cached run lacks the saved test PNGs. For the reference scores, use CUDA PyTorch, torchvision, tqdm and the pretrained VGG and LPIPS weights. These PowerShell commands prepare Graphdeco’s directory layout, pair each RGB8 render with the original photo decoded by Pillow, and score every held-out image. The model-directory argument can also be passed directly to the reference checkout’s `python metrics.py -m` command. [Graphdeco reference evaluation](https://github.com/graphdeco-inria/gaussian-splatting/blob/54c035f7834b564019656c3e3fcc3646292f727d/metrics.py)
+The sweep reuses completed runs by name. The GPU tag gives a new card its own run directories. On other adapters, set `$gpuTag` to the device name manually. Verify the adapter in each `run_report.json`. Choose a new name or pass `--force` if a cached run lacks the saved test PNGs. For the reference scores, use CUDA PyTorch, torchvision, tqdm and the pretrained VGG and LPIPS weights. These PowerShell commands prepare Graphdeco’s directory layout, pair each RGB8 render with the original photo decoded by Pillow, and score every held-out image. The model-directory argument can also be passed directly to the reference checkout’s `python metrics.py -m` command. [Graphdeco reference evaluation](https://github.com/graphdeco-inria/gaussian-splatting/blob/54c035f7834b564019656c3e3fcc3646292f727d/metrics.py)
 
 ```powershell
 git clone https://github.com/graphdeco-inria/gaussian-splatting.git outputs/graphdeco_reference
 git -C outputs/graphdeco_reference checkout 54c035f7834b564019656c3e3fcc3646292f727d
-$models = foreach ($run in Get-ChildItem outputs/train -Directory -Filter 'sweep_mip360_3k_preset_*') {
+$models = foreach ($run in Get-ChildItem outputs/train -Directory -Filter "sweep_mip360_3k_${gpuTag}_*") {
   $model = "outputs/graphdeco_input/$($run.Name)"
   python scripts/running/prepare_graphdeco.py $run.FullName $model | Out-Host
   if ($LASTEXITCODE -ne 0) { throw "Could not prepare $model" }
@@ -42,6 +43,51 @@ Measure-Command {
 ```
 
 `Measure-Command` stops at process exit. The training log records the optimizer loop under `train_complete.train_wall_s`, and the benchmark CSV distinguishes model readiness, PLY closure, process exit and a completed file sync. In the clean training-only CLI, the writer closes the PLY before exit and the timing harness syncs it immediately afterward. The quality run synced its PLY before scoring held-out views. Fresh processes may reuse filesystem and shader disk caches. Graphdeco’s `full_eval.py` times its training commands including model saves. [Per-scene timing boundaries](mipnerf360_3k_presets.csv) · [Upstream timing script](https://github.com/graphdeco-inria/gaussian-splatting/blob/54c035f7834b564019656c3e3fcc3646292f727d/full_eval.py)
+
+### Compare LiteGS on the same GPU
+
+Use the pinned LiteGS checkout and its CUDA environment. From the PERF-GS repository root, the Bash commands below time all nine scenes and then score their final models. Set `LITEGS` to the path to that checkout. The `--reference` directories come from the PERF-GS sweep above. [LiteGS installation and source](https://github.com/MooreThreads/LiteGS/tree/004b95215c90c36cdaf4b354301132b700ac287b) · [Benchmark helper](../scripts/running/benchmark_litegs.py)
+
+```bash
+export PYTHONHASHSEED=42
+gpu_tag=$(nvidia-smi -i 0 --query-gpu=name --format=csv,noheader | tr ' ' '_')
+for phase in train score; do
+  for scene in bicycle flowers garden stump treehill bonsai counter kitchen room; do
+    dataset=360_v2
+    case "$scene" in flowers|treehill) dataset=360_extra_scenes ;; esac
+    extra=()
+    if [[ "$phase" == score ]]; then
+      extra=(--graphdeco outputs/graphdeco_reference
+             --reference "outputs/graphdeco_input/sweep_mip360_3k_${gpu_tag}_quality_${scene}_42")
+    fi
+    python scripts/running/benchmark_litegs.py "$phase" --litegs "$LITEGS" \
+      --scene "datasets/$dataset/$scene" --model "outputs/litegs_${gpu_tag}/$scene" "${extra[@]}" || exit 1
+  done
+done
+```
+
+Each LiteGS scene writes its loop time to `time.json` and RGB8 PSNR to `heldout_rgb8.json`. On the RTX 4080, all 246 reference images matched the PERF-GS targets byte for byte. Replaying the first held-out bicycle view through upstream LiteGS reproduced the helper’s PSNR within 0.000001 dB.
+
+### Reproduce the additional trainers
+
+Use a separate upstream checkout and CUDA environment for each trainer. Apply its benchmark patch from the PERF-GS repository root with `git -C "$CHECKOUT" apply "$PWD/scripts/running/benchmark_patches/$PATCH"`. Run the nine Mip-NeRF 360 entries in the linked upstream recipe, retaining its per-scene settings. Set `PYTHONHASHSEED=42`, use one GPU, and keep each model in its own output directory. Use `images_4` outdoors and `images_2` indoors at their stored sizes. Each patch records the synchronized optimization loop in `time.json`.
+
+| Trainer | Upstream training and rendering | Benchmark patch |
+| --- | --- | --- |
+| SAD-GS | Use the authors’ 3,000-step Mip-NeRF 360 options, including the indoor batch size of two. Pass `--data_device cpu -r 1` and the image folder to training. Render with `render.py --skip_train --iteration 3000`. The patch caches float32 structure maps in system RAM and charges transfers during optimization to the loop. [Pinned recipe](https://github.com/LinjieLyu/SADGS/blob/029814fb5ed773e4a794cec5115951a64f610ab8/run_train.sh) | [sadgs.patch](../scripts/running/benchmark_patches/sadgs.patch) |
+| FastGS-Big | Use each scene’s 30,000-step Big options with `-r 1` and the image folder. Render with `render.py --skip_train --iteration 30000`. [Pinned recipe](https://github.com/fastgs/FastGS/blob/44e02a5c1d5e9ed64d2ecd4af1cbba14ac92150f/train_big.sh) | [fastgs.patch](../scripts/running/benchmark_patches/fastgs.patch) |
+| SkipGS on FastGS Standard | Install the pinned SkipGS package into the FastGS environment. Use the 30,000-step Standard per-scene options with the same image and render flags as Big. The controller begins at step 15,000. [FastGS Standard recipe](https://github.com/fastgs/FastGS/blob/44e02a5c1d5e9ed64d2ecd4af1cbba14ac92150f/train_base.sh) · [Pinned SkipGS integration](https://github.com/ASU-ESIC-FAN-Lab/SkipGS/blob/d69d9605a18d0f6e5e493ea3d25dfd158849c63e/examples/integrate_fastgs.md) | Apply [fastgs.patch](../scripts/running/benchmark_patches/fastgs.patch) first, then [skipgs-fastgs.patch](../scripts/running/benchmark_patches/skipgs-fastgs.patch). |
+
+The RTX 4080 runs used PyTorch 2.5.1+cu121 on WSL2 with `OMP_NUM_THREADS=4`. SAD-GS used `OPENBLAS_NUM_THREADS=4`. Both FastGS-based runs used `MKL_NUM_THREADS=4` and `OPENBLAS_NUM_THREADS=2`. SkipGS trained from the supplied COLMAP points for all 30,000 iterations and recorded its skipped backward passes in `skip_stats.json`.
+
+Each native renderer writes a `native_views.json` manifest alongside its output. Use the Quality reference directory for the same scene from the sweep above. The scorer checks the camera names and image dimensions before applying Graphdeco’s PSNR to the saved RGB8 renders and the same reference photos.
+
+```bash
+python scripts/running/score_benchmark_renders.py --graphdeco outputs/graphdeco_reference \
+  --reference "$REFERENCE" --views "$MODEL/native_views.json" --output "$MODEL/heldout_rgb8.json"
+```
+
+To plot another card, record its per-scene means in CSVs with the same fields as the RTX 4080 files. Pass the preset CSV with `--presets` and the external-method CSVs with `--baselines` to `python scripts/plots/plot_method_frontiers.py`. The script checks the GPU, image dimensions and held-out counts before creating a card-specific image. [PERF-GS data](mipnerf360_3k_presets.csv) · [LiteGS data](mipnerf360_litegs_4080.csv) · [Additional trainers](mipnerf360_peers_4080.csv)
 
 ## Earlier SH3 comparison
 
