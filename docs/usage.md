@@ -4,6 +4,13 @@
 
 PERF-GS requires Python 3.10 or newer and a GPU with a Vulkan or D3D12 driver. Run the commands below from the checkout with your Python environment active. The README has the editable install and first training command. For a regular installation, use `python -m pip install .` or install a built wheel. The package includes the Slang shaders. [Quickstart](../README.md#quickstart)
 
+### First-run help
+
+The published runs used Windows, Python 3.11.9, SlangPy 0.42.0, Vulkan and an RTX 4080 with 16 GB of VRAM. The Quality preset used 6.06–6.23 GiB of process-local GPU memory at the end of the training loop across the nine headless runs. Peak usage and the interactive viewer’s memory requirements can be higher. [Benchmark configuration](benchmarks.md#current-presets)
+
+- If Python cannot find `trainer`, run `python -m pip install -e .` from the repository root using the same Python that launches the hub.
+- If the window closes during GPU setup, open the `errors.log` path printed in the terminal. On Windows you can also start the hub with `python -m trainer.frontend.app --hub --backend d3d12` to use Direct3D 12.
+
 ## Datasets
 
 Pass `--scene` the directory containing the registered photos in `images/` and the COLMAP reconstruction in `sparse/0/`. The loader accepts binary or text cameras, images and points. For `--downsample 2` or `4` it uses `images_2/` or `images_4/` when available and otherwise resizes on load. Use `--downsample 1` for the original resolution. [COLMAP loader](../src/trainer/data/colmap.py)

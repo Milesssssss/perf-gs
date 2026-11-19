@@ -291,6 +291,22 @@ def plot_presets():
     axes[0].set_yticks(range(len(SCENES)), [s.title() for s in SCENES])
     save(fig, "mipnerf360_3k_presets.png")
 
+    fig = Figure(figsize=(6.8, 2.65))
+    ax = fig.subplots()
+    fig.subplots_adjust(left=.14, right=.975, bottom=.23, top=.95)
+    frame(ax)
+    ax.grid(axis="y", color=RULE, linewidth=.7)
+    for preset, color, marker in presets:
+        seconds = fmean(means[preset, scene][0] for scene in SCENES)
+        psnr = fmean(means[preset, scene][1] for scene in SCENES)
+        ax.scatter(seconds, psnr, marker=marker, s=65, color=color, zorder=3)
+        ax.annotate(preset.title(), (seconds, psnr), xytext=(0, 9),
+                    textcoords="offset points", ha="center", color=INK, weight="bold")
+    ax.margins(x=.18, y=.33)
+    ax.set_xlabel("Training-loop time per scene (seconds)", color=INK)
+    ax.set_ylabel("Held-out PSNR (dB)", color=INK)
+    save(fig, "perfgs-speed-quality.png")
+
 
 if __name__ == "__main__":
     plot_mip360()
