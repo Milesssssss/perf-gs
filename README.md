@@ -2,7 +2,7 @@
 
 **3DGS in seconds.**
 
-At 3,000 steps on an RTX 4080, Ultrafast averages **17.62 seconds of optimization** across nine Mip-NeRF 360 scenes.<br>We average **27.13 dB PSNR in 17.62 seconds** with Ultrafast preset and **27.78 dB PSNR in 33.85 seconds** with **Quality** preset.
+On MipNerf360, we average **27.13 dB PSNR in 17.62 seconds** with Ultrafast preset and **27.78 dB PSNR in 33.85 seconds** with **Quality** preset.
 
 [Quickstart](#quickstart) · [Benchmarks](#mip-nerf-360-at-3000-steps) · [Gallery](#reconstructions)
 
@@ -13,7 +13,7 @@ At 3,000 steps on an RTX 4080, Ultrafast averages **17.62 seconds of optimizatio
 
 **18.14 s from opening the scene to training completion** = 0.19 s to load COLMAP + 0.52 s before pressing Start + 3.41 s for setup + 14.02 s of optimization. The clock stays at 18.14 s during the final camera move.
 
-## Mip-NeRF 360 at 3,000 steps
+## Mip-NeRF 360
 
 | Preset | Training loop | Launch to saved PLY | PSNR ↑ | SSIM ↑ | VGG LPIPS ↓ |
 | --- | ---: | ---: | ---: | ---: | ---: |
