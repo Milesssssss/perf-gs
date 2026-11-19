@@ -9,6 +9,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import TYPE_CHECKING
 
+from trainer.backend.render import stbn_table
 from trainer.data.colmap import ColmapDataset, _find_sparse_dir, load_colmap
 from trainer.frontend.profiling.profiler import apply_profile_session_overrides
 from trainer.frontend.reporting.error_log import report_exception
@@ -37,6 +38,8 @@ class TrainingHub:
         self.app = app
         self._pending_drop: str | None = None
         self._scene_cache: tuple[tuple, ColmapDataset] | None = None
+        # NVIDIA's STBN masks carry their own license, so they download only after the user accepts it.
+        self._stbn_accepted = False
 
     def _colmap_key(self, scene_dir, dataset):
         args = self.app.args
@@ -135,6 +138,9 @@ class TrainingHub:
                     else:
                         self._pending_drop = None
                         command = None
+                elif command == "download_stbn_then_train":
+                    self._stbn_accepted = True
+                    command = "train"
             elif command == "cancel":
                 state.take_confirm(accept=False)
                 self._pending_drop = None
@@ -227,11 +233,18 @@ class TrainingHub:
         state.notify("Could not load dataset", ERROR)
 
     def _hub_request_training(self) -> "str | None":
-        """Start from the original points after resolving any unsaved model."""
+        """Start from the original points after resolving the STBN license and any unsaved model."""
         state = self.app._viewer.state
         snap = state.snapshot()
         if not snap.trainable:
             state.notify("No trainable scene yet", WARN)
+            return None
+        if not self._stbn_accepted and self._stbn_download_needed(state.setup):
+            state.ask(Confirm(
+                key="training", title="This run needs NVIDIA's STBN masks",
+                body="About 30 MB from github.com/NVIDIA-RTX/STBN, licensed for non-commercial "
+                     "research only. Balanced and Quality don't use them.",
+                command="download_stbn_then_train", confirm_label="Download and train"))
             return None
         if snap.unexported:
             state.ask(Confirm(
@@ -251,6 +264,9 @@ class TrainingHub:
         started = time.perf_counter()
         state.reset_for_new_run()
         state.training_initializing(setup.get("iters"))
+        # Before suspend_rendering, so the panel keeps drawing during the download.
+        if not self._hub_ensure_stbn(setup):
+            return
         state.begin_activity("Preparing training images and GPU buffers")
         self.app.viewer.clear_stop_request()
         state.log(f"preparing training on {scene_dir}")
@@ -292,6 +308,28 @@ class TrainingHub:
                      else f"Training complete in "
                           f"{format_duration(stats.elapsed_s)}", OK)
         state.log("Training finished")
+
+    def _stbn_download_needed(self, setup) -> bool:
+        """Whether the run samples NVIDIA's STBN masks and they are not cached yet."""
+        args = self.app.args
+        return (setup.get("stbn_pixel_fraction") < 1.0
+                and args.stbn_source == stbn_table.SOURCE_NVIDIA and not args.stbn_file
+                and not stbn_table.nvidia_volume_path().is_file())
+
+    def _hub_ensure_stbn(self, setup) -> bool:
+        """Download the accepted STBN masks if this run needs them; False once a failure failed the run."""
+        if not (self._stbn_accepted and self._stbn_download_needed(setup)):
+            return True
+        from trainer.frontend import stbn_download
+
+        state = self.app._viewer.state
+        state.begin_activity("Downloading NVIDIA's STBN masks")
+        try:
+            stbn_download.download(log=state.log)
+        except Exception as error:                     # noqa: BLE001
+            self._hub_run_failed("downloading NVIDIA's STBN masks", error)
+            return False
+        return True
 
     def _hub_run_failed(self, what: str, error: Exception) -> None:
         """Report a failed hub run and leave the session usable."""

@@ -226,31 +226,6 @@ class Panel:
         self.bind(box, **binds)
         return box
 
-    def slider_float(self, caption: str, value: Dynamic, minimum: float,
-                     maximum: float, on_change: Callable[[float], None],
-                     fmt: str = "%.3f", **binds: Dynamic) -> spy.ui.SliderFloat:
-        self._caption_row(caption, binds)
-        slider = spy.ui.SliderFloat(self._parent, self._widget_id(),
-                                    value=float(_as_getter(value)()),
-                                    min=float(minimum), max=float(maximum),
-                                    callback=on_change, format=fmt)
-        if callable(value):
-            binds.setdefault("value", lambda g=_as_getter(value): float(g()))
-        self.bind(slider, **binds)
-        return slider
-
-    def slider_int(self, caption: str, value: Dynamic, minimum: int, maximum: int,
-                   on_change: Callable[[int], None], **binds: Dynamic) -> spy.ui.SliderInt:
-        self._caption_row(caption, binds)
-        slider = spy.ui.SliderInt(self._parent, self._widget_id(),
-                                  value=int(_as_getter(value)()),
-                                  min=int(minimum), max=int(maximum),
-                                  callback=on_change)
-        if callable(value):
-            binds.setdefault("value", lambda g=_as_getter(value): int(g()))
-        self.bind(slider, **binds)
-        return slider
-
     def drag_int(self, caption: str, value: Dynamic, on_change: Callable[[int], None],
                  *, minimum: int = 0, maximum: int = 0, speed: float = 1.0,
                  fmt: str = "%d", **binds: Dynamic) -> spy.ui.DragInt:

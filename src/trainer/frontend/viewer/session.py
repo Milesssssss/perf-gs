@@ -636,10 +636,6 @@ class Session:
             self._snap = replace(
                 self._snap, notices=(*self._snap.notices, notice)[-MAX_NOTICES:])
 
-    def clear_notices(self) -> None:
-        with self._lock:
-            self._snap = replace(self._snap, notices=())
-
     def ask(self, confirm: Confirm) -> None:
         with self._lock:
             self._snap = replace(self._snap, confirm=confirm)
@@ -652,11 +648,6 @@ class Session:
         if pending is None or not accept:
             return None
         return pending.alt_command if alt and pending.alt_command else pending.command
-
-    @property
-    def pending_confirm(self) -> Confirm | None:
-        with self._lock:
-            return self._snap.confirm
 
     def begin_activity(self, label: str, fraction: float | None = None) -> None:
         with self._lock:
@@ -839,12 +830,6 @@ class Session:
         with self._lock:
             self._snap = replace(self._snap, result_error=str(reason),
                                  activity=Activity())
-
-    def drop_result(self) -> None:
-        """Forget the reconstruction (a restart is about to replace it)."""
-        with self._lock:
-            self._snap = replace(self._snap, result_state=ResultState.NONE,
-                                 result=ResultInfo(), result_error="")
 
     def clear_session(self) -> None:
         """Back to the empty drop target, keeping tools, matcher/build choices, parameters and the log.

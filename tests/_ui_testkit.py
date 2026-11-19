@@ -161,13 +161,6 @@ class RecordingPanel:
         self.widgets.append(Declared("input_text", value=value,
                                      on_change=on_change, binds=binds))
 
-    def slider_float(self, caption, value, minimum, maximum, on_change,
-                     fmt="%.3f", **binds) -> None:
-        self.widgets.append(Declared("slider", value=value, on_change=on_change,
-                                     binds=binds))
-
-    slider_int = slider_float
-
     def drag_int(self, caption, value, on_change, *, minimum=0, maximum=0,
                  speed=1.0, fmt="%d", **binds) -> None:
         self._caption_row(caption, binds)

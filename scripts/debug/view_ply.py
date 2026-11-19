@@ -9,8 +9,6 @@ from __future__ import annotations
 
 import argparse
 
-import numpy as np
-
 from trainer.data.ply import load_ply
 from trainer.common.sh import sh_degree_from_rest_floats
 from trainer.config.config import AppearanceConfig
@@ -20,10 +18,7 @@ from trainer.frontend.viewer.viewer import Viewer
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="View a .ply gaussian splat file")
-    # A positional needs nargs="?" for its default to apply.
-    ap.add_argument("ply", type=str, nargs="?",
-                    default=r"C:\Users\sscolari\Desktop\slang_3dgs_trainer\datasets\ply_files\debug\GaussianSplatValidator_HDR.ply",
-                    help="path to the .ply file to view")
+    ap.add_argument("ply", help="path to the .ply file to view")
     ap.add_argument("--width", type=int, default=960)
     ap.add_argument("--height", type=int, default=540)
     ap.add_argument("--max-splats", type=int, default=1_000_000)

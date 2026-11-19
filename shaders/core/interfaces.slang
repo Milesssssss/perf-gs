@@ -50,21 +50,4 @@ void projectModel<M : IProjectableModel>(
                       mean2d, cov2d, depth_vs, cov2d_det, opacity_compensation);
 }
 
-interface IScreenFootprint
-{
-    // Unclamped screen-space AABB; false (outputs undefined) when the primitive has no extent.
-    bool bounds(out float2 out_min, out float2 out_max);
-
-    // True walks rows (rowTiles), false columns (colTiles); the shorter axis minimizes crossing tests.
-    bool iterateRows(uint2 tile_min, uint2 tile_max);
-
-    // Inclusive column range [tx_lo, tx_hi] crossed in tile row `ty`; false if the row is untouched.
-    bool rowTiles(float2 bbox_min, float2 bbox_max, uint ty,
-                  uint tile_min_x, uint tile_max_x, out uint tx_lo, out uint tx_hi);
-
-    // Column twin of rowTiles.
-    bool colTiles(float2 bbox_min, float2 bbox_max, uint tx,
-                  uint tile_min_y, uint tile_max_y, out uint ty_lo, out uint ty_hi);
-}
-
 #endif // TRAINER_CORE_INTERFACES_SLANG

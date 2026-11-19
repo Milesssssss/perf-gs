@@ -654,10 +654,6 @@ class Viewer:
         if self._pause_event.is_set():
             self._pause_event.clear()
 
-    def toggle_pause(self) -> None:
-        (self.resume_training if self._pause_event.is_set()
-         else self.pause_training)()
-
     def request_stop_training(self) -> None:
         if not self.state.training_stopping():
             return

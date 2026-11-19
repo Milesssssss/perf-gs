@@ -11,16 +11,15 @@
 # allocator avoids expandable segments, which fail under WSL here ("device not ready").
 # train (loop timed by timed_train.py) -> render test views -> metrics. Idempotent:
 # a scene with results.json is skipped. Output: outputs/sadgs_counterparts/sh<D>/<scene>/.
-# Run from Windows: wsl -e bash /mnt/c/.../scripts/shell/_sadgs_run/run_counterparts.sh
+# Run in the activated SADGS Python environment. Set SADGS_ROOT if the reference
+# checkout is not beside this repository.
 set -uo pipefail
 
-REPO=/mnt/c/Users/sscolari/Desktop/slang_3dgs_trainer
-export SADGS_ROOT=/mnt/c/Users/sscolari/Desktop/SADGS
-export MAMBA_ROOT_PREFIX=$HOME/mm CUDA_HOME=$HOME/mm/envs/sadgs
-export PATH=$HOME/mm/envs/sadgs/bin:$PATH
-export LD_LIBRARY_PATH=$HOME/mm/envs/sadgs/lib/python3.11/site-packages/torch/lib:$HOME/mm/envs/sadgs/lib:${LD_LIBRARY_PATH:-}
+REPO=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../../.." && pwd) || exit 1
+SADGS_ROOT=$(cd -- "${SADGS_ROOT:-$REPO/../SADGS}" && pwd) || exit 1
+export SADGS_ROOT
 export PYTORCH_CUDA_ALLOC_CONF=garbage_collection_threshold:0.7,max_split_size_mb:256
-PY=$HOME/mm/envs/sadgs/bin/python
+PY=${PYTHON:-python}
 
 M360=(--optimizer_type hybrid --split_ratio_threshold 0.4 --sample_bbox_faces
       --warmup_densification --mult 0.25 --iterations 3000 --position_lr_max_steps 3000

@@ -132,7 +132,7 @@ The download helpers link to three datasets that can be obtained separately by u
 
 ## License
 
-This project is provided under the BSD 3-Clause License, see [LICENSE](LICENSE.md) for details. See [NOTICE](NOTICE.md) for licensing details on other software and data.
+This project is provided under the BSD 3-Clause License, see [LICENSE](LICENSE) for details. See [NOTICE](NOTICE.md) for licensing details on other software and data.
 
 ## Contributing
 

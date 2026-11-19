@@ -274,8 +274,8 @@ License for Spatiotemporal Blue Noise Texture Generation*: **non-commercial
 research/evaluation use only**, and redistribution must carry the license plus
 attribution. Therefore:
 
-- the download is **opt-in** (`scripts/data/download_stbn.py`) and the feature is
-  off by default;
+- the download is **opt-in** (`scripts/data/download_stbn.py`, or the hub's prompt
+  when a run needs the masks) and the feature is off by default;
 - assets land in `.stbn/` which is **gitignored** — vendoring them into a shared
   repo is a redistribution, and that is a call for a human to make;
 - the license text and a provenance `NOTICE.md` are written next to the data.
@@ -300,7 +300,7 @@ arrangement is most of the point.
 | `src/trainer/config/resolve.py` | CLI args -> `StbnConfig` and the shader specialization |
 | `src/trainer/frontend/schedule.py` | `StbnDensitySchedule` |
 | `src/trainer/frontend/sampling.py` | `StbnSampler`: per-camera slice walk + density schedule |
-| `scripts/data/download_stbn.py` | asset fetch + license handling |
+| `src/trainer/frontend/stbn_download.py` | asset fetch + license handling (CLI: `scripts/data/download_stbn.py`) |
 | `tests/test_stbn.py` | mask invariants + blue-noise quality |
 | `tests/test_stbn_gradients.py` | reference-vs-compacted equivalence, unbiasedness |
 

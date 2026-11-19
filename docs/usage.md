@@ -85,7 +85,7 @@ The viewer restores the lens response recorded in the PLY. External renderers ne
 
 ## Testing and diagnostics
 
-Install the development dependencies and run the suite from the checkout.
+The source distribution contains the trainer and its shaders. Use a repository checkout for the download helpers and test suite.
 
 ```sh
 python -m pip install -e ".[dev]"

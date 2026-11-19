@@ -234,9 +234,8 @@ def build_parser() -> argparse.ArgumentParser:
                     help="additive L2 loss weight for non-SAD runs (0 = pure L1(+SSIM))")
     _shared(parser, "grad_thresh")
     parser.add_argument("--no-viewer", action="store_true", help="disable live viewer stream")
-    parser.add_argument("--launch-viewer", action="store_true",
-                    help="DEPRECATED / no-op: the live viewer is now in-process "
-                         "and starts automatically unless --no-viewer is given.")
+    # Older launch scripts pass this flag. The viewer now starts automatically.
+    parser.add_argument("--launch-viewer", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--wait-for-viewer", action="store_true",
                     help="after initializing the gaussians, stream the initial "
                          "state and BLOCK until the viewer's 'Start Training' "

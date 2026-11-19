@@ -6,12 +6,17 @@ import threading
 import pytest
 from slangpy import platform
 
+from trainer.backend.render import stbn_table
 from trainer.frontend import hub as hub_module
+from trainer.frontend import stbn_download
 from trainer.frontend.app import TrainingApplication
 from trainer.frontend.cli import build_parser
 from trainer.frontend.hub import TrainingHub
 from trainer.frontend.reconstruction import ReconTools
-from trainer.frontend.viewer.session import DatasetInfo, MODE_HUB, ResultInfo, Session
+from trainer.frontend.settings import TrainingSetup
+from trainer.frontend.viewer.session import (
+    DatasetInfo, MODE_HUB, ResultInfo, Session, TrainingState,
+)
 
 
 def hub_for_one_request(monkeypatch):
@@ -19,7 +24,7 @@ def hub_for_one_request(monkeypatch):
     alive = iter((True, False))
     viewer = SimpleNamespace(state=state, is_alive=lambda: next(alive))
     monkeypatch.setattr(hub_module.time, "sleep", lambda seconds: None)
-    return state, TrainingHub(SimpleNamespace(_viewer=viewer))
+    return state, TrainingHub(SimpleNamespace(_viewer=viewer, args=build_parser().parse_args(["--hub"])))
 
 
 @pytest.mark.parametrize("command", ["browse", "new_dataset"])
@@ -85,6 +90,40 @@ def test_export_and_train_waits_for_a_successful_save(monkeypatch, save):
     monkeypatch.setattr(hub, "_hub_export_ply", lambda: save)
     state.request("confirm")
     assert hub._hub_choose_scene(None) == ("scene" if save else None)
+
+
+def ultrafast_hub_asking_for_masks(tmp_path, monkeypatch):
+    monkeypatch.setattr(stbn_table, "default_cache_dir", lambda: tmp_path)
+    state, hub = hub_for_one_request(monkeypatch)
+    hub.app.args = build_parser().parse_args(["--hub", "--preset", "ultrafast"])
+    state.setup = TrainingSetup.from_args(hub.app.args)
+    state.dataset_ready(DatasetInfo(path="scene", scene_dir="scene"))
+    assert hub._hub_request_training() is None
+    assert state.snapshot().confirm.confirm_label == "Download and train"
+    return state, hub
+
+
+def test_cancelled_stbn_prompt_asks_again_next_time(tmp_path, monkeypatch):
+    state, hub = ultrafast_hub_asking_for_masks(tmp_path, monkeypatch)
+    state.request("cancel")
+    assert hub._hub_choose_scene(None) is None
+    assert hub._hub_request_training() is None
+    assert state.snapshot().confirm.confirm_label == "Download and train"
+
+
+def test_accepted_stbn_download_runs_first_and_its_failure_fails_the_run(tmp_path, monkeypatch):
+    state, hub = ultrafast_hub_asking_for_masks(tmp_path, monkeypatch)
+    state.request("confirm")
+    assert hub._hub_choose_scene(None) == "scene"
+    attempts = []
+    def offline(**kwargs):
+        attempts.append(kwargs)
+        raise RuntimeError("network unreachable")
+    monkeypatch.setattr(stbn_download, "download", offline)
+    hub._hub_train_scene("scene", state.setup)
+    snap = state.snapshot()
+    assert len(attempts) == 1
+    assert snap.training_state is TrainingState.FAILED and "STBN" in snap.training_error
 
 
 def test_next_run_setup_previews_original_points_and_back_restores_model(monkeypatch):
