@@ -1,14 +1,14 @@
 # PERF-GS
 
-**3D Gaussian Splatting. Trained in seconds.**
+**3DGS in seconds.**
 
-Turn a COLMAP scene into a 3D model you can explore and export as a PLY. At 3,000 steps on an RTX 4080, Ultrafast averages **17.62 seconds of optimization** across nine Mip-NeRF 360 scenes. Quality averages **27.78 dB PSNR in 33.85 seconds**.
+At 3,000 steps on an RTX 4080, Ultrafast averages **17.62 seconds of optimization** across nine Mip-NeRF 360 scenes.<br>We average **27.13 dB PSNR in 17.62 seconds** with Ultrafast preset and **27.78 dB PSNR in 33.85 seconds** with **Quality** preset.
 
 [Quickstart](#quickstart) · [Benchmarks](#mip-nerf-360-at-3000-steps) · [Gallery](#reconstructions)
 
 <p align="center">
-  <a href="assets/perfgs-demo.webp"><img src="assets/perfgs-demo.webp" width="896" alt="Stump in real time, from opening the COLMAP scene through 3,000 Ultrafast steps. The timer freezes at training completion as the camera moves through the result."></a>
-  <br><em>Stump · Ultrafast · RTX 4080 · real-time playback</em> · <a href="assets/perfgs-demo.gif">GIF version</a>
+  <a href="assets/perfgs-demo.webp?raw=true"><img src="assets/perfgs-demo.webp" width="896" alt="Stump in real time, from opening the COLMAP scene through 3,000 Ultrafast steps. The timer freezes at training completion as the camera moves through the result."></a>
+  <br><em>Stump · Ultrafast · RTX 4080 · real-time playback</em> · <a href="assets/perfgs-demo.gif?raw=true">GIF (61 MiB)</a>
 </p>
 
 **18.14 s from opening the scene to training completion** = 0.19 s to load COLMAP + 0.52 s before pressing Start + 3.41 s for setup + 14.02 s of optimization. The clock stays at 18.14 s during the final camera move.
@@ -58,34 +58,61 @@ The model is saved in `outputs/train/<run-name>/output.ply`. Evaluation is off b
 
 Each row shows one held-out photograph and all three 3,000-step presets rendered from that camera. Beneath each full view is the same boxed detail, cropped without color or exposure adjustments. Select a tile to see the crop at native resolution.
 
-| Scene | Reference photo | Ultrafast | Balanced | Quality |
-| --- | --- | --- | --- | --- |
-| **Kitchen** | [<img src="assets/reconstructions/kitchen-reference.webp" width="170" alt="Kitchen reference photograph and detail crop">][kitchen-reference] | [<img src="assets/reconstructions/kitchen-ultrafast.webp" width="170" alt="Kitchen Ultrafast render and detail crop">][kitchen-ultrafast] | [<img src="assets/reconstructions/kitchen-balanced.webp" width="170" alt="Kitchen Balanced render and detail crop">][kitchen-balanced] | [<img src="assets/reconstructions/kitchen-quality.webp" width="170" alt="Kitchen Quality render and detail crop">][kitchen-quality] |
-| **Bicycle** | [<img src="assets/reconstructions/bicycle-reference.webp" width="170" alt="Bicycle reference photograph and detail crop">][bicycle-reference] | [<img src="assets/reconstructions/bicycle-ultrafast.webp" width="170" alt="Bicycle Ultrafast render and detail crop">][bicycle-ultrafast] | [<img src="assets/reconstructions/bicycle-balanced.webp" width="170" alt="Bicycle Balanced render and detail crop">][bicycle-balanced] | [<img src="assets/reconstructions/bicycle-quality.webp" width="170" alt="Bicycle Quality render and detail crop">][bicycle-quality] |
-| **Stump** | [<img src="assets/reconstructions/stump-reference.webp" width="170" alt="Stump reference photograph and detail crop">][stump-reference] | [<img src="assets/reconstructions/stump-ultrafast.webp" width="170" alt="Stump Ultrafast render and detail crop">][stump-ultrafast] | [<img src="assets/reconstructions/stump-balanced.webp" width="170" alt="Stump Balanced render and detail crop">][stump-balanced] | [<img src="assets/reconstructions/stump-quality.webp" width="170" alt="Stump Quality render and detail crop">][stump-quality] |
-| **Room** | [<img src="assets/reconstructions/room-reference.webp" width="170" alt="Room reference photograph and detail crop">][room-reference] | [<img src="assets/reconstructions/room-ultrafast.webp" width="170" alt="Room Ultrafast render and detail crop">][room-ultrafast] | [<img src="assets/reconstructions/room-balanced.webp" width="170" alt="Room Balanced render and detail crop">][room-balanced] | [<img src="assets/reconstructions/room-quality.webp" width="170" alt="Room Quality render and detail crop">][room-quality] |
-| **Bonsai** | [<img src="assets/reconstructions/bonsai-reference.webp" width="170" alt="Bonsai reference photograph and detail crop">][bonsai-reference] | [<img src="assets/reconstructions/bonsai-ultrafast.webp" width="170" alt="Bonsai Ultrafast render and detail crop">][bonsai-ultrafast] | [<img src="assets/reconstructions/bonsai-balanced.webp" width="170" alt="Bonsai Balanced render and detail crop">][bonsai-balanced] | [<img src="assets/reconstructions/bonsai-quality.webp" width="170" alt="Bonsai Quality render and detail crop">][bonsai-quality] |
-
-[kitchen-reference]: assets/reconstructions/kitchen-reference.webp
-[kitchen-ultrafast]: assets/reconstructions/kitchen-ultrafast.webp
-[kitchen-balanced]: assets/reconstructions/kitchen-balanced.webp
-[kitchen-quality]: assets/reconstructions/kitchen-quality.webp
-[bicycle-reference]: assets/reconstructions/bicycle-reference.webp
-[bicycle-ultrafast]: assets/reconstructions/bicycle-ultrafast.webp
-[bicycle-balanced]: assets/reconstructions/bicycle-balanced.webp
-[bicycle-quality]: assets/reconstructions/bicycle-quality.webp
-[stump-reference]: assets/reconstructions/stump-reference.webp
-[stump-ultrafast]: assets/reconstructions/stump-ultrafast.webp
-[stump-balanced]: assets/reconstructions/stump-balanced.webp
-[stump-quality]: assets/reconstructions/stump-quality.webp
-[room-reference]: assets/reconstructions/room-reference.webp
-[room-ultrafast]: assets/reconstructions/room-ultrafast.webp
-[room-balanced]: assets/reconstructions/room-balanced.webp
-[room-quality]: assets/reconstructions/room-quality.webp
-[bonsai-reference]: assets/reconstructions/bonsai-reference.webp
-[bonsai-ultrafast]: assets/reconstructions/bonsai-ultrafast.webp
-[bonsai-balanced]: assets/reconstructions/bonsai-balanced.webp
-[bonsai-quality]: assets/reconstructions/bonsai-quality.webp
+<table>
+  <thead>
+    <tr>
+      <th scope="col" width="25%">Reference photo</th>
+      <th scope="col" width="25%">Ultrafast</th>
+      <th scope="col" width="25%">Balanced</th>
+      <th scope="col" width="25%">Quality</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr><th scope="rowgroup" colspan="4" align="left">Kitchen</th></tr>
+    <tr>
+      <td><a href="assets/reconstructions/kitchen-reference.webp"><img src="assets/reconstructions/kitchen-reference.webp" width="216" alt="Kitchen reference photograph and detail crop"></a></td>
+      <td><a href="assets/reconstructions/kitchen-ultrafast.webp"><img src="assets/reconstructions/kitchen-ultrafast.webp" width="216" alt="Kitchen Ultrafast render and detail crop"></a></td>
+      <td><a href="assets/reconstructions/kitchen-balanced.webp"><img src="assets/reconstructions/kitchen-balanced.webp" width="216" alt="Kitchen Balanced render and detail crop"></a></td>
+      <td><a href="assets/reconstructions/kitchen-quality.webp"><img src="assets/reconstructions/kitchen-quality.webp" width="216" alt="Kitchen Quality render and detail crop"></a></td>
+    </tr>
+  </tbody>
+  <tbody>
+    <tr><th scope="rowgroup" colspan="4" align="left">Bicycle</th></tr>
+    <tr>
+      <td><a href="assets/reconstructions/bicycle-reference.webp"><img src="assets/reconstructions/bicycle-reference.webp" width="216" alt="Bicycle reference photograph and detail crop"></a></td>
+      <td><a href="assets/reconstructions/bicycle-ultrafast.webp"><img src="assets/reconstructions/bicycle-ultrafast.webp" width="216" alt="Bicycle Ultrafast render and detail crop"></a></td>
+      <td><a href="assets/reconstructions/bicycle-balanced.webp"><img src="assets/reconstructions/bicycle-balanced.webp" width="216" alt="Bicycle Balanced render and detail crop"></a></td>
+      <td><a href="assets/reconstructions/bicycle-quality.webp"><img src="assets/reconstructions/bicycle-quality.webp" width="216" alt="Bicycle Quality render and detail crop"></a></td>
+    </tr>
+  </tbody>
+  <tbody>
+    <tr><th scope="rowgroup" colspan="4" align="left">Stump</th></tr>
+    <tr>
+      <td><a href="assets/reconstructions/stump-reference.webp"><img src="assets/reconstructions/stump-reference.webp" width="216" alt="Stump reference photograph and detail crop"></a></td>
+      <td><a href="assets/reconstructions/stump-ultrafast.webp"><img src="assets/reconstructions/stump-ultrafast.webp" width="216" alt="Stump Ultrafast render and detail crop"></a></td>
+      <td><a href="assets/reconstructions/stump-balanced.webp"><img src="assets/reconstructions/stump-balanced.webp" width="216" alt="Stump Balanced render and detail crop"></a></td>
+      <td><a href="assets/reconstructions/stump-quality.webp"><img src="assets/reconstructions/stump-quality.webp" width="216" alt="Stump Quality render and detail crop"></a></td>
+    </tr>
+  </tbody>
+  <tbody>
+    <tr><th scope="rowgroup" colspan="4" align="left">Room</th></tr>
+    <tr>
+      <td><a href="assets/reconstructions/room-reference.webp"><img src="assets/reconstructions/room-reference.webp" width="216" alt="Room reference photograph and detail crop"></a></td>
+      <td><a href="assets/reconstructions/room-ultrafast.webp"><img src="assets/reconstructions/room-ultrafast.webp" width="216" alt="Room Ultrafast render and detail crop"></a></td>
+      <td><a href="assets/reconstructions/room-balanced.webp"><img src="assets/reconstructions/room-balanced.webp" width="216" alt="Room Balanced render and detail crop"></a></td>
+      <td><a href="assets/reconstructions/room-quality.webp"><img src="assets/reconstructions/room-quality.webp" width="216" alt="Room Quality render and detail crop"></a></td>
+    </tr>
+  </tbody>
+  <tbody>
+    <tr><th scope="rowgroup" colspan="4" align="left">Bonsai</th></tr>
+    <tr>
+      <td><a href="assets/reconstructions/bonsai-reference.webp"><img src="assets/reconstructions/bonsai-reference.webp" width="216" alt="Bonsai reference photograph and detail crop"></a></td>
+      <td><a href="assets/reconstructions/bonsai-ultrafast.webp"><img src="assets/reconstructions/bonsai-ultrafast.webp" width="216" alt="Bonsai Ultrafast render and detail crop"></a></td>
+      <td><a href="assets/reconstructions/bonsai-balanced.webp"><img src="assets/reconstructions/bonsai-balanced.webp" width="216" alt="Bonsai Balanced render and detail crop"></a></td>
+      <td><a href="assets/reconstructions/bonsai-quality.webp"><img src="assets/reconstructions/bonsai-quality.webp" width="216" alt="Bonsai Quality render and detail crop"></a></td>
+    </tr>
+  </tbody>
+</table>
 
 Scenes and reference photography from Barron et al., CVPR 2022. [Mip-NeRF 360 dataset](https://jonbarron.info/mipnerf360/)
 
@@ -93,9 +120,19 @@ Scenes and reference photography from Barron et al., CVPR 2022. [Mip-NeRF 360 da
 
 Python and SlangPy drive the same Slang rendering, optimization and densification shaders on Vulkan and D3D12. The trainer starts with COLMAP points, adds stereo matches from training views and fits a lens response from those views. Vulkan is the default. On Windows, select D3D12 with `--backend d3d12`. [Shaders](shaders/) · [Preset settings](docs/usage.md#training)
 
+## Datasets
+
+The download helpers link to three datasets that can be obtained separately by users · [Download instructions](docs/usage.md#datasets)
+
+| Dataset | Project / attribution | Included scene selection |
+| --- | --- | --- |
+| Mip-NeRF 360 | [Barron et al., CVPR 2022](https://jonbarron.info/mipnerf360/) | bicycle, bonsai, counter, garden, kitchen, room, stump (plus optional flowers and treehill) |
+| Tanks & Temples | [Knapitsch et al., ACM TOG 2017](https://www.tanksandtemples.org/) | train, truck |
+| Deep Blending | [Hedman et al., ACM TOG 2018](https://repo-sam.inria.fr/fungraph/deep-blending/) | drjohnson, playroom |
+
 ## License
 
-This project is provided under the [BSD 3-Clause License](LICENSE), see LICENSE for details. See [NOTICE](NOTICE.md) for licensing details on other software and data.
+This project is provided under the BSD 3-Clause License, see [LICENSE](LICENSE.md) for details. See [NOTICE](NOTICE.md) for licensing details on other software and data.
 
 ## Contributing
 
