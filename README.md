@@ -11,7 +11,7 @@ On MipNerf360, we average **27.13 dB PSNR in 17.62 seconds** with Ultrafast pres
   <br><em>Stump · Ultrafast · RTX 4080 · real-time playback</em> · <a href="assets/perfgs-demo.gif?raw=true">GIF (61 MiB)</a>
 </p>
 
-**18.14 s from opening the scene to training completion** = 0.19 s to load COLMAP + 0.52 s before pressing Start + 3.41 s for setup + 14.02 s of optimization. The clock stays at 18.14 s during the final camera move.
+**18.14 s from opening the scene to training completion** = 0.19 s to load COLMAP + 0.52 s before pressing Start + 3.41 s for setup + 14.02 s of optimization.
 
 ## Mip-NeRF 360
 
