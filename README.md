@@ -4,11 +4,8 @@
 
 On a **24 GB RTX 4090**, Ultrafast averages **27.10 dB PSNR in 11.85 seconds** of training-loop time across the nine Mip-NeRF 360 scenes. Quality reaches **27.79 dB in 23.24 seconds**. Both run for 3,000 steps.
 
-<<<<<<< HEAD
 For GPUs with less VRAM, start with **Balanced**. It streams training photos from system RAM and used **2.72–2.89 GiB of VRAM at loop end** across the nine scenes. On Bicycle, it finished with 2.49 million splats and buffers sized for 2.60 million. [VRAM and system RAM breakdown](docs/benchmarks.md#where-memory-goes)
-=======
 **Balanced**, the default preset, streams training photos from system RAM. It averaged **27.42 dB in 17.31 seconds** on the RTX 4090, using **2.73–2.90 GiB** of process VRAM at loop end. On the **16 GB RTX 4080**, it reached **27.39 dB in 25.97 seconds** with **2.72–2.89 GiB** at loop end. Peak and viewer usage can be higher. [VRAM by preset and workstation](docs/benchmarks.md)
->>>>>>> bb44ebff26e4044ef2e8f59cb52f7122923c7ef5
 
 [Quickstart](#quickstart) · [Benchmarks](#mip-nerf-360) · [Gallery](#reconstructions)
 
@@ -21,21 +18,11 @@ For GPUs with less VRAM, start with **Balanced**. It streams training photos fro
 
 ## Mip-NeRF 360
 
-<<<<<<< HEAD
-| Preset (RTX 4080 16 GB) | Training loop | PSNR ↑ | SSIM ↑ | VGG LPIPS ↓ | Loop-end VRAM in GiB, mean (range) |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| Ultrafast | 17.62 s | 27.13 dB | 0.7936 | 0.2567 | 5.29 (3.42–7.60) |
-| Balanced (default) | 25.97 s | 27.39 dB | 0.8143 | 0.2229 | 2.80 (2.72–2.89) |
-| Quality | 33.85 s | 27.78 dB | 0.8275 | 0.2011 | 6.13 (6.06–6.23) |
-
-Windows measured the trainer’s VRAM after the GPU finished step 3,000, before evaluation or export. Peak usage during training and usage with the viewer open can be higher.
-=======
 | Preset (RTX 4090 24 GB) | Training loop | PSNR ↑ | SSIM ↑ | VGG LPIPS ↓ | VRAM at loop end |
 | --- | ---: | ---: | ---: | ---: | ---: |
 | Ultrafast | 11.85 s | 27.10 dB | 0.7930 | 0.2567 | 5.29 GiB |
 | Balanced (default) | 17.31 s | 27.42 dB | 0.8143 | 0.2229 | 2.81 GiB |
 | Quality | 23.24 s | 27.79 dB | 0.8274 | 0.2011 | 6.14 GiB |
->>>>>>> bb44ebff26e4044ef2e8f59cb52f7122923c7ef5
 
 Each entry is a mean across nine scenes, with one headless Vulkan run per scene at seed 42. The clock covers 3,000 training steps and excludes loading, initialization, evaluation and export. Graphdeco scored all 246 held-out views per preset at quarter resolution outdoors and half resolution indoors. [Per-scene CSV](docs/NVIDIA_GeForce_RTX_4090_presets.csv) · [Workstation and software](docs/NVIDIA_GeForce_RTX_4090_system.txt) · [Reproduce the benchmark](docs/benchmark-rtx4090.md)
 
