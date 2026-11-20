@@ -391,24 +391,6 @@ def test_input_map_tracks_held_keys_and_fires_presses():
 CONTROLS = ("checkbox", "combo", "drag_int", "drag_float")
 
 
-def _probe(setting):
-    """A value distinct from the store's neutral default, in the WIDGET's units
-    (a combo hands back an index; everything else hands back a value)."""
-    if setting.kind == BOOL:
-        return True
-    if setting.kind == CHOICE:
-        return len(setting.choices) - 1
-    return setting.maximum
-
-
-def _expected(setting):
-    if setting.kind == BOOL:
-        return True
-    if setting.kind == CHOICE:
-        return setting.choices[-1]
-    return setting.coerce(setting.maximum)
-
-
 def test_the_shared_settings_are_internally_consistent():
     """Every row names a group that exists and has a drag range containing its own
     default, and every row actually reached the parser."""

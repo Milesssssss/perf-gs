@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import struct
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -143,7 +144,6 @@ def _find_sparse_dir(scene_dir: Path) -> tuple[Path | None, str]:
 
 
 def _parse_cameras_bin(path: Path) -> dict[int, dict]:
-    import struct
     cameras: dict[int, dict] = {}
     with path.open("rb") as f:
         num_cameras = struct.unpack("<Q", f.read(8))[0]
@@ -172,7 +172,6 @@ def _parse_cameras_bin(path: Path) -> dict[int, dict]:
 
 
 def _parse_images_bin(path: Path, track_names: set[str] | None = None) -> list[dict]:
-    import struct
     entries: list[dict] = []
     with path.open("rb") as f:
         num_images = struct.unpack("<Q", f.read(8))[0]
@@ -196,8 +195,6 @@ def _parse_images_bin(path: Path, track_names: set[str] | None = None) -> list[d
                 dtype = np.dtype([("xy", "<f8", 2), ("id", "<i8")])
                 features = np.frombuffer(f.read(num_points2d * 24), dtype)
                 tracks["tracks"] = features[features["id"] >= 0]
-            elif track_names is None:
-                f.read(num_points2d * 24)
             else:
                 f.seek(num_points2d * 24, 1)
             entries.append({
@@ -212,18 +209,14 @@ def _parse_images_bin(path: Path, track_names: set[str] | None = None) -> list[d
 
 
 def _parse_points3d_bin(path: Path) -> tuple[np.ndarray, np.ndarray]:
-    import struct
+    header = struct.Struct("<8x3d3B8xQ")  # skip the point ID and reprojection error
     pts: list[list[float]] = []
     colors: list[list[float]] = []
     with path.open("rb") as f:
         num_points = struct.unpack("<Q", f.read(8))[0]
         for _ in range(num_points):
-            point3d_id = struct.unpack("<Q", f.read(8))[0]
-            x, y, z = struct.unpack("<3d", f.read(24))
-            r, g, b = struct.unpack("<3B", f.read(3))
-            error = struct.unpack("<d", f.read(8))[0]
-            track_length = struct.unpack("<Q", f.read(8))[0]
-            f.read(track_length * 8)
+            x, y, z, r, g, b, track_length = header.unpack(f.read(header.size))
+            f.seek(track_length * 8, 1)
             pts.append([x, y, z])
             colors.append([r / 255.0, g / 255.0, b / 255.0])
     positions = np.array(pts, dtype=np.float32) if pts else np.zeros((0, 3), dtype=np.float32)
@@ -336,7 +329,6 @@ def load_colmap(
     # gsplat-style k-NN scale init: SfM point density varies too much for a uniform scale.
     from scipy.spatial import cKDTree
     k = 3
-    init_scale = 1.0
     if n >= k + 1:
         tree = cKDTree(pts3d)
         dists, _ = tree.query(pts3d, k=k + 1)   # (n, k+1), col 0 is self
@@ -345,7 +337,7 @@ def load_colmap(
         knn_dist = np.sqrt(dist_sq)
     else:
         knn_dist = np.full(n, 0.01, dtype=np.float32)
-    log_scale_per_point = np.log(knn_dist * init_scale)
+    log_scale_per_point = np.log(knn_dist)
 
     initial_points = {
         "means": pts3d,

@@ -1,6 +1,6 @@
 // Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-// Minimal per-element function for the platform smoke test (module load, dispatch, readback).
+// The platform smoke test dispatches this function and reads the result back.
 
 float add_one(float x)
 {

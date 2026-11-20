@@ -11,17 +11,18 @@ gradients against finite differences, and that opaque cores actually form.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 import slangpy as spy
 from _pipeline_testkit import TestPipeline
 from test_gradients import _scene, _target, finite_difference_mismatches
 
-from trainer.backend.compute.device import SHADERS_DIR, create_device, create_slang_session
-from trainer.config.config import LossConfig
+from trainer.backend.compute.device import create_device, create_slang_session
+from trainer.config.config import LossConfig, ShaderSpecialization
 from trainer.config.config_types import SplatKernel
 from trainer.data.dataset import simple_camera
-from trainer.config.config import ShaderSpecialization
 from trainer.frontend.factory import shader_defines
 
 BACKENDS = ["vulkan", "d3d12"]
@@ -46,7 +47,7 @@ def _device(backend: str, kernel: SplatKernel, power: float = 1.0, onset: float 
 
 def _math(backend: str, kernel: SplatKernel, power: float, onset: float = 0.0) -> spy.Module:
     return spy.Module.load_from_file(_device(backend, kernel, power, onset),
-                                     str(SHADERS_DIR / "common" / "math_tests.slang"))
+                                     str(Path(__file__).with_name("shaders") / "math_tests.slang"))
 
 
 def _call(module: spy.Module, name: str, *arrays) -> np.ndarray:

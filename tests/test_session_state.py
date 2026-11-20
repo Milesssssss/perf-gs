@@ -382,6 +382,19 @@ def test_exporting_is_recorded_so_the_result_is_no_longer_at_risk() -> None:
     assert snap.state_label == "result exported"
 
 
+def test_double_clicking_retrain_cannot_replace_the_next_result() -> None:
+    session = hub()
+    ready_dataset(session)
+    trained(session)
+    session.request("restart")
+    assert session.take_command() == "restart"
+    session.request("restart")
+    session.reset_for_new_run()
+    trained(session)
+    assert session.take_command() is None
+    assert session.snapshot().unexported
+
+
 def test_an_export_failure_surfaces_on_the_result_not_in_the_log() -> None:
     session = hub()
     ready_dataset(session)
@@ -401,19 +414,6 @@ def test_initial_points_are_a_result_state_but_not_a_reconstruction() -> None:
     assert snap.result_state == ResultState.INITIALIZED
     assert not snap.has_result                       # nothing to export yet
     assert not snap.can_export and snap.can_start_training
-
-
-def test_editing_parameters_marks_a_finished_result_as_no_longer_matching() -> None:
-    session = hub()
-    ready_dataset(session)
-    trained(session)
-    assert not session.snapshot().result.stale_config
-    session.mark_config_edited()
-    assert session.snapshot().result.stale_config
-    # Nothing to mark when there is no result to mismatch.
-    fresh = hub()
-    fresh.mark_config_edited()
-    assert not fresh.snapshot().result.stale_config
 
 
 # --------------------------------------------------------------------------
@@ -455,12 +455,12 @@ def test_a_pending_question_blocks_the_actions_it_is_about() -> None:
     session = hub()
     ready_dataset(session)
     trained(session)
-    session.ask(Confirm(key="result", title="Restart training?", body="...",
-                        command="train!", confirm_label="Discard and restart"))
+    session.ask(Confirm(key="dataset", title="Save the current model?", body="...",
+                        command="export_then_load", confirm_label="Export and open"))
     snap = session.snapshot()
     assert snap.confirm is not None
     assert snap.primary_action == "confirm"
-    assert snap.next_step() == "Restart training?"
+    assert snap.next_step() == "Save the current model?"
     # Everything else stands down until it is answered.
     assert not any((snap.can_export, snap.can_restart_training, snap.can_clear,
                     snap.can_drop))

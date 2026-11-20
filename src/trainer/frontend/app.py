@@ -215,10 +215,6 @@ class TrainingApplication:
         self.profiler = None            # already closed by _run_training_and_post
 
 
-    def _attach_scene_to_viewer(self) -> None:
-        """Hand the chosen scene's eval and training cameras to the hub viewer's pickers."""
-        self._viewer.attach_scene(self._sceneContext.camera_sets())
-
     def _run_training_and_post(self, *, hold_viewer: bool = True) -> None:
         """Train, then write the run's post-training artifacts.
         ``hold_viewer`` blocks on the viewer window afterwards (CLI); the hub passes False
@@ -899,7 +895,8 @@ class TrainingLoop:
             pipeline.train_step(context.camera_entry.camera, lrs=context.learning_rates,
                                 contextual=context.iteration_contextual_variables)
         self.runtime.queue_limiter.record(pipeline.last_submit_id)
-        self._stream_viewer_snapshot_if_due(context)
+        if context.step_number % self.args.stream_every == 0:
+            self.runtime.viewer.push_snapshot(pipeline)
 
     def _record_current_timing(self) -> None:
         # Drain the GPU so the final timing includes all submitted work.
@@ -990,10 +987,6 @@ class TrainingLoop:
         """No densify tick reads the screen gradient after the last one."""
         return (self.densify_mode != DensificationMode.NONE
                 and training_step <= self.args.densify_to)
-
-    def _stream_viewer_snapshot_if_due(self, context: IterationContext) -> None:
-        if context.step_number % self.args.stream_every == 0:
-            self.runtime.viewer.push_snapshot(self.runtime.pipeline)
 
     def _record_psnr_curve_if_due(self, context: IterationContext) -> None:
         stream = self.runtime.artifacts.psnr_curve_json

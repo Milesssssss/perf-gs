@@ -1,18 +1,6 @@
 // Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-// Per-frame clears of the tile-binned forward's scratch/output resources.
-
-[shader("compute")]
-[numthreads(64, 1, 1)]
-void clearTilesCount(
-    uint3 dtid: SV_DispatchThreadID,
-    RWStructuredBuffer<uint> screen_tiles_count,
-    uniform uint num_tiles)
-{
-    uint i = dtid.x;
-    if (i >= num_tiles) return;
-    screen_tiles_count[i] = 0;
-}
+// Per-frame clears of the tile-binned forward's output textures.
 
 [shader("compute")]
 [numthreads(16, 16, 1)]

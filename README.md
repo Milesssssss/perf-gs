@@ -40,9 +40,9 @@ python -m pip install -e .
 python -m trainer.frontend.app --hub
 ```
 
-Drop the folder containing `images/` and `sparse/0/` into the hub. Click **Start Training**, explore the result, then choose **Export PLY...**. If you have photos only, choose **Reconstruct to COLMAP** first. [Hub walkthrough](docs/usage.md#interactive-hub)
+Drop the folder containing `images/` and `sparse/0/` into the hub and click **Start Training**. Explore the result, export a PLY, or train again from the original point cloud. If you have photos only, choose **Reconstruct to COLMAP** first. [Hub walkthrough](docs/usage.md#interactive-hub)
 
-![PERF-GS hub showing the trained kitchen scene with Export PLY and Set up another run controls](assets/perfgs-hub.webp)
+![Trained kitchen scene in the PERF-GS hub, with controls to export the model or start another run](assets/perfgs-hub.webp)
 
 **Try a sample from the command line.** Download the Tanks & Temples sample archive (about 650 MB) and train the truck scene.
 

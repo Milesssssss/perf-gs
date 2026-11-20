@@ -3,10 +3,10 @@
 // Scalar wrappers of the gaussian math for tests through SlangPy's functional API.
 // Opacity arguments are probabilities, converted to the primitives' logit here.
 
-#include "math.slang"
-#include "../primitives/gaussian/eval.slang"
-#include "../primitives/gaussian/snugbox.slang"
-#include "../primitives/gaussian/accutile.slang"
+#include "common/math.slang"
+#include "primitives/gaussian/eval.slang"
+#include "primitives/gaussian/snugbox.slang"
+#include "primitives/gaussian/accutile.slang"
 
 static float _opacityToLogit(float p)
 {

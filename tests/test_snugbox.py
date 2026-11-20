@@ -1,36 +1,12 @@
 # Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-"""SnugBox correctness test.
-
-Compare SnugBox's analytical tight-bbox vs a brute-force grid evaluation
-of the Gaussian alpha function. SnugBox should:
-1. Return ``valid=0`` for any gaussian with opacity <= 1/255 (can't
-   exceed the display threshold anywhere).
-2. For valid gaussians, produce a bbox that contains every point where
-   ``alpha >= 1/255`` and is tight (the bbox boundary touches the ellipse
-   at four points).
-"""
+"""Compare SnugBox's bounds at the 1/255 alpha threshold with a sampled Gaussian footprint."""
 
 from __future__ import annotations
 
 import numpy as np
 import pytest
 import slangpy as spy
-
-from trainer.backend.compute.device import SHADERS_DIR, create_device
-
-
-BACKENDS = ["vulkan", "d3d12"]
-
-
-def _module(backend: str) -> spy.Module:
-    try:
-        device = create_device(backend=backend)
-    except Exception as exc:
-        pytest.skip(f"backend {backend!r} unavailable: {exc}")
-    return spy.Module.load_from_file(
-        device, str(SHADERS_DIR / "common" / "math_tests.slang")
-    )
 
 
 def _brute_force_bbox(mean: np.ndarray, cov: np.ndarray, opacity: float,
@@ -69,15 +45,13 @@ def _call_snugbox(module, mean: np.ndarray, cov: np.ndarray, opacity: float):
     return bbox.to_numpy()
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_snugbox_isotropic(backend: str) -> None:
+def test_snugbox_isotropic(math_module: spy.Module) -> None:
     """Isotropic cov = I: ellipse is a circle of radius sqrt(t). Opacity=0.5
     gives t = 2·log(127.5) ≈ 9.69, radius ≈ 3.11. Bbox should be [-3.11,3.11]²."""
-    module = _module(backend)
     mean = np.array([0.0, 0.0])
     cov = np.array([1.0, 0.0, 1.0])
     opacity = 0.5
-    bbox = _call_snugbox(module, mean, cov, opacity).reshape(4)
+    bbox = _call_snugbox(math_module, mean, cov, opacity).reshape(4)
     t = 2.0 * np.log(255.0 * opacity)
     expected_r = float(np.sqrt(t))  # circle of radius sqrt(t) in unit-cov space
     np.testing.assert_allclose(bbox[0], -expected_r, atol=1e-3)
@@ -86,7 +60,6 @@ def test_snugbox_isotropic(backend: str) -> None:
     np.testing.assert_allclose(bbox[3], +expected_r, atol=1e-3)
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
 @pytest.mark.parametrize("cov", [
     [1.0, 0.0, 1.0],          # isotropic unit
     [4.0, 0.0, 1.0],           # axis-aligned elongated x
@@ -96,17 +69,16 @@ def test_snugbox_isotropic(backend: str) -> None:
     [0.1, 0.05, 0.1],          # small
 ])
 @pytest.mark.parametrize("opacity", [0.1, 0.5, 0.9])
-def test_snugbox_matches_brute_force(backend: str, cov: list, opacity: float) -> None:
+def test_snugbox_matches_brute_force(math_module: spy.Module, cov: list, opacity: float) -> None:
     """SnugBox bbox must:
       1. Contain every grid point where alpha >= 1/255.
       2. Not be vastly larger than the true bbox (no factor-2 slack).
     """
-    module = _module(backend)
     mean = np.array([10.0, -5.0])  # non-zero to exercise translation.
     cov_np = np.array(cov, dtype=np.float64)
 
     bf = _brute_force_bbox(mean, cov_np, opacity, half_extent=20.0, samples=400)
-    sb = _call_snugbox(module, mean, cov_np, opacity).reshape(4)
+    sb = _call_snugbox(math_module, mean, cov_np, opacity).reshape(4)
 
     if opacity <= 1.0 / 255.0:
         # Too dim — expected invalid (bbox is a point at mean).

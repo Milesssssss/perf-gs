@@ -12,13 +12,6 @@ float sigmoid(float x)
     return 1.0 / (1.0 + exp(-x));
 }
 
-[Differentiable]
-[PreferRecompute(SideEffectBehavior.Allow)]
-float3 sigmoid3(float3 v)
-{
-    return float3(sigmoid(v.x), sigmoid(v.y), sigmoid(v.z));
-}
-
 // log(1 + e^x) without overflow. Note softplus(x) == -log(1 - sigmoid(x)).
 [Differentiable]
 [PreferRecompute(SideEffectBehavior.Allow)]

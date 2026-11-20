@@ -474,7 +474,6 @@ class Viewer:
             max_splats, sh_degree, mip_enabled, mip_kernel_size, max_sort_pairs)
 
         self._has_data = False
-        self._update_pending = False
 
 
     def _build_view_pipeline(self, max_splats: int, sh_degree: int,
@@ -766,7 +765,6 @@ class Viewer:
             confirm=lambda: self.state.request("confirm"),
             confirm_alt=lambda: self.state.request("confirm_alt"),
             cancel=lambda: self.state.request("cancel"),
-            on_config_change=self.state.mark_config_edited,
             toggle_log=self.state.toggle_log,
             clear_log=self.state.clear_log,
         )
@@ -783,7 +781,7 @@ class Viewer:
         training_section(panel, view, actions, self.state.setup if self._hub else None)
         if self._hub:
             configuration_section(
-                panel, view, self.state.setup, actions,
+                panel, view, self.state.setup,
                 show_all=lambda: view.show_all_config,
                 toggle_all=self.state.toggle_config_detail)
         loss_section(panel, view)

@@ -80,39 +80,53 @@ def test_cancelling_save_keeps_unsaved_model_and_current_dataset(monkeypatch):
     assert state.snapshot().unexported and hub._pending_drop is None
 
 
-@pytest.mark.parametrize("save", [True, False])
-def test_export_and_train_waits_for_a_successful_save(monkeypatch, save):
+@pytest.mark.parametrize("exported", [False, True])
+def test_restart_starts_another_run_on_the_current_dataset_in_one_click(monkeypatch, exported):
     state, hub = hub_for_one_request(monkeypatch)
     state.dataset_ready(DatasetInfo(path="scene", scene_dir="scene"))
     state.training_completed(ResultInfo(iterations=10))
-    assert hub._hub_request_training() is None
-    assert state.snapshot().confirm.confirm_label == "Export and train"
-    monkeypatch.setattr(hub, "_hub_export_ply", lambda: save)
-    state.request("confirm")
-    assert hub._hub_choose_scene(None) == ("scene" if save else None)
+    if exported:
+        state.result_exported("out.ply", 1.0)
+    state.request("restart")
+    assert hub._hub_choose_scene(None) == "scene"
+    assert state.snapshot().confirm is None
 
 
-def ultrafast_hub_asking_for_masks(tmp_path, monkeypatch):
+def test_initial_train_command_cannot_replace_a_result(monkeypatch):
+    state, hub = hub_for_one_request(monkeypatch)
+    state.dataset_ready(DatasetInfo(path="scene", scene_dir="scene"))
+    state.training_completed(ResultInfo(iterations=10))
+    state.request("train")
+    assert hub._hub_choose_scene(None) is None
+    assert state.snapshot().unexported and state.snapshot().confirm is None
+
+
+def ultrafast_hub_asking_for_masks(tmp_path, monkeypatch, *, restart=False):
     monkeypatch.setattr(stbn_table, "default_cache_dir", lambda: tmp_path)
     state, hub = hub_for_one_request(monkeypatch)
     hub.app.args = build_parser().parse_args(["--hub", "--preset", "ultrafast"])
     state.setup = TrainingSetup.from_args(hub.app.args)
     state.dataset_ready(DatasetInfo(path="scene", scene_dir="scene"))
-    assert hub._hub_request_training() is None
+    if restart:
+        state.training_completed(ResultInfo(iterations=10))
+    assert hub._hub_request_training(restart=restart) is None
     assert state.snapshot().confirm.confirm_label == "Download and train"
     return state, hub
 
 
-def test_cancelled_stbn_prompt_asks_again_next_time(tmp_path, monkeypatch):
-    state, hub = ultrafast_hub_asking_for_masks(tmp_path, monkeypatch)
+@pytest.mark.parametrize("restart", [False, True])
+def test_cancelled_stbn_prompt_asks_again_next_time(tmp_path, monkeypatch, restart):
+    state, hub = ultrafast_hub_asking_for_masks(tmp_path, monkeypatch, restart=restart)
     state.request("cancel")
     assert hub._hub_choose_scene(None) is None
-    assert hub._hub_request_training() is None
+    assert state.snapshot().has_result == restart
+    assert hub._hub_request_training(restart=restart) is None
     assert state.snapshot().confirm.confirm_label == "Download and train"
 
 
-def test_accepted_stbn_download_runs_first_and_its_failure_fails_the_run(tmp_path, monkeypatch):
-    state, hub = ultrafast_hub_asking_for_masks(tmp_path, monkeypatch)
+@pytest.mark.parametrize("restart", [False, True])
+def test_accepted_stbn_download_runs_before_replacing_the_model(tmp_path, monkeypatch, restart):
+    state, hub = ultrafast_hub_asking_for_masks(tmp_path, monkeypatch, restart=restart)
     state.request("confirm")
     assert hub._hub_choose_scene(None) == "scene"
     attempts = []
@@ -123,7 +137,10 @@ def test_accepted_stbn_download_runs_first_and_its_failure_fails_the_run(tmp_pat
     hub._hub_train_scene("scene", state.setup)
     snap = state.snapshot()
     assert len(attempts) == 1
-    assert snap.training_state is TrainingState.FAILED and "STBN" in snap.training_error
+    if restart:
+        assert snap.unexported and snap.can_export and snap.result.iterations == 10
+    else:
+        assert snap.training_state is TrainingState.FAILED and "STBN" in snap.training_error
 
 
 def test_next_run_setup_previews_original_points_and_back_restores_model(monkeypatch):

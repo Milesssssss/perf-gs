@@ -14,21 +14,6 @@ import numpy as np
 import pytest
 import slangpy as spy
 
-from trainer.backend.compute.device import SHADERS_DIR, create_device
-
-
-BACKENDS = ["vulkan", "d3d12"]
-
-
-def _module(backend: str) -> spy.Module:
-    try:
-        device = create_device(backend=backend)
-    except Exception as exc:
-        pytest.skip(f"backend {backend!r} unavailable: {exc}")
-    return spy.Module.load_from_file(
-        device, str(SHADERS_DIR / "common" / "math_tests.slang")
-    )
-
 
 def _brute_force_row_x_range(mean: np.ndarray, cov: np.ndarray, opacity: float,
                              row_y_bot: float, row_y_top: float,
@@ -65,7 +50,6 @@ def _call_accutile_row(module, mean: np.ndarray, cov: np.ndarray, opacity: float
     return module.accuTileRowTest(mean_t, cov_t, op_t, yb_t, yt_t).to_numpy()
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
 @pytest.mark.parametrize("cov", [
     [1.0, 0.0, 1.0],     # isotropic
     [4.0, 0.0, 1.0],     # x-elongated
@@ -76,10 +60,9 @@ def _call_accutile_row(module, mean: np.ndarray, cov: np.ndarray, opacity: float
 @pytest.mark.parametrize("opacity", [0.3, 0.8])
 @pytest.mark.parametrize("y_offset", [-3.0, -1.0, 0.0, 1.0, 3.0])
 def test_accutile_row_matches_brute_force(
-    backend: str, cov: list, opacity: float, y_offset: float,
+    math_module: spy.Module, cov: list, opacity: float, y_offset: float,
 ) -> None:
     """For each row, AccuTile's x-range must contain the brute-force x-range."""
-    module = _module(backend)
     mean = np.array([5.0, 0.0])
     cov_np = np.array(cov, dtype=np.float64)
 
@@ -87,7 +70,7 @@ def test_accutile_row_matches_brute_force(
     y_bot = float(mean[1] + y_offset) - 0.5
     y_top = float(mean[1] + y_offset) + 0.5
 
-    at = _call_accutile_row(module, mean, cov_np, opacity, y_bot, y_top).reshape(2)
+    at = _call_accutile_row(math_module, mean, cov_np, opacity, y_bot, y_top).reshape(2)
     bf = _brute_force_row_x_range(mean, cov_np, opacity, y_bot, y_top)
 
     if bf is None:
@@ -110,7 +93,6 @@ def test_accutile_row_matches_brute_force(
     )
 
     # AccuTile should also be not-too-loose.
-    looseness = max(at[0] - bf[0], 0) + max(bf[1] - at[1], 0)
     # We tolerate up to 2 px of slack per side.
     max_slack_per_side = 2.0
     assert abs(at[0] - bf[0]) <= max_slack_per_side + slack, (

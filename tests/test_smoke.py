@@ -15,12 +15,13 @@ test is to catch regressions on the backends the host *does* support.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 import slangpy as spy
 
-from trainer.backend.compute.device import SHADERS_DIR, create_device
-
+from trainer.backend.compute.device import create_device
 
 BACKENDS = ["vulkan", "d3d12"]
 
@@ -41,7 +42,7 @@ def test_device_creates(backend: str) -> None:
 @pytest.mark.parametrize("backend", BACKENDS)
 def test_shader_compiles_and_dispatches(backend: str) -> None:
     device = _try_create_device(backend)
-    module = spy.Module.load_from_file(device, str(SHADERS_DIR / "common" / "smoke.slang"))
+    module = spy.Module.load_from_file(device, str(Path(__file__).with_name("shaders") / "smoke.slang"))
 
     initial = np.arange(256, dtype=np.float32)
     buffer = spy.Tensor.from_numpy(device, initial)

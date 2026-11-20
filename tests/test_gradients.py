@@ -106,32 +106,6 @@ PARAM_TABLE: list[tuple[str, str, int]] = [
 ]
 
 
-def _analytic_grads(backend: str) -> tuple[np.ndarray, dict[str, np.ndarray], float]:
-    """Returns (analytic grad matrix [N, 14], per-component names, reference loss)."""
-    W = H = 16
-    pipeline = _setup_pipeline(backend, W, H)
-
-    scene = _scene()
-    pipeline.set_primitive_from_numpy(**scene)
-    target = _target(H, W)
-    pipeline.targets.set_image(target)
-
-    camera = simple_camera(
-        width=W, height=H,
-        eye=(0.0, 0.0, 0.0), target=(0.0, 0.0, 1.0), up=(0.0, 1.0, 0.0),
-        fovy_degrees=60.0,
-    )
-
-    pipeline.forward_and_loss(camera)
-    pipeline.optimizer.zero_grad()
-    pipeline.run_backward()
-    ref_loss = pipeline.read_loss()
-
-    grads = pipeline.read_gradients()
-    n = scene["means"].shape[0]
-    return pipeline, grads, ref_loss
-
-
 def _loss_for(pipeline: TestPipeline, scene: dict, camera) -> float:
     pipeline.set_primitive_from_numpy(**scene)
     pipeline.forward_and_loss(camera)

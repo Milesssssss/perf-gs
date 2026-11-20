@@ -358,7 +358,7 @@ def test_sh_active_band_adam_matches_full_width(backend: str) -> None:
 @pytest.mark.parametrize("backend", BACKENDS)
 def test_sh_features_rest_survives_morton_sort(backend: str) -> None:
     """features_rest + its Adam moments must be permuted in lockstep with the
-    gaussians by a Morton re-sort (mortonScatterSH), or the coefficients desync
+    gaussians by a Morton re-sort, or the coefficients desync
     from their gaussians."""
     try:
         device = create_device(backend=backend)

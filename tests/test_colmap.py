@@ -17,19 +17,33 @@ Catches regressions in:
 - scaling of fx/fy/cx/cy when rendering at a resolution other than the
   COLMAP native size
 
-Skipped if the Suzanne scene isn't present.
+The camera-alignment tests use the optional Suzanne scene.
 """
 
 from __future__ import annotations
 
+import struct
 from pathlib import Path
 
 import numpy as np
 import pytest
 from PIL import Image
 
+from trainer.data.colmap import _parse_points3d_bin
 
 SCENE_DIR = Path(__file__).resolve().parent.parent / "datasets" / "synthetic" / "suzanne_blender"
+
+
+def test_binary_points_skip_track_before_next_point(tmp_path) -> None:
+    path = tmp_path / "points3D.bin"
+    point = struct.Struct("<Q3d3BdQ")
+    path.write_bytes(struct.pack("<Q", 2)
+                     + point.pack(41, 1., 2., 3., 255, 0, 0, .25, 2)
+                     + struct.pack("<4i", 9, 7, 42, 4)
+                     + point.pack(87, 4., 5., 6., 0, 255, 0, .5, 0))
+    positions, colors = _parse_points3d_bin(path)
+    np.testing.assert_array_equal(positions, [[1, 2, 3], [4, 5, 6]])
+    np.testing.assert_array_equal(colors, [[1, 0, 0], [0, 1, 0]])
 
 
 def _load_scene_or_skip(width: int = 960, height: int = 540):

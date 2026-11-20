@@ -5,7 +5,6 @@
 
 #include "../../common/types.slang"
 #include "../../optimizers/primitive_adam.slang"
-#include "channels.slang"
 
 // Only the primitive-value mapping is Gaussian-specific; the optimizer lives in AdamPlanes/AdamPass.
 struct GaussianParameterStorage : IPrimitiveParameterStorage<GaussianChannel::Count>

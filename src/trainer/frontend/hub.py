@@ -132,15 +132,15 @@ class TrainingHub:
             if command in ("confirm", "confirm_alt"):
                 command = state.take_confirm(accept=True,
                                              alt=command == "confirm_alt")
-                if command in ("export_then_load", "export_then_train"):
+                if command == "export_then_load":
                     if self._hub_export_ply():
-                        command = "load_dropped" if command == "export_then_load" else "train!"
+                        command = "load_dropped"
                     else:
                         self._pending_drop = None
                         command = None
-                elif command == "download_stbn_then_train":
+                elif command in ("download_stbn_then_train", "download_stbn_then_restart"):
                     self._stbn_accepted = True
-                    command = "train"
+                    command = command.removeprefix("download_stbn_then_")
             elif command == "cancel":
                 state.take_confirm(accept=False)
                 self._pending_drop = None
@@ -178,11 +178,9 @@ class TrainingHub:
             elif command == "load_dropped":
                 self._hub_load_pending_drop()
             elif command in ("train", "restart"):
-                scene = self._hub_request_training()
+                scene = self._hub_request_training(restart=command == "restart")
                 if scene is not None:
                     return scene
-            elif command == "train!":
-                return state.scene_dir
             time.sleep(0.05)
         return None
 
@@ -232,26 +230,22 @@ class TrainingHub:
                              "folder of images, or one with sparse/ + images/.")
         state.notify("Could not load dataset", ERROR)
 
-    def _hub_request_training(self) -> "str | None":
-        """Start from the original points after resolving the STBN license and any unsaved model."""
+    def _hub_request_training(self, *, restart: bool = False) -> "str | None":
+        """Only the restart action can replace a result. Both paths check the STBN license."""
         state = self.app._viewer.state
         snap = state.snapshot()
         if not snap.trainable:
             state.notify("No trainable scene yet", WARN)
+            return None
+        if not (snap.can_restart_training if restart else snap.can_start_training):
             return None
         if not self._stbn_accepted and self._stbn_download_needed(state.setup):
             state.ask(Confirm(
                 key="training", title="This run needs NVIDIA's STBN masks",
                 body="About 30 MB from github.com/NVIDIA-RTX/STBN, licensed for non-commercial "
                      "research only. Balanced and Quality don't use them.",
-                command="download_stbn_then_train", confirm_label="Download and train"))
-            return None
-        if snap.unexported:
-            state.ask(Confirm(
-                key="result", title="Save the current model?",
-                body="The new run starts from the original point cloud and replaces the model in memory.",
-                command="export_then_train", confirm_label="Export and train",
-                alt_label="Train without saving", alt_command="train!"))
+                command="download_stbn_then_restart" if restart else "download_stbn_then_train",
+                confirm_label="Download and train"))
             return None
         return state.scene_dir
 
@@ -260,13 +254,12 @@ class TrainingHub:
         Setup runs with rendering suspended (queue races); a failure leaves the hub usable."""
         state = self.app._viewer.state
         print(f"[hub] training on {scene_dir}")
-        # Acknowledge the click first: scene load, pipeline build and uploads precede iteration 1.
         started = time.perf_counter()
-        state.reset_for_new_run()
-        state.training_initializing(setup.get("iters"))
-        # Before suspend_rendering, so the panel keeps drawing during the download.
+        # Keep the previous model available if a required download fails.
         if not self._hub_ensure_stbn(setup):
             return
+        state.reset_for_new_run()
+        state.training_initializing(setup.get("iters"))
         state.begin_activity("Preparing training images and GPU buffers")
         self.app.viewer.clear_stop_request()
         state.log(f"preparing training on {scene_dir}")
@@ -286,7 +279,7 @@ class TrainingHub:
         finally:
             self.app.viewer.resume_rendering()
 
-        self.app._attach_scene_to_viewer()
+        self.app.viewer.attach_scene(self.app._sceneContext.camera_sets())
         self.app.viewer.push_snapshot(self.app._pipeline)  # show the initial gaussians
         state.log(f"Ready to train after {time.perf_counter() - started:.2f} s of setup")
         try:
@@ -317,12 +310,13 @@ class TrainingHub:
                 and not stbn_table.nvidia_volume_path().is_file())
 
     def _hub_ensure_stbn(self, setup) -> bool:
-        """Download the accepted STBN masks if this run needs them; False once a failure failed the run."""
+        """Download the accepted masks if needed. A failed download leaves the previous model available."""
         if not (self._stbn_accepted and self._stbn_download_needed(setup)):
             return True
         from trainer.frontend import stbn_download
 
         state = self.app._viewer.state
+        state.training_initializing(setup.get("iters"))
         state.begin_activity("Downloading NVIDIA's STBN masks")
         try:
             stbn_download.download(log=state.log)

@@ -2,7 +2,7 @@
 
 """Tkinter GUI comparing two v2_train.py runs (``outputs/train/<run>/``): metric curves and render | GT | render views.
 
-Reads config.json, log.jsonl, densify_log.jsonl, final_psnr.json and cams/cam_NN/*.png, each optional.
+Reads log.jsonl, densify_log.jsonl, final_psnr.json and cams/cam_NN/*.png, each optional.
     python scripts/plots/inspect_runs.py [--run-a DIR] [--run-b DIR] [--root outputs/train]
 """
 from __future__ import annotations
@@ -60,7 +60,6 @@ class Run:
     def __init__(self, path: Path):
         self.path = Path(path)
         self.name = self.path.name
-        self.config = _load_json(self.path / "config.json") or {}
         self.log = _load_jsonl(self.path / "log.jsonl")
         self.densify = _load_jsonl(self.path / "densify_log.jsonl")
         self.final = _load_json(self.path / "final_psnr.json") or {}
@@ -91,9 +90,6 @@ class Run:
                     "gt": gt if gt.exists() else None,
                     "iters": iters,
                 }
-
-    def is_valid(self) -> bool:
-        return bool(self.log) or bool(self.cams) or bool(self.final)
 
     def log_series(self, key: str, x_key: str = "iter"):
         """(xs, ys) for a log.jsonl metric, dropping rows missing either value."""
@@ -597,7 +593,6 @@ class InspectorApp(tk.Tk):
             bits = [f"{tag}: {run.name}"]
             if run.avg_psnr is not None:
                 bits.append(f"avg PSNR {run.avg_psnr:.2f} dB")
-            ng = run.config.get("n_init_points")
             if run.log:
                 bits.append(f"{run.log[-1].get('n_gaussians', '?')} splats @ last log")
             parts.append("   ".join(bits))

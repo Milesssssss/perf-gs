@@ -82,8 +82,6 @@ class Actions:
     confirm: Callable[[], None] = lambda: None
     confirm_alt: Callable[[], None] = lambda: None
     cancel: Callable[[], None] = lambda: None
-    # configuration: an edit marks the on-screen result stale (drives the "parameters changed" hint).
-    on_config_change: Callable[[], None] = lambda: None
     # diagnostics
     toggle_log: Callable[[bool], None] = lambda _v: None
     clear_log: Callable[[], None] = lambda: None
@@ -213,14 +211,12 @@ def training_section(panel: Panel, view: View, actions: Actions, setup: Training
 
     if setup is not None:
         for key in RUN_SETTINGS:
-            _setting_widget(panel, view, setup, SETTINGS_MAP[key], actions, visible=lambda: view.show_run_settings)
+            _setting_widget(panel, view, setup, SETTINGS_MAP[key], visible=lambda: view.show_run_settings)
         panel.button("Start Training", actions.start_training, enabled=lambda: view.can_start_training,
                      visible=lambda: view.show_run_settings and not view.has_result)
-        panel.button(lambda: "Start with new settings" if view.result.stale_config else "Start from point cloud",
-                     actions.restart_training, enabled=lambda: view.can_restart_training,
-                     visible=lambda: view.next_run_setup and view.confirm is None)
+        _retrain_button(panel, view, actions, visible=lambda: view.next_run_setup and view.show_run_settings)
         panel.button("Back to trained model", actions.back_to_result,
-                     visible=lambda: view.next_run_setup and view.confirm is None)
+                     visible=lambda: view.next_run_setup and view.show_run_settings)
     with (panel.section("TRAINING", label=titled("TRAINING", summary)) if setup is None else nullcontext()):
         if setup is None:
             _training_idle(panel, view, actions)
@@ -325,10 +321,15 @@ def _appearance_text(view: View) -> str:
     return f"   {GLYPHS['bullet']} ".join(parts)
 
 
+def _retrain_button(panel: Panel, view: View, actions: Actions, *, visible: Callable[[], bool]) -> None:
+    panel.button(lambda: "Discard model and train again" if view.unexported else "Train again",
+                 actions.restart_training, enabled=lambda: view.can_restart_training, visible=visible)
+
+
 def result_section(panel: Panel, view: View, actions: Actions) -> None:
-    """Keep saving the finished model separate from configuring its replacement."""
+    """Save the finished model, train again, or choose a new dataset."""
     def finished() -> bool:
-        return view.has_result and not view.next_run_setup and view.confirm is None
+        return view.has_result and not view.training_live and not view.next_run_setup and view.confirm is None
 
     panel.text(lambda: section_summary(view.result.summary(), view.result.quality()),
                lines=2, visible=finished)
@@ -338,20 +339,19 @@ def result_section(panel: Panel, view: View, actions: Actions) -> None:
     if actions.reveal_export is not None:
         panel.button("Show in folder", actions.reveal_export,
                      visible=lambda: finished() and bool(view.result.exported_path))
-    panel.button("Set up another run", actions.configure_next_run,
+    note(panel, "Each run starts from the original point cloud.", lines=2, visible=finished)
+    _retrain_button(panel, view, actions, visible=finished)
+    panel.button("Change settings...", actions.configure_next_run,
                  enabled=lambda: view.can_restart_training, visible=finished)
     panel.button("Open another dataset...", actions.new_dataset, enabled=lambda: view.can_drop,
                  visible=finished)
     inline_error(panel, lambda: view.result_error, title="Export failed")
-    confirm_block(panel, view, "result", on_confirm=actions.confirm,
-                  on_alt=actions.confirm_alt, on_cancel=actions.cancel)
 
 
 RUN_SETTINGS = ("preset", "iters")
 
 
-def configuration_section(panel: Panel, view: View, setup: TrainingSetup,
-                          actions: Actions, *,
+def configuration_section(panel: Panel, view: View, setup: TrainingSetup, *,
                           show_all: Callable[[], bool],
                           toggle_all: Callable[[bool], None]) -> None:
     """Detailed settings for the next run; the main controls sit beside Start Training."""
@@ -365,7 +365,7 @@ def configuration_section(panel: Panel, view: View, setup: TrainingSetup,
             with panel.section(title, label=titled(title, lambda s=settings: _group_summary(setup, s)),
                                visible=lambda: available() and show_all()):
                 for setting in settings:
-                    _setting_widget(panel, view, setup, setting, actions)
+                    _setting_widget(panel, view, setup, setting)
 
 
 def _group_summary(setup: TrainingSetup, settings: Sequence[Setting]) -> str:
@@ -375,7 +375,7 @@ def _group_summary(setup: TrainingSetup, settings: Sequence[Setting]) -> str:
 
 
 def _setting_widget(panel: Panel, view: View, setup: TrainingSetup,
-                    setting: Setting, actions: Actions, *, visible: Callable[[], bool] | None = None) -> None:
+                    setting: Setting, *, visible: Callable[[], bool] | None = None) -> None:
     """One parameter row, chosen by the setting's kind.
 
     The ``s=setting`` defaults capture by value, since these lambdas outlive the loop that builds them.
@@ -385,11 +385,9 @@ def _setting_widget(panel: Panel, view: View, setup: TrainingSetup,
 
     def write(value, s=setting) -> None:
         setup.set(s.setting_name, value)
-        actions.on_config_change()
 
     def write_index(index, s=setting) -> None:
         setup.set_index(s.setting_name, index)
-        actions.on_config_change()
 
     if setting.kind == BOOL:
         panel.checkbox(f"  {setting.caption}",

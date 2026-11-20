@@ -189,8 +189,6 @@ class ResultInfo:
     run_dir: str = ""
     exported_path: str = ""
     exported_mb: float = 0.0
-    # True once the configuration is edited after this result, so the next run would not reproduce it.
-    stale_config: bool = False
 
     def summary(self) -> str:
         parts = [f"{self.iterations:,} iterations", format_duration(self.wall_s)]
@@ -622,13 +620,6 @@ class Session:
         with self._lock:
             self._snap = replace(self._snap, show_log=bool(shown))
 
-    def mark_config_edited(self) -> None:
-        """A parameter changed: mark any existing result stale (drives the result's "modified" hint)."""
-        with self._lock:
-            if self._snap.has_result and not self._snap.result.stale_config:
-                self._snap = replace(self._snap, result=replace(
-                    self._snap.result, stale_config=True))
-
     def notify(self, text: str, kind: str = OK) -> None:
         """Post a transient acknowledgement (see :class:`Notice`)."""
         with self._lock:
@@ -784,6 +775,9 @@ class Session:
     def training_completed(self, result: ResultInfo) -> None:
         """The run is over and its output is now the session's important object."""
         with self._lock:
+            # A second click on the previous result cannot authorize replacing this one.
+            if self._command == "restart":
+                self._command = None
             self._paused_run = None
             self._snap = replace(self._snap,
                                  training_state=TrainingState.COMPLETED,

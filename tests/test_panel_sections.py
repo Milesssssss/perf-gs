@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from _ui_testkit import Recorder, RecordingPanel
 
-from trainer.frontend.settings import SETTINGS, SETTINGS_MAP, TrainingSetup
+from trainer.frontend.settings import SETTINGS, TrainingSetup
 from trainer.frontend.viewer.session import (
     KIND_IMAGES,
     LOSS_HISTORY,
@@ -52,7 +52,7 @@ def _actions(recorder: Recorder) -> Actions:
     """Every action wired to a recorder, so a click is observable."""
     names = ("install_tools", "reconstruct", "new_dataset", "configure_next_run", "back_to_result",
              "start_training", "restart_training", "pause", "resume", "stop",
-             "export", "confirm", "confirm_alt", "cancel", "on_config_change",
+             "export", "confirm", "confirm_alt", "cancel",
              "clear_log", "browse", "reveal_export")
     kwargs = {name: recorder.action(name) for name in names}
     kwargs["select_matcher"] = recorder.action("select_matcher")
@@ -75,7 +75,7 @@ def build(session: Session, which: str = "all"):
     if which in ("all", "result"):
         result_section(panel, view, actions)
     if which in ("all", "configuration"):
-        configuration_section(panel, view, session.setup, actions,
+        configuration_section(panel, view, session.setup,
                               show_all=lambda: view.show_all_config,
                               toggle_all=session.toggle_config_detail)
     if which in ("all", "loss"):
@@ -230,14 +230,13 @@ def test_start_training_is_the_primary_action_on_a_ready_dataset() -> None:
 def test_ready_scene_can_change_preset_without_opening_advanced_settings() -> None:
     session = _session()
     ready(session)
-    panel, _, recorder = build(session)
+    panel, _, _ = build(session)
     preset = panel.only("combo", caption="Preset")
     assert preset.shown and preset.enabled
     preset.change(0)
     assert session.setup.get("preset") == "ultrafast"
     assert session.setup.get("stbn_pixel_fraction") == 0.25
     assert session.setup.get("max_splats") == 1_850_000
-    assert "on_config_change" in recorder.names
 
 
 def test_the_run_status_carries_every_number_in_one_block() -> None:
@@ -363,21 +362,33 @@ def test_a_training_failure_is_reported_in_the_training_section() -> None:
 # result: export / retrain / move on
 # --------------------------------------------------------------------------
 
-def test_finished_model_actions_and_setup_are_separate():
+def test_finished_model_can_retrain_directly_or_open_settings():
     session = _session()
     panel, view, recorder = build(session)
     ready(session)
     trained(session)
     view.sample()
     assert "30,000 iterations · 1m 34s" in panel.screen() and "7.82M splats" in panel.screen()
-    assert panel.visible_buttons() == ["Export PLY...", "Set up another run", "Open another dataset..."]
+    restart = "Discard model and train again"
+    assert set(panel.visible_buttons()) == {
+        "Export PLY...", restart, "Change settings...", "Open another dataset...",
+    }
     assert "Advanced training settings" not in panel.screen()
-    panel.find("Set up another run").click()
-    assert recorder.names == ["configure_next_run"]
+    assert "original point cloud" in panel.screen()
+    button, = [w for w in panel.of("button") if w.shown and w.label == restart]
+    assert button.enabled
+    button.click()
+    panel.find("Change settings...").click()
+    assert recorder.names == ["restart_training", "configure_next_run"]
     session.show_next_run_setup(True)
     view.sample()
     assert "Preset" in panel.screen() and "Iterations" in panel.screen()
-    assert panel.visible_buttons() == ["Start from point cloud", "Back to trained model"]
+    assert panel.visible_buttons() == [restart, "Back to trained model"]
+    iterations, = [w for w in panel.of("drag_int") if w.shown]
+    iterations.change(5000)
+    button, = [w for w in panel.of("button") if w.shown and w.label == restart]
+    button.click()
+    assert recorder.names[-1] == "restart_training" and session.setup.get("iters") == 5000
     panel.find("Back to trained model").click()
     assert recorder.names[-1] == "back_to_result"
     session.show_next_run_setup(False)
@@ -397,6 +408,8 @@ def test_export_opens_a_save_dialog_and_reports_the_saved_path():
     view.sample()
     assert "D:/out/kitchen_30000.ply" in panel.screen()
     assert "Show in folder" in panel.visible_buttons()
+    assert "Train again" in panel.visible_buttons()
+    assert "Discard model and train again" not in panel.visible_buttons()
 
 def test_an_export_failure_appears_next_to_the_export_button() -> None:
     session = _session()
@@ -408,16 +421,6 @@ def test_an_export_failure_appears_next_to_the_export_button() -> None:
     screen = panel.screen()
     assert "x Export failed" in screen and "permission denied" in screen
 
-
-def test_changed_settings_apply_to_the_next_run():
-    session = _session()
-    panel, view, _ = build(session)
-    ready(session)
-    trained(session)
-    session.show_next_run_setup(True)
-    session.mark_config_edited()
-    view.sample()
-    assert "Start with new settings" in panel.visible_buttons()
 
 def test_the_result_section_is_quiet_before_anything_is_trained() -> None:
     session = _session()
@@ -451,33 +454,19 @@ def test_a_replace_question_appears_in_the_dataset_section() -> None:
     assert recorder.names == ["cancel"]
 
 
-def test_a_restart_question_appears_in_the_result_section() -> None:
+def test_a_mask_download_question_offers_download_or_cancel_before_retraining() -> None:
     session = _session()
-    panel, view, recorder = build(session, "result")
+    panel, view, recorder = build(session)
     ready(session)
     trained(session)
-    session.ask(Confirm(key="result", title="Restart training?",
-                        body="The current reconstruction is discarded.",
-                        command="train!", confirm_label="Discard and restart"))
+    session.ask(Confirm(key="training", title="This run needs NVIDIA's STBN masks",
+                        body="Download the masks for this run.",
+                        command="download_stbn_then_restart", confirm_label="Download and train"))
     view.sample()
-    assert "! Restart training?" in panel.screen()
-    panel.find("Discard and restart").click()
+    assert "! This run needs NVIDIA's STBN masks" in panel.screen()
+    assert panel.visible_buttons() == ["Download and train", "Cancel"]
+    panel.find("Download and train").click()
     assert recorder.names == ["confirm"]
-    # ... and the actions it is about are not clickable underneath it.
-    assert not panel.find("Export PLY...").enabled
-
-
-def test_a_question_without_an_alternative_offers_only_two_answers() -> None:
-    session = _session()
-    panel, view, _ = build(session, "result")
-    ready(session)
-    trained(session)
-    session.result_exported("D:/out/kitchen.ply", 1.0)
-    session.ask(Confirm(key="result", title="Restart training?", body="b",
-                        command="train!", confirm_label="Restart"))
-    view.sample()
-    assert panel.visible_buttons().count("Cancel") == 1
-    assert "Export first" not in panel.visible_buttons()
 
 
 # --------------------------------------------------------------------------
@@ -523,16 +512,15 @@ def test_every_parameter_says_what_it_does() -> None:
             assert setting.about and setting.about in screen, setting.setting_name
 
 
-def test_a_parameter_edit_writes_the_store_and_marks_the_result_stale() -> None:
+def test_a_parameter_edit_updates_the_next_run() -> None:
     session = _session()
-    panel, view, recorder = build(session, "configuration")
+    panel, view, _ = build(session, "configuration")
     ready(session)
     session.toggle_config_detail(True)
     view.sample()
     field = next(w for w in panel.of("drag_int") if w.info["value"]() == 3000)
     field.change(9000)
     assert session.setup.get("iters") == 9000
-    assert "on_config_change" in recorder.names
 
 
 def test_parameters_grey_out_while_a_run_consumes_them() -> None:
