@@ -1,5 +1,7 @@
 # RTX 4090 benchmark handoff
 
+The completed seed-42 sweep averaged **11.85 s** per scene for Ultrafast, **17.31 s** for Balanced and **23.24 s** for Quality. All three presets scored 246 held-out views. [RTX 4090 results](benchmarks.md#rtx-4090-presets) · [Per-scene CSV](NVIDIA_GeForce_RTX_4090_presets.csv) · [System record](NVIDIA_GeForce_RTX_4090_system.txt)
+
 Measure Ultrafast, Balanced and Quality on the Lenovo 30HJSAME00. It has an RTX 4090 (24 GB), a 32-core Threadripper PRO 9975WX, 127.2 GB of reported RAM and Windows 11 Enterprise 10.0.26300. Use the PERF-GS checkout containing this guide. Run from the repository root on an idle GPU with the hub closed.
 
 ## Set up once
