@@ -2,34 +2,21 @@
 
 ## Reproduce the benchmark
 
-Install the trainer, activate its Python environment and fetch all nine scenes with `python scripts/data/download_mipnerf360.py --set all`. For presets with sparse pixel supervision, first run `python scripts/data/download_stbn.py` to obtain the NVIDIA scalar blue-noise masks. [Preset settings and asset terms](usage.md#training)
-
-Run this PowerShell sweep on an idle GPU. It launches one process per scene and preset at seed 42. Both training and held-out evaluation use `images_4` outdoors and `images_2` indoors at their stored dimensions. Stereo initialization uses a separate 672-pixel-wide working image for up to 28 training-camera anchors and can add up to 256,000 starting points. Its cost belongs to setup.
+On Windows with an NVIDIA GPU, use the benchmark driver from the repository root in the trainer’s Python environment. It records the hardware and software, runs all three presets and scores the saved renders with the pinned Graphdeco evaluator. The RTX 4090 handoff includes the exact environment and dataset setup used for this comparison. [Setup and handoff](benchmark-rtx4090.md)
 
 ```powershell
-$gpuTag = (nvidia-smi -i 0 --query-gpu=name --format=csv,noheader).Trim() -replace '\s+', '_'
-foreach ($preset in 'ultrafast', 'balanced', 'quality') {
-  python scripts/running/eval_sweep.py --axis seed --values 42 --iters 3000 `
-    --name "mip360_3k_${gpuTag}_$preset" --no-plot --extra --preset $preset `
-    --eval-every 0 --preview-every 0 --no-write-ground-truths --run-report --save-test-renders
-}
+.\scripts\running\benchmark_presets.ps1 -ExpectedGpu 'NVIDIA GeForce RTX 4090'
 ```
 
-The sweep reuses completed runs by name. The GPU tag gives a new card its own run directories. On other adapters, set `$gpuTag` to the device name manually. Verify the adapter in each `run_report.json`. Choose a new name or pass `--force` if a cached run lacks the saved test PNGs. For the reference scores, use CUDA PyTorch, torchvision, tqdm and the pretrained VGG and LPIPS weights. These PowerShell commands prepare Graphdeco’s directory layout, pair each RGB8 render with the original photo decoded by Pillow, and score every held-out image. The model-directory argument can also be passed directly to the reference checkout’s `python metrics.py -m` command. [Graphdeco reference evaluation](https://github.com/graphdeco-inria/gaussian-splatting/blob/54c035f7834b564019656c3e3fcc3646292f727d/metrics.py)
+For another NVIDIA card, pass its actual adapter name. Each completed sweep produces a CSV under `outputs/benchmarks/<GPU>/<revision>/`. Each preset runs in a fresh headless process per scene at seed 42, with mid-loop previews, metrics and logging off. Training and held-out rendering use the stored `images_4` outdoors and `images_2` indoors. Stereo initialization uses a 672-pixel-wide working image for up to 28 training-camera anchors and can add up to 256,000 points during setup.
 
-```powershell
-git clone https://github.com/graphdeco-inria/gaussian-splatting.git outputs/graphdeco_reference
-git -C outputs/graphdeco_reference checkout 54c035f7834b564019656c3e3fcc3646292f727d
-$models = foreach ($run in Get-ChildItem outputs/train -Directory -Filter "sweep_mip360_3k_${gpuTag}_*") {
-  $model = "outputs/graphdeco_input/$($run.Name)"
-  python scripts/running/prepare_graphdeco.py $run.FullName $model | Out-Host
-  if ($LASTEXITCODE -ne 0) { throw "Could not prepare $model" }
-  $model
-}
-python scripts/running/score_graphdeco.py --graphdeco outputs/graphdeco_reference $models
+For a manual sweep, use the command below once per preset, choosing a distinct run name for each card and preset. Prepare each run with `python scripts/running/prepare_graphdeco.py RUN MODEL`. The driver shows how to score the resulting directories together and collect all 27 rows. [Benchmark driver](../scripts/running/benchmark_presets.ps1) · [Graphdeco reference evaluation](https://github.com/graphdeco-inria/gaussian-splatting/blob/54c035f7834b564019656c3e3fcc3646292f727d/metrics.py)
+
+```sh
+python scripts/running/eval_sweep.py --axis seed --values 42 --iters 3000 --name my_gpu_balanced --no-plot --extra --preset balanced --backend vulkan --eval-every 0 --preview-every 0 --no-write-ground-truths --run-report --save-test-renders
 ```
 
-To score the model from a timed, training-only run, use `--no-evaluation --save-ply` as shown below. Then run `python scripts/running/prepare_graphdeco.py RUN MODEL --ply RUN/output.ply`, substituting the training directory for `RUN` and a fresh output directory for `MODEL`. The converter uses the training log and configuration, restores the PLY’s 3D filter, and renders the registered held-out cameras. Use the same reference scoring command on `MODEL`. Replaying the quality preset’s 4,102,802-splat bicycle PLY at seed 42 reproduced all 76,261,050 RGB8 channel values across its 25 held-out views.
+To score the model from a timed, training-only run, use `--no-evaluation --save-ply` as shown below. Then run `python scripts/running/prepare_graphdeco.py RUN MODEL --ply RUN/output.ply`, substituting the training directory for `RUN` and a fresh output directory for `MODEL`. The converter uses the training log and configuration, restores the PLY’s 3D filter, and renders the registered held-out cameras. Score it with `python scripts/running/score_graphdeco.py --graphdeco outputs/graphdeco_reference MODEL`. Replaying the quality preset’s 4,102,802-splat bicycle PLY at seed 42 reproduced all 76,261,050 RGB8 channel values across its 25 held-out views.
 
 Held-out cameras are indices 0, 8, 16, and so on in filename order. Training and stereo initialization use the other views. The benchmark scenes informed preset selection. Each model directory contains `results.json` and `per_view.json`. Aggregate the nine scene means with equal weight for each seed. The reference evaluates saved RGB8 images and passes values in [0, 1] to its VGG LPIPS implementation. The wrapper caches the reference VGG network between images. On one indoor and one outdoor held-out view, its PSNR, SSIM and LPIPS matched the standalone upstream script exactly. [Per-scene preset measurements](mipnerf360_3k_presets.csv)
 
@@ -51,6 +38,7 @@ Use the pinned LiteGS checkout and its CUDA environment. From the PERF-GS reposi
 ```bash
 export PYTHONHASHSEED=42
 gpu_tag=$(nvidia-smi -i 0 --query-gpu=name --format=csv,noheader | tr ' ' '_')
+revision=$(git rev-parse --short=12 HEAD)
 for phase in train score; do
   for scene in bicycle flowers garden stump treehill bonsai counter kitchen room; do
     dataset=360_v2
@@ -58,7 +46,7 @@ for phase in train score; do
     extra=()
     if [[ "$phase" == score ]]; then
       extra=(--graphdeco outputs/graphdeco_reference
-             --reference "outputs/graphdeco_input/sweep_mip360_3k_${gpu_tag}_quality_${scene}_42")
+             --reference "outputs/graphdeco_input/sweep_mip360_3k_${gpu_tag}_${revision}_quality_${scene}_42")
     fi
     python scripts/running/benchmark_litegs.py "$phase" --litegs "$LITEGS" \
       --scene "datasets/$dataset/$scene" --model "outputs/litegs_${gpu_tag}/$scene" "${extra[@]}" || exit 1
@@ -119,3 +107,5 @@ From the repository root, run the following commands with Matplotlib installed. 
 python scripts/plots/plot_preset_results.py
 python scripts/plots/plot_method_frontiers.py
 ```
+
+To plot a completed Lenovo run, pass its CSV path to `python scripts/plots/plot_preset_results.py --presets PATH_TO_CSV`. It prints the measured preset means and writes `assets/mipnerf360-rtx4090-presets.png`. The method-comparison plot uses the RTX 4080 measurements until peer trainers are benchmarked on the 4090.

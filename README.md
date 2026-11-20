@@ -2,9 +2,9 @@
 
 **3DGS in seconds.**
 
-On an RTX 4080, Ultrafast averages **27.13 dB PSNR in 17.62 seconds** of training on the nine Mip-NeRF 360 scenes. Quality reaches **27.78 dB in 33.85 seconds**. Both run for 3,000 steps.
+On a **16 GB RTX 4080**, Ultrafast averages **27.13 dB PSNR in 17.62 seconds** of training-loop time across the nine Mip-NeRF 360 scenes. Quality reaches **27.78 dB in 33.85 seconds**. Both run for 3,000 steps.
 
-For GPUs with limited VRAM, start with **Balanced**. It streams training photos from system RAM. Across all nine scenes on an RTX 4080, the trainer used **2.72–2.89 GiB of VRAM** at the end of each headless run. Usage can peak higher during training or with the viewer open. [VRAM by preset](docs/benchmarks.md#current-presets)
+For GPUs with less VRAM, start with **Balanced**. It streams training photos from system RAM and reached **27.39 dB in 25.97 seconds** on the same 4080. The trainer used **2.72–2.89 GiB of VRAM** at the end of each headless run. Peak and viewer usage can be higher. [VRAM by preset](docs/benchmarks.md#current-presets)
 
 [Quickstart](#quickstart) · [Benchmarks](#mip-nerf-360) · [Gallery](#reconstructions)
 
@@ -17,13 +17,13 @@ For GPUs with limited VRAM, start with **Balanced**. It streams training photos 
 
 ## Mip-NeRF 360
 
-| Preset | Training loop | PSNR ↑ | SSIM ↑ | VGG LPIPS ↓ |
+| Preset (RTX 4080 16 GB) | Training loop | PSNR ↑ | SSIM ↑ | VGG LPIPS ↓ |
 | --- | ---: | ---: | ---: | ---: |
 | Ultrafast | 17.62 s | 27.13 dB | 0.7936 | 0.2567 |
 | Balanced (default) | 25.97 s | 27.39 dB | 0.8143 | 0.2229 |
 | Quality | 33.85 s | 27.78 dB | 0.8275 | 0.2011 |
 
-Headless runs on Windows, RTX 4080 16 GB, Vulkan, seed 42. Training-loop time excludes loading, initialization and export. Each scene contributes equally. Graphdeco’s RGB8 evaluator scores 246 held-out views at quarter resolution outdoors and half resolution indoors. [Reproduce the benchmark](docs/mipnerf360_3k.md#reproduce-the-benchmark) · [Full results](docs/benchmarks.md)
+Headless runs on Windows and Vulkan, seed 42. Training-loop time excludes loading, initialization and export. Each scene contributes equally. Graphdeco’s RGB8 evaluator scores 246 held-out views at quarter resolution outdoors and half resolution indoors. [Full RTX 4080 results](docs/benchmarks.md) · [Run the benchmark on RTX 4090](docs/benchmark-rtx4090.md)
 
 Ultrafast requires NVIDIA’s separately licensed non-commercial research masks. Download them once with `python scripts/data/download_stbn.py`. Balanced and Quality work with the base install. [Mask terms](docs/stbn_pixel_sampling.md)
 
