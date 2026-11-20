@@ -12,12 +12,73 @@ from statistics import mean
 from matplotlib import rc_context
 from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.figure import Figure
+from matplotlib.text import Text
 from matplotlib.ticker import FixedLocator, ScalarFormatter
-from plot_pareto import _frontier, _place_labels
+from matplotlib.transforms import Bbox
 
 ROOT = Path(__file__).resolve().parents[2]
 HELDOUT_VIEWS = {"bicycle": 25, "flowers": 22, "garden": 24, "stump": 16, "treehill": 18,
                  "bonsai": 37, "counter": 30, "kitchen": 35, "room": 39}
+
+
+MUTED = "#a3a19c"
+INK = "#0b0b0b"
+INK_MUTED = "#52514e"
+LABEL_OFFSETS = ((7, 4, "left"), (7, -12, "left"), (-7, 4, "right"), (-7, -12, "right"),
+                 (0, 9, "center"), (0, -18, "center"),
+                 (12, 18, "left"), (-12, 18, "right"), (12, -26, "left"), (-12, -26, "right"),
+                 (0, 26, "center"), (0, -34, "center"))
+NEAR_OFFSETS = 6
+MARKER_HALF_PX = 7
+
+
+def _frontier(points: dict[str, tuple[float, float]]) -> list[str]:
+    """Pareto-optimal configs (not dominated on time and quality), sorted by time."""
+    front = [name for name, (t, q) in points.items()
+             if not any(t2 <= t and q2 >= q and (t2 < t or q2 > q)
+                        for other, (t2, q2) in points.items() if other != name)]
+    return sorted(front, key=lambda name: points[name][0])
+
+
+def _overlap(box: Bbox, others: list[Bbox]) -> float:
+    return sum(cut.width * cut.height for other in others
+               if (cut := Bbox.intersection(box, other)) is not None)
+
+
+def _place_labels(ax, points: dict[str, tuple[float, float]], labels: dict[str, str],
+                  front: list[str]) -> None:
+    """Greedy label placement on the final layout, frontier first: first clear in-panel offset, else least overlap."""
+    renderer = ax.figure.canvas.get_renderer()
+    panel = ax.get_window_extent(renderer)
+    taken = [Bbox.from_bounds(x - MARKER_HALF_PX, y - MARKER_HALF_PX,
+                              2 * MARKER_HALF_PX, 2 * MARKER_HALF_PX)
+             for x, y in ax.transData.transform(list(points.values()))]
+    order = sorted(points, key=lambda n: (n not in front, -points[n][1]))
+    for name in order:
+        color = INK if name in front else INK_MUTED
+        scored = []
+        for index, (dx, dy, ha) in enumerate(LABEL_OFFSETS):
+            leader = ({"arrowstyle": "-", "color": MUTED, "linewidth": 0.6,
+                       "shrinkA": 0, "shrinkB": 3} if index >= NEAR_OFFSETS else None)
+            note = ax.annotate(labels[name], points[name], xytext=(dx, dy),
+                               textcoords="offset points", ha=ha, color=color,
+                               fontsize="small", arrowprops=leader)
+            note.update_positions(renderer)
+            box = Text.get_window_extent(note, renderer)  # the text, not the leader
+            inside = (panel.x0 <= box.x0 and box.x1 <= panel.x1
+                      and panel.y0 <= box.y0 and box.y1 <= panel.y1)
+            penalty = _overlap(box, taken) + (0.0 if inside else 1e9)
+            if penalty == 0.0:
+                break
+            scored.append((penalty, index, note, box))
+            note.set_visible(False)
+        else:
+            _, _, note, box = min(scored, key=lambda s: (s[0], s[1]))
+            note.set_visible(True)
+        for _, _, other, _ in scored:
+            if other is not note:
+                other.remove()
+        taken.append(box)
 
 
 def scene_means(name, runs):

@@ -15,14 +15,13 @@ import sys
 import time
 from pathlib import Path
 
-from paper_suite.config import scene_downsample
-
 REPO = Path(__file__).resolve().parent.parent.parent
 
 # Outdoor then indoor; flowers/treehill live in 360_extra_scenes (see _scene_dir).
 DEFAULT_SCENES = ["bicycle", "flowers", "garden", "stump", "treehill",
                   "bonsai", "counter", "kitchen", "room"]
 DATASET_ROOTS = ["360_v2", "360_extra_scenes", "tandt", "db"]
+
 
 # The sweep opts into evaluation and records held-out PSNR.
 BASE_ARGS = [
@@ -32,6 +31,14 @@ BASE_ARGS = [
     "--evaluation",
     "--final-test-psnr",
 ]
+
+
+def scene_downsample(scene: str) -> int:
+    if scene in ("drjohnson", "playroom"):
+        return 1
+    if scene in ("bonsai", "counter", "kitchen", "room", "train", "truck"):
+        return 2
+    return 4
 
 
 def _scene_dir(scene: str) -> Path | None:
@@ -52,7 +59,7 @@ def _gpu_temperature() -> float | None:
     try:
         out = subprocess.run(["nvidia-smi", "--query-gpu=temperature.gpu",
                               "--format=csv,noheader,nounits"],
-                             capture_output=True, text=True, timeout=10)
+                             capture_output=True, text=True, timeout=10, check=False)
         return float(out.stdout.split()[0])
     except (OSError, ValueError, IndexError, subprocess.SubprocessError):
         return None
@@ -96,7 +103,7 @@ def train_run(scene: str, run_name: str, flags: list[str], *, iters: int,
         if cooldown_c is not None:
             wait_for_cool_gpu(cooldown_c)
         print(f"[sweep] TRAIN {run_name} ...", flush=True)
-        proc = subprocess.run(cmd, cwd=str(REPO))
+        proc = subprocess.run(cmd, cwd=str(REPO), check=False)
         if proc.returncode != 0 or not result_json.exists():
             print(f"[sweep] FAILED {run_name} (rc={proc.returncode})", flush=True)
             return None
@@ -136,7 +143,7 @@ def _publish(out_dir: Path, results: list[dict], axis: str, iters: int,
            "--results", str(out_dir / "results.json"),
            "--axis-label", axis, "--iters", str(iters)]
     # Quiet on success (runs after every cell) but never silent on failure.
-    proc = subprocess.run(cmd, cwd=str(REPO), capture_output=True, text=True)
+    proc = subprocess.run(cmd, cwd=str(REPO), capture_output=True, text=True, check=False)
     if proc.returncode != 0:
         print(f"[sweep] WARNING: plotting failed (rc={proc.returncode}); results "
               f"are safe in results.json\n{proc.stderr.strip()[-600:]}", flush=True)

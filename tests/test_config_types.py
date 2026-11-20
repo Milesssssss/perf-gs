@@ -4,8 +4,6 @@
 
 from __future__ import annotations
 
-from v2_train import build_parser
-
 from trainer.config.config_types import (
     BlendKind,
     DensificationMode,
@@ -14,6 +12,7 @@ from trainer.config.config_types import (
     resolve_blend_kind,
 )
 from trainer.config.resolve import RunConfig
+from trainer.frontend.cli import build_parser
 
 
 def test_enum_values_frozen() -> None:

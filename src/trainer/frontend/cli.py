@@ -109,7 +109,7 @@ def build_parser() -> argparse.ArgumentParser:
                          "psnr_curve.jsonl (streamed) + psnr_curve.json (iters[]/psnr_srgb[], "
                          "built for cross-run averaging) and renders psnr_curve.png (PSNR vs "
                          "iter) into the run dir at the end. Independent of --eval-every. "
-                         "Average many runs with scripts/plot_psnr_curves.py.", default=False)
+                         "Average many runs with scripts/plots/plot_psnr_curves.py.", default=False)
     parser.add_argument("--psnr-curve-every", type=int, default=0,
                     help="capture cadence for --psnr-curve. A sample is taken at iter `it` "
                          "when (it+1) %% this == 0, i.e. one iter before each densify boundary "
@@ -326,7 +326,7 @@ def build_parser() -> argparse.ArgumentParser:
                          "HUD Save/Open needed). The trainer just presents a "
                          "stable frozen workload at --capture-iter for exactly "
                          "--capture-frames frames, then exits. Launch this via "
-                         "scripts/capture_gpu_trace.py, which computes the frame "
+                         "scripts/running/capture_gpu_trace.py, which computes the frame "
                          "counts and invokes ngfx.exe. Implies --profile-run.")
     parser.add_argument("--capture-frames", type=int, default=240,
                     help="External-capture only: number of frozen, bit-identical "

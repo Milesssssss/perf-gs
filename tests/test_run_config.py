@@ -6,11 +6,10 @@ from __future__ import annotations
 
 import pytest
 from _colmap_testkit import write_colmap_scene
-from v2_train import build_parser
 
 from trainer.config.config import AdamLRs
 from trainer.config.resolve import RunConfig
-from trainer.frontend.cli import parse_args
+from trainer.frontend.cli import build_parser, parse_args
 from trainer.frontend.scene import holdout_split, load_scene_context
 
 

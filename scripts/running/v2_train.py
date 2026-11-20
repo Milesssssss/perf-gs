@@ -2,19 +2,10 @@
 
 """Thin entry point for the v2 trainer; all training logic lives in :mod:`trainer.frontend.app`."""
 
-from __future__ import annotations
+from trainer.frontend.app import main
+from trainer.frontend.cli import build_parser
 
-import sys
-from pathlib import Path
-
-_SCRIPTS = Path(__file__).resolve().parent.parent
-for _sub in ("running", "debug", "plots"):
-    _p = str(_SCRIPTS / _sub)
-    if _p not in sys.path:
-        sys.path.append(_p)
-
-from trainer.frontend.app import main 
-from trainer.frontend.cli import build_parser as build_parser
+__all__ = ["build_parser", "main"]
 
 
 if __name__ == "__main__":

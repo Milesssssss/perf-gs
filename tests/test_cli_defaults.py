@@ -135,9 +135,7 @@ EXPECTED_DEFAULTS = {
     "final_test_psnr": False,
     "compute_final_metrics": False,
     "save_ply": False,
-    # Paper-suite instrumentation (scripts/running/eval_stbn_ablation.py). All
-    # OFF by default and all strictly post-loop or sampled, so a run that does
-    # not ask for them is byte-for-byte the run it was before they existed.
+    # Evaluation and profiling are opt-in.
     "run_report": False,
     "save_test_renders": False,
     "render_fps_frames": 0,

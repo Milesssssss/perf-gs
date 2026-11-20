@@ -41,6 +41,8 @@ All three presets use stereo matches from training views, a lens response fitted
 
 Ultrafast renders at the full selected image dimensions and samples the pixel gradients. Download NVIDIA’s masks once with `python scripts/data/download_stbn.py`. Balanced and quality use every pixel and need no mask download. [STBN asset terms](stbn_pixel_sampling.md)
 
+All three presets use structure-aware densification. It compares a Gaussian’s projected axes with local image detail across training views, then splits it along axes that cover too much detail. The CLI also supports threshold-based 3DGS splitting with `--densify-mode simple` and a fixed set of Gaussians with `--densify-mode none`. [SAD-GS](#ref-sadgs) · [Split and prune decisions](../shaders/densify/decide_actions_structure.slang)
+
 The published Mip-NeRF 360 comparison uses the selected image resolution for training and final evaluation. Explicit settings override the preset. To control the lens response, pass `--lens-strength 1` for fixed cos⁴ falloff or `--lens-strength 0` for a flat response. [Camera model and PLY metadata](mipnerf360_3k.md#camera-response-and-ply-playback)
 
 ### Interactive hub
@@ -56,7 +58,7 @@ python -m trainer.frontend.app --hub
 3. When training finishes, choose **Export PLY...** to save the model. The dialog lets you pick the filename and destination. On platforms without a save dialog, the hub uses the run directory.
 4. **Set up another run** previews the original point cloud with the current settings. Keep them or edit the preset and iteration count, then start training. **Back to trained model** restores the finished view. To switch scenes, choose **Open another dataset...**. If starting or switching would replace an unsaved model, you can export it first in the same action.
 
-The hub reuses the cameras and original point cloud it loaded for the preview. Each new run builds its own training split and stereo seeds. On bicycle with the balanced preset and an RTX 4080, the Start handler reached the first optimizer step in **3.03 s**, down from **5.18 s** with a second COLMAP load and reference PNG export. Each figure averages two offscreen runs with the scene already open. The diagnostics log records setup time for your own run.
+The hub reuses the cameras and original point cloud from the preview. Each run builds its training split and stereo seeds, and the diagnostics log records setup time.
 
 ## Evaluation and PLY export
 

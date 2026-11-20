@@ -9,20 +9,12 @@ Colour is affine in sh0, so the backward of a unit red image gradient yields C0 
 from __future__ import annotations
 
 import json
-import sys
 import time
 from pathlib import Path
 
 import numpy as np
 
-_SCRIPTS = Path(__file__).resolve().parent.parent
-for _sub in ("running", "debug", "plots"):
-    _path = str(_SCRIPTS / _sub)
-    if _path not in sys.path:
-        sys.path.append(_path)
-
-from trainer.config.config import DensifyConfig
-from trainer.config.config import AdamLRs, IterationContextualVariables
+from trainer.config.config import AdamLRs, DensifyConfig, IterationContextualVariables
 from trainer.frontend.app import TrainingApplication
 from trainer.frontend.cli import build_parser
 from trainer.frontend.evaluation.evaluation import eval_test_psnr_srgb

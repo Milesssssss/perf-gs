@@ -10,10 +10,10 @@ train split that silently trains on nothing; the CLI defaults pass.
 from __future__ import annotations
 
 import pytest
-from v2_train import build_parser
 
 from trainer.config.resolve import RunConfig
 from trainer.config.validation import ConfigError, validate_training_config
+from trainer.frontend.cli import build_parser
 from trainer.frontend.schedule import TrainingSchedule
 
 

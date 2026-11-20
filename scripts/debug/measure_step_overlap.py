@@ -10,18 +10,10 @@ from __future__ import annotations
 
 import contextlib
 import statistics
-import sys
 import time
-from pathlib import Path
 
 import numpy as np
 import slangpy as spy
-
-_SCRIPTS = Path(__file__).resolve().parent.parent
-for _sub in ("running", "debug", "plots"):
-    _path = str(_SCRIPTS / _sub)
-    if _path not in sys.path:
-        sys.path.append(_path)
 
 from trainer.backend.compute import gpu
 from trainer.config.config import AdamLRs
