@@ -2,6 +2,8 @@
 
 ## Reproduce the benchmark
 
+The completed three-preset sweeps include per-scene training times and Graphdeco image metrics for both workstations. [RTX 4090 measurements](NVIDIA_GeForce_RTX_4090_presets.csv) · [RTX 4080 measurements](mipnerf360_3k_presets.csv)
+
 On Windows with an NVIDIA GPU, use the benchmark driver from the repository root in the trainer’s Python environment. It records the hardware and software, runs all three presets and scores the saved renders with the pinned Graphdeco evaluator. The RTX 4090 handoff includes the exact environment and dataset setup used for this comparison. [Setup and handoff](benchmark-rtx4090.md)
 
 ```powershell

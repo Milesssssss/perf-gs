@@ -1,6 +1,24 @@
 # Training benchmarks
 
-## Current presets
+## RTX 4090 presets
+
+On the **RTX 4090 24 GB**, Balanced averaged **17.31 seconds** per training loop and **27.42 dB** held-out PSNR. The same preset averaged 25.97 seconds and 27.39 dB on the [RTX 4080 workstation](#current-presets), a 33% reduction in loop time on the newer workstation.
+
+| Preset | Train loop | PSNR ↑ | SSIM ↑ | VGG LPIPS ↓ | VRAM at loop end |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Ultrafast | 11.85 s | 27.10 dB | 0.7930 | 0.2567 | 5.29 GiB |
+| Balanced | 17.31 s | 27.42 dB | 0.8143 | 0.2229 | 2.81 GiB |
+| Quality | 23.24 s | 27.79 dB | 0.8274 | 0.2011 | 6.14 GiB |
+
+All 27 runs completed on the first pass. Each preset trained for 3,000 steps at seed 42 on each of the nine Mip-NeRF 360 scenes, using quarter resolution outdoors and half resolution indoors. The clock covers the headless Vulkan training loop and excludes loading, initialization, evaluation and export. VRAM is the trainer process’s local GPU memory sampled at loop end. Graphdeco scored all 246 held-out views per preset using RGB8 renders. We averaged views within each scene, then weighted all nine scenes equally. [Per-scene RTX 4090 measurements](NVIDIA_GeForce_RTX_4090_presets.csv)
+
+The Lenovo workstation ran Windows 11 Enterprise on a 32-core Threadripper PRO 9975WX with NVIDIA driver 610.88. Trainer revision `8e2cacefe7df` used SlangPy 0.42.0 and Python 3.11.9. Graphdeco evaluation used PyTorch 2.10.0+cu128 and torchvision 0.25.0+cu128. [Workstation record](NVIDIA_GeForce_RTX_4090_system.txt) · [Reproduce the sweep](benchmark-rtx4090.md)
+
+![Training-loop time, PSNR, SSIM and VGG LPIPS by scene and preset on the RTX 4090](../assets/mipnerf360-rtx4090-presets.png)
+
+<a id="current-presets"></a>
+
+## RTX 4080 presets
 
 These measurements are from the **RTX 4080 16 GB**. All three presets train for 3,000 steps on the nine Mip-NeRF 360 scenes at seed 42. Training and evaluation use the stored `images_4` photos outdoors and `images_2` indoors. Graphdeco’s RGB8 evaluator scores all 246 held-out views. Each scene contributes equally to every mean. [Benchmark commands](mipnerf360_3k.md#reproduce-the-benchmark) · [Per-scene RTX 4080 measurements](mipnerf360_3k_presets.csv)
 

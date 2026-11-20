@@ -8,9 +8,8 @@ second. Measured on bicycle with the splat count pinned, that took throughput
 from ~155 it/s headless to ~35 it/s with the viewer attached, and the penalty is
 worst early in a run when a training step is cheapest.
 
-So while the trainer is competing for the queue, the SCENE is rendered on a
-budget (:meth:`Viewer._scene_due`) — the UI pass is not, so the panel stays
-responsive at full frame rate:
+While training competes for the queue, the viewer paces frame presentation
+(including UI-only frames) and can reuse the previous scene texture:
 
   * parked on a test camera -> only when new gaussians arrive (the view cannot
     move: navigating calls ``_CameraRig.leave``),
@@ -50,6 +49,20 @@ def _viewer(*, training: bool, parked: bool, dirty: bool = False) -> Viewer:
 
 
 FRAME = 1.0 / TRAINING_SCENE_FPS
+
+
+def test_frame_pacing_only_while_training_shares_the_gpu() -> None:
+    viewer = _viewer(training=False, parked=True)
+    assert viewer._training_frame_interval() == 0
+    viewer._training_active = True
+    assert viewer._training_frame_interval() == FRAME
+    viewer._pause_event.set()
+    assert viewer._training_frame_interval() == 0
+    viewer._pause_event.clear()
+    viewer.suspend_frame_budget()
+    assert viewer._training_frame_interval() == 0
+    viewer.resume_frame_budget()
+    assert viewer._training_frame_interval() == FRAME
 
 
 def test_not_training_is_never_throttled() -> None:

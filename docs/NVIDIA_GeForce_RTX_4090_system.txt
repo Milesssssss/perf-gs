@@ -1,0 +1,12 @@
+Trainer commit: 8e2cacefe7df584d919d35a92e699140f294698a
+System: LENOVO 30HJSAME00
+CPU: AMD Ryzen Threadripper PRO 9975WX 32-Cores      (32 cores)
+OS: Microsoft Windows 11 Enterprise 10.0.26300
+Visible system RAM (KiB): 133397176
+name, driver_version, memory.total [MiB]
+NVIDIA GeForce RTX 4090, 610.88, 24564 MiB
+[WARN] Cannot enable D3D12 Agility SDK: Calling SetSDKVersion failed.
+Python 3.11.9 (tags/v3.11.9:de54cf5, Apr  2 2024, 10:12:12) [MSC v.1938 64 bit (AMD64)]
+slangpy 0.42.0
+torch 2.10.0+cu128
+torchvision 0.25.0+cu128

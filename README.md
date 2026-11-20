@@ -2,21 +2,26 @@
 
 **3DGS in seconds.**
 
-On a **16 GB RTX 4080**, Ultrafast averages **27.13 dB PSNR in 17.62 seconds** of training-loop time across the nine Mip-NeRF 360 scenes. Quality reaches **27.78 dB in 33.85 seconds**. Both run for 3,000 steps.
+On a **24 GB RTX 4090**, Ultrafast averages **27.10 dB PSNR in 11.85 seconds** of training-loop time across the nine Mip-NeRF 360 scenes. Quality reaches **27.79 dB in 23.24 seconds**. Both run for 3,000 steps.
 
+<<<<<<< HEAD
 For GPUs with less VRAM, start with **Balanced**. It streams training photos from system RAM and used **2.72–2.89 GiB of VRAM at loop end** across the nine scenes. On Bicycle, it finished with 2.49 million splats and buffers sized for 2.60 million. [VRAM and system RAM breakdown](docs/benchmarks.md#where-memory-goes)
+=======
+**Balanced**, the default preset, streams training photos from system RAM. It averaged **27.42 dB in 17.31 seconds** on the RTX 4090, using **2.73–2.90 GiB** of process VRAM at loop end. On the **16 GB RTX 4080**, it reached **27.39 dB in 25.97 seconds** with **2.72–2.89 GiB** at loop end. Peak and viewer usage can be higher. [VRAM by preset and workstation](docs/benchmarks.md)
+>>>>>>> bb44ebff26e4044ef2e8f59cb52f7122923c7ef5
 
 [Quickstart](#quickstart) · [Benchmarks](#mip-nerf-360) · [Gallery](#reconstructions)
 
 <p align="center">
-  <a href="assets/perfgs-demo.webp?raw=true"><img src="assets/perfgs-demo.webp" width="896" alt="Stump in real time, from opening the COLMAP scene through 3,000 Ultrafast steps. The timer freezes at training completion as the camera moves through the result."></a>
-  <br><em>Stump · Ultrafast · RTX 4080 · real-time playback</em> · <a href="assets/perfgs-demo.gif?raw=true">GIF (61 MiB)</a>
+  <a href="assets/perfgs-demo.webp?raw=true"><img src="assets/perfgs-demo.webp" width="896" alt="The RTX 4090 hub opens Stump, trains for 3,000 Ultrafast steps, then moves the camera through the reconstruction. The timer stops at 12.71 seconds."></a>
+  <br><em>Stump · Ultrafast · RTX 4090 · real-time playback</em> · <a href="assets/perfgs-demo.gif?raw=true">GIF (14 MiB)</a>
 </p>
 
-**18.14 s from opening the scene to training completion** = 0.19 s to load COLMAP + 0.52 s before pressing Start + 3.41 s for setup + 14.02 s of optimization.
+**12.71 s from opening Stump to the trained result**, including **8.95 s for 3,000 optimization steps**. Playback continues for about four seconds to show the finished scene. The same hub run took 8.96 s of optimization with recording off, and the headless Stump benchmark took 8.95 s.
 
 ## Mip-NeRF 360
 
+<<<<<<< HEAD
 | Preset (RTX 4080 16 GB) | Training loop | PSNR ↑ | SSIM ↑ | VGG LPIPS ↓ | Loop-end VRAM in GiB, mean (range) |
 | --- | ---: | ---: | ---: | ---: | ---: |
 | Ultrafast | 17.62 s | 27.13 dB | 0.7936 | 0.2567 | 5.29 (3.42–7.60) |
@@ -24,18 +29,42 @@ For GPUs with less VRAM, start with **Balanced**. It streams training photos fro
 | Quality | 33.85 s | 27.78 dB | 0.8275 | 0.2011 | 6.13 (6.06–6.23) |
 
 Windows measured the trainer’s VRAM after the GPU finished step 3,000, before evaluation or export. Peak usage during training and usage with the viewer open can be higher.
+=======
+| Preset (RTX 4090 24 GB) | Training loop | PSNR ↑ | SSIM ↑ | VGG LPIPS ↓ | VRAM at loop end |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Ultrafast | 11.85 s | 27.10 dB | 0.7930 | 0.2567 | 5.29 GiB |
+| Balanced (default) | 17.31 s | 27.42 dB | 0.8143 | 0.2229 | 2.81 GiB |
+| Quality | 23.24 s | 27.79 dB | 0.8274 | 0.2011 | 6.14 GiB |
+>>>>>>> bb44ebff26e4044ef2e8f59cb52f7122923c7ef5
 
-Headless runs on Windows and Vulkan, seed 42. Training-loop time excludes loading, initialization and export. Each scene contributes equally. Graphdeco’s RGB8 evaluator scores 246 held-out views at quarter resolution outdoors and half resolution indoors. [Full RTX 4080 results](docs/benchmarks.md) · [Run the benchmark on RTX 4090](docs/benchmark-rtx4090.md)
+Each entry is a mean across nine scenes, with one headless Vulkan run per scene at seed 42. The clock covers 3,000 training steps and excludes loading, initialization, evaluation and export. Graphdeco scored all 246 held-out views per preset at quarter resolution outdoors and half resolution indoors. [Per-scene CSV](docs/NVIDIA_GeForce_RTX_4090_presets.csv) · [Workstation and software](docs/NVIDIA_GeForce_RTX_4090_system.txt) · [Reproduce the benchmark](docs/benchmark-rtx4090.md)
+
+![RTX 4090 training-loop time, PSNR, SSIM and VGG LPIPS for all three presets on each Mip-NeRF 360 scene](assets/mipnerf360-rtx4090-presets.png)
 
 Ultrafast requires NVIDIA’s separately licensed non-commercial research masks. Download them once with `python scripts/data/download_stbn.py`. Balanced and Quality work with the base install. [Mask terms](docs/stbn_pixel_sampling.md)
 
-![Training-loop seconds versus held-out PSNR for PERF-GS and other Gaussian splatting trainers on the same RTX 4080.](assets/mipnerf360-rtx4080-frontier.png)
-
-On the same RTX 4080, PERF-GS Quality averaged **27.78 dB in 33.85 s**. FastGS-Big reached **27.83 dB in 325.86 s** on the same nine scenes and held-out photos. [Method settings and per-scene results](docs/benchmarks.md#rtx-4080-comparison)
+The peer comparison uses the earlier RTX 4080 workstation for every trainer. There, PERF-GS Quality averaged **27.78 dB in 33.85 s**, and FastGS-Big reached **27.83 dB in 325.86 s** on the same nine scenes. [RTX 4080 comparison plot, settings and results](docs/benchmarks.md#rtx-4080-comparison)
 
 ## Quickstart
 
-With Python 3.10+ and a Vulkan or D3D12 GPU, launch the hub from the repository root.
+Run the hub from the repository root with Python 3.10+ and a Vulkan or D3D12 GPU.
+
+**Windows PowerShell.** If this checkout already has the benchmark environment, launch the hub directly.
+
+```powershell
+.\.venv\Scripts\python.exe -m trainer.frontend.app --hub
+```
+
+For a fresh Windows checkout with Python 3.11 and the `py` launcher installed, run these setup commands once before launching the hub.
+
+```powershell
+py -3.11 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -e .
+```
+
+Use `.\.venv\Scripts\python.exe` for the other `python` examples below, or activate the environment in your current shell with `.\.venv\Scripts\Activate.ps1`.
+
+**Other platforms or an active Python environment**
 
 ```sh
 python -m pip install -e .
@@ -44,7 +73,7 @@ python -m trainer.frontend.app --hub
 
 Drop the folder containing `images/` and `sparse/0/` into the hub and click **Start Training**. Explore the result, export a PLY, or train again from the original point cloud. If you have photos only, choose **Reconstruct to COLMAP** first. [Hub walkthrough](docs/usage.md#interactive-hub)
 
-![Trained kitchen scene in the PERF-GS hub, with controls to export the model or start another run](assets/perfgs-hub.webp)
+![Kitchen in the RTX 4090 hub after 3,000 Balanced steps, with controls to export the trained model or start another run](assets/perfgs-hub.webp)
 
 **Try a sample from the command line.** Download the Tanks & Temples sample archive (about 650 MB) and train the truck scene.
 
@@ -57,7 +86,7 @@ The model is saved in `outputs/train/<run-name>/output.ply`. Evaluation is off b
 
 ## Reconstructions
 
-Each row shows one held-out photograph and all three 3,000-step presets rendered from that camera. Beneath each full view is the same boxed detail, cropped without color or exposure adjustments. Select a tile to see the crop at native resolution.
+Each row pairs a held-out photograph with the three renders scored in the RTX 4090 benchmark. Each preset trained for 3,000 steps. The box marks the detail shown beneath each full view. Select a tile to see the crop at native resolution.
 
 <table>
   <thead>
