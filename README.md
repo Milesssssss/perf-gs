@@ -10,11 +10,11 @@ For GPUs with less VRAM, start with **Balanced**. It streams training photos fro
 [Quickstart](#quickstart) · [Benchmarks](#mip-nerf-360) · [Gallery](#reconstructions)
 
 <p align="center">
-  <a href="assets/perfgs-demo.webp?raw=true"><img src="assets/perfgs-demo.webp" width="896" alt="The RTX 4090 hub opens Stump, trains for 3,000 Ultrafast steps, then moves the camera through the reconstruction. The timer stops at 12.71 seconds."></a>
-  <br><em>Stump · Ultrafast · RTX 4090 · real-time playback</em> · <a href="assets/perfgs-demo.gif?raw=true">GIF (14 MiB)</a>
+  <a href="assets/stump-rtx4090-orbit.webp?raw=true"><img src="assets/stump-rtx4090-orbit.webp" width="896" alt="The RTX 4090 hub trains Stump for 3,000 Ultrafast steps. The controls and timer disappear as the camera arcs around the finished stump."></a>
+  <br><em>Stump · Ultrafast · RTX 4090 · real-time playback</em> · <a href="assets/stump-rtx4090-orbit.gif?raw=true">GIF (50 MiB)</a>
 </p>
 
-**12.71 s from opening Stump to the trained result**, including **8.95 s for 3,000 optimization steps**. Playback continues for about four seconds to show the finished scene. The same hub run took 8.96 s of optimization with recording off, and the headless Stump benchmark took 8.95 s.
+**13.08 s from opening Stump to the trained result**, including **9.21 s for 3,000 optimization steps**. After training, the controls and timer fade away for a 9.5-second camera arc around the stump. The optimization loop took 8.96 s in a separate unrecorded hub run and 8.95 s in the headless Stump benchmark.
 
 ## Mip-NeRF 360
 
