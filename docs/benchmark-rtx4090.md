@@ -34,4 +34,14 @@ Return these two files from the folder the command prints, `outputs/benchmarks/N
 
 Include the three preset means in the handoff. With Matplotlib installed, `python scripts/plots/plot_preset_results.py --presets PATH_TO_CSV` prints the table and writes a 4090-specific chart.
 
-Use the verified 4090 means for the README headline and three-preset table. Keep the measured 16 GB RTX 4080 Balanced result beside them (25.97 s, 27.39 dB, 2.72–2.89 GiB of process VRAM at loop end). The existing demo and peer comparison plot were measured on the 4080. [RTX 4080 results](benchmarks.md#current-presets)
+The README uses the verified 4090 means for its headline and three-preset table. Its Stump demo comes from a separate interactive 4090 run with the viewer and frame capture active. The 16 GB RTX 4080 Balanced result (25.97 s, 27.39 dB, 2.72–2.89 GiB of process VRAM at loop end) and the same-card peer comparison come from the earlier workstation. [RTX 4080 results](benchmarks.md#current-presets)
+
+## Interactive Stump demo
+
+To try the recorded settings, launch the hub with the following command, open `datasets/360_v2/stump`, then select **Start Training**.
+
+```powershell
+.\.venv\Scripts\python.exe -m trainer.frontend.app --hub --preset ultrafast --iters 3000 --downsample 4 --seed 42 --backend vulkan
+```
+
+The recording used a 1152 × 648 viewer and the default snapshot interval of 10 steps. The 12.71 s clock starts when the hub opens the dataset and stops when it reports the trained result. The optimization loop took 8.95 s with frame capture and 8.96 s in a separate run without capture. Both runs used the viewer’s 15 Hz limit during optimization.

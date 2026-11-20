@@ -6,8 +6,9 @@ PERF-GS requires Python 3.10 or newer and a GPU with a Vulkan or D3D12 driver. R
 
 ### First-run help
 
-The published runs used Windows, Python 3.11.9, SlangPy 0.42.0, Vulkan and an RTX 4080 with 16 GB of VRAM. The Quality preset used 6.06–6.23 GiB of process-local GPU memory at the end of the training loop across the nine headless runs. Peak usage and the interactive viewer’s memory requirements can be higher. [Benchmark configuration](benchmarks.md#current-presets)
+The README benchmarks used Windows, Python 3.11.9, SlangPy 0.42.0, Vulkan and an RTX 4090 with 24 GB of VRAM. Across the nine headless scenes, Balanced used 2.73–2.90 GiB of process-local GPU memory at loop end and Quality used 6.06–6.23 GiB. Peak usage and the interactive viewer’s memory requirements can be higher. [RTX 4090 measurements](benchmarks.md#rtx-4090-presets) · [16 GB RTX 4080 measurements](benchmarks.md#current-presets)
 
+- If PowerShell opens the Microsoft Store or reports “Python was not found,” run `.\.venv\Scripts\python.exe -m trainer.frontend.app --hub` from the checkout. This uses the installed benchmark environment directly. For a fresh checkout, follow the [Windows setup](../README.md#quickstart).
 - If Python cannot find `trainer`, run `python -m pip install -e .` from the repository root using the same Python that launches the hub.
 - If the window closes during GPU setup, open the `errors.log` path printed in the terminal. On Windows you can also start the hub with `python -m trainer.frontend.app --hub --backend d3d12` to use Direct3D 12.
 
@@ -31,7 +32,9 @@ Sparse pixel supervision with NVIDIA’s spatiotemporal blue-noise masks require
 
 The trainer opens its viewer by default. Use `--no-viewer` for headless training, or `--wait-for-viewer` to inspect the initial Gaussians before starting. Vulkan is the default backend. On Windows, select D3D12 with `--backend d3d12`.
 
-All three presets use stereo matches from training views, a lens response fitted from training landmarks, and the `short` learning-rate schedule. Choose a preset with `--preset` or in the viewer. [Measured speed and quality](benchmarks.md#current-presets)
+During optimization the viewer presents at up to 15 frames per second so training can use the same GPU. Pausing the run or viewing the completed model restores the viewer’s normal refresh rate.
+
+All three presets use stereo matches from training views, a lens response fitted from training landmarks, and the `short` learning-rate schedule. Choose a preset with `--preset` or in the viewer. [Measured speed and quality](benchmarks.md#rtx-4090-presets)
 
 | Preset | SH degree | Pixels supervised per step | Splat capacity | Training images |
 | --- | ---: | ---: | ---: | --- |

@@ -616,16 +616,19 @@ class Viewer:
     def resume_frame_budget(self) -> None:
         self._frame_budget_off.clear()
 
-    def _scene_due(self, now: float) -> bool:
-        # A paused trainer leaves the queue idle, so the scene gets full frame rate.
+    def _training_frame_interval(self) -> float:
         if (not self._training_active or self._frame_budget_off.is_set()
                 or self._pause_event.is_set()):
-            return True
-        if self._scene_dirty.is_set():
+            return 0.0
+        return 1.0 / TRAINING_SCENE_FPS
+
+    def _scene_due(self, now: float) -> bool:
+        interval = self._training_frame_interval()
+        if not interval or self._scene_dirty.is_set():
             return True
         if self._rig.index >= 0:            # parked: only new data moves the image
             return False
-        return (now - self._last_scene_s) >= (1.0 / TRAINING_SCENE_FPS)
+        return (now - self._last_scene_s) >= interval
 
     def set_training_active(self, active: bool = True) -> None:
         self._training_active = active
@@ -938,6 +941,12 @@ class Viewer:
             except Exception as e:
                 self._report_error("frame error", e)
                 time.sleep(0.016)
+
+            # Even a cached scene submits a UI pass and presents on the training GPU.
+            # Wait outside both locks, and count time already spent drawing this frame.
+            remaining = self._training_frame_interval() - (time.perf_counter() - now)
+            if remaining > 0:
+                self._stop_event.wait(remaining)
 
         try:
             window.close()
