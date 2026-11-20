@@ -279,9 +279,9 @@ def build_parser() -> argparse.ArgumentParser:
     _shared(parser, "sh_degree")
     _shared(parser, "sh_band_interval")
     parser.add_argument("--sample-mode", type=str, default="sadgs", choices=["ours", "sadgs"],
-                    help="per-iteration train-camera draw. 'ours' (default): "
+                    help="per-iteration train-camera draw. 'ours': "
                          "np.random.default_rng(seed).integers over the name-sorted "
-                         "train indices (with replacement, 1/iter). 'sadgs': replicate "
+                         "train indices (with replacement, 1/iter). 'sadgs' (default): replicate "
                          "the reference SADGS trainer's EXACT draw — Python random.seed(seed), "
                          "a load-time random.shuffle of train then test cameras (INRIA "
                          "Scene shuffle=True), first epoch consumed in that load-shuffled "
@@ -430,7 +430,7 @@ def build_parser() -> argparse.ArgumentParser:
                     help="After the timed loop, write run_report.json: PER-VIEW "
                          "held-out PSNR/SSIM (not just the mean), the timing "
                          "split (train_active_s = train_wall_s minus every "
-                         "mid-loop observation), trainer-owned GPU allocation, "
+                         "mid-loop observation), GPU allocations, image caches, process RAM, "
                          "the adapter/API the run bound, the resolved train/test "
                          "split, and the STBN asset's content hash. Additive: "
                          "test_psnr.json keeps its schema. Renders only the "

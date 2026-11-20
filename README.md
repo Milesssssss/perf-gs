@@ -4,7 +4,7 @@
 
 On a **16 GB RTX 4080**, Ultrafast averages **27.13 dB PSNR in 17.62 seconds** of training-loop time across the nine Mip-NeRF 360 scenes. Quality reaches **27.78 dB in 33.85 seconds**. Both run for 3,000 steps.
 
-For GPUs with less VRAM, start with **Balanced**. It streams training photos from system RAM and reached **27.39 dB in 25.97 seconds** on the same 4080. The trainer used **2.72–2.89 GiB of VRAM** at the end of each headless run. Peak and viewer usage can be higher. [VRAM by preset](docs/benchmarks.md#current-presets)
+For GPUs with less VRAM, start with **Balanced**. It streams training photos from system RAM and used **2.72–2.89 GiB of VRAM at loop end** across the nine scenes. On Bicycle, it finished with 2.49 million splats and buffers sized for 2.60 million. [VRAM and system RAM breakdown](docs/benchmarks.md#where-memory-goes)
 
 [Quickstart](#quickstart) · [Benchmarks](#mip-nerf-360) · [Gallery](#reconstructions)
 
@@ -17,11 +17,13 @@ For GPUs with less VRAM, start with **Balanced**. It streams training photos fro
 
 ## Mip-NeRF 360
 
-| Preset (RTX 4080 16 GB) | Training loop | PSNR ↑ | SSIM ↑ | VGG LPIPS ↓ |
-| --- | ---: | ---: | ---: | ---: |
-| Ultrafast | 17.62 s | 27.13 dB | 0.7936 | 0.2567 |
-| Balanced (default) | 25.97 s | 27.39 dB | 0.8143 | 0.2229 |
-| Quality | 33.85 s | 27.78 dB | 0.8275 | 0.2011 |
+| Preset (RTX 4080 16 GB) | Training loop | PSNR ↑ | SSIM ↑ | VGG LPIPS ↓ | Loop-end VRAM in GiB, mean (range) |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Ultrafast | 17.62 s | 27.13 dB | 0.7936 | 0.2567 | 5.29 (3.42–7.60) |
+| Balanced (default) | 25.97 s | 27.39 dB | 0.8143 | 0.2229 | 2.80 (2.72–2.89) |
+| Quality | 33.85 s | 27.78 dB | 0.8275 | 0.2011 | 6.13 (6.06–6.23) |
+
+Windows measured the trainer’s VRAM after the GPU finished step 3,000, before evaluation or export. Peak usage during training and usage with the viewer open can be higher.
 
 Headless runs on Windows and Vulkan, seed 42. Training-loop time excludes loading, initialization and export. Each scene contributes equally. Graphdeco’s RGB8 evaluator scores 246 held-out views at quarter resolution outdoors and half resolution indoors. [Full RTX 4080 results](docs/benchmarks.md) · [Run the benchmark on RTX 4090](docs/benchmark-rtx4090.md)
 

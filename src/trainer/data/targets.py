@@ -38,6 +38,10 @@ class TargetDataset:
     def srgb(self) -> list[np.ndarray]:
         return self._srgb
 
+    def host_image_bytes(self) -> dict[str, int]:
+        return {"decoded_images_bytes": sum(image.nbytes for image in self._srgb),
+                "linear_cache_bytes": sum(image.nbytes for image in self._linear_cache.values())}
+
     def linear(self, camera_index: int) -> np.ndarray:
         target = self._linear_cache.get(camera_index)
         if target is None:

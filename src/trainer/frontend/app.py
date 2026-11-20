@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import slangpy as spy
 
 from trainer.backend.densify.structure_tensor import StructureTensor
 from trainer.backend.memory.budget import GIB, allocated_bytes, available_bytes, fit_capacity
@@ -294,6 +295,22 @@ class TrainingApplication:
             summary["vram_budget_bytes"], summary["vram_usage_bytes"] = measured
             vram = (f"; VRAM in use {measured[1] / GIB:.2f} of "
                     f"{measured[0] / GIB:.2f} GiB budget")
+        if self.args.run_report:
+            ram = spy.platform.memory_stats()
+            summary["host_ram"] = {
+                "working_set_bytes": ram.rss or None,
+                "peak_working_set_bytes": ram.peak_rss or None,
+                **self._targets.host_image_bytes(),
+                "packed_training_images_bytes": sum(
+                    image.nbytes for image in self.target_textures.values() if isinstance(image, np.ndarray)),
+            }
+            # Per-view textures live outside pipeline.buffers. Streamed views share scratch space.
+            summary["gpu_view_cache"] = {
+                "training_images_bytes": sum(
+                    image.memory_usage.device for image in self.target_textures.values() if isinstance(image, spy.Texture)),
+                "structure_fields_bytes": sum(
+                    field.memory_usage.device for field in self.structure_textures.values() if isinstance(field, spy.Texture)),
+            }
         print(f"[memory] peak sort pairs {peak_pairs:,} of "
               f"{pipeline.max_sort_pairs:,}; pipeline buffers {owned / GIB:.2f} GiB{vram}")
         if overflows:

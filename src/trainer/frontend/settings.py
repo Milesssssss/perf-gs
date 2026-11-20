@@ -280,8 +280,8 @@ SETTINGS: tuple[Setting, ...] = (
             minimum=0, maximum=20_000, speed=10, note="0 = no ramp"),
     Setting("image_residency", "training images", "perf", str, default="stream",
             about="Streaming saves GPU memory. Keeping all training images on the GPU saves transfer time.",
-            choices=("stream", "gpu"), help="stream training images and structure fields "
-            "from host RAM or keep them on the GPU to reduce per-step transfers."),
+            choices=("stream", "gpu"), help="stream photos from host RAM and compute structure fields "
+            "when needed, or keep all training photos and their structure fields on the GPU."),
     Setting("adam_moments", "Adam moments", "perf", str, default="bf16",
             about="Precision of the optimizer state. bf16: the same quality with "
                   "0.7-1.7 GiB less memory, and slightly faster.",

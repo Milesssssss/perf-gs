@@ -26,6 +26,29 @@ The ultrafast and balanced scores come from replaying the exact timed PLY files.
 
 The benchmark machine ran Windows on a 32-core Ryzen Threadripper PRO 5975WX with 128 GiB of RAM and an RTX 4080 16 GB (driver 610.60). Python 3.11.9 and SlangPy 0.42.0 ran the Vulkan trainer. Stereo matching ran on the CPU. The independent CUDA evaluation used PyTorch 2.10.0+cu128 and torchvision 0.25.0.
 
+### Where memory goes
+
+On Bicycle, Balanced finished with 2.49 million Gaussians and buffers sized for 2.60 million. This is the headless RTX 4080 footprint at 3,000 steps and seed 42. SlangPy reports the size of each named GPU resource. Windows reports the trainer process’s total local GPU usage through DXGI immediately after the training loop, before held-out evaluation or export. [GPU resource accounting](../src/trainer/frontend/evaluation/run_report.py) · [Windows memory counters](https://learn.microsoft.com/en-us/windows/win32/api/dxgi1_4/ns-dxgi1_4-dxgi_query_video_memory_info)
+
+| Bicycle GPU memory at loop end (MiB, rounded) | Balanced | Quality |
+| --- | ---: | ---: |
+| Rendering, tile sorting, scans and backward-pass workspace | 931 | 1,438 |
+| Gradients | 555 | 1,431 |
+| Adam optimizer state | 377 | 1,260 |
+| Densification and its workspace | 357 | 961 |
+| Gaussian parameters, view-dependent colors and 3D filter | 268 | 812 |
+| Loss buffers and current reference photo | 72 | 72 |
+| Other process-local GPU usage, including structure workspace | 228 | 227 |
+| **Windows process total** | **2,788** | **6,203** |
+
+**Photos.** The nine scenes contain 1,940 original 8-bit RGB JPEGs. Their benchmark-resolution copies are also 8-bit RGB JPEGs. The GPU texture stores four uncompressed bytes per pixel (RGB and alpha). Bicycle has 169 training photos at 1,237 × 822, totaling 656 MiB of packed pixels. Caching the derived structure maps for all 169 views adds another 1,311 MiB before GPU texture padding. Balanced and Quality reuse a single reference texture. Ultrafast caches every training photo and structure map, bringing its Bicycle loop-end usage to 4.16 GiB.
+
+**System RAM.** A separate Balanced Bicycle run on the same RTX 4080 used 3.72 GiB of process working set at loop end and peaked at 4.06 GiB while packing the training photos. The loader retained 2.20 GiB of decoded float32 RGB for all 194 views, including 25 held out, plus 0.64 GiB of packed training photos. Those two allocations account for 2.84 GiB of host image data. [Image decoding](../src/trainer/data/colmap.py) · [Target storage](../src/trainer/data/targets.py)
+
+**What a partial image cache bought on Bicycle.** A prototype kept 63 training photos on the GPU and streamed the remaining 106 through one reusable texture. Both configurations computed structure maps on demand and used the same seed-42 camera order. Caching avoided 1,120 of 3,000 in-loop uploads. In two runs each, in stream/cache/cache/stream order, the mean loop went from 17.00 s to 16.65 s (2.0% shorter), and end VRAM went from 2.72 GiB to 2.99 GiB. The loop excludes preload. The default sampler visits every training camera once per shuffled pass. Replaying the same trace with 64 initially empty least-recently-used slots gave only 231 hits (7.7%). [Camera sampler](../src/trainer/frontend/sampling.py)
+
+**Inspect a run.** With `--run-report`, open `run_report.json` and look under `memory`. The `by_field` map itemizes pipeline GPU allocations. `gpu_view_cache` counts additional per-view GPU textures. `host_ram` gives decoded, packed and linear image-array bytes alongside process working set and peak working set through loop end. The peak spans the lifetime of the process, including previous runs in an open hub. On Windows, `vram_usage_bytes` is the loop-end DXGI sample.
+
 ## RTX 4080 comparison
 
 ![Training-loop time and held-out PSNR for Gaussian splatting trainers measured on one RTX 4080.](../assets/mipnerf360-rtx4080-frontier.png)

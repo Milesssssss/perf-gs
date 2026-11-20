@@ -159,7 +159,7 @@ def _train_scene(device, tmp_path, monkeypatch, residency: str) -> np.ndarray:
         "--no-evaluation", "--no-write-ground-truths", "--preview-every", "0",
         "--densify-mode", "structure_aware", "--densify-from", "0", "--densify-to", "4",
         "--densify-every", "1", "--sad-accum-every", "1", "--sad-structure-every", "2",
-        "--image-residency", residency, "--run-name", residency,
+        "--image-residency", residency, "--run-report", "--run-name", residency,
     ])
     monkeypatch.setattr("trainer.frontend.app.create_training_device", lambda _args: device)
     # Earlier tests' devices count against this process's DXGI budget.
@@ -172,6 +172,18 @@ def _train_scene(device, tmp_path, monkeypatch, residency: str) -> np.ndarray:
         assert app._stream_targets == (residency == "stream")
         app.build_training_loop().launch_training_loop()
         app.pipeline.runtime.wait_for_idle()
+        memory = app._report_memory()
+        ram, cache = memory["host_ram"], memory["gpu_view_cache"]
+        assert ram["decoded_images_bytes"] == 4 * 16 * 16 * 3 * 4
+        assert ram["linear_cache_bytes"] == 0
+        packed_bytes = 2 * 16 * 16 * 4
+        if residency == "stream":
+            assert ram["packed_training_images_bytes"] == packed_bytes
+            assert cache == {"training_images_bytes": 0, "structure_fields_bytes": 0}
+        else:
+            assert ram["packed_training_images_bytes"] == 0
+            assert cache["training_images_bytes"] >= packed_bytes
+            assert cache["structure_fields_bytes"] >= 2 * packed_bytes
         return app.pipeline.buffers.primitive.values.to_numpy().copy()
     finally:
         app.runtime.artifacts.close_all()
