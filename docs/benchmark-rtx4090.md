@@ -44,4 +44,4 @@ To try the recorded settings, launch the hub with the following command, open `d
 .\.venv\Scripts\python.exe -m trainer.frontend.app --hub --preset ultrafast --iters 3000 --downsample 4 --seed 42 --backend vulkan
 ```
 
-The recording used a 1152 × 648 viewer and the default snapshot interval of 10 steps. The 13.08 s clock starts when the hub opens the dataset and stops when it reports the trained result. The optimization loop took 9.21 s with frame capture and 8.96 s in a separate run without capture. Both runs used the viewer’s 15 Hz limit during optimization. The camera arc plays after the timer stops.
+The recording used a 1152 × 648 viewer and the default snapshot interval of 10 steps. The published clip starts at the beginning of optimization. Its training timer stops at 9.21 s. The timing strip also accounts for the 3.86 s before playback (0.38 s loading Stump + 0.53 s waiting for Start + 2.95 s preparing training). The hub reported the trained result 13.08 s after scene open. A separate run without capture took 8.96 s of optimization. Both runs used the viewer’s 15 Hz limit during optimization. The camera arc plays after training finishes.
