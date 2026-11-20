@@ -1,4 +1,4 @@
-Trainer commit: 8e2cacefe7df584d919d35a92e699140f294698a
+Measured trainer source SHA-256 (git ls-tree -r HEAD -- shaders src/trainer, UTF-8 with LF): 3fac2f7174d04a51d8f920259bd3423f60d536435004529d8cedc49f4a9fddd7
 System: LENOVO 30HJSAME00
 CPU: AMD Ryzen Threadripper PRO 9975WX 32-Cores      (32 cores)
 OS: Microsoft Windows 11 Enterprise 10.0.26300

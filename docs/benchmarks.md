@@ -12,7 +12,7 @@ On the **RTX 4090 24 GB**, Balanced averaged **17.31 seconds** per training loop
 
 All 27 runs completed on the first pass. Each preset trained for 3,000 steps at seed 42 on each of the nine Mip-NeRF 360 scenes, using quarter resolution outdoors and half resolution indoors. The clock covers the headless Vulkan training loop and excludes loading, initialization, evaluation and export. VRAM is the trainer process’s local GPU memory sampled at loop end. Graphdeco scored all 246 held-out views per preset using RGB8 renders. We averaged views within each scene, then weighted all nine scenes equally. [Per-scene RTX 4090 measurements](NVIDIA_GeForce_RTX_4090_presets.csv)
 
-The Lenovo workstation ran Windows 11 Enterprise on a 32-core Threadripper PRO 9975WX with NVIDIA driver 610.88. Trainer revision `8e2cacefe7df` used SlangPy 0.42.0 and Python 3.11.9. Graphdeco evaluation used PyTorch 2.10.0+cu128 and torchvision 0.25.0+cu128. [Workstation record](NVIDIA_GeForce_RTX_4090_system.txt) · [Reproduce the sweep](benchmark-rtx4090.md)
+The Lenovo workstation ran Windows 11 Enterprise on a 32-core Threadripper PRO 9975WX with NVIDIA driver 610.88. These measurements predate the public release and used SlangPy 0.42.0 and Python 3.11.9. The workstation record identifies the measured trainer sources by SHA-256. Graphdeco evaluation used PyTorch 2.10.0+cu128 and torchvision 0.25.0+cu128. [Workstation record](NVIDIA_GeForce_RTX_4090_system.txt) · [Reproduce the sweep](benchmark-rtx4090.md)
 
 ![Training-loop time, PSNR, SSIM and VGG LPIPS by scene and preset on the RTX 4090](../assets/mipnerf360-rtx4090-presets.png)
 

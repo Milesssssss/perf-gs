@@ -102,7 +102,7 @@ The suite checks CLI settings, schedules, shader math, gradients against finite 
 
 At startup the trainer prints the path to `errors.log` in the initial run directory. It opens the file before GPU setup and captures Python tracebacks and native stderr. In hub mode the same log covers the entire session. Check it if the viewer closes or a shader fails to compile. The viewer also shows messages in its **DIAGNOSTICS** panel.
 
-Use `python -m trainer.frontend.app --help` for the full CLI. The repository includes plotting scripts for training histories and an Nsight GPU Trace capture helper for NVIDIA GPUs. [Plotting scripts](../scripts/plots/) · [GPU trace helper](../scripts/running/capture_gpu_trace.py)
+Use `python -m trainer.frontend.app --help` for the full CLI. The repository includes plotting scripts for training histories and an Nsight GPU Trace helper for NVIDIA GPUs. Pass your Nsight Graphics project with `--project PATH.ngfx-proj`. [Plotting scripts](../scripts/plots/) · [GPU trace helper](../scripts/running/capture_gpu_trace.py)
 
 ## References
 

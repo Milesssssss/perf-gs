@@ -9,12 +9,9 @@ from pathlib import Path
 
 import pytest
 
-_SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
-
-for _sub in ("running", "debug"):
-    _p = _SCRIPTS_DIR / _sub
-    if _p.is_dir() and str(_p) not in sys.path:
-        sys.path.append(str(_p))
+_RUNNING_SCRIPTS = str(Path(__file__).resolve().parents[1] / "scripts" / "running")
+if _RUNNING_SCRIPTS not in sys.path:
+    sys.path.append(_RUNNING_SCRIPTS)
 
 
 @pytest.fixture(scope="module", params=["vulkan", "d3d12"])

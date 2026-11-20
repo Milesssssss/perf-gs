@@ -54,10 +54,6 @@ def load(net: str = DEFAULT_NET) -> bool:
         return False
 
 
-def is_available() -> bool:
-    return _STATE == "ready"
-
-
 def lpips(rendered: np.ndarray, target: np.ndarray,
           net: str = DEFAULT_NET) -> float | None:
     """Per-image LPIPS (lower is better) of HxWx3 sRGB in [0, 1]; ``None`` if unavailable."""

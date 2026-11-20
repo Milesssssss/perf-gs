@@ -1,22 +1,14 @@
 # Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-"""Per-splat importance (scripts/debug/measure_splat_importance.py).
-
-The importance pass reads each splat's blend weight alpha * T out of the
-backward's colour gradient. Checked against the forward alone: a front splat
-weighs the sum of its own alpha, a splat behind it only what the front one lets
-through, and a splat outside the frame nothing.
-"""
+"""Check the renderer's colour gradient against the visible opacity of each splat."""
 
 from __future__ import annotations
 
 import numpy as np
 import pytest
 from _pipeline_testkit import TestPipeline
-from measure_splat_importance import splat_importance
 
 from trainer.backend.compute.device import create_device
-from trainer.config.config import IterationContextualVariables
 from trainer.data.dataset import simple_camera
 
 SIZE = 32
@@ -40,7 +32,7 @@ def _alpha(pipeline: TestPipeline, camera, splats: dict) -> np.ndarray:
 
 
 @pytest.mark.parametrize("backend", ["vulkan", "d3d12"])
-def test_importance_is_the_blend_weight(backend: str) -> None:
+def test_red_sh_gradient_matches_visible_blend_weight(backend: str) -> None:
     try:
         device = create_device(backend=backend)
     except Exception as exc:  # pragma: no cover - backend availability
@@ -54,9 +46,16 @@ def test_importance_is_the_blend_weight(backend: str) -> None:
 
     pipeline.set_primitive_from_numpy(**_splats([0.0, 0.1, 50.0], [2.0, 3.0, 2.0],
                                                 [0.6, 0.8, 0.9]))
-    importance = splat_importance(
-        pipeline, [camera], IterationContextualVariables(hardness_value=1.0, sh_degree=0),
-        3)
+    pipeline.optimizer.zero_grad()
+    image_gradient = np.zeros((SIZE, SIZE, 4), dtype=np.float32)
+    image_gradient[..., 0] = 1.0
+    pipeline.buffers.loss.image_gradient.copy_from_numpy(image_gradient)
+    with pipeline.commands.recording("occlusion_gradient"):
+        pipeline.rasterize(camera)
+        pipeline.run_backward()
+    pipeline.runtime.wait_for_idle()
 
-    expected = [front.sum(), (back * (1.0 - front)).sum(), 0.0]
-    np.testing.assert_allclose(importance, expected, rtol=1e-3, atol=1e-3)
+    visible_opacity = np.array([front.sum(), (back * (1.0 - front)).sum(), 0.0])
+    sh_dc_basis = 1.0 / np.sqrt(4.0 * np.pi)
+    np.testing.assert_allclose(pipeline.read_gradients()["color_r"] / sh_dc_basis,
+                               visible_opacity, rtol=1e-3, atol=1e-3)

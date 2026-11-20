@@ -3,7 +3,7 @@
 """Headless GPU Trace capture via ngfx.exe that auto-saves the .ngfx-gputrace (self-injection cannot).
 
 The trainer runs in --capture-external mode, so every traced frame is a frozen, bit-identical workload.
-Usage: python scripts/running/capture_gpu_trace.py --scene datasets/360_v2/bicycle --capture-iter 560 -- --densify-mode structure_aware --seed 42
+Usage: python scripts/running/capture_gpu_trace.py --project capture.ngfx-proj --scene datasets/360_v2/bicycle --capture-iter 560 -- --densify-mode structure_aware --seed 42
 """
 from __future__ import annotations
 
@@ -27,9 +27,8 @@ def main() -> int:
                          "v2_train.py uses its own default scene.")
     ap.add_argument("--capture-iter", type=int, default=560,
                     help="Iteration whose (frozen) workload is traced.")
-    ap.add_argument("--project", type=str,
-                    default="nsight/gpu_trace/gpu_trace_base/gpu_trace_base.ngfx-proj",
-                    help="Path to the .ngfx-proj (metric set + settings).")
+    ap.add_argument("--project", required=True,
+                    help="Nsight Graphics project (.ngfx-proj) with the capture settings.")
     ap.add_argument("--output-dir", type=str, default="nsight/gpu_trace/out",
                     help="Folder where ngfx.exe writes the .ngfx-gputrace. A "
                          "timestamped subfolder is created inside it.")

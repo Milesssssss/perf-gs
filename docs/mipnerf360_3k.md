@@ -4,7 +4,7 @@
 
 The completed three-preset sweeps include per-scene training times and Graphdeco image metrics for both workstations. [RTX 4090 measurements](NVIDIA_GeForce_RTX_4090_presets.csv) · [RTX 4080 measurements](mipnerf360_3k_presets.csv)
 
-On Windows with an NVIDIA GPU, use the benchmark driver from the repository root in the trainer’s Python environment. It records the hardware and software, runs all three presets and scores the saved renders with the pinned Graphdeco evaluator. The RTX 4090 handoff includes the exact environment and dataset setup used for this comparison. [Setup and handoff](benchmark-rtx4090.md)
+On Windows with an NVIDIA GPU, use the benchmark driver from the repository root in the trainer’s Python environment. It records the hardware and software, runs all three presets and scores the saved renders with the pinned Graphdeco evaluator. The RTX 4090 guide covers environment and dataset setup. [Reproduce the RTX 4090 benchmark](benchmark-rtx4090.md)
 
 ```powershell
 .\scripts\running\benchmark_presets.ps1 -ExpectedGpu 'NVIDIA GeForce RTX 4090'
@@ -110,4 +110,4 @@ python scripts/plots/plot_preset_results.py
 python scripts/plots/plot_method_frontiers.py
 ```
 
-To plot a completed Lenovo run, pass its CSV path to `python scripts/plots/plot_preset_results.py --presets PATH_TO_CSV`. It prints the measured preset means and writes `assets/mipnerf360-rtx4090-presets.png`. The method-comparison plot uses the RTX 4080 measurements until peer trainers are benchmarked on the 4090.
+To plot an RTX 4090 run, pass its CSV path to `python scripts/plots/plot_preset_results.py --presets PATH_TO_CSV`. It prints the measured preset means and writes `assets/mipnerf360-rtx4090-presets.png`. The method-comparison plot uses the RTX 4080 measurements until peer trainers are benchmarked on the 4090.

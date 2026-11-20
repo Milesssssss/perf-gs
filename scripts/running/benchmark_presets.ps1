@@ -22,7 +22,7 @@ try {
     $lock = [IO.File]::Open((Join-Path $dest 'benchmark.lock'), 'OpenOrCreate', 'ReadWrite', 'None')
     if (Test-Path -LiteralPath $csv) {
         if (!(Test-Path -LiteralPath $system)) { throw "Missing system record for $csv" }
-        Write-Host "Already complete. Return these files:`n$csv`n$system"
+        Write-Host "Benchmark results:`n$csv`n$system"
         return
     }
 
@@ -82,7 +82,7 @@ for package in (slangpy, torch, torchvision):
     Invoke-Checked python (@('scripts/running/score_graphdeco.py', '--graphdeco', $reference,
         '--expect-gpu', $gpu, '--preset-csv', $stage) + $models)
     [IO.File]::Move($stage, $csv)
-    Write-Host "Complete. Return these files:`n$csv`n$system"
+    Write-Host "Benchmark results:`n$csv`n$system"
 } finally {
     if ($stage -and (Test-Path -LiteralPath $stage)) { Remove-Item -LiteralPath $stage }
     if ($lock) { $lock.Dispose() }

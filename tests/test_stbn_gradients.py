@@ -91,7 +91,7 @@ def _camera():
 
 
 def _pipeline(backend: str, *, compacted: bool, budget: int = BUDGET,
-              ssim: float = 0.0,
+              ssim: float = 0.0, source: str = stbn.SOURCE_NVIDIA,
               select_mode: str = stbn.SELECT_GLOBAL) -> TestPipeline:
     """A pipeline whose SHADER DEFINES and StbnConfig agree.
 
@@ -113,7 +113,7 @@ def _pipeline(backend: str, *, compacted: bool, budget: int = BUDGET,
         device=device, width=W, height=H, max_splats=128,
         loss_config=LossConfig(ssim_weight=ssim, alpha_weight=0.0),
         stbn_config=StbnConfig(
-            pixel_fraction=budget / TILE_AREA,
+            source=source, pixel_fraction=budget / TILE_AREA,
             backward_compacted=compacted,
             select_mode=select_mode,
         ),
@@ -236,10 +236,10 @@ def test_mask_off_in_a_compacted_build_matches_a_plain_dense_backward(
     """
     scene, camera = _deep_scene(), _camera()
 
-    plain = _pipeline(backend, compacted=False)
+    plain = _pipeline(backend, compacted=False, source=stbn.SOURCE_WHITE)
     reference = _gradients(plain, scene, camera, None)
 
-    compacted = _pipeline(backend, compacted=True)
+    compacted = _pipeline(backend, compacted=True, source=stbn.SOURCE_WHITE)
     measured = _gradients(compacted, scene, camera, None)
 
     _compare(measured, reference, label_a="compacted(mask off)",
@@ -296,7 +296,7 @@ def test_full_budget_is_bit_identical_to_no_mask_at_all(backend: str) -> None:
     less and every default run would be paying for a feature it disabled.
     """
     scene, camera = _deep_scene(), _camera()
-    pipeline = _pipeline(backend, compacted=False)
+    pipeline = _pipeline(backend, compacted=False, source=stbn.SOURCE_WHITE)
 
     unmasked = _gradients(pipeline, scene, camera, None)
     full = _gradients(pipeline, scene, camera,
@@ -363,7 +363,7 @@ def test_a_budget_of_a_whole_tile_is_representable(backend: str) -> None:
     occupancy. At an 8x8 tile those arrays are under 2 KB of ~100 KB per SM, so it
     bought nothing and the knob is now a hand-only diagnostic.)"""
     scene, camera = _deep_scene(), _camera()
-    pipeline = _pipeline(backend, compacted=True)
+    pipeline = _pipeline(backend, compacted=True, source=stbn.SOURCE_WHITE)
     grads = _gradients(pipeline, scene, camera,
                        StbnVariables(slice_index=0, pixels_per_tile=TILE_AREA))
     assert np.isfinite(grads["opacity"]).all()

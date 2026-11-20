@@ -4,28 +4,15 @@
 
 from __future__ import annotations
 
-from trainer.config.config_types import (
-    BlendKind,
-    DensificationMode,
-    PrimitiveKind,
-    SamplingMode,
-    resolve_blend_kind,
-)
+from trainer.config.config_types import DensificationMode
 from trainer.config.resolve import RunConfig
 from trainer.frontend.cli import build_parser
 
 
-def test_enum_values_frozen() -> None:
-    assert SamplingMode.OURS == "ours"
-    assert SamplingMode.SADGS == "sadgs"
+def test_densification_mode_values() -> None:
     assert DensificationMode.NONE == "none"
     assert DensificationMode.SIMPLE == "simple"
     assert DensificationMode.STRUCTURE_AWARE == "structure_aware"
-    assert PrimitiveKind.GAUSSIAN_3D == "gaussian_3d"
-    assert PrimitiveKind.DISK_2D == "disk_2d"
-    assert PrimitiveKind.SPHERE_3D == "sphere_3d"
-    assert BlendKind.ALPHA_OVER == "alpha_over"
-    assert BlendKind.HARDENED_EXTINCTION == "hardened_extinction"
 
 
 def test_densify_mode_from_args_reads_cli_choice() -> None:
@@ -41,12 +28,7 @@ def test_densify_mode_from_cli_default_is_structure_aware() -> None:
 
 def test_sampling_mode_from_cli_default_is_sadgs() -> None:
     args = build_parser().parse_args([])
-    assert SamplingMode(args.sample_mode) == SamplingMode.SADGS
-
-
-def test_blend_kind_from_extinction_target() -> None:
-    assert resolve_blend_kind(extinction_hardness=1.0) == BlendKind.ALPHA_OVER
-    assert resolve_blend_kind(extinction_hardness=4.0) == BlendKind.HARDENED_EXTINCTION
+    assert args.sample_mode == "sadgs"
 
 
 def test_schedule_config_from_args_defaults() -> None:

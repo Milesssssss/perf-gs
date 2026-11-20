@@ -137,7 +137,9 @@ def main():
         with args.preset_csv.open("x", encoding="utf-8", newline="") as stream:
             writer = csv.DictWriter(stream, fieldnames=columns)
             writer.writeheader()
-            writer.writerows(rows.values())
+            for row in rows.values():
+                label = "{preset}_{scene}_s{seed}".format(**row)
+                writer.writerow({**row, "run_name": label})
         print(args.preset_csv)
 
 
