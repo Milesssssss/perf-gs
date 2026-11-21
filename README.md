@@ -36,7 +36,7 @@ Each entry is a mean across nine scenes, with one headless Vulkan run per scene 
 
 ## Quickstart & Setup
 
-1. **Get PERF-GS.** You can:
+1. **Get perf-gs.** You can:
 
    - **Clone with Git.**:
    ```powershell
