@@ -1,7 +1,8 @@
 # PERF-GS
 
-**Efficient, extensible & low memory gaussian training**
+**Efficient, extensible & low memory differentiable training.**
 
+As of November 2026, **perf-gs** is, to the best of our knowledge, the fastest publicly available open-source 3D Gaussian Splatting trainer, outperforming competitors such as [LiteGS](https://github.com/MooreThreads/LiteGS), [SAD-GS](https://github.com/LinjieLyu/SADGS) and [FastGS](https://github.com/fastgs/FastGS) in training speed while delivering competitive or superior reconstruction quality with low VRAM usage.<br><br>
 On an **RTX 4090**, *Ultrafast* preset averages **27.10 dB PSNR in 11.85 seconds** of training-loop time across the nine Mip-NeRF 360 scenes. *Quality* preset, instead, reaches **27.79 dB in 23.24 seconds**.
 
 For GPUs with less VRAM, start with the *Balanced* preset: it streams in training images from RAM and used an average of **2.72-2.89 GiB of VRAM at loop end** across the nine scenes. [VRAM and system RAM breakdown](docs/benchmarks.md#where-memory-goes). <br>
@@ -39,14 +40,14 @@ Each entry is a mean across nine scenes, with one headless Vulkan run per scene 
 
 ## Quickstart & Setup
 
-1. **Get PERF-GS.**
+1. Get **perf-gs.** You can:
 
    - **Clone with Git.**:
    ```powershell
    git clone https://github.com/electronicarts/perf-gs.git
    ```
-   - **Download a release.**: Open **Releases**, choose a version, then under **Assets** click **Source code (zip)**.
-   - **Download the latest source.**: Click **Code -> Download ZIP**.
+   - Or **download a release.**: Open **Releases**, choose a version, then under **Assets** click **Source code (zip)**.
+   - Or **download the latest source.**: Click **Code -> Download ZIP**.
 
 2. **Open PowerShell in the project folder.**
 3. **Setup venv and install PERF-GS (once)**: In PowerShell, run `py -3.11 --version`.
@@ -88,7 +89,7 @@ Run `.\.venv\Scripts\python.exe -m trainer.frontend.app --help` to see every fla
 
 ## Reconstructions
 
-Each row pairs a held-out photograph with the three renders scored in the RTX 4090 benchmark. Each preset trained for 3,000 steps. The box marks the detail shown beneath each full view. Select a tile to see the crop at native resolution.
+Each row pairs a held-out/test image with the three renders scored in the RTX 4090 benchmark. Each preset trained for 3,000 steps.
 
 <table>
   <thead>
@@ -148,9 +149,9 @@ Each row pairs a held-out photograph with the three renders scored in the RTX 40
 
 Scenes and reference photography from Barron et al., CVPR 2022. [Mip-NeRF 360 dataset](https://jonbarron.info/mipnerf360/)
 
-## How it works
+## Architecture from a high level
 
-Python and SlangPy drive the same Slang rendering, optimization and densification shaders on Vulkan and D3D12. The trainer starts with COLMAP points, adds stereo matches from training views and fits a lens response from those views. Vulkan is the default. On Windows, select D3D12 with `--backend d3d12`. [Shaders](shaders/) · [Preset settings](docs/usage.md#training)
+Python and SlangPy drive the same Slang rendering, optimization and densification shaders on Vulkan and D3D12. The trainer starts with COLMAP points, adds stereo matches from training views and fits a lens response from those views. Vulkan is the default. On Windows, select D3D12 with `--backend d3d12`. [Shaders](shaders/) · [Preset settings](docs/usage.md#training).<br>
 
 ## Datasets
 
