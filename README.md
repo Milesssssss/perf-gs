@@ -12,7 +12,7 @@ Check out [VRAM by preset and workstation](docs/benchmarks.md) for benchmarks co
 
 <div align="center">
 
-![The Stump training timer reaches 9.21 seconds at step 3,000, then the camera orbits the reconstruction.](assets/stump-preview.gif)
+![The Stump training timer reaches 9.21 seconds at step 3,000, then the camera orbits the reconstruction.](assets/stump-demo.webp)
 
 *Stump · Ultrafast · RTX 4090 · real-time training* · [Open GIF](assets/stump-preview.gif) · [Full-resolution WebP](assets/stump-rtx4090-orbit.webp)
 
