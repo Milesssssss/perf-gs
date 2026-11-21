@@ -32,44 +32,53 @@ Ultrafast requires NVIDIA’s separately licensed non-commercial research masks.
 
 The peer comparison uses the earlier RTX 4080 workstation for every trainer. There, PERF-GS Quality averaged **27.78 dB in 33.85 s**, and FastGS-Big reached **27.83 dB in 325.86 s** on the same nine scenes. [RTX 4080 comparison plot, settings and results](docs/benchmarks.md#rtx-4080-comparison)
 
+## Requirements
+
+- **OS and Python.** Python 3.10+. Tested on Windows 11. Linux and macOS are unverified.
+- **GPU.** Tested on the NVIDIA RTX 4080 (16 GB) and RTX 4090 (24 GB). The default shaders use 32-lane waves and 64-bit integer buffer atomics through Vulkan (default) or Direct3D 12 (Windows).
+- **VRAM.** *Balanced* preset used 2.72-2.90 GiB at the end of headless Mip-NeRF 360 training. Peak and viewer usage can be higher. Minimum card capacity is unverified. [Memory measurements](docs/benchmarks.md#where-memory-goes)
+
 ## Quickstart
 
-Run the hub from the repository root with Python 3.10+ and a Vulkan or D3D12 GPU.
+**First run on Windows 11**
 
-**Windows PowerShell.** If this checkout already has the benchmark environment, launch the hub directly.
+1. **Get PERF-GS.** On this project's GitHub page, click **Code** and choose either option.
 
-```powershell
-.\.venv\Scripts\python.exe -m trainer.frontend.app --hub
-```
+   - **Download a ZIP.** Click **Download ZIP**, then right-click the downloaded file in File Explorer and choose **Extract All**.
+   - **Clone with Git.** Copy the **HTTPS** URL. In a terminal, type `git clone` followed by a space, paste the URL, and press **Enter**.
 
-For a fresh Windows checkout with Python 3.11 and the `py` launcher installed, run these setup commands once before launching the hub.
+2. **Open PowerShell in the project folder.** In File Explorer, open the folder containing `README.md` and `pyproject.toml`. Click the address bar, type `powershell`, and press **Enter**.
+3. **Install PERF-GS once.** If you need Python 3.11, install the Python install manager and run `py install 3.11` in PowerShell. Then run these two commands, one at a time. [Get Python for Windows](https://www.python.org/downloads/windows/)
 
-```powershell
-py -3.11 -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -e .
-```
+   ```powershell
+   py -3.11 -m venv .venv
+   .\.venv\Scripts\python.exe -m pip install -e .
+   ```
 
-Use `.\.venv\Scripts\python.exe` for the other `python` examples below, or activate the environment in your current shell with `.\.venv\Scripts\Activate.ps1`.
+4. **Open the training window.** Run the command below in the same PowerShell window. Next time, just open PowerShell in the project folder and run this command again.
 
-**Other platforms or an active Python environment**
+   ```powershell
+   .\.venv\Scripts\python.exe -m trainer.frontend.app --hub
+   ```
 
-```sh
-python -m pip install -e .
-python -m trainer.frontend.app --hub
-```
-
-Drop the folder containing `images/` and `sparse/0/` into the hub and click **Start Training**. Explore the result, export a PLY, or train again from the original point cloud. If you have photos only, choose **Reconstruct to COLMAP** first. [Hub walkthrough](docs/usage.md#interactive-hub)
+5. **Train and save.** Click **Open dataset folder...** and select your scene folder. If it contains only photos, click **Install reconstruction tools** if prompted, then **Reconstruct to COLMAP**. An existing COLMAP scene opens directly. When the point cloud appears, click **Start Training**. When training finishes, click **Export PLY...** to save your model.
 
 ![Kitchen in the RTX 4090 hub after 3,000 Balanced steps, with controls to export the trained model or start another run](assets/perfgs-hub.webp)
 
-**Try a sample from the command line.** Download the Tanks & Temples sample archive (about 650 MB) and train the truck scene.
+### Train from the command line
 
-```sh
-python scripts/data/download_tandt_db.py --set tandt
-python -m trainer.frontend.app --scene datasets/tandt/truck --no-viewer --save-ply
+After step 3, you can train directly from PowerShell. From the project folder, run these commands to download the Truck sample (about 650 MB) and train it without opening a window.
+
+```powershell
+.\.venv\Scripts\python.exe scripts/data/download_tandt_db.py --set tandt
+.\.venv\Scripts\python.exe -m trainer.frontend.app --scene "datasets/tandt/truck" --no-viewer --save-ply
 ```
 
-The model is saved in `outputs/train/<run-name>/output.ply`. Evaluation is off by default. Add `--run-report` for held-out metrics. [Datasets](docs/usage.md#datasets) · [Compatibility and first-run help](docs/usage.md#first-run-help)
+For your own COLMAP scene, skip the download and replace `"datasets/tandt/truck"` with your folder path in quotes. The default is Balanced at 3,000 steps. With `--save-ply`, the model is saved in a timestamped folder under `outputs/train/` as `output.ply`.
+
+Run `.\.venv\Scripts\python.exe -m trainer.frontend.app --help` to see every flag. If you already installed PERF-GS in an active Python environment, use `python` in place of `.\.venv\Scripts\python.exe`. [Presets and training settings](docs/usage.md#training) · [Evaluation and export flags](docs/usage.md#evaluation-and-ply-export)
+
+[Hub walkthrough](docs/usage.md#interactive-hub) · [Datasets](docs/usage.md#datasets) · [First-run help](docs/usage.md#first-run-help)
 
 ## Reconstructions
 
