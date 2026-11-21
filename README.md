@@ -2,7 +2,7 @@
 
 **Efficient, extensible & low memory gaussian training**
 
-As of November 2026, **perf-gs** is, to the best of our knowledge, the fastest publicly available open-source 3D Gaussian Splatting trainer, outperforming competitors such as LiteGS, SAD-GS, FastGS, and SkipGS in training speed while achieving competitive or superior reconstruction quality.<br>
+As of November 2026, **perf-gs** is, to the best of our knowledge, the fastest publicly available open-source 3D Gaussian Splatting trainer, outperforming competitors such as LiteGS, SAD-GS, FastGS, and SkipGS in training speed while achieving competitive or superior reconstruction quality.<br><br>
 On an **RTX 4090**, *Ultrafast* preset averages **27.10 dB PSNR in 11.85 seconds** of training-loop time across the nine Mip-NeRF 360 scenes. *Quality* preset, instead, reaches **27.79 dB in 23.24 seconds**.
 
 For GPUs with less VRAM, start with the *Balanced* preset: it streams in training images from RAM and used an average of **2.72-2.89 GiB of VRAM at loop end** across the nine scenes. [VRAM and system RAM breakdown](docs/benchmarks.md#where-memory-goes). <br>
