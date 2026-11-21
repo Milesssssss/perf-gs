@@ -36,14 +36,14 @@ Each entry is a mean across nine scenes, with one headless Vulkan run per scene 
 
 ## Quickstart & Setup
 
-1. **Get PERF-GS.**
+1. **Get PERF-GS.** You can:
 
    - **Clone with Git.**:
    ```powershell
    git clone https://github.com/electronicarts/perf-gs.git
    ```
-   - **Download a release.**: Open **Releases**, choose a version, then under **Assets** click **Source code (zip)**.
-   - **Download the latest source.**: Click **Code -> Download ZIP**.
+   - Or **download a release.**: Open **Releases**, choose a version, then under **Assets** click **Source code (zip)**.
+   - Or **download the latest source.**: Click **Code -> Download ZIP**.
 
 2. **Open PowerShell in the project folder.**
 3. **Setup venv and install PERF-GS (once)**: In PowerShell, run `py -3.11 --version`.
