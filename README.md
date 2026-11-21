@@ -1,20 +1,20 @@
 # PERF-GS
 
-**3DGS in seconds.**
+**Efficient, extensible & low memory gaussian training**
 
-On a **24 GB RTX 4090**, Ultrafast averages **27.10 dB PSNR in 11.85 seconds** of training-loop time across the nine Mip-NeRF 360 scenes. Quality reaches **27.79 dB in 23.24 seconds**. Both run for 3,000 steps.
+On an **RTX 4090**, *Ultrafast* preset averages **27.10 dB PSNR in 11.85 seconds** of training-loop time across the nine Mip-NeRF 360 scenes. *Quality* preset, instead, reaches **27.79 dB in 23.24 seconds**.
 
-For GPUs with less VRAM, start with **Balanced**. It streams training photos from system RAM and used **2.72–2.89 GiB of VRAM at loop end** across the nine scenes. On Bicycle, it finished with 2.49 million splats and buffers sized for 2.60 million. [VRAM and system RAM breakdown](docs/benchmarks.md#where-memory-goes)
-**Balanced**, the default preset, streams training photos from system RAM. It averaged **27.42 dB in 17.31 seconds** on the RTX 4090, using **2.73–2.90 GiB** of process VRAM at loop end. On the **16 GB RTX 4080**, it reached **27.39 dB in 25.97 seconds** with **2.72–2.89 GiB** at loop end. Peak and viewer usage can be higher. [VRAM by preset and workstation](docs/benchmarks.md)
+For GPUs with less VRAM, start with the *Balanced* preset: it streams in training images from RAM and used an average of **2.72-2.89 GiB of VRAM at loop end** across the nine scenes. [VRAM and system RAM breakdown](docs/benchmarks.md#where-memory-goes). <br>
+Check out [VRAM by preset and workstation](docs/benchmarks.md) for benchmarks comparing RTX 4080 & RTX 4090.
 
 [Quickstart](#quickstart) · [Benchmarks](#mip-nerf-360) · [Gallery](#reconstructions)
 
 <p align="center">
-  <a href="assets/perfgs-demo.webp?raw=true"><img src="assets/perfgs-demo.webp" width="896" alt="The RTX 4090 hub opens Stump, trains for 3,000 Ultrafast steps, then moves the camera through the reconstruction. The timer stops at 12.71 seconds."></a>
-  <br><em>Stump · Ultrafast · RTX 4090 · real-time playback</em> · <a href="assets/perfgs-demo.gif?raw=true">GIF (14 MiB)</a>
+  <a href="assets/stump-rtx4090-orbit.webp?raw=true&amp;v=a218367871"><img src="assets/stump-rtx4090-orbit.webp?v=a218367871" width="896" alt="Stump at the start of optimization. The training timer advances from zero to 9.21 seconds over 3,000 steps. The controls then fade for a camera arc around the stump."></a>
+  <br><em>Stump · Ultrafast · RTX 4090 · real-time training</em> · <a href="assets/stump-rtx4090-orbit.gif?raw=true&amp;v=43369c9190">GIF</a>
 </p>
 
-**12.71 s from opening Stump to the trained result**, including **8.95 s for 3,000 optimization steps**. Playback continues for about four seconds to show the finished scene. The same hub run took 8.96 s of optimization with recording off, and the headless Stump benchmark took 8.95 s.
+**9.21 s for 3,000 optimization steps.** Playback starts with the training loop. Before the clip, the hub spent 0.38 s loading Stump, 0.53 s waiting for Start, and 2.95 s preparing training. The result appeared **13.08 s after scene open**. The same loop took 8.96 s in a separate unrecorded hub run and 8.95 s in the headless benchmark.
 
 ## Mip-NeRF 360
 
@@ -28,34 +28,37 @@ Each entry is a mean across nine scenes, with one headless Vulkan run per scene 
 
 ![RTX 4090 training-loop time, PSNR, SSIM and VGG LPIPS for all three presets on each Mip-NeRF 360 scene](assets/mipnerf360-rtx4090-presets.png)
 
-Ultrafast requires NVIDIA’s separately licensed non-commercial research masks. Download them once with `python scripts/data/download_stbn.py`. Balanced and Quality work with the base install. [Mask terms](docs/stbn_pixel_sampling.md)
-
-The peer comparison uses the earlier RTX 4080 workstation for every trainer. There, PERF-GS Quality averaged **27.78 dB in 33.85 s**, and FastGS-Big reached **27.83 dB in 325.86 s** on the same nine scenes. [RTX 4080 comparison plot, settings and results](docs/benchmarks.md#rtx-4080-comparison)
-
 ## Requirements
 
 - **OS and Python.** Python 3.10+. Tested on Windows 11. Linux and macOS are unverified.
 - **GPU.** Tested on the NVIDIA RTX 4080 (16 GB) and RTX 4090 (24 GB). The default shaders use 32-lane waves and 64-bit integer buffer atomics through Vulkan (default) or Direct3D 12 (Windows).
 - **VRAM.** *Balanced* preset used 2.72-2.90 GiB at the end of headless Mip-NeRF 360 training. Peak and viewer usage can be higher. Minimum card capacity is unverified. [Memory measurements](docs/benchmarks.md#where-memory-goes)
 
-## Quickstart
+## Quickstart & Setup
 
-**First run on Windows 11**
+1. **Get PERF-GS.**
 
-1. **Get PERF-GS.** On this project's GitHub page, click **Code** and choose either option.
+   - **Clone with Git.**:
+   ```powershell
+   git clone https://github.com/electronicarts/perf-gs.git
+   ```
+   - **Download a release.**: Open **Releases**, choose a version, then under **Assets** click **Source code (zip)**.
+   - **Download the latest source.**: Click **Code -> Download ZIP**.
 
-   - **Download a ZIP.** Click **Download ZIP**, then right-click the downloaded file in File Explorer and choose **Extract All**.
-   - **Clone with Git.** Copy the **HTTPS** URL. In a terminal, type `git clone` followed by a space, paste the URL, and press **Enter**.
+2. **Open PowerShell in the project folder.**
+3. **Setup venv and install PERF-GS (once)**: In PowerShell, run `py -3.11 --version`.
 
-2. **Open PowerShell in the project folder.** In File Explorer, open the folder containing `README.md` and `pyproject.toml`. Click the address bar, type `powershell`, and press **Enter**.
-3. **Install PERF-GS once.** If you need Python 3.11, install the Python install manager and run `py install 3.11` in PowerShell. Then run these two commands, one at a time. [Get Python for Windows](https://www.python.org/downloads/windows/)
+   - If you see `Python 3.11` followed by a patch number (for example, `Python 3.11.9`), Python is ready.
+   - If you get an error, download and open the **Python install manager** from the [Python for Windows page](https://www.python.org/downloads/windows/). After installing it, reopen PowerShell in the project folder and run `pymanager install 3.11` to download and install Python 3.11.
+
+   Once Python is ready, run these two commands, one at a time, to setup a virtual environemnt and install PERF-GS.
 
    ```powershell
    py -3.11 -m venv .venv
    .\.venv\Scripts\python.exe -m pip install -e .
    ```
 
-4. **Open the training window.** Run the command below in the same PowerShell window. Next time, just open PowerShell in the project folder and run this command again.
+4. **Open the training window.**  
 
    ```powershell
    .\.venv\Scripts\python.exe -m trainer.frontend.app --hub
