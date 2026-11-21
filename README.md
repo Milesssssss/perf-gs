@@ -10,13 +10,13 @@ Check out [VRAM by preset and workstation](docs/benchmarks.md) for benchmarks co
 
 [Quickstart](#quickstart) · [Benchmarks](#mip-nerf-360) · [Gallery](#reconstructions)
 
-<p align="center">
-  <picture>
-    <source media="(min-width: 896px) and (hover: hover)" srcset="assets/stump-rtx4090-orbit.webp">
-    <img src="assets/stump-preview.gif" width="896" alt="Stump at the start of optimization. The training timer advances from zero to 9.21 seconds over 3,000 steps. The controls then fade for a camera arc around the stump.">
-  </picture>
-  <br><em>Stump · Ultrafast · RTX 4090 · real-time training</em> · <a href="assets/stump-preview.gif">Open GIF</a> · <a href="assets/stump-rtx4090-orbit.webp">Full-resolution WebP</a>
-</p>
+<div align="center">
+
+![The Stump training timer reaches 9.21 seconds at step 3,000, then the camera orbits the reconstruction.](assets/stump-preview.gif)
+
+*Stump · Ultrafast · RTX 4090 · real-time training* · [Open GIF](assets/stump-preview.gif) · [Full-resolution WebP](assets/stump-rtx4090-orbit.webp)
+
+</div>
 
 **9.21 s for 3,000 optimization steps.** Playback starts with the training loop. Before the clip, the hub spent 0.38 s loading Stump, 0.53 s waiting for Start, and 2.95 s preparing training. The result appeared **13.08 s after scene open**. The same loop took 8.96 s in a separate unrecorded hub run and 8.95 s in the headless benchmark.
 
