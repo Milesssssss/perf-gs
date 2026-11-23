@@ -1,0 +1,7 @@
+@misc{scolari2026perfgs,
+  author       = {Scolari, Stefano},
+  title        = {{PERF-GS}},
+  year         = {2026},
+  howpublished = {Electronic Arts},
+  url          = {https://github.com/electronicarts/perf-gs}
+}
