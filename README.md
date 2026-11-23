@@ -170,3 +170,26 @@ This project is provided under the BSD 3-Clause License, see [LICENSE](LICENSE) 
 ## Contributing
 
 Before you can contribute, EA must have a Contributor License Agreement (CLA) on file that has been signed by each contributor. You can sign [here](https://electronicarts.na1.echosign.com/public/esignWidget?wid=CBFCIBAA3AAABLblqZhByHRvZqmltGtliuExmuV-WNzlaJGPhbSRg2ufuPsM3P0QmILZjLpkGslg24-UJtek*).
+
+## How to Cite
+
+To cite this repository, click the **“Cite this repository”** button at the top of the GitHub page.  
+Alternatively, you can use the following BibTeX entry:
+```bibtex 
+@misc{scolari2026perfgs,
+  author       = {Scolari, Stefano},
+  title        = {{PERF-GS}},
+  year         = {2026},
+  howpublished = {Electronic Arts},
+  url          = {https://github.com/electronicarts/perf-gs}
+}
+```
+
+## SEED
+
+<p align="center"><a href="https://seed.ea.com"><img src="SEED.jpg" width="150px"></a><br>
+<b>Search for Extraordinary Experiences Division (SEED) - Electronic Arts <br> http://seed.ea.com</b><br>
+We are a cross-disciplinary team within EA Worldwide Studios.<br>
+Our mission is to explore, build and help define the future of interactive entertainment.</p>
+
+Perf-gs was created by [Stefano Scolari](https://stefanoscolapasta.github.io/nozbufferallowed/about.html).
