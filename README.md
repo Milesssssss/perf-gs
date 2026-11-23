@@ -190,6 +190,5 @@ Alternatively, you can use the following BibTeX entry:
 <p align="center"><a href="https://seed.ea.com"><img src="assets/SEED.jpg" width="150px"></a><br>
 <b>Search for Extraordinary Experiences Division (SEED) - Electronic Arts <br> http://seed.ea.com</b><br>
 We are a cross-disciplinary team within EA Worldwide Studios.<br>
-Our mission is to explore, build and help define the future of interactive entertainment.</p>
-
-Perf-gs was created by [Stefano Scolari](https://stefanoscolapasta.github.io/nozbufferallowed/about.html).
+Our mission is to explore, build and help define the future of interactive entertainment.
+Perf-gs was created by [Stefano Scolari](https://stefanoscolapasta.github.io/nozbufferallowed/about.html).</p>
