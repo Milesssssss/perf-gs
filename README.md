@@ -173,15 +173,15 @@ Before you can contribute, EA must have a Contributor License Agreement (CLA) on
 
 ## How to Cite
 
-To cite this repository, click the **“Cite this repository”** button at the top of the GitHub page.  
-Alternatively, you can use the following BibTeX entry:
-```bibtex 
-@misc{scolari2026perfgs,
-  author       = {Scolari, Stefano},
-  title        = {{PERF-GS}},
-  year         = {2026},
-  howpublished = {Electronic Arts},
-  url          = {https://github.com/electronicarts/perf-gs}
+Scolari, S. (2026). *PERF-GS*. Electronic Arts. <https://github.com/electronicarts/perf-gs>
+
+```bibtex
+@software{scolari2026perfgs,
+  author    = {Scolari, Stefano},
+  title     = {{PERF-GS}},
+  year      = {2026},
+  publisher = {Electronic Arts},
+  url       = {https://github.com/electronicarts/perf-gs}
 }
 ```
 
