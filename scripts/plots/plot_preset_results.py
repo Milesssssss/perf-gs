@@ -13,7 +13,7 @@ from matplotlib.lines import Line2D
 from matplotlib.ticker import MaxNLocator
 
 ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_CSV = ROOT / "docs/mipnerf360_3k_presets.csv"
+DEFAULT_CSV = ROOT / "docs/NVIDIA_GeForce_RTX_4080_presets.csv"
 HELDOUT_VIEWS = {"bicycle": 25, "flowers": 22, "garden": 24, "stump": 16, "treehill": 18,
                  "bonsai": 37, "counter": 30, "kitchen": 35, "room": 39}
 INK, MUTED, RULE = "#182531", "#52616c", "#d8dfe2"
@@ -41,11 +41,11 @@ def plot_presets(presets_path=DEFAULT_CSV, output=None):
     observed = {(r["preset"], int(r["seed"]), r["scene"]) for r in rows}
     if observed != expected or len(rows) != len(expected):
         raise ValueError("Each seed needs one run per preset for each of the nine scenes")
-    if any(int(r["steps"]) != 3000 or int(r["heldout_views"]) != HELDOUT_VIEWS[r["scene"]] for r in rows):
-        raise ValueError("Each run needs 3,000 steps and the standard held-out views for its scene")
+    if any(int(r["steps"]) < 1 or int(r["heldout_views"]) != HELDOUT_VIEWS[r["scene"]] for r in rows):
+        raise ValueError("Each run needs a positive step count and the standard held-out views for its scene")
     if output is None:
         adapter_id = re.sub("[^a-z0-9]", "", gpu.lower())
-        filename = ("mipnerf360_3k_presets.png" if presets_path.resolve() == DEFAULT_CSV
+        filename = ("mipnerf360_3k_presets.png" if presets_path.resolve() == ROOT / "docs/mipnerf360_3k_presets.csv"
                     else f"mipnerf360-{adapter_id}-presets.png")
         output = ROOT / "assets" / filename
     means = {}
@@ -57,8 +57,12 @@ def plot_presets(presets_path=DEFAULT_CSV, output=None):
     summaries = []
     for preset, color, marker in presets:
         selected = [r for r in rows if r["preset"] == preset]
+        steps = {int(r["steps"]) for r in selected}
+        if len(steps) != 1:
+            raise ValueError(f"Expected a single step count for {preset}")
         legend.append(Line2D([], [], linestyle="none", marker=marker, markersize=6.3, color=color,
-                             markerfacecolor=color, markeredgewidth=1.4, label=preset.title()))
+                             markerfacecolor=color, markeredgewidth=1.4,
+                             label=f"{preset.title()} ({steps.pop():,} steps)"))
         for scene in HELDOUT_VIEWS:
             scene_rows = [r for r in selected if r["scene"] == scene]
             means[preset, scene] = [fmean(float(r[key]) for r in scene_rows) for key in metrics]
@@ -73,7 +77,7 @@ def plot_presets(presets_path=DEFAULT_CSV, output=None):
         splats = fmean(int(r["final_gaussians"]) for r in selected) / 1e6
         timings.append([preset.title(), *clocks, f"{splats:.2f} M"])
 
-    print("| Preset | Train loop | Launch to saved PLY | PSNR ↑ | SSIM ↑ | VGG LPIPS ↓ |")
+    print("| Preset | Train loop | Launch to saved PLY | PSNR (higher) | SSIM (higher) | VGG LPIPS (lower) |")
     print("| --- | ---: | ---: | ---: | ---: | ---: |")
     print("\n".join(summaries))
     print("\n| Preset | Setup + train loop | Launch to model | Launch to closed PLY | Launch to exit | Launch to synced PLY | Gaussians |")
@@ -86,7 +90,7 @@ def plot_presets(presets_path=DEFAULT_CSV, output=None):
     seed_text = ", ".join(map(str, seeds))
     card = f"an {gpu}" if gpu.startswith("RTX ") else f"the {gpu}"
     fig.text(.035, .963, "Training presets on Mip-NeRF 360", color=INK, size=19, weight="bold", va="top")
-    fig.text(.035, .885, f"3,000 steps on {card} at seed {seed_text}. Image metrics are Graphdeco RGB8 scene means.",
+    fig.text(.035, .885, f"Headless Vulkan on {card}, seed {seed_text}. Image metrics are Graphdeco RGB8 scene means.",
              color=MUTED, size=11, va="top")
     fig.legend(handles=legend, loc="upper left", bbox_to_anchor=(.025, .827), labelcolor=INK,
                frameon=False, ncol=3, fontsize=10, handletextpad=.15, columnspacing=1.5)

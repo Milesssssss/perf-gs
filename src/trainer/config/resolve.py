@@ -105,6 +105,7 @@ class RunConfig:
                 t_opacity=args.sad_structure_min_opacity,
                 opacity_cap=args.sad_opacity_cap,
                 dense_scale=args.grow_scale3d * scene_extent,
+                rank_split_families=args.preset == "quality",
                 detailed_diagnostics=bool(args.densify_diag),
             ),
             base_lrs=base_lrs,

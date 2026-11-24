@@ -15,7 +15,22 @@ $lock = $null
 Push-Location (Join-Path $PSScriptRoot '../..')
 try {
     $revision = (Invoke-Checked git @('rev-parse', 'HEAD')).Trim()
-    $short = $revision.Substring(0, 12)
+    # The next workstation may receive the trainer as an uncommitted patch.
+    $fingerprint = @'
+import hashlib, pathlib, subprocess
+import trainer
+if pathlib.Path(trainer.__file__).resolve() != pathlib.Path('src/trainer/__init__.py').resolve():
+    raise SystemExit('Run python -m pip install -e . in this checkout before benchmarking.')
+files = subprocess.check_output(['git', 'ls-files', '-co', '--exclude-standard', '-z', '--', 'src/trainer', 'shaders'])
+digest = hashlib.sha256()
+for name in sorted(filter(None, files.split(bytes(1)))):
+    path = pathlib.Path(name.decode('utf-8'))
+    if path.is_file():
+        digest.update(name + bytes(1) + hashlib.sha256(path.read_bytes()).digest())
+print(digest.hexdigest())
+'@
+    $sourceHash = (Invoke-Checked python @('-c', $fingerprint)).Trim()
+    $short = $revision.Substring(0, 12) + '-' + $sourceHash.Substring(0, 12)
     $dest = (New-Item -ItemType Directory -Force "outputs/benchmarks/$gpuTag/$short").FullName
     $csv = Join-Path $dest "${gpuTag}_presets.csv"
     $system = Join-Path $dest "${gpuTag}_system.txt"
@@ -39,6 +54,7 @@ for package in (slangpy, torch, torchvision):
 '@
     $record = @(
         "Trainer commit: $revision"
+        "Trainer source files SHA-256: $sourceHash"
         "System: $($computer.Manufacturer) $($computer.Model)"
         "CPU: $($cpu.Name) ($($cpu.NumberOfCores) cores)"
         "OS: $($os.Caption) $($os.Version)"
@@ -59,12 +75,13 @@ for package in (slangpy, torch, torchvision):
     Invoke-Checked git @('-C', $reference, 'checkout', '--detach', '54c035f7834b564019656c3e3fcc3646292f727d')
     $scenes = 'bicycle', 'flowers', 'garden', 'stump', 'treehill', 'bonsai', 'counter', 'kitchen', 'room'
     $models = foreach ($preset in 'ultrafast', 'balanced', 'quality') {
-        $name = "mip360_3k_${gpuTag}_${short}_$preset"
-        Invoke-Checked python @('scripts/running/eval_sweep.py', '--axis', 'seed', '--values', '42', '--iters', '3000',
+        $steps = [int](Invoke-Checked python @('-c', 'import sys; from trainer.frontend.cli import parse_args; print(parse_args(sys.argv[1:]).iters)', '--preset', $preset))
+        $name = "mip360_${gpuTag}_${short}_$preset" -replace '-', '_'
+        Invoke-Checked python @('scripts/running/eval_sweep.py', '--axis', 'seed', '--values', '42', '--iters', "$steps",
             '--name', $name, '--no-plot', '--extra', '--preset', $preset, '--backend', 'vulkan', '--eval-every', '0',
             '--preview-every', '0', '--no-write-ground-truths', '--run-report', '--save-test-renders') | Out-Host
         $runs = Get-Content -Raw "outputs/eval_sweep/$name/results.json" | ConvertFrom-Json
-        if ($runs.Count -ne 9 -or (Compare-Object $scenes $runs.scene) -or ($runs | Where-Object { $_.iters -ne 3000 })) {
+        if ($runs.Count -ne 9 -or (Compare-Object $scenes $runs.scene) -or ($runs | Where-Object { $_.iters -ne $steps })) {
             throw "Incomplete $preset sweep. Fix the failed scenes and rerun this command."
         }
         foreach ($scene in $scenes) {
@@ -72,7 +89,7 @@ for package in (slangpy, torch, torchvision):
             $model = "outputs/graphdeco_input/$run"
             $report = Get-Content -Raw "outputs/train/$run/run_report.json" | ConvertFrom-Json
             if ($report.device.adapter_name -cne $gpu) { throw "$run used $($report.device.adapter_name), expected $gpu" }
-            if (!(Test-Path -LiteralPath "$model/test/ours_3000" -PathType Container)) {
+            if (!(Test-Path -LiteralPath "$model/test/ours_$steps" -PathType Container)) {
                 Invoke-Checked python @('scripts/running/prepare_graphdeco.py', "outputs/train/$run", $model) | Out-Host
             }
             $model

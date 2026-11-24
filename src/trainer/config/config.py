@@ -220,3 +220,4 @@ class StructureConfig:
     # Clone (max scale <= this) vs anisotropic split, in world units (SADGS dense * extent).
     dense_scale: float = 0.0
     detailed_diagnostics: bool = False  # full eta readback only when requested
+    rank_split_families: bool = False  # allocate scarce slots by screen gradient per child

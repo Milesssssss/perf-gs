@@ -162,7 +162,7 @@ def draw(points, gpu):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--presets", type=Path, default=ROOT / "docs/mipnerf360_3k_presets.csv")
+    parser.add_argument("--presets", type=Path, default=ROOT / "docs/NVIDIA_GeForce_RTX_4080_presets.csv")
     parser.add_argument("--baselines", "--litegs", nargs="+", type=Path,
                         default=[ROOT / "docs/mipnerf360_litegs_4080.csv", ROOT / "docs/mipnerf360_peers_4080.csv"])
     args = parser.parse_args()

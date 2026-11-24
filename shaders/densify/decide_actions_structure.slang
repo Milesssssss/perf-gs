@@ -16,8 +16,7 @@ uint per_axis_split_factor(float eta_axis, float split_power, uint max_split_fac
     return clamp(uint(raw), 1u, max_split_factor);
 }
 
-// Structure-aware decision: writes each gaussian's action and per-axis split factors. No capacity
-// clamp: split_anisotropic drops overflow children and the host logs it from densify_children_sum.
+// Propose each Gaussian's action and per-axis split factors before applying the slot budget.
 [shader("compute")]
 [numthreads(256, 1, 1)]
 void decideActionsStructure(

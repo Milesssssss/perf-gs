@@ -2,11 +2,9 @@
 
 **Efficient, extensible & low memory differentiable training.**
 
-As of November 2026, **perf-gs** is, to the best of our knowledge, the fastest publicly available open-source 3D Gaussian Splatting trainer, outperforming competitors such as [LiteGS](https://github.com/MooreThreads/LiteGS), [SAD-GS](https://github.com/LinjieLyu/SADGS) and [FastGS](https://github.com/fastgs/FastGS) in training speed while delivering competitive or superior reconstruction quality with low VRAM usage.<br><br>
-On an **RTX 4090**, *Ultrafast* preset averages **27.10 dB PSNR in 11.85 seconds** of training-loop time across the nine Mip-NeRF 360 scenes. *Quality* preset, instead, reaches **27.79 dB in 23.24 seconds**.
+Train a 3D Gaussian Splatting model from a COLMAP scene with Slang on Vulkan or Direct3D 12. On an **RTX 4090**, Ultrafast averages **27.10 dB PSNR in 11.85 seconds** across all nine Mip-NeRF 360 scenes. On a **16 GB RTX 4080**, the updated Quality preset reaches **27.90 dB in 32.44 seconds** with **2.11M final splats**. Times cover the training loop. [Same-GPU comparison with LiteGS, SAD-GS and FastGS](docs/benchmarks.md#rtx-4080-comparison)
 
-For GPUs with less VRAM, start with the *Balanced* preset: it streams in training images from RAM and used an average of **2.72-2.89 GiB of VRAM at loop end** across the nine scenes. [VRAM and system RAM breakdown](docs/benchmarks.md#where-memory-goes). <br>
-Check out [VRAM by preset and workstation](docs/benchmarks.md) for benchmarks comparing RTX 4080 & RTX 4090.
+For GPUs with less VRAM, Balanced streams training images from system RAM. It used **2.72–2.90 GiB of VRAM at loop end** across the two workstations. [VRAM and system RAM breakdown](docs/benchmarks.md#where-memory-goes)
 
 [Quickstart](#quickstart) · [Benchmarks](#mip-nerf-360) · [Gallery](#reconstructions)
 
@@ -22,15 +20,16 @@ Check out [VRAM by preset and workstation](docs/benchmarks.md) for benchmarks co
 
 ## Mip-NeRF 360
 
-| Preset (RTX 4090 24 GB) | Training loop | PSNR ↑ | SSIM ↑ | VGG LPIPS ↓ | VRAM at loop end |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| Ultrafast | 11.85 s | 27.10 dB | 0.7930 | 0.2567 | 5.29 GiB |
-| Balanced (default) | 17.31 s | 27.42 dB | 0.8143 | 0.2229 | 2.81 GiB |
-| Quality | 23.24 s | 27.79 dB | 0.8274 | 0.2011 | 6.14 GiB |
+| Preset | GPU | Steps | Training loop | PSNR ↑ | SSIM ↑ | VGG LPIPS ↓ | VRAM at loop end |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Ultrafast | RTX 4090 | 3,000 | 11.85 s | 27.10 dB | 0.7930 | 0.2567 | 5.29 GiB |
+| Balanced (default) | RTX 4090 | 3,000 | 17.31 s | 27.42 dB | 0.8143 | 0.2229 | 2.81 GiB |
+| **Quality** | **RTX 4080** | **3,500** | **32.44 s** | **27.90 dB** | **0.8286** | **0.1997** | **4.80 GiB** |
+| Quality (previous) | RTX 4090 | 3,000 | 23.24 s | 27.79 dB | 0.8274 | 0.2011 | 6.14 GiB |
 
-Each entry is a mean across nine scenes, with one headless Vulkan run per scene at seed 42. The clock covers 3,000 training steps and excludes loading, initialization, evaluation and export. Graphdeco scored all 246 held-out views per preset at quarter resolution outdoors and half resolution indoors. [Per-scene CSV](docs/NVIDIA_GeForce_RTX_4090_presets.csv) · [Workstation and software](docs/NVIDIA_GeForce_RTX_4090_system.txt) · [Reproduce the benchmark](docs/benchmark-rtx4090.md)
+On the same 4080, the previous Quality preset reached 27.78 dB in 33.85 s with 3.08M splats. The updated preset improved PSNR on all nine scenes and used 32% fewer splats on average. Its 4090 rerun is pending. Each row averages nine headless Vulkan runs at seed 42. Graphdeco scored 246 held-out views at quarter resolution outdoors and half resolution indoors. Timing excludes loading, initialization, evaluation and export. [4080 CSV](docs/NVIDIA_GeForce_RTX_4080_presets.csv) · [Original 4090 CSV](docs/NVIDIA_GeForce_RTX_4090_presets.csv) · [Reproduce the benchmark](docs/benchmark-rtx4090.md)
 
-![RTX 4090 training-loop time, PSNR, SSIM and VGG LPIPS for all three presets on each Mip-NeRF 360 scene](assets/mipnerf360-rtx4090-presets.png)
+![RTX 4080 training-loop time, PSNR, SSIM and VGG LPIPS by scene for Ultrafast, Balanced and the updated Quality preset](assets/mipnerf360-rtx4080-presets.png)
 
 ## Requirements
 
@@ -38,7 +37,7 @@ Each entry is a mean across nine scenes, with one headless Vulkan run per scene 
 - **GPU.** Tested on the NVIDIA RTX 4080 (16 GB) and RTX 4090 (24 GB). The default shaders use 32-lane waves and 64-bit integer buffer atomics through Vulkan (default) or Direct3D 12 (Windows).
 - **VRAM.** *Balanced* preset used 2.72-2.90 GiB at the end of headless Mip-NeRF 360 training. Peak and viewer usage can be higher. Minimum card capacity is unverified. [Memory measurements](docs/benchmarks.md#where-memory-goes)
 
-## Quickstart & Setup
+## Quickstart
 
 1. Get **perf-gs.** You can:
 
@@ -89,7 +88,7 @@ Run `.\.venv\Scripts\python.exe -m trainer.frontend.app --help` to see every fla
 
 ## Reconstructions
 
-Each row pairs a held-out/test image with the three renders scored in the RTX 4090 benchmark. Each preset trained for 3,000 steps.
+Each row pairs a held-out photo with the three renders scored in the original RTX 4090 benchmark. All gallery models used 3,000 steps, including the previous Quality preset.
 
 <table>
   <thead>

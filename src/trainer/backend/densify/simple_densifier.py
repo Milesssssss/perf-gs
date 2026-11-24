@@ -75,7 +75,6 @@ class SimpleDensifier:
         big_scale = prune_big_scale if prune_big_scale is not None else cfg.t_big_scale
         primitive, adam, r = self.primitive, self.adam, self.resources
         k, commands, capacity = self.kernels, self.commands, self.max_primitives
-        live_count, scan_offsets = self.scan.resources.total, self.scan.resources.work
 
         with commands.recording("densify_simple") as recording, \
                 commands.marker_group("densify_simple"):
@@ -129,56 +128,68 @@ class SimpleDensifier:
                 pre_count_buf=r.pre_count.storage,
                 post_count_buf=r.post_count.storage,
                 max_splats=capacity)
-            self.scan.scan(capacity, r.valid_mask, total_buf=live_count)
-
-            commands.dispatch(k.scatter_compact_gaussian, "scatter_compact_gaussian",
-                thread_count=[capacity, 1, 1],
-                gaussians_in=primitive.values.storage,
-                valid_mask=r.valid_mask.storage,
-                scan=scan_offsets.storage,
-                gaussians_out=self.arena.storage,
-                max_splats=capacity)
-            self.arena.commit(primitive.values, live_count)
-            commands.dispatch(k.scatter_compact_adam, "scatter_compact_adam",
-                thread_count=[capacity, 1, 1],
-                adam_state_in=adam.state.storage,
-                valid_mask=r.valid_mask.storage,
-                scan=scan_offsets.storage,
-                adam_state_out=self.arena.storage,
-                max_splats=capacity)
-            self.arena.commit(adam.state, live_count)
-
-            if carry_eta:
-                commands.dispatch(k.scatter_compact_eta_only, "scatter_compact_eta_only",
-                    thread_count=[capacity, 1, 1],
-                    valid_mask=r.valid_mask.storage,
-                    scan=scan_offsets.storage,
-                    action=r.actions.storage,
-                    pre_count_buf=r.pre_count.storage,
-                    **self.eta.scatter_kwargs(),
-                    max_splats=capacity)
-
-            if self.sh is not None:
-                commands.dispatch(k.scatter_compact_features, "scatter_compact_features",
-                    thread_count=[capacity, 1, 1],
-                    features_rest_in=self.sh.features_rest.storage,
-                    valid_mask=r.valid_mask.storage,
-                    scan=scan_offsets.storage,
-                    features_rest_out=self.arena.storage,
-                    rest_floats=self.sh.rest_floats,
-                    max_splats=capacity)
-                self.arena.commit(self.sh.features_rest, live_count)
-                self.arena.reorder_planes(
-                    self.sh.adam_rest, k.scatter_compact_adam_rest,
-                    "scatter_compact_adam_rest", self.sh.moment_planes, live_count,
-                    valid_mask=r.valid_mask.storage, scan=scan_offsets.storage)
-
-            commands.dispatch(k.snapshot_count, "densify_snapshot",
-                thread_count=[1, 1, 1],
-                src=live_count.storage,
-                dst=primitive.active_count.storage)
+            self._compact(carry_eta)
             # Eta keeps a dedicated scratch and swaps once the submit succeeded.
             if carry_eta:
                 recording.after_submit(self.eta.swap)
 
         return {"pre_count": None, "post_split_count": None, "final_count": None}
+
+    def compact_mask(self, mask) -> None:
+        """Compact a host-selected survivor mask after the last growth tick."""
+        self.resources.valid_mask.storage.copy_from_numpy(mask)
+        with self.commands.recording("prune_compact"):
+            self._compact(carry_eta=False)
+
+    def _compact(self, carry_eta: bool) -> None:
+        primitive, adam, r = self.primitive, self.adam, self.resources
+        k, commands, capacity = self.kernels, self.commands, self.max_primitives
+        live_count, scan_offsets = self.scan.resources.total, self.scan.resources.work
+        self.scan.scan(capacity, r.valid_mask, total_buf=live_count)
+
+        commands.dispatch(k.scatter_compact_gaussian, "scatter_compact_gaussian",
+            thread_count=[capacity, 1, 1],
+            gaussians_in=primitive.values.storage,
+            valid_mask=r.valid_mask.storage,
+            scan=scan_offsets.storage,
+            gaussians_out=self.arena.storage,
+            max_splats=capacity)
+        self.arena.commit(primitive.values, live_count)
+        commands.dispatch(k.scatter_compact_adam, "scatter_compact_adam",
+            thread_count=[capacity, 1, 1],
+            adam_state_in=adam.state.storage,
+            valid_mask=r.valid_mask.storage,
+            scan=scan_offsets.storage,
+            adam_state_out=self.arena.storage,
+            max_splats=capacity)
+        self.arena.commit(adam.state, live_count)
+
+        if carry_eta:
+            commands.dispatch(k.scatter_compact_eta_only, "scatter_compact_eta_only",
+                thread_count=[capacity, 1, 1],
+                valid_mask=r.valid_mask.storage,
+                scan=scan_offsets.storage,
+                action=r.actions.storage,
+                pre_count_buf=r.pre_count.storage,
+                **self.eta.scatter_kwargs(),
+                max_splats=capacity)
+
+        if self.sh is not None:
+            commands.dispatch(k.scatter_compact_features, "scatter_compact_features",
+                thread_count=[capacity, 1, 1],
+                features_rest_in=self.sh.features_rest.storage,
+                valid_mask=r.valid_mask.storage,
+                scan=scan_offsets.storage,
+                features_rest_out=self.arena.storage,
+                rest_floats=self.sh.rest_floats,
+                max_splats=capacity)
+            self.arena.commit(self.sh.features_rest, live_count)
+            self.arena.reorder_planes(
+                self.sh.adam_rest, k.scatter_compact_adam_rest,
+                "scatter_compact_adam_rest", self.sh.moment_planes, live_count,
+                valid_mask=r.valid_mask.storage, scan=scan_offsets.storage)
+
+        commands.dispatch(k.snapshot_count, "densify_snapshot",
+            thread_count=[1, 1, 1],
+            src=live_count.storage,
+            dst=primitive.active_count.storage)

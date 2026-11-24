@@ -1,6 +1,6 @@
 # Reproduce the RTX 4090 benchmark
 
-The completed seed-42 sweep averaged **11.85 s** per scene for Ultrafast, **17.31 s** for Balanced and **23.24 s** for Quality. All three presets scored 246 held-out views. [RTX 4090 results](benchmarks.md#rtx-4090-presets) · [Per-scene CSV](NVIDIA_GeForce_RTX_4090_presets.csv) · [System record](NVIDIA_GeForce_RTX_4090_system.txt)
+The original 3,000-step sweep averaged **11.85 s** per scene for Ultrafast, **17.31 s** for Balanced and **23.24 s** for the previous Quality recipe. The command below measures the current presets. Keep the original CSV alongside the new sweep so the two Quality versions can be compared. [Original RTX 4090 results](benchmarks.md#rtx-4090-presets) · [Per-scene CSV](NVIDIA_GeForce_RTX_4090_presets.csv) · [System record](NVIDIA_GeForce_RTX_4090_system.txt)
 
 Run the commands from the repository root with the hub closed and the GPU idle. The published sweep used an RTX 4090 (24 GB), a 32-core Threadripper PRO 9975WX and Windows 11. [Hardware and software versions](NVIDIA_GeForce_RTX_4090_system.txt)
 
@@ -23,18 +23,18 @@ python scripts/data/download_stbn.py
 .\scripts\running\benchmark_presets.ps1 -ExpectedGpu 'NVIDIA GeForce RTX 4090'
 ```
 
-The sweep runs **27 fresh training processes** on a first pass. Each preset gets 3,000 steps at seed 42 on all nine scenes, including flowers and treehill. It uses the stored quarter-resolution images outdoors and half-resolution images indoors. Every eighth camera is held out. Each preset must score all 246 held-out views.
+The sweep runs **27 fresh training processes** on a first pass. It reads the default step count from each preset. Expect **3,000** for Ultrafast and Balanced and **3,500** for Quality. Each preset uses seed 42 on all nine scenes, including flowers and treehill. It uses the stored quarter-resolution images outdoors and half-resolution images indoors. Every eighth camera is held out. Each preset must score all 246 held-out views.
 
 Report **mean training-loop seconds per scene** and **Graphdeco RGB8 PSNR, SSIM and VGG LPIPS**. The clock excludes setup, evaluation and export. Average views within each scene, then give each of the nine scenes equal weight. An interrupted run can resume with the same command on the same checkout. Record any contention or reruns alongside the results. [Full protocol](mipnerf360_3k.md#reproduce-the-benchmark)
 
-The command writes two files under `outputs/benchmarks/NVIDIA_GeForce_RTX_4090/<revision>/`.
+The command writes two files under `outputs/benchmarks/NVIDIA_GeForce_RTX_4090/<revision>-<source hash>/`. The source hash includes local trainer and shader edits, so a patched checkout gets a separate run directory.
 
 - `NVIDIA_GeForce_RTX_4090_presets.csv` — one measured row per scene and preset.
 - `NVIDIA_GeForce_RTX_4090_system.txt` — workstation, driver, software versions and trainer revision.
 
 With Matplotlib installed, `python scripts/plots/plot_preset_results.py --presets PATH_TO_CSV` prints the table and writes a 4090-specific chart.
 
-The README uses the verified 4090 means for its headline and three-preset table. Its Stump demo comes from a separate interactive 4090 run with the viewer and frame capture active. The 16 GB RTX 4080 Balanced result (25.97 s, 27.39 dB, 2.72–2.89 GiB of process VRAM at loop end) and the same-card peer comparison come from the earlier workstation. [RTX 4080 results](benchmarks.md#current-presets)
+For the handoff, keep the new CSV and system record together. Compare Quality against its earlier 4090 row on training-loop time, PSNR, SSIM, VGG LPIPS, final splats and loop-end VRAM. The Stump demo is a separate interactive Ultrafast run. [RTX 4080 comparison](benchmarks.md#current-presets)
 
 ## Interactive Stump demo
 

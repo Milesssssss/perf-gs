@@ -15,7 +15,7 @@ from trainer.backend.compute.device import create_device
 from trainer.backend.densify.structure_tensor import StructureTensor
 from trainer.backend.memory import budget
 from trainer.backend.platform.dxgi import query_video_memory
-from trainer.backend.render.pipeline import TrainingPipeline, estimate_pipeline_bytes
+from trainer.backend.render.pipeline import TrainingPipeline, default_sort_pairs, estimate_pipeline_bytes
 from trainer.config.config import AdamLRs, LossConfig
 from trainer.data.dataset import simple_camera
 from trainer.frontend.app import TrainingApplication
@@ -50,6 +50,12 @@ def _three_splats(device, **kwargs) -> TestPipeline:
                               np.float32))
     pipeline.optimizer.zero_grad()
     return pipeline
+
+
+def test_preset_sort_workspace() -> None:
+    parser = build_parser()
+    for preset, expected in (("ultrafast", 16_776_960), ("balanced", 16_776_960), ("quality", 24_000_000)):
+        assert default_sort_pairs(parser.parse_args(["--preset", preset]).max_splats) == expected
 
 
 def test_fit_capacity_is_the_largest_that_fits() -> None:

@@ -91,8 +91,8 @@ def prepare(run: Path, output: Path, image_dir: Path | None = None, ply: Path | 
         if ply is not None:
             expected_count = report["model"]["n_gaussians"]
         memory = report["memory"]
-    if requested != 3000 or completed != 3000:
-        raise ValueError("The Mip-NeRF 360 benchmark requires 3,000 completed training steps")
+    if requested < 1 or completed != requested:
+        raise ValueError(f"Expected {requested:,} completed training steps, found {completed}")
     if not holdout or scene["holdout_stride"] != 8:
         raise ValueError("Training must hold out every eighth registered camera")
     psnr_path = run / "test_psnr.json"
@@ -131,7 +131,7 @@ def prepare(run: Path, output: Path, image_dir: Path | None = None, ply: Path | 
         if (scene["test_indices"] != indices or [view["cam_idx"] for view in views] != indices
                 or len(indices) != report["quality"]["n_test_views"]):
             raise ValueError("Expected the complete every-eighth-camera held-out split")
-    method = output / "test" / "ours_3000"
+    method = output / "test" / f"ours_{completed}"
     if method.exists():
         raise FileExistsError(f"Output method already exists: {method}")
     renderer = None
@@ -164,7 +164,14 @@ def prepare(run: Path, output: Path, image_dir: Path | None = None, ply: Path | 
                 photo.convert("RGB").save(stage / "gt" / filename)
             if renderer is None:
                 shutil.copyfile(render_path, stage / "renders" / filename)
+        # External-trainer comparisons use these names to pair native cameras to the reference RGB8s.
+        manifest = {"iterations": completed, "views": [
+            {"ordinal": i, "camera_index": idx, "image_name": v["image_name"], "width": v["width"], "height": v["height"]}
+            for i, (idx, v) in enumerate(zip(indices, views))]}
+        staged_manifest = Path(tmp) / "manifest.json"
+        staged_manifest.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
         method.parent.mkdir(exist_ok=True)
+        staged_manifest.replace(output / "manifest.json")
         stage.rename(method)
     return method
 

@@ -28,6 +28,8 @@ def validate_training_config(args: argparse.Namespace, *, n_cams: int, n_train: 
         raise ConfigError(f"--iters must be >= 1, got {args.iters}.")
     if args.max_splats < 1:
         raise ConfigError(f"--max-splats must be >= 1, got {args.max_splats}.")
+    if not 0.0 < args.final_splat_fraction <= 1.0:
+        raise ConfigError("--final-splat-fraction must be in (0, 1].")
 
     # densify_every is a modulo divisor of the schedule, not a "disable" value.
     if args.densify_every < 1:

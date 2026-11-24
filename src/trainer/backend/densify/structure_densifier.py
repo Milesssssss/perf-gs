@@ -29,6 +29,7 @@ _DISPATCH = "densify/densify_dispatch.slang"
 _COMPACT = "densify/scatter_compact.slang"
 _SCORE = "densify/score_structure_aware.slang"
 _SPLIT = "densify/split_anisotropic.slang"
+_RANK = "densify/rank_families.slang"
 FIXED_POINT_SCALE = 65536.0
 
 
@@ -58,6 +59,7 @@ class StructureDensifier:
                  scan: PrefixScan, arena: ArenaCommitter, opacity: OpacityReset,
                  width: int, height: int, capacity: int) -> None:
         self._commands = commands
+        self._kernel_library = kernels
         self._kernels = kernels.load(self.KERNELS)
         self._primitive = primitive
         self._adam_resources = adam
@@ -107,7 +109,7 @@ class StructureDensifier:
     def densify(self, cfg: StructureConfig, min_blend_weight: float = 0.0) -> dict:
         """Split/clone the splats the window flagged, prune, compact, cap opacity.
 
-        Overflowing children are dropped; only the requested child count is read back.
+        Read back the requested growth to report capacity pressure.
         """
         self._record_densify(cfg, min_blend_weight)
         self._commands.runtime.wait_for_submit(self._commands.last_submit_id)
@@ -117,13 +119,12 @@ class StructureDensifier:
         overbudget = children > headroom
         if overbudget:
             share = children / pre_count if pre_count > 0 else 0.0
-            print(f"WARNING: structure densify overbudget at {pre_count} splats — "
+            policy = ("ranked complete split families" if cfg.rank_split_families
+                      else "overflow children DROPPED at the tail")
+            print(f"Structure densify overbudget at {pre_count} splats — "
                   f"requested {children} new children ({share:.0%} of the "
                   f"population) but only {headroom} fit (max_splats="
-                  f"{self._capacity}); overflow children DROPPED at the tail. "
-                  f"A single tick asking for this many splits usually means the split "
-                  f"gate is too loose — tune --sad-tau-split / --sad-max-split-factor "
-                  f"/ --max-splats.")
+                  f"{self._capacity}); {policy}.")
             if cfg.detailed_diagnostics:
                 self._print_gate_breakdown(cfg, pre_count)
         return {"pre_count": None, "post_split_count": None, "final_count": None,
@@ -181,6 +182,24 @@ class StructureDensifier:
                 max_splats=capacity,
                 selected_parents=r.valid_mask.storage,
                 selected_count=selected_count.storage)
+
+            if cfg.rank_split_families:
+                # The depth sort has finished and clears its own histogram on next use.
+                histogram = self._raster_resources.depth_sort.global_hist.storage
+                commands.dispatch(k.clear_uint, "clear_family_histogram",
+                    thread_count=[512, 1, 1], buffer=histogram, count=512)
+                common = dict(histogram=histogram, pre_count=r.pre_count.storage, capacity=capacity)
+                args = dict(**common, action=r.actions.storage,
+                            factor_x=split.split_factor_x.storage, factor_y=split.split_factor_y.storage,
+                            factor_z=split.split_factor_z.storage, eta_x=eta["max_x"].storage,
+                            eta_y=eta["max_y"].storage, eta_z=eta["max_z"].storage,
+                            views=r.visibility_count.storage, gradient=r.grad_mean_2d_mag.storage,
+                            gradient_scale=self._grad_threshold(cfg) or 1.0)
+                rank = self._kernel_library.kernel(_RANK, "rankFamilies")
+                commands.dispatch_indirect(rank, "score_family_upgrades", r.dispatch_args, apply=0, **args)
+                commands.dispatch(self._kernel_library.kernel(_RANK, "chooseCutoff"), "budget_family_upgrades",
+                    thread_count=[1, 1, 1], **common)
+                commands.dispatch_indirect(rank, "admit_family_upgrades", r.dispatch_args, apply=1, **args)
 
             # One cooperative workgroup per selected parent; children go to the tail.
             commands.dispatch(k.prepare_split, "structure_split_prepare_args",

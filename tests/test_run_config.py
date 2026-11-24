@@ -69,13 +69,15 @@ def test_quality_recipe_lowers_the_opacity_lr_and_decays_scale_and_rotation() ->
 
 def test_presets_supply_defaults_that_explicit_flags_override() -> None:
     parser = build_parser()
-    for name, pixels, sh, splats in (
-        ("ultrafast", 0.25, 2, 1_850_000),
-        ("balanced", 1.0, 2, 2_600_000),
-        ("quality", 1.0, 3, 5_600_000),
+    for name, pixels, sh, splats, steps, fraction in (
+        ("ultrafast", 0.25, 2, 1_850_000, 3000, 1.0),
+        ("balanced", 1.0, 2, 2_600_000, 3000, 1.0),
+        ("quality", 1.0, 3, 4_000_000, 3500, 0.75),
     ):
         args = parser.parse_args(["--preset", name])
         assert (args.stbn_pixel_fraction, args.sh_degree, args.max_splats) == (pixels, sh, splats)
+        assert (args.iters, args.final_splat_fraction) == (steps, fraction)
+        assert RunConfig.from_args(args, 1).structure.rank_split_families == (name == "quality")
         assert args.width is None and args.height is None and args.downsample is None
         assert args.auto_lens and args.stereo_init and args.lr_recipe == "short"
     assert parse_args(["--stbn-pixel-fraction", "1", "--preset", "ultrafast"]).stbn_pixel_fraction == 1

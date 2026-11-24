@@ -73,7 +73,8 @@ def score(args, images):
     cameras, frames, _, _ = litegs.io_manager.load_colmap_result(str(args.scene), images)
     heldout = frames[::8]
     if args.reference:
-        reference_views = json.loads((args.reference / "manifest.json").read_text())["views"]
+        reference = json.loads((args.reference / "manifest.json").read_text())
+        reference_views = reference["views"]
         if [v["image_name"] for v in reference_views] != [frame.name for frame in heldout]:
             raise ValueError("LiteGS and PERF-GS held out different cameras")
     for frame in heldout:
@@ -106,7 +107,7 @@ def score(args, images):
             expected = reference_views[i]
             if (expected["camera_index"], expected["width"], expected["height"]) != (i * 8, *gt.size):
                 raise ValueError(f"Different evaluation camera or size for {frame.name}")
-            with Image.open(args.reference / "test/ours_3000/gt" / filename) as benchmark_gt:
+            with Image.open(args.reference / f"test/ours_{reference['iterations']}/gt" / filename) as benchmark_gt:
                 benchmark_rgb = benchmark_gt.convert("RGB")
                 if benchmark_rgb.size != gt.size:
                     raise ValueError(f"Different reference size for {frame.name}")

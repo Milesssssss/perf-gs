@@ -111,7 +111,8 @@ PRESETS: dict[str, dict[str, Any]] = {
                   "densify_to": 1600, "grad_thresh": 0.00060,
                   "prune_blend_from": 650, "prune_blend_weight": 0.25},
     "balanced": {},
-    "quality": {"max_splats": 5_600_000, "sh_degree": 3},
+    "quality": {"max_splats": 4_000_000, "sh_degree": 3, "iters": 3500,
+                "final_splat_fraction": 0.75},
 }
 
 
@@ -152,8 +153,7 @@ SETTINGS: tuple[Setting, ...] = (
             about="First iteration that adds or removes splats.",
             minimum=0, maximum=200_000, speed=25),
     Setting("densify_to", "last densify iter", "densify", int, default=1900,
-            about="Last iteration that adds or removes splats; after it, training only "
-                  "refines the splats it has.",
+            about="Last iteration that proposes new splats. A final trim, if enabled, follows growth.",
             minimum=0, maximum=200_000, speed=25),
     Setting("densify_every", "densify interval", "densify", int, default=100,
             about="Iterations between densification steps.",
@@ -168,6 +168,12 @@ SETTINGS: tuple[Setting, ...] = (
             about="Most splats the model may grow to. GPU memory for this many is "
                   "reserved up front, and it is lowered if it does not fit.",
             minimum=100_000, maximum=100_000_000, speed=50_000),
+    Setting("final_splat_fraction", "fraction to keep after growth", "densify", float, default=1.0,
+            help="fraction of live splats to retain after growth, scored by their effect on rendered color. "
+                 "Unobserved splats are kept. 1 disables the final trim.",
+            about="After growth, keep the splats whose removal changes the training images most. "
+                  "1 keeps them all.",
+            minimum=0.01, maximum=1.0, speed=0.01, fmt="%.2f"),
     Setting("lambda_ssim", "SSIM weight", "loss", float, default=0.3,
             about="Weight of the structural-similarity (SSIM) term in the loss; the "
                   "rest is per-pixel error.",

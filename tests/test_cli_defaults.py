@@ -61,6 +61,7 @@ EXPECTED_DEFAULTS = {
     "w_alpha": 0.0,
     "lambda_ssim": 0.3,
     "max_splats": 2_600_000,
+    "final_splat_fraction": 1.0,
     "z_near_cull": 0.01,
     "profile_every": 0,
     "morton_every": 0,

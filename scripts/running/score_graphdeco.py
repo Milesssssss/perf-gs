@@ -18,6 +18,8 @@ REFERENCE_COMMIT = "54c035f7834b564019656c3e3fcc3646292f727d"
 
 def preset_rows(models, graphdeco, expected_gpu):
     """Match prepared renders to measured Vulkan runs under the published nine-scene protocol."""
+    from trainer.frontend.settings import preset_values
+
     rev = subprocess.check_output(["git", "-C", graphdeco, "rev-parse", "HEAD"], text=True).strip()
     if rev != REFERENCE_COMMIT:
         raise ValueError(f"Preset benchmarks use Graphdeco {REFERENCE_COMMIT}, found {rev}")
@@ -38,6 +40,9 @@ def preset_rows(models, graphdeco, expected_gpu):
         key = (args["preset"], PureWindowsPath(report["scene_path"]).name)
         if key in rows or key not in reference:
             raise ValueError(f"Duplicate or unexpected preset/scene {key} in {model}")
+        preset = preset_values(key[0])
+        if any(args.get(field) != value for field, value in preset.items()):
+            raise ValueError(f"{model} differs from the current {key[0]} preset")
         gpu = report["device"]["adapter_name"]
         if not gpu or (expected_gpu and gpu != expected_gpu):
             raise ValueError(f"{model} reports GPU {gpu!r}, expected {expected_gpu!r}")
@@ -57,7 +62,7 @@ def preset_rows(models, graphdeco, expected_gpu):
             raise ValueError(f"Invalid training length, timing or sort capacity for {model}")
         # A retrained run can have the same name as a previously prepared set of PNGs.
         for index, view in enumerate(views):
-            prepared = model / "test/ours_3000/renders" / f"{index:05d}.png"
+            prepared = model / "test" / f"ours_{timing['iters']}" / "renders" / f"{index:05d}.png"
             if view["cam_idx"] != index * 8 or (view["width"], view["height"]) != (scene["width"], scene["height"]):
                 raise ValueError(f"Unexpected evaluation camera or dimensions at {prepared}")
             if not filecmp.cmp(run / "test_renders" / view["render_png"], prepared, shallow=False):
@@ -71,7 +76,7 @@ def preset_rows(models, graphdeco, expected_gpu):
             "vram_usage_bytes": timing.get("vram_usage_bytes"), "gpu": gpu, "run_name": model.name,
             "metric_source": f"Graphdeco RGB8 PSNR/SSIM/VGG-LPIPS ({rev[:7]})",
         }
-        for field in ("seed", "steps", "sh_degree", "pixel_fraction", "train_width", "train_height", "heldout_views"):
+        for field in ("seed", "train_width", "train_height", "heldout_views"):
             if rows[key][field] != float(reference[key][field]):
                 raise ValueError(f"{model} has {field}={rows[key][field]}, expected {reference[key][field]}")
     return columns, {rows[key]["run_name"]: rows[key] for key in reference}
@@ -84,7 +89,7 @@ def main():
     parser.add_argument("--preset-csv", type=Path, help="write a new per-scene CSV for a complete preset benchmark")
     parser.add_argument("--expect-gpu", help="require this exact trainer adapter name in the preset CSV")
     parser.add_argument("models", type=Path, nargs="+",
-                        help="directories containing test/ours_3000/{renders,gt}")
+                        help="directories containing one test/ours_<steps>/{renders,gt}")
     args = parser.parse_args()
     if not (args.graphdeco / "metrics.py").is_file():
         parser.error("Graphdeco checkout must contain metrics.py")
@@ -109,8 +114,11 @@ def main():
     metrics.lpips = cached_lpips
     with torch.inference_mode():
         for model in args.models:
-            method = "ours_3000"
-            path = model / "test" / method
+            methods = list((model / "test").glob("ours_*"))
+            if len(methods) != 1:
+                raise ValueError(f"Expected one prepared method in {model}/test")
+            path = methods[0]
+            method = path.name
             names = {p.name for p in (path / "renders").iterdir()}
             if not names or names != {p.name for p in (path / "gt").iterdir()}:
                 raise ValueError(f"Missing or mismatched test images in {path}")

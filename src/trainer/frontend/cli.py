@@ -138,6 +138,7 @@ def build_parser() -> argparse.ArgumentParser:
                     help="alpha loss weight; set > 0 for RGBA targets (e.g. 1.0)")
     _shared(parser, "lambda_ssim")
     _shared(parser, "max_splats")
+    _shared(parser, "final_splat_fraction")
     parser.add_argument("--z-near-cull", type=float, default=RasterConfig.z_near_cull,
                     help="view-space depth floor for bin cull; raise for scenes "
                          "where points can land near a camera pose (e.g. 0.2)")

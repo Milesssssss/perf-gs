@@ -15,6 +15,7 @@ import pytest
 from _pipeline_testkit import TestPipeline
 
 from trainer.backend.compute.device import create_device
+from trainer.backend.densify.removal import accumulate_removal_cost, prune_by_removal_cost
 from trainer.config.config import DensifyConfig, StructureConfig
 from trainer.config.config import DensificationProperties, IterationContextualVariables
 from trainer.data.dataset import simple_camera
@@ -114,3 +115,32 @@ def test_densify_prunes_underweight_splats(backend: str, structure: bool,
     means = np.frombuffer(pipeline.buffers.primitive.values.to_numpy().tobytes(),
                           np.float32).reshape(-1, 14)[:count, 0]
     np.testing.assert_allclose(np.sort(means), survivors, atol=1e-6)
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_removal_cost_matches_rendering_without_each_splat(backend: str) -> None:
+    pipeline = _pipeline(backend)
+    camera = simple_camera(width=SIZE, height=SIZE, eye=(0.0, 0.0, 0.0),
+                           target=(0.0, 0.0, 1.0), up=(0.0, 1.0, 0.0),
+                           fovy_degrees=60.0)
+    scene = _splats([0.0, 0.1, 50.0], [2.0, 3.0, 2.0], [0.65, 0.4, 0.9])
+    scene["color_logits"][:2] = [[1, -1, 0], [0, 1, -1]]
+
+    def render(keep):
+        pipeline.set_primitive_from_numpy(**{k: v[keep] for k, v in scene.items()})
+        pipeline.render(camera)
+        return pipeline.read_output_image()[..., :3].astype(np.float64)
+
+    omissions = [render([1, 2]), render([0, 2])]
+    image = render([0, 1, 2])
+    expected = [np.sum((image - omitted) ** 2) for omitted in omissions]
+    pipeline.densify_stats.clear()
+    for phase in range(16):
+        accumulate_removal_cost(pipeline, phase, 1.0)
+    scores = pipeline.buffers.densification.blend_weight.to_numpy().view(np.int64).reshape(-1)[:3]
+    np.testing.assert_allclose(scores / 2**30, [*expected, 0], atol=1e-5, rtol=2e-4)
+
+    stats = prune_by_removal_cost(pipeline, 2 / 3)
+    assert stats == {"pre_count": 3, "target_count": 2, "final_count": 2, "unobserved_count": 1}
+    keep = [int(np.argmax(expected)), 2]
+    np.testing.assert_allclose(pipeline.primitives.read()["mean"], scene["means"][keep])

@@ -16,6 +16,7 @@ from typing import Any
 import numpy as np
 import slangpy as spy
 
+from trainer.backend.densify.removal import accumulate_removal_cost, prune_by_removal_cost
 from trainer.backend.densify.structure_tensor import StructureTensor
 from trainer.backend.memory.budget import GIB, allocated_bytes, available_bytes, fit_capacity
 from trainer.backend.platform.dxgi import query_video_memory
@@ -35,7 +36,7 @@ from trainer.config.validation import validate_training_config
 from trainer.data.parallel import map_ordered
 from trainer.data.targets import TargetDataset
 from trainer.frontend.cli import parse_args
-from trainer.frontend.densification import DensificationController
+from trainer.frontend.densification import DensificationController, DensifyOutcome
 from trainer.frontend.evaluation import run_report as run_report_module
 from trainer.frontend.evaluation.evaluation import (
     eval_test_psnr_srgb,
@@ -776,6 +777,13 @@ class TrainingLoop:
             rng,
         )
         self.schedule = TrainingSchedule(config.schedule)
+        growth_end = config.schedule.densify_to
+        score_steps = min(200, max(0, (args.iters - growth_end) // 2))
+        self.image_prune_steps = (
+            range(growth_end + 1, growth_end + score_steps + 1)
+            if args.final_splat_fraction < 1 and self.densify_mode != DensificationMode.NONE
+            else range(0))
+        self.deferred_morton = False
 
         pipeline = self.runtime.pipeline
         self.stbn_sampler = (StbnSampler(pipeline.stbn_config, pipeline.stbn_slices)
@@ -939,7 +947,25 @@ class TrainingLoop:
             pipeline.opacity_reset.reset(self.densify_config)
             self.runtime.reporter.report_opacity_reset(context.step_number)
 
-        if events.morton:
+        step = context.step_number
+        morton_due, mip_due = events.morton, events.mip_periodic
+        if step in self.image_prune_steps:
+            if step == self.image_prune_steps.start:
+                pipeline.densify_stats.clear()  # reuse the now-idle blend-weight buffer
+            accumulate_removal_cost(pipeline, step, context.iteration_contextual_variables.hardness_value)
+            if step + 1 == self.image_prune_steps.stop:
+                stats = prune_by_removal_cost(pipeline, self.args.final_splat_fraction)
+                self.gaussian_count = stats["final_count"]
+                self.runtime.reporter.report_densify(DensifyOutcome(step, self.gaussian_count, "image_prune", stats))
+                morton_due |= self.deferred_morton
+                mip_due |= pipeline.raster_config.mip_enabled
+            else:
+                # Keep splat indices stable from the first measurement until compaction.
+                self.deferred_morton |= morton_due
+                morton_due = False
+            self.runtime.queue_limiter.record(pipeline.last_submit_id)
+
+        if morton_due:
             pipeline.morton.reorder(
                 self.scene.morton_min,
                 self.scene.morton_max,
@@ -950,7 +976,7 @@ class TrainingLoop:
             if pipeline.last_submit_id:
                 self.runtime.queue_limiter.record(pipeline.last_submit_id)
 
-        if events.mip_periodic:
+        if mip_due:
             pipeline.mip_filter.compute()
 
     def _produce_observations(self, context: IterationContext) -> bool:

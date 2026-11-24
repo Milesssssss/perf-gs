@@ -246,18 +246,26 @@ def test_full_grid_parallel_children_and_fresh_moments(backend, sh_degree) -> No
 
 @pytest.mark.parametrize("backend", BACKENDS)
 @pytest.mark.parametrize("sh_degree", [0, 3])
-def test_overbudget_drops_children_without_implicit_percentiles(
-    backend, sh_degree, monkeypatch, capsys,
+@pytest.mark.parametrize("ranked", [False, True])
+def test_overbudget_structure_split(
+    backend, sh_degree, ranked, monkeypatch, capsys,
 ) -> None:
     p = _setup(backend, max_splats=7, sh_degree=sh_degree)
     _one_gaussian(p, opacity=0.7)
     _set_eta(p, 0, n_total=10, n_high=10, eta_max=(64, 64, 64))
     monkeypatch.setattr(np, "percentile", lambda *a, **k: pytest.fail(
         "production overflow must not run CPU percentile diagnostics"))
-    stats = p.structure_densifier.densify(StructureConfig())
-    assert _count(p) == 7 and stats["overbudget"]
-    assert np.all(np.isfinite(_read_gaussians(p, 7)))
-    assert "overflow children DROPPED" in capsys.readouterr().out
+    stats = p.structure_densifier.densify(StructureConfig(rank_split_families=ranked))
+    assert stats["overbudget"]
+    if ranked:
+        assert _count(p) == 4  # A complete 2x2x1 grid fits. A 2x2x2 grid needs eight slots.
+        positions = _read_gaussians(p, 4)[:, :3]
+        np.testing.assert_allclose(positions.mean(axis=0), [0, 0, 3], atol=1e-6)
+        assert tuple(len(np.unique(axis)) for axis in positions.T) == (2, 2, 1)
+    else:
+        assert _count(p) == 7
+        assert np.all(np.isfinite(_read_gaussians(p, 7)))
+        assert "overflow children DROPPED" in capsys.readouterr().out
 
 
 @pytest.mark.parametrize("backend", BACKENDS)

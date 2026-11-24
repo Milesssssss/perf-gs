@@ -55,7 +55,8 @@ def default_sort_pairs(max_splats: int, viewer_only: bool = False) -> int:
     """Sort-pair capacity for ``max_splats``; pairs past it are dropped (and counted)."""
     if viewer_only:
         return min(12_000_000, max(2_000_000, max_splats * 6))
-    return max(buffers.DEFAULT_MAX_SORT_PAIRS, max_splats * 4)
+    # A splat may overlap many tiles even when the population fits its growth budget.
+    return max(buffers.DEFAULT_MAX_SORT_PAIRS, max_splats * 6)
 
 
 def estimate_pipeline_bytes(module: spy.Module, *, max_splats: int, width: int,

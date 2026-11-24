@@ -8,9 +8,9 @@ On the **RTX 4090 24 GB**, Balanced averaged **17.31 seconds** per training loop
 | --- | ---: | ---: | ---: | ---: | ---: |
 | Ultrafast | 11.85 s | 27.10 dB | 0.7930 | 0.2567 | 5.29 GiB |
 | Balanced | 17.31 s | 27.42 dB | 0.8143 | 0.2229 | 2.81 GiB |
-| Quality | 23.24 s | 27.79 dB | 0.8274 | 0.2011 | 6.14 GiB |
+| Quality (previous) | 23.24 s | 27.79 dB | 0.8274 | 0.2011 | 6.14 GiB |
 
-All 27 runs completed on the first pass. Each preset trained for 3,000 steps at seed 42 on each of the nine Mip-NeRF 360 scenes, using quarter resolution outdoors and half resolution indoors. The clock covers the headless Vulkan training loop and excludes loading, initialization, evaluation and export. VRAM is the trainer process’s local GPU memory sampled at loop end. Graphdeco scored all 246 held-out views per preset using RGB8 renders. We averaged views within each scene, then weighted all nine scenes equally. [Per-scene RTX 4090 measurements](NVIDIA_GeForce_RTX_4090_presets.csv)
+This sweep predates the Quality allocator and final pruning pass. Each preset trained for 3,000 steps at seed 42 on all nine scenes, using quarter resolution outdoors and half resolution indoors. The clock covers the headless Vulkan training loop and excludes loading, initialization, evaluation and export. VRAM is the trainer process’s local GPU memory sampled at loop end. Graphdeco scored all 246 held-out views per preset using RGB8 renders. We averaged views within each scene, then weighted all nine scenes equally. [Per-scene RTX 4090 measurements](NVIDIA_GeForce_RTX_4090_presets.csv)
 
 The Lenovo workstation ran Windows 11 Enterprise on a 32-core Threadripper PRO 9975WX with NVIDIA driver 610.88. These measurements predate the public release and used SlangPy 0.42.0 and Python 3.11.9. The workstation record identifies the measured trainer sources by SHA-256. Graphdeco evaluation used PyTorch 2.10.0+cu128 and torchvision 0.25.0+cu128. [Workstation record](NVIDIA_GeForce_RTX_4090_system.txt) · [Reproduce the sweep](benchmark-rtx4090.md)
 
@@ -20,44 +20,66 @@ The Lenovo workstation ran Windows 11 Enterprise on a 32-core Threadripper PRO 9
 
 ## RTX 4080 presets
 
-These measurements are from the **RTX 4080 16 GB**. All three presets train for 3,000 steps on the nine Mip-NeRF 360 scenes at seed 42. Training and evaluation use the stored `images_4` photos outdoors and `images_2` indoors. Graphdeco’s RGB8 evaluator scores all 246 held-out views. Each scene contributes equally to every mean. [Benchmark commands](mipnerf360_3k.md#reproduce-the-benchmark) · [Per-scene RTX 4080 measurements](mipnerf360_3k_presets.csv)
+The updated **Quality** preset averaged **27.90 dB in 32.44 s** on the RTX 4080 16 GB. It improved PSNR on every scene, SSIM on seven and VGG LPIPS on eight. Final model size fell from 3.08M to 2.11M splats on average. The table combines the original Ultrafast and Balanced runs with a new nine-scene Quality sweep. Each row uses seed 42, the stored `images_4` photos outdoors and `images_2` indoors, and all 246 held-out views. Each scene contributes equally to every mean. [Current 4080 CSV](NVIDIA_GeForce_RTX_4080_presets.csv) · [Original 3,000-step CSV](mipnerf360_3k_presets.csv) · [Benchmark commands](mipnerf360_3k.md#reproduce-the-benchmark)
 
-| Preset | Train loop | Launch to saved PLY | PSNR ↑ | SSIM ↑ | VGG LPIPS ↓ | VRAM at loop end |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| Ultrafast | 17.62 s | 31.28 s | 27.13 dB | 0.7936 | 0.2567 | 5.29 GiB |
-| Balanced | 25.97 s | 41.30 s | 27.39 dB | 0.8143 | 0.2229 | 2.80 GiB |
-| Quality | 33.85 s | 49.56 s | 27.78 dB | 0.8275 | 0.2011 | 6.13 GiB |
+| Preset | Steps | Train loop | Launch to saved PLY | PSNR ↑ | SSIM ↑ | VGG LPIPS ↓ | VRAM at loop end |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Ultrafast | 3,000 | 17.62 s | 31.28 s | 27.13 dB | 0.7936 | 0.2567 | 5.29 GiB |
+| Balanced | 3,000 | 25.97 s | 41.30 s | 27.39 dB | 0.8143 | 0.2229 | 2.80 GiB |
+| **Quality** | **3,500** | **32.44 s** | — | **27.90 dB** | **0.8286** | **0.1997** | **4.80 GiB** |
+| Quality (previous) | 3,000 | 33.85 s | 49.56 s | 27.78 dB | 0.8275 | 0.2011 | 6.13 GiB |
 
 VRAM is the trainer process’s local GPU memory on the RTX 4080, sampled at the end of each headless training loop and recorded in the CSV as `vram_usage_bytes`. Balanced and Quality stream photos from system RAM. Ultrafast keeps the training photos and their structure fields on the GPU for speed.
 
-![Training-loop time, PSNR, SSIM and VGG LPIPS for all three presets on each of the nine scenes](../assets/mipnerf360_3k_presets.png)
+Quality used one recipe for every scene. It reserved space for 4M splats and 24M splat–tile pairs, prioritized complete splits when requests exceeded capacity (11 of 27 structure updates), and ended growth at step 1,900. At step 2,100 it kept 75% of the live population using the estimated RGB change from removing each splat. The remaining 1,400 steps refined this smaller model. New scenes use the same capacity, fraction and step count. [Settings and implementation](usage.md#training)
+
+The updated loop was faster on eight scenes. Room took 0.68 s longer and gained 0.220 dB. Stump and Treehill had small SSIM decreases (0.00009 and 0.00036), and Bicycle’s VGG LPIPS rose by 0.00006. The scenes informed preset development. The published sweep contains one run per scene and gives no estimate of seed-to-seed variance.
+
+<details>
+<summary>Does occlusion help decide which splats to split?</summary>
+
+In the original Quality preset, 27.8% of positive structure votes came from image samples where at most 10% of incoming light reached the splat. Ignoring those samples reduced requested growth by 14.6% when evaluated on the same parents at the same 27 structure updates. In five full retraining runs, the final models were 5.2% smaller on average, but SSIM and LPIPS worsened on all five scenes.
+
+We also tried preserving every proposal and multiplying its gradient-per-child priority by the parent’s mean incoming transmittance over its positive structure votes. We measured transmittance at the four pixels used to interpolate each image-detail sample. Both versions used the same 4M growth capacity, final pruning pass and 3,500 steps.
+
+| Split priority on the RTX 4080 | PSNR ↑ | SSIM ↑ | VGG LPIPS ↓ | Train loop | Final splats |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Gradient per child (Quality) | 27.8992 | 0.828574 | 0.199660 | 32.44 s | 2.109M |
+| Gradient per child × transmittance | 27.8916 | 0.828562 | 0.199404 | 32.32 s | 2.093M |
+
+The transmittance multiplier improved LPIPS on seven scenes and lowered PSNR on seven. Its mean loop-end memory was 61 MiB higher. Quality keeps the simpler split priority and uses occlusion in the later RGB-removal estimate. [Quality measurements](NVIDIA_GeForce_RTX_4080_presets.csv) · [Transmittance experiment](mipnerf360_transmittance_4080.csv)
+
+</details>
+
+![Training-loop time, PSNR, SSIM and VGG LPIPS for the current presets on each of the nine scenes](../assets/mipnerf360-rtx4080-presets.png)
 
 | Preset | Setup + train loop | Launch to model | Launch to closed PLY | Launch to exit | Launch to synced PLY | Gaussians |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
 | Ultrafast | — | 28.30 s | 30.38 s | 31.24 s | 31.28 s | 1.43 M |
 | Balanced | — | 36.32 s | 40.39 s | 41.24 s | 41.30 s | 2.07 M |
-| Quality | 41.25 s | 43.57 s | — | — | 49.56 s | 3.08 M |
+| Quality | — | — | — | — | — | 2.11 M |
+| Quality (previous) | 41.25 s | 43.57 s | — | — | 49.56 s | 3.08 M |
 
-The train loop starts after image loading, stereo initialization and target setup. Launch clocks start at process creation. “Launch to model” ends when the trained Gaussians are ready, before export. “Launch to saved PLY” ends at disk sync. The ultrafast and balanced writers closed the file before process exit, and the timing harness synced it just afterward. Quality synced the PLY before held-out evaluation. Dashes mark clocks without observations on all nine scenes.
+The train loop starts after image loading, stereo initialization and target setup. Launch clocks start at process creation. “Launch to model” ends when the trained Gaussians are ready, before export. “Launch to saved PLY” ends at disk sync. The ultrafast and balanced writers closed the file before process exit, and the timing harness synced it just afterward. The previous Quality sweep synced the PLY before held-out evaluation. Dashes mark clocks without observations on all nine scenes.
 
-The ultrafast and balanced scores come from replaying the exact timed PLY files. Quality uses the same native renderer to save the held-out images after export. We selected the ultrafast timing runs before scoring using the external GPU process log. A separate viewer was open during two runs in the initial repeat, which averaged 18.78 s per training loop across all nine scenes. The table uses the uncontended runs for those two scenes. The CSV records each selected run name. [Saved-model replay check](mipnerf360_3k.md#reproduce-the-benchmark)
+The Ultrafast and Balanced scores come from replaying the timed PLY files. The previous Quality sweep saved held-out renders after PLY export. The current Quality sweep trained headless, saved its held-out renders and recorded loop-end memory. Ultrafast uses uncontended timings for the two scenes that initially ran with a separate viewer open. [Saved-model replay check](mipnerf360_3k.md#reproduce-the-benchmark)
 
-The benchmark machine ran Windows on a 32-core Ryzen Threadripper PRO 5975WX with 128 GiB of RAM and an RTX 4080 16 GB (driver 610.60). Python 3.11.9 and SlangPy 0.42.0 ran the Vulkan trainer. Stereo matching ran on the CPU. The independent CUDA evaluation used PyTorch 2.10.0+cu128 and torchvision 0.25.0.
+The 4080 workstation ran Windows on a 32-core Ryzen Threadripper PRO 5975WX with 128 GiB of RAM and NVIDIA driver 610.60. Python 3.11.9 and SlangPy 0.42.0 ran the Vulkan trainer. Stereo matching ran on the CPU. Both published sweeps used Graphdeco revision `54c035f` and its VGG weights with PyTorch 2.10.0+cu128 and torchvision 0.25.0+cu128. All nine updated Quality runs recorded zero sort overflows in training and held-out rendering.
 
 ### Where memory goes
 
-On Bicycle, Balanced finished with 2.49 million Gaussians and buffers sized for 2.60 million. This is the headless RTX 4080 footprint at 3,000 steps and seed 42. SlangPy reports the size of each named GPU resource. Windows reports the trainer process’s total local GPU usage through DXGI immediately after the training loop, before held-out evaluation or export. [GPU resource accounting](../src/trainer/frontend/evaluation/run_report.py) · [Windows memory counters](https://learn.microsoft.com/en-us/windows/win32/api/dxgi1_4/ns-dxgi1_4-dxgi_query_video_memory_info)
+On Bicycle, Balanced finished 3,000 steps with 2.49M Gaussians and buffers sized for 2.60M. Quality finished 3,500 steps with 2.60M Gaussians and capacity for 4.00M. Both runs used seed 42 on the headless RTX 4080. SlangPy reports the sizes of named GPU resources. Windows reports the trainer process’s total local GPU memory through DXGI immediately after training, before held-out evaluation or export. [GPU resource accounting](../src/trainer/frontend/evaluation/run_report.py) · [Windows memory counters](https://learn.microsoft.com/en-us/windows/win32/api/dxgi1_4/ns-dxgi1_4-dxgi_query_video_memory_info)
 
 | Bicycle GPU memory at loop end (MiB, rounded) | Balanced | Quality |
 | --- | ---: | ---: |
-| Rendering, tile sorting, scans and backward-pass workspace | 931 | 1,438 |
-| Gradients | 555 | 1,431 |
-| Adam optimizer state | 377 | 1,260 |
-| Densification and its workspace | 357 | 961 |
-| Gaussian parameters, view-dependent colors and 3D filter | 268 | 812 |
+| Rendering, tile sorting, scans and backward-pass workspace | 931 | 1,347 |
+| Gradients | 555 | 1,022 |
+| Adam optimizer state | 377 | 900 |
+| Densification and its workspace | 357 | 687 |
+| Gaussian parameters, view-dependent colors and 3D filter | 268 | 580 |
 | Loss buffers and current reference photo | 72 | 72 |
-| Other process-local GPU usage, including structure workspace | 228 | 227 |
-| **Windows process total** | **2,788** | **6,203** |
+| Other process-local GPU usage, including structure workspace | 228 | 229 |
+| **Windows process total** | **2,788** | **4,837** |
 
 **Photos.** The nine scenes contain 1,940 original 8-bit RGB JPEGs. Their benchmark-resolution copies are also 8-bit RGB JPEGs. The GPU texture stores four uncompressed bytes per pixel (RGB and alpha). Bicycle has 169 training photos at 1,237 × 822, totaling 656 MiB of packed pixels. Caching the derived structure maps for all 169 views adds another 1,311 MiB before GPU texture padding. Balanced and Quality reuse a single reference texture. Ultrafast caches every training photo and structure map, bringing its Bicycle loop-end usage to 4.16 GiB.
 
@@ -80,11 +102,11 @@ The dashed line connects configurations that improve on the best PSNR reached at
 | SkipGS on FastGS Standard | 30,000 steps, backward skipping from step 15,000 | 184.26 s | 27.43 dB |
 | FastGS-Big | 30,000 steps, authors’ per-scene Big settings | 325.86 s | 27.83 dB |
 
-FastGS-Big gained **0.050 dB** over PERF-GS Quality (27.8345 vs. 27.7848 dB), using **9.63×** its training-loop time. LiteGS completes whole passes through the training views, yielding 9,760–9,982 updates across scenes. SAD-GS uses two views per indoor iteration and one outdoors. Transfers from its host cache count toward the loop. On bicycle, a densification step spilled into shared GPU memory on this 16 GB card.
+In these runs, PERF-GS Quality scored **27.8992 dB in 32.44 s** and FastGS-Big scored **27.8345 dB in 325.86 s**. LiteGS completes whole passes through the training views, yielding 9,760–9,982 updates across scenes. SAD-GS uses two views per indoor iteration and one outdoors. Transfers from its host cache count toward the loop. On bicycle, a densification step spilled into shared GPU memory on this 16 GB card.
 
 SkipGS uses FastGS Standard’s densification settings. It skipped 50,426 of 135,009 backward passes from its activation point across the nine scenes. FastGS-Big uses a different densification recipe.
 
-All trainers ran headless on the same RTX 4080 16 GB, with one seed-42 run per scene. PERF-GS used Windows and Vulkan. The other trainers used WSL2 and CUDA. The wall clock starts after loading and initialization, includes the final GPU synchronization, and stops before model export or evaluation. [Per-scene PERF-GS data](mipnerf360_3k_presets.csv) · [LiteGS data](mipnerf360_litegs_4080.csv) · [Additional trainers](mipnerf360_peers_4080.csv)
+All trainers ran headless on the same RTX 4080 16 GB, with one seed-42 run per scene. PERF-GS used Windows and Vulkan. The other trainers used WSL2 and CUDA. The wall clock starts after loading and initialization, includes the final GPU synchronization, and stops before model export or evaluation. [Per-scene PERF-GS data](NVIDIA_GeForce_RTX_4080_presets.csv) · [LiteGS data](mipnerf360_litegs_4080.csv) · [Additional trainers](mipnerf360_peers_4080.csv)
 
 All runs used the stored `images_4` outdoors and `images_2` indoors. Each trainer’s native renderer produced the 246 held-out views. Graphdeco’s RGB8 PSNR uses identical reference pixels for each method. Views contribute equally within each scene, and the nine scene means contribute equally to each point. [Reproduce LiteGS](mipnerf360_3k.md#compare-litegs-on-the-same-gpu) · [Reproduce the other trainers](mipnerf360_3k.md#reproduce-the-additional-trainers)
 
@@ -103,6 +125,6 @@ These are the authors’ reported Mip-NeRF 360 means. SAD-GS used an H100, with 
 
 EDGS and dBS report averages over all nine scenes. The EDGS benchmark uses quarter-resolution outdoor images and half-resolution indoor images. Its evaluator writes two VGG LPIPS scores, and the paper reports one without identifying which. dBS specifies joint-RGB PSNR and leaves the LPIPS backbone unspecified. [EDGS, Table 1](https://openaccess.thecvf.com/content/CVPR2026/papers/Kotovenko_EDGS_Eliminating_Densification_for_Efficient_Convergence_of_3DGS_CVPR_2026_paper.pdf#page=5) · [EDGS benchmark](https://github.com/CompVis/EDGS/blob/f90b022445fc88368f75e66e8fb34aea88372cac/full_eval.py) · [EDGS evaluator](https://github.com/CompVis/EDGS/blob/f90b022445fc88368f75e66e8fb34aea88372cac/metrics.py) · [dBS results and protocol](https://arxiv.org/html/2610.22778v1#S5.SS1)
 
-Opt3DGS reports 29.96 dB on seven scenes, omitting flowers and treehill. Averaging our same 3,000-step Quality models over those seven gives 29.26 dB, versus 27.78 dB over all nine. [Opt3DGS, §5 and Table 1](https://ojs.aaai.org/index.php/AAAI/article/download/37438/41400#page=5) · [PERF-GS per-scene scores](mipnerf360_3k_presets.csv)
+Opt3DGS reports 29.96 dB on seven scenes, omitting flowers and treehill. Averaging the updated 3,500-step RTX 4080 Quality runs over those seven gives 29.40 dB, versus 27.90 dB over all nine. [Opt3DGS, §5 and Table 1](https://ojs.aaai.org/index.php/AAAI/article/download/37438/41400#page=5) · [PERF-GS per-scene scores](NVIDIA_GeForce_RTX_4080_presets.csv)
 
 SAD-GS reports 4.05 million final Gaussians at 3,000 steps. FastGS reports 0.40 million at 30,000 steps. [SAD-GS, Table 1](https://arxiv.org/html/2604.28016v1#S4.T1) · [FastGS, Table 1](https://openaccess.thecvf.com/content/CVPR2026/papers/Ren_FastGS_Training_3D_Gaussian_Splatting_in_100_Seconds_CVPR_2026_paper.pdf)
