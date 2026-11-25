@@ -171,18 +171,6 @@ Select **Quality+** in the hub or add `--preset quality+` to the training comman
 
 All headline results give equal weight to the nine Mip-NeRF 360 scenes. On the RTX 4080, Quality+ averaged **28.225 dB across all nine** and **29.834 dB across the seven scenes used by gsplat and LichtFeld**, which exclude *Flowers* and *Treehill*. [Per-scene results](docs/NVIDIA_GeForce_RTX_4080_qualityplus.csv) · [gsplat benchmark](https://github.com/nerfstudio-project/gsplat/blob/main/docs/source/tests/eval.rst) · [LichtFeld benchmark](https://lichtfeld.io/bounty/bounty4/)
 
-### Radeon RX 7900 XT
-
-| Preset | Steps | Training loop | PSNR ↑ | SSIM ↑ | VGG LPIPS ↓ | Final splats | VRAM at loop end |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| Ultrafast | 3,000 | 16.44 s | 27.125 dB | 0.7936 | 0.2569 | 1.43M | 5.41 GiB |
-| Balanced (default) | 3,000 | 27.02 s | 27.391 dB | 0.8143 | 0.2229 | 2.07M | 2.85 GiB |
-| **Quality** | 3,500 | 39.47 s | 27.898 dB | 0.8286 | 0.1997 | 2.10M | 4.85 GiB |
-
-Each row averages nine headless Vulkan runs at seed 42. Graphdeco scored all 246 held-out views per preset on the CPU. Training and held-out rendering recorded zero sort overflows. [AMD per-scene results](docs/AMD_Radeon_RX_7900_XT_presets.csv) · [Benchmark details](docs/benchmarks.md#radeon-rx-7900-xt)
-
-Replaying the same Stump and Kitchen models on the RX 7900 XT and RTX 4080 gave **83.86 dB** and **82.53 dB** between their rendered images. Across 51 views, 712 of 219,272,010 RGB8 channel values differed by more than one level. [Cross-vendor rendering measurements](docs/benchmarks.md#cross-vendor-rendering-checks)
-
 ### RTX 4090
 
 | Preset | Steps | Training loop | PSNR ↑ | SSIM ↑ | VGG LPIPS ↓ | Final splats | VRAM at loop end |
@@ -199,6 +187,18 @@ Each row averages nine scenes equally, with one headless Vulkan run per scene at
 Ultrafast and Balanced keep their 3,000-step settings. Applying Quality’s 75% post-growth retention produced about 25% fewer final splats on Bicycle and Kitchen. SSIM and VGG LPIPS worsened in all four runs. [Pruning comparison](docs/benchmarks.md#pruning-in-ultrafast-and-balanced)
 
 ![RTX 4090 training-loop time, PSNR, SSIM and VGG LPIPS by scene for the three fixed-budget presets](assets/mipnerf360-rtx4090-presets.png)
+
+### Radeon RX 7900 XT
+
+| Preset | Steps | Training loop | PSNR ↑ | SSIM ↑ | VGG LPIPS ↓ | Final splats | VRAM at loop end |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Ultrafast | 3,000 | 16.44 s | 27.125 dB | 0.7936 | 0.2569 | 1.43M | 5.41 GiB |
+| Balanced (default) | 3,000 | 27.02 s | 27.391 dB | 0.8143 | 0.2229 | 2.07M | 2.85 GiB |
+| **Quality** | 3,500 | 39.47 s | 27.898 dB | 0.8286 | 0.1997 | 2.10M | 4.85 GiB |
+
+Each row averages nine headless Vulkan runs at seed 42. Graphdeco scored all 246 held-out views per preset on the CPU. Training and held-out rendering recorded zero sort overflows. [AMD per-scene results](docs/AMD_Radeon_RX_7900_XT_presets.csv) · [Benchmark details](docs/benchmarks.md#radeon-rx-7900-xt)
+
+Replaying the same Stump and Kitchen models on the RX 7900 XT and RTX 4080 gave **83.86 dB** and **82.53 dB** between their rendered images. Across 51 views, 712 of 219,272,010 RGB8 channel values differed by more than one level. [Cross-vendor rendering measurements](docs/benchmarks.md#cross-vendor-rendering-checks)
 
 <details>
 <summary>RTX 4080 results</summary>
