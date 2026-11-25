@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="theme-color" content="#f9f9f5">
+  <meta name="theme-color" content="#ffffff">
   <meta name="description" content="PERF-GS trains 3D Gaussian Splatting scenes in seconds. Explore real-time training, held-out reconstructions, and measured RTX 4090 and 4080 results.">
   <meta property="og:title" content="PERF-GS · 3D Gaussian Splatting in seconds">
   <meta property="og:description" content="Run COLMAP on your photos in the PERF-GS hub or open an existing scene, then train and explore a 3D Gaussian Splatting model.">
@@ -16,8 +16,8 @@
   <a class="skip" href="#main">Skip to content</a>
   <header class="site-header">
     <nav class="shell nav" aria-label="Project navigation">
-      <a class="brand" href="#main" aria-label="PERF-GS home"><span class="mark" aria-hidden="true"><i></i><i></i><i></i></span>PERF-GS</a>
-      <div class="nav-links"><a href="#reconstructions">Gallery</a><a href="#motion">Videos</a><a href="#results">Results</a><a href="#citation">Citation</a></div>
+      <a class="brand" href="#main" aria-label="PERF-GS home">PERF-GS</a>
+      <div class="nav-links"><a href="#reconstructions">Gallery</a><a href="#training">Videos</a><a href="#results">Results</a><a href="#citation">Citation</a></div>
     </nav>
   </header>
   <main id="main">
@@ -28,30 +28,44 @@
       <div class="actions"><a class="button primary" href="https://github.com/electronicarts/perf-gs"><span class="code-icon" aria-hidden="true">&lt;/&gt;</span> View code</a><a class="button" href="#quickstart">Quickstart <span aria-hidden="true">↓</span></a></div>
     </section>
 
-    <section class="shell showcase" aria-label="Demo and featured reconstructions">
+    <section class="shell showcase" id="training" aria-label="Real-time Ultrafast training videos">
       <div class="media-grid">
         <figure class="demo">
-          <video id="demo" controls playsinline preload="none" poster="assets/project-page/stump-poster.webp" width="1152" height="720" aria-label="Stump training in real time, followed by a camera orbit" aria-describedby="demo-caption">
+          <video id="demo" controls muted playsinline preload="metadata" poster="assets/project-page/stump-poster.webp" width="960" height="600" aria-label="Stump training in real time, followed by a camera orbit" aria-describedby="demo-caption">
             <source src="assets/project-page/stump.mp4" type="video/mp4">
             <a href="assets/project-page/stump.mp4">Open the Stump training video</a>
           </video>
           <button class="demo-cover" id="play-demo" type="button" aria-label="Play the real-time Stump training demo" hidden>
-            <span class="demo-tag"><i aria-hidden="true"></i> Real-time demo</span>
-            <span class="demo-info"><span class="play-icon" aria-hidden="true"></span><span><strong>Stump</strong><small>Ultrafast · RTX 4090</small></span></span>
+            <span class="play-icon" aria-hidden="true"></span>
           </button>
+          <figcaption><strong>Stump</strong><span>Real-time demo · <a href="assets/project-page/ultrafast-runs.json" title="Training records for the four Ultrafast videos">Ultrafast · RTX 4090</a></span></figcaption>
         </figure>
-        <div class="scene-links">
-          <a class="scene-card" href="assets/reconstructions/kitchen-quality.webp" data-scene="kitchen" aria-label="View Kitchen reconstruction">
-            <img src="assets/reconstructions/kitchen-quality.webp" width="464" height="563" alt="">
-            <span>Kitchen</span><b aria-hidden="true">↗</b>
-          </a>
-          <a class="scene-card" href="assets/reconstructions/bicycle-quality.webp" data-scene="bicycle" aria-label="View Bicycle reconstruction">
-            <img src="assets/reconstructions/bicycle-quality.webp" width="464" height="563" alt="">
-            <span>Bicycle</span><b aria-hidden="true">↗</b>
-          </a>
-        </div>
+        <figure class="teaser-scene">
+          <video controls muted playsinline preload="metadata" width="960" height="600" poster="assets/project-page/bicycle-ultrafast.webp" aria-label="Bicycle training in real time, followed by a camera path through the result">
+            <source src="assets/project-page/bicycle-ultrafast.mp4" type="video/mp4">
+            <a href="assets/project-page/bicycle-ultrafast.mp4">Open the Bicycle video</a>
+          </video>
+          <figcaption><a href="assets/reconstructions/bicycle-ultrafast.webp" data-scene="bicycle" aria-label="View Bicycle reconstruction">Bicycle ↗</a><span>Real-time demo · Ultrafast · RTX 4090</span></figcaption>
+        </figure>
+        <figure class="teaser-scene">
+          <video controls muted playsinline preload="metadata" width="960" height="600" poster="assets/project-page/bonsai-ultrafast.webp" aria-label="Bonsai training in real time, followed by a camera path through the result">
+            <source src="assets/project-page/bonsai-ultrafast.mp4" type="video/mp4">
+            <a href="assets/project-page/bonsai-ultrafast.mp4">Open the Bonsai video</a>
+          </video>
+          <figcaption><a href="assets/reconstructions/bonsai-ultrafast.webp" data-scene="bonsai" aria-label="View Bonsai reconstruction">Bonsai ↗</a><span>Real-time demo · Ultrafast · RTX 4090</span></figcaption>
+        </figure>
+        <figure class="teaser-scene">
+          <video controls muted playsinline preload="metadata" width="960" height="600" poster="assets/project-page/garden-ultrafast.webp" aria-label="Garden training in real time, followed by a camera path through the result">
+            <source src="assets/project-page/garden-ultrafast.mp4" type="video/mp4">
+            <a href="assets/project-page/garden-ultrafast.mp4">Open the Garden video</a>
+          </video>
+          <figcaption><a href="assets/project-page/garden-ultrafast.mp4" aria-label="Open the Garden training video">Garden ↗</a><span>Real-time demo · Ultrafast · RTX 4090</span></figcaption>
+        </figure>
       </div>
-      <p class="caption" id="demo-caption">Stump trains for <strong>9.21 seconds</strong> in this recording, followed by a free-camera orbit. From opening the scene to the trained result took 13.08 seconds.</p>
+      <div class="demo-notes">
+        <p class="caption" id="demo-caption">Stump trains for <strong>10.15 seconds</strong> in this recording, followed by a free-camera orbit. From opening the scene to the trained result took 13.90 seconds.</p>
+        <div class="demo-actions"><button type="button" id="replay-training" hidden>Replay together</button><a href="#motion">Reconstructions in motion ↓</a></div>
+      </div>
       <h2 class="metric-heading" id="averages">Nine-scene Mip-NeRF 360 averages</h2>
       <dl class="metrics" aria-labelledby="averages">
         <div><dt>Ultrafast training loop</dt><dd>10.51 <small>s</small></dd><dd class="hardware">RTX 4090 · <span>3,000 steps</span></dd></div>
@@ -111,14 +125,14 @@
       <p class="lead">Follow the same camera path through two trained models. Pause or scrub the video to inspect Ultrafast on the left and Balanced on the right at exactly the same viewpoint.</p>
       <label class="motion-picker" hidden>Scene <select id="motion-scene"><option value="kitchen">Kitchen</option><option value="bicycle">Bicycle</option></select></label>
       <figure data-motion-scene="kitchen">
-        <video controls playsinline preload="none" width="1440" height="480" poster="assets/project-page/kitchen-comparison.webp" aria-label="Kitchen camera path, Ultrafast on the left and Balanced on the right">
+        <video controls muted playsinline preload="metadata" width="1440" height="480" poster="assets/project-page/kitchen-comparison.webp" aria-label="Kitchen camera path, Ultrafast on the left and Balanced on the right">
           <source src="assets/project-page/kitchen-comparison.mp4" type="video/mp4">
           <a href="assets/project-page/kitchen-comparison.mp4">Open the Kitchen video</a>
         </video>
         <figcaption><span><strong>Kitchen</strong> · RTX 4080 · 3,000 steps per model · seed 42</span><button type="button" hidden aria-label="Stop Kitchen video and return to the first frame">Stop</button></figcaption>
       </figure>
       <figure data-motion-scene="bicycle">
-        <video controls playsinline preload="none" width="1440" height="480" poster="assets/project-page/bicycle-comparison.webp" aria-label="Bicycle camera path, Ultrafast on the left and Balanced on the right">
+        <video controls muted playsinline preload="metadata" width="1440" height="480" poster="assets/project-page/bicycle-comparison.webp" aria-label="Bicycle camera path, Ultrafast on the left and Balanced on the right">
           <source src="assets/project-page/bicycle-comparison.mp4" type="video/mp4">
           <a href="assets/project-page/bicycle-comparison.mp4">Open the Bicycle video</a>
         </video>
