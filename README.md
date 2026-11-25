@@ -1,12 +1,25 @@
 # PERF-GS
 
-[![Project Page](https://img.shields.io/badge/Project-Page-blue.svg)](https://electronicarts.github.io/perf-gs/)
-[![Languages: Python and Slang](https://img.shields.io/badge/languages-Python%20%2B%20Slang-41464D)](#overview)
-[![Backends: Vulkan and D3D12](https://img.shields.io/badge/backends-Vulkan%20%2B%20D3D12-41464D)](#requirements)
+[![Project page](https://img.shields.io/badge/Project%20page-D9D448)](https://electronicarts.github.io/perf-gs/)
+[![Languages: Python and Slang](https://img.shields.io/badge/languages-Python%20%2B%20Slang-3776AB)](#architecture-from-a-high-level)
+[![Backends: Vulkan and D3D12](https://img.shields.io/badge/backends-Vulkan%20%2B%20D3D12-355B3E)](#requirements)
 
-PERF-GS is a 3D Gaussian Splatting trainer. Give it a COLMAP scene, or a folder of photos and let the hub run COLMAP for you. On an RTX 4090, the Ultrafast training loop averaged **10.51 seconds at 27.13 dB** and Quality averaged **22.68 seconds at 27.90 dB** across the nine Mip-NeRF 360 scenes (held-out PSNR).
+**Efficient, extensible, dependency-free & low memory differentiable training.**
 
-[Overview and presets](#overview) · [Quickstart](#quickstart) · [Benchmarks](#mip-nerf-360) · [Gallery](#reconstructions) · [RTX 4080 comparison with LiteGS, SAD-GS and FastGS](docs/benchmarks.md#rtx-4080-comparison)
+Run COLMAP on a folder of photos directly in the PERF-GS standalone app, or open an existing COLMAP scene. Then train a 3D Gaussian Splatting model with Slang on Vulkan or D3D12.<br>
+On an **RTX 4090**:
+- *Quality* preset averages **27.90 dB PSNR in 22.68 seconds** across the nine Mip-NeRF 360 scenes.
+- *Ultrafast* preset averages **27.13 dB in 10.51 seconds** on the same card.<br>
+
+The **Quality+** preset continues training until PSNR on training views levels off. On an **RTX 4090**, it averaged **28.227 dB held-out PSNR** across the same nine scenes, with a mean training loop of **2 min 2 s**.
+
+[RTX 4080 comparison with LiteGS, SAD-GS and FastGS](docs/benchmarks.md#rtx-4080-comparison)
+
+As of November 2026, **perf-gs** is, to the best of our knowledge, the fastest publicly available open-source 3D Gaussian Splatting trainer, outperforming competitors such as [LiteGS](https://github.com/MooreThreads/LiteGS), [SAD-GS](https://github.com/LinjieLyu/SADGS) and [FastGS](https://github.com/fastgs/FastGS) in training speed while delivering competitive or superior reconstruction quality with low VRAM usage.<br><br>
+
+For GPUs with less VRAM, Balanced streams training images from system RAM. It used **2.72-2.90 GiB of VRAM at loop end** across the two workstations. [VRAM and system RAM breakdown](docs/benchmarks.md#where-memory-goes)
+
+[Quickstart](#quickstart) · [Benchmarks](#mip-nerf-360) · [Gallery](#reconstructions)
 
 <div align="center">
 
@@ -17,6 +30,7 @@ PERF-GS is a 3D Gaussian Splatting trainer. Give it a COLMAP scene, or a folder 
 </div>
 
 **9.21 s for 3,000 optimization steps.** Playback starts with the training loop. Before the clip, the hub spent 0.38 s loading Stump, 0.53 s waiting for Start, and 2.95 s preparing training. The result appeared **13.08 s after scene open**. The same loop took 8.96 s in a separate unrecorded hub run and 8.95 s in the original headless benchmark.
+
 
 
 <a id="architecture-from-a-high-level"></a>
