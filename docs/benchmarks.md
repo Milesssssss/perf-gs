@@ -2,6 +2,18 @@
 
 ## Radeon RX 7900 XT
 
+| Preset | Steps | Train loop | PSNR ↑ | SSIM ↑ | VGG LPIPS ↓ | Final splats | VRAM at loop end |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Ultrafast | 3,000 | 16.44 s | 27.125 dB | 0.7936 | 0.2569 | 1.43M | 5.41 GiB |
+| Balanced | 3,000 | 27.02 s | 27.391 dB | 0.8143 | 0.2229 | 2.07M | 2.85 GiB |
+| Quality | 3,500 | 39.47 s | 27.898 dB | 0.8286 | 0.1997 | 2.10M | 4.85 GiB |
+
+Each preset trained on all nine Mip-NeRF 360 scenes at seed 42. Times cover the headless Vulkan training loop through final synchronization. Graphdeco scored 246 held-out RGB8 images per preset on the CPU after training, using the same PSNR, SSIM and VGG LPIPS implementations as the NVIDIA sweeps. The table weights scenes equally. The three fixed-budget PSNR means were within 0.013 dB of their RTX 4090 counterparts. The largest individual scene difference was Room with Ultrafast (−0.136 dB). [AMD per-scene results](AMD_Radeon_RX_7900_XT_presets.csv) · [RTX 4090 per-scene results](NVIDIA_GeForce_RTX_4090_presets_current.csv)
+
+The RX 7900 XT ran on Windows 11 with a 32-core Threadripper PRO 5975WX, display driver 32.0.32029.2010 and SlangPy 0.42.0. The published RTX 4090 ran on a different workstation. On three archived Stump images, CPU scoring reproduced the original CUDA scores to within 0.000002 dB PSNR, 0.0000007 SSIM and 0.0000042 LPIPS. [AMD system and source record](AMD_Radeon_RX_7900_XT_system.txt) · [Reproduction commands](mipnerf360_3k.md#reproduce-the-benchmark)
+
+![Training-loop time, PSNR, SSIM and VGG LPIPS by scene for the three fixed-budget presets on the Radeon RX 7900 XT](assets/rx7900xt-presets.png)
+
 ### Cross-vendor rendering checks
 
 We rendered two archived RTX 4080 models on the RX 7900 XT using Vulkan. Both cards loaded the same exported PLY and used the same held-out cameras. We checked the model hashes and compared every RGB8 channel at native evaluation resolution. This isolates rendering differences from the differences introduced by training two models independently. [Model hashes and per-scene errors](AMD_Radeon_RX_7900_XT_fixed_model.csv)
@@ -16,6 +28,8 @@ The mean absolute error was 0.00026 RGB8 levels on Stump and 0.00035 on Kitchen.
 ![RTX 4080 and RX 7900 XT crops from Stump and Kitchen. The color scale shows the largest absolute RGB8 channel difference at each pixel. Cyan boxes mark the 32 × 32 regions with the greatest mean error.](assets/rx7900xt-fixed-model-errors.png)
 
 The AMD Vulkan viewer also loaded the 1.59-million-splat Stump PLY. Its 1245 × 825 scene capture at the registered camera matched the headless AMD render in all 3,081,375 RGB8 channels.
+
+Replaying the same two models on AMD Direct3D 12 and AMD Vulkan gave 85.37 dB between their Stump renders and 84.26 dB for Kitchen. Of 219,272,010 RGB8 channels, 278 differed by more than one level, with a maximum difference of 12 levels.
 
 ### Training correctness on AMD
 

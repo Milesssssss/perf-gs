@@ -23,82 +23,96 @@ PERF-GS is a 3D Gaussian Splatting trainer. Give it a COLMAP scene, or a folder 
 
 ## Overview
 
-We wanted to change a few lines in a shader, move a growth update in the Python frontend, or tweak a hyperparameter, then train the whole scene and fly around it. The target was a hundred experiments in a day. On our RTX 4090, the nine Ultrafast runs on Mip-NeRF 360 add up to 94.6 seconds in the training loop. Loading the photos, initializing the splats, scoring the held-out views and exporting the model take additional time.
-
-The hub is built for that same loop. It keeps the cameras and original COLMAP cloud around, so you can inspect a result, change a setting, and start again from the same reconstruction. For a comparison across scenes, the command line uses the same trainer and preset settings.
+The goal was allowing hundreds of experiments in a day on a single consumer GPU. On our RTX 4090, Ultrafast preset runs the whole nine-scene Mip-NeRF 360 dataset in 94.6 seconds. Loading the photos, initializing the splats, scoring the held-out views and exporting the model take some minimal additional time.
 
 <details>
 <summary><strong>How the trainer works</strong></summary>
 
-[Initialization](#where-the-first-splats-come-from) · [Forward pass](#drawing-one-training-view) · [Backward passes](#the-backward-passes) · [Densification](#deciding-where-to-grow) · [Presets](#presets)
+[Initialization](#initialization) [Forward pass](#forward-passes) [Backward passes](#backward-passes) [Densification](#densification) [Presets](#presets)
 
-### Why SlangPy and Slang
+<a name="why-slangpy-and-slang"></a>
 
-We started with **SlangPy** so we could write the training schedule in Python and work directly on the renderer in Slang. Python picks a training camera, sets the learning rates and decides when to grow the model. SlangPy compiles each shader entry point from source and caches the kernel for the session. To try a shader change, edit the file and rerun the trainer. There’s no separate native extension to build.
+### Trainer architecture
 
-A splat supplies its projection, its coverage at a pixel, and its color. The compositor takes care of blending it over what’s behind it. With Slang.D we can mark the projection and coverage functions as differentiable. Change the math in one of those functions and Slang generates its derivatives from the same source. We still write the backward passes ourselves so we control what each GPU thread computes and what it saves. There’s a small disk primitive in the tests that uses the same forward blend loop with its own coverage function. [Primitive interfaces](shaders/core/interfaces.slang) · [Disk primitive test](tests/test_disk_primitive.py)
+We started with **SlangPy** so we could write the training schedule in Python and work directly on the renderer in Slang. The goal was finding a balance between efficiency and modularity, and a Python training loop frontend, with a Slangpy-based Python backend and kernels written in Slang gave us exactly what we needed.<br>
+Python picks a training camera, sets the learning rates and decides when to grow the model. SlangPy compiles each shader entry point from source and caches the kernel for the session, its Python RHI allows toeasily orchestrate shader dispatches. There's no separate native extension to build.
 
-Vulkan is the cross-platform target. Direct3D 12 on Windows uses the same shader sources. Training has no CUDA or PyTorch dependency. One detail that mattered across vendors was wave size. The backward shader works on groups of 32 splats, so a 64-lane wave handles two independent groups. We’ve run Vulkan training on Windows with the RTX 4080, RTX 4090 and Radeon RX 7900 XT. Linux and macOS are unverified.
+A *primitive* supplies its projection, its coverage at a pixel, and its color. The *compositor* takes care of blending it over what's behind it. With Slang.D we can mark the projection and coverage functions as differentiable. Change the math in one of those functions and Slang generates its derivatives from the same source. For performance reasons, we still need to write the outer shell's backward passes ourselves. There's a small disk primitive in the tests that uses the same forward blend loop with its own coverage function. [Primitive interfaces](https://github.com/electronicarts/perf-gs/blob/HEAD/shaders/core/interfaces.slang) · [Disk primitive test](https://github.com/electronicarts/perf-gs/blob/HEAD/tests/test_disk_primitive.py)
 
-### Where the first splats come from
+Vulkan is the cross-platform target. D3D12 on Windows uses the same shader sources. Training has no CUDA or PyTorch dependency. One detail that mattered across vendors was wave size. We've run Vulkan training on Windows with the Nvidia RTX 4080, Nvidia RTX 4090 and AMD Radeon RX 7900 XT. Linux and macOS are unverified, yet.
+
+<a name="where-the-first-splats-come-from"></a>
+
+### Initialization
 
 COLMAP gives us camera poses and a sparse cloud of colored points. Each point becomes a round splat. Its color initializes the constant spherical harmonic coefficient, its opacity starts at 0.1, and its initial scale comes from the root-mean-square distance to its three nearest neighbors. That lets a dense patch of points start with smaller splats than a sparse one.
 
-We also seed geometry between those points. We take up to 28 anchor photos from the training split, rectify stereo pairs and match them in both directions. We triangulate matches that agree left-to-right and right-to-left, then check where the 3D point lands in a third training photo. We keep it if the color agrees. This adds up to 256,000 splats in places the sparse reconstruction may barely have sampled. Their initial scale corresponds to about 1.5 pixels at the stereo working resolution.
+We also seed geometry between those points. We take up to 28 anchor photos from the training split, rectify stereo pairs and match them in both directions. We then triangulate matches that agree left-to-right and right-to-left, then check where the 3D point lands in a third training photo. We keep it if the color agrees and this adds up to 256,000 splats in places the sparse reconstruction may barely have sampled, which helps speeding up initial convergence.
 
-The photos tell us something about the lens too. A landmark may be near the center in one view and near a darker corner in another. For a single-camera reconstruction with enough landmarks in the binary COLMAP tracks, we fit one radial falloff strength during setup and apply it when rendering. Otherwise the trainer uses a flat response. [Stereo initialization](src/trainer/data/stereo.py) · [Lens fit](src/trainer/data/lens_calibration.py)
+Taking inspiration from [PPISP](https://research.nvidia.com/labs/sil/projects/ppisp/), for a single-camera reconstruction we fit one radial falloff strength during setup and apply it when rendering. Otherwise the trainer uses a flat response. [Stereo initialization](https://github.com/electronicarts/perf-gs/blob/HEAD/src/trainer/data/stereo.py) · [Lens fit](https://github.com/electronicarts/perf-gs/blob/HEAD/src/trainer/data/lens_calibration.py)
 
-### Drawing one training view
+<a name="drawing-one-training-view"></a>
+
+### Forward passes
 
 One ordinary step records the forward render, image loss, backward passes and Adam update in one GPU submission. After growth, we reorder splats along a Morton curve so nearby splats sit together in memory. At the start of a view the GPU can then cull an off-screen cluster of 128 splats with one bounding-box test. The renderer projects each surviving Gaussian to an ellipse, counts the 8 × 8 pixel tiles it overlaps, and evaluates its view-dependent color if it touches the image. We use Mip-Splatting here. The training cameras set a 3D smoothing scale for each splat, and a 2D filter widens small projected footprints while compensating their opacity.
 
-A large splat can touch many tiles. Sorting a depth key for every copy would repeat a lot of work. We sort splats by depth **once per view**, emit the splat–tile pairs in that order, then do a stable GPU radix sort on just the tile ID. Each tile gets a front-to-back list. The blend skips alpha below 1/255 and stops a pixel once its remaining transmittance falls below 0.0001. The loss compares the render with the training photo using pixel error and SSIM. The SSIM shader filters each 11 × 11 neighborhood first along rows, then along columns. [Rasterizer](src/trainer/backend/render/rasterizer.py) · [SSIM shader](shaders/losses/ssim_loss.slang)
+A large splat can touch many tiles. Sorting a depth key for every copy would repeat a lot of work. We sort splats by depth **once per view**, emit the splat–tile pairs in that order, then do a stable GPU radix sort on just the tile ID. Each tile gets a front-to-back list. The blend skips alpha below 1/255 and stops a pixel once its remaining transmittance falls below 0.0001. The loss compares the render with the training photo using pixel error and SSIM. The SSIM shader filters each 11 × 11 neighborhood first along rows, then along columns. [Rasterizer](https://github.com/electronicarts/perf-gs/blob/HEAD/src/trainer/backend/render/rasterizer.py) · [SSIM shader](https://github.com/electronicarts/perf-gs/blob/HEAD/shaders/losses/ssim_loss.slang)
 
-### The backward passes
+<a name="the-backward-passes"></a>
 
-A single splat can cover hundreds of pixels, and a single pixel can see hundreds of splats. We keep a per-pixel backward shader as a reference. The path used by the presets turns the work around. Every 32 splats in a tile, the forward pass saves the accumulated RGB and remaining transmittance for each active pixel. Those four half-precision values are enough to resume the blend at that point.
+### Backward passes
 
-The per-tile version gives each tile a workgroup, even though a tile looking through foliage can have a much longer list than its neighbor. In the default version the GPU collects the 32-splat groups reached by at least one supervised pixel into a single list and writes the indirect dispatch size itself. Python can queue the backward pass before that count is known. Each lane takes one splat, uses wave operations to reconstruct its place in the blend, and adds up contributions from the tile’s pixels in registers. That cuts the number of threads trying to add to the same gradient in memory.
+We take inspiration from recent work on per-splat backward pass parallelization (instead of per-pixel parallelization), see [TamingGS](https://arxiv.org/abs/2406.15643), but improve much further on its design, implementation and optimization. Every 32 splats in a tile, the forward pass saves the accumulated RGB and remaining transmittance for each active pixel, which we later use to reconstruct color and transmittance during the gradient backward pass.
 
-Once those contributions have been summed across tiles, a separate pass differentiates the projection once per contributing splat. All of its pixels saw the same projected ellipse, so we can sum their 2D gradients before mapping them back to 3D position, scale and rotation. Another pass handles spherical harmonic color and its dependence on view direction. Adam updates the parameters in 32-bit float. Its two running moments are stored in bfloat16 with stochastic rounding, which halves the storage for those moments and lets small updates accumulate. [Blend backward](shaders/rasterize/tile_binned/backward_persplat.slang) · [Projection backward](shaders/rasterize/tile_binned/projection_backward.slang) · [Adam precision](shaders/common/adam_precision.slang)
+Indirect dispatches are used to schedule work-lists for each 32-splat-group/wave, meaning in the gradient bwd pass, each lane takes one splat, uses wave-instrinsics to reconstruct its place/factor in the localized blending, and adds up contributions from the tile's pixels in registers, which cuts the number of threads trying to add to the same gradient in memory (reducing atomic contention).
 
-### Deciding where to grow
+Once those contributions have been summed across tiles, a separate pass differentiates the projection once per contributing splat. Another pass handles spherical harmonic color and its dependence on view direction. Adam updates the parameters in 32-bit float (and we use int64 atomics for better cross-platform compatibility). Its two running moments are stored in bfloat16 with stochastic rounding, which halves the storage for those moments and lets small updates accumulate. [Blend backward](https://github.com/electronicarts/perf-gs/blob/HEAD/shaders/rasterize/tile_binned/backward_persplat.slang) · [Projection backward](https://github.com/electronicarts/perf-gs/blob/HEAD/shaders/rasterize/tile_binned/projection_backward.slang) · [Adam precision](https://github.com/electronicarts/perf-gs/blob/HEAD/shaders/common/adam_precision.slang)
 
-We use structure-aware densification from SAD-GS. During growth, every tenth step samples a structure tensor built from RGB gradients in the training photo. The tensor gives us an estimate of the local image frequency. The shader projects the splat’s three axes into that view and scores each projected length against that frequency. Think of a long splat on a fence. Seen end-on it might cover a couple of pixels. From the side it might stretch across several slats. We accumulate those observations across cameras before deciding which axes to split.
+<a name="deciding-where-to-grow"></a>
 
-Every 500 steps during growth, a splat can split if over 64% of its eligible observations vote for more detail and its screen-position loss gradient is large enough. Depending on which axes need subdivision, one parent can become two, four or eight children. On the intervening 100-step growth updates, we use an AbsGS-style update driven by accumulated screen-position gradients. Small splats with a large gradient can be cloned and larger ones can split. Growth updates can also prune splats with low opacity or little accumulated blend weight. With Quality’s 4M cap, proposed splits can outnumber the free slots. We rank expansions by the parent’s average screen-position gradient divided by the proposed family size and give space to whole families, strongest axis first. [Structure scoring](shaders/densify/score_structure_aware.slang) · [Split allocation](shaders/densify/rank_families.slang)
+### Densification
+
+We use a modified version of *structure-aware densification* from [SAD-GS](https://vcai.mpi-inf.mpg.de/projects/SAD-GS/). During growth, every tenth step samples a structure tensor built from RGB gradients in the training photo, this gives us an estimate of the *local image frequency*. The shader projects the splat's three axes into that view and scores each projected length against that frequency. Think of a long splat on a fence: seen end-on it might cover a couple of pixels, but from the side it might stretch across several slats. We accumulate those observations across cameras before deciding which axes to split.
+
+Every 500 steps during growth, a splat can split if over 64% of its eligible observations vote for more detail and its screen-position loss gradient is large enough. Depending on which axes need subdivision, one parent can become two, four or eight children. On the intervening 100-step growth updates, we use an [AbsGS](https://arxiv.org/abs/2404.10484)-style update driven by accumulated screen-position gradients. Small splats with a large gradient can be cloned and larger ones can split. Growth updates can also prune splats with low opacity or little accumulated blend weight. With Quality's 4M cap, proposed splits can outnumber the free slots. We rank expansions by the parent's average screen-position gradient divided by the proposed family size and give space to whole families, strongest axis first. [Structure scoring](https://github.com/electronicarts/perf-gs/blob/HEAD/shaders/densify/score_structure_aware.slang) · [Split allocation](https://github.com/electronicarts/perf-gs/blob/HEAD/shaders/densify/rank_families.slang)
 
 </details>
 
-### Presets
+<details>
+<summary><strong>Presets</strong></summary>
 
-All four presets use the renderer and growth rules above. What changes is how many pixels and splats get work, where the photos live, and how long we keep refining. The timings and held-out PSNR below are means over the nine Mip-NeRF 360 scenes on the RTX 4090, with equal weight per scene.
+<a name="presets"></a>
+
+All four presets use the renderer and growth rules above, but we change how many pixels and splats get work, where the photos live, and how long we keep refining. The timings and held-out PSNR below are means over the nine Mip-NeRF 360 scenes on the RTX 4090, with equal weight per scene.
 
 #### Ultrafast
 
-This is what we use to try a shader idea. We keep the training photos and their structure maps on the GPU, cap growth at 1.85M splats and stop adding splats at step 1,600. The renderer still draws the full image at the selected resolution. A spatiotemporal blue-noise mask picks a quarter of the pixels for the backward pass, scales their gradients by four, and advances on the next visit to that camera. SSIM still sees the full neighborhood. Degree-2 spherical harmonics and 3,000 steps gave **10.51 s at 27.13 dB**.
+[A spatiotemporal blue-noise mask](https://developer.nvidia.com/blog/rendering-in-real-time-with-spatiotemporal-blue-noise-textures-part-1/) picks a quarter of the pixels for the backward pass, scales their gradients by four, and advances on the next visit to that camera, while SSIM still sees the full neighborhood. Degree-2 spherical harmonics and 3,000 steps gave **10.51 s at 27.13 dB**.
 
-To isolate what pixel sampling buys you, run Ultrafast twice on the same scene and seed. Set `--stbn-pixel-fraction 1` on the second run. You get full pixel supervision with the same growth cap, color model and GPU image cache.
+To isolate sparse pixel sampling advantages, run Ultrafast twice on the same scene and seed. Set `--stbn-pixel-fraction 1` on the second run. You get full pixel supervision with the same growth cap, color model and GPU image cache.
 
 #### Balanced
 
-Balanced runs for the same 3,000 steps with the same degree-2 color model, and uses every pixel for supervision. It’s the default. It allows up to 2.6M splats and grows through step 1,900. We stream the current photo from system RAM into a reusable GPU texture and compute its structure map when needed. On Bicycle alone, caching all 169 training photos takes 656 MiB of packed pixels and their structure maps add another 1,311 MiB before texture padding. Reusing those textures is how Balanced fits more splats in less VRAM than Ultrafast. It averaged **15.91 s at 27.40 dB**, with **2.81 GiB** of GPU memory at loop end versus Ultrafast’s 5.29 GiB.
+Balanced runs for the same 3,000 steps with the same degree-2 color model, and uses every pixel for supervision. *It's the default*. It allows up to 2.6M splats and grows through step 1,900. We stream the current photo from RAM into a mapped GPU texture and compute its structure map when needed. On Bicycle alone, caching all 169 training photos takes 656 MiB of packed pixels and their structure maps add another 1,311 MiB before texture padding. Reusing those textures is how Balanced fits more splats in less VRAM than Ultrafast. It averaged **15.91 s at 27.40 dB**, with **2.81 GiB** of GPU memory at loop end versus Ultrafast's 5.29 GiB.
 
 #### Quality
 
 Here we still stream the photos and use every pixel. Moving from degree-2 to degree-3 spherical harmonics gives each color channel 16 coefficients instead of nine to fit changes with viewing angle. It can grow to 4M splats through step 1,900. For the next 200 steps, we sample one pixel per 4 × 4 block and estimate how much its RGB would change if a splat disappeared. The estimate accounts for the splats in front of it and the color that would show through from behind.
 
-At step 2,100 the CPU ranks the removal costs collected on the GPU, and the GPU compacts the surviving splats. We aim to keep 75% of the live population and always keep splats we didn’t observe during scoring. The final 1,400 steps refine the survivors. That gave **22.68 s at 27.90 dB** and 2.10M final splats on average. We tried the same 75% trim on Bicycle and Kitchen with the two faster presets. SSIM and LPIPS got worse in all four runs, so we left it out of those presets.
+At step 2,100 the CPU ranks the removal costs collected on the GPU, and the GPU compacts the surviving splats. We aim to keep 75% of the live population and always keep splats we didn't observe during scoring. The final 1,400 steps refine the survivors. That gave **22.68 s at 27.90 dB** and 2.10M final splats on average. We tried the same 75% trim on Bicycle and Kitchen with the two faster presets. SSIM and LPIPS got worse in all four runs, so we left it out of those presets.
 
 #### Quality+
 
-This runs Quality’s 3,500 steps and continues with the model it just trained. The splat count stays fixed and we keep the Adam state, final learning rates and loss weights. To decide when to stop, we render up to eight fixed training views every four passes’ worth of updates (at least 100 steps). A cumulative gain of 0.05 dB in mean PSNR resets the counter. Three checks without that gain end the run. The held-out views are used for reporting. On the 4090 that bought another 0.33 dB on average, reaching **28.227 dB in 122.66 s** including the convergence checks. The four indoor scenes gained 0.69 dB on average and the five outdoor scenes gained 0.04 dB. [Preset settings and stopping rule](docs/usage.md#training) · [Benchmark results](docs/benchmarks.md#rtx-4090-presets)
+This runs Quality's 3,500 steps and continues with the model it just trained. The splat count stays fixed and we keep the Adam state, final learning rates and loss weights. To decide when to stop, we render up to eight fixed training views every four passes' worth of updates (at least 100 steps). A cumulative gain of 0.05 dB in mean PSNR resets the counter. Three checks without that gain end the run. The held-out views are used for reporting. On the 4090 that bought another 0.33 dB on average, reaching **28.227 dB in 122.66 s** including the convergence checks. The four indoor scenes gained 0.69 dB on average and the five outdoor scenes gained 0.04 dB. [Preset settings and stopping rule](https://github.com/electronicarts/perf-gs/blob/HEAD/docs/usage.md#training) · [Benchmark results](#mip-nerf-360)
+
+</details>
 
 ## Requirements
 
 - **OS and Python.** Python 3.10+. Tested on Windows 11. Linux and macOS are unverified.
 - **GPU.** Tested on the AMD Radeon RX 7900 XT (20 GB), NVIDIA RTX 4080 (16 GB) and RTX 4090 (24 GB). The rasterizer supports 32- and 64-lane waves and uses 64-bit integer buffer atomics through Vulkan (default) or Direct3D 12 (Windows).
-- **VRAM.** *Balanced* preset used 2.72-2.90 GiB at the end of headless Mip-NeRF 360 training. Peak and viewer usage can be higher. Minimum card capacity is unverified. [Memory measurements](docs/benchmarks.md#where-memory-goes)
+- **VRAM.** Balanced used 2.72–2.90 GiB at loop end on the tested NVIDIA cards and 2.76–2.95 GiB on the RX 7900 XT. Peak and viewer usage can be higher. [GPU memory measurements](docs/benchmarks.md)
 
 ## Quickstart
 Perf-gs was designed to be extremely simple to setup and install.
@@ -159,7 +173,13 @@ All headline results give equal weight to the nine Mip-NeRF 360 scenes. On the R
 
 ### Radeon RX 7900 XT
 
-Across the nine Mip-NeRF 360 scenes, headless Vulkan training averaged **16.44 s for Ultrafast** and **27.02 s for Balanced** at 3,000 steps, and **39.47 s for Quality** at 3,500 steps. Each preset used seed 42 and completed all 246 held-out views with zero sort overflows during training and evaluation.
+| Preset | Steps | Training loop | PSNR ↑ | SSIM ↑ | VGG LPIPS ↓ | Final splats | VRAM at loop end |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Ultrafast | 3,000 | 16.44 s | 27.125 dB | 0.7936 | 0.2569 | 1.43M | 5.41 GiB |
+| Balanced (default) | 3,000 | 27.02 s | 27.391 dB | 0.8143 | 0.2229 | 2.07M | 2.85 GiB |
+| **Quality** | 3,500 | 39.47 s | 27.898 dB | 0.8286 | 0.1997 | 2.10M | 4.85 GiB |
+
+Each row averages nine headless Vulkan runs at seed 42. Graphdeco scored all 246 held-out views per preset on the CPU. Training and held-out rendering recorded zero sort overflows. [AMD per-scene results](docs/AMD_Radeon_RX_7900_XT_presets.csv) · [Benchmark details](docs/benchmarks.md#radeon-rx-7900-xt)
 
 Replaying the same Stump and Kitchen models on the RX 7900 XT and RTX 4080 gave **83.86 dB** and **82.53 dB** between their rendered images. Across 51 views, 712 of 219,272,010 RGB8 channel values differed by more than one level. [Cross-vendor rendering measurements](docs/benchmarks.md#cross-vendor-rendering-checks)
 
