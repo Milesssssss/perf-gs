@@ -22,38 +22,6 @@ For GPUs with less VRAM, Balanced streams training images from system RAM. It us
 
 **9.21 s for 3,000 optimization steps.** Playback starts with the training loop. Before the clip, the hub spent 0.38 s loading Stump, 0.53 s waiting for Start, and 2.95 s preparing training. The result appeared **13.08 s after scene open**. The same loop took 8.96 s in a separate unrecorded hub run and 8.95 s in the original headless benchmark.
 
-## Mip-NeRF 360
-
-### RTX 4090
-
-| Preset | Steps | Training loop | PSNR ↑ | SSIM ↑ | VGG LPIPS ↓ | Final splats | VRAM at loop end |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| Ultrafast | 3,000 | 10.54 s | 27.12 dB | 0.7935 | 0.2564 | 1.43M | 5.29 GiB |
-| Balanced (default) | 3,000 | 15.92 s | 27.41 dB | 0.8143 | 0.2229 | 2.07M | 2.81 GiB |
-| **Quality** | 3,500 | 22.61 s | 27.89 dB | 0.8285 | 0.1996 | 2.10M | 4.81 GiB |
-
-Compared with the previous 3,000-step Quality preset on this 4090, the 3,500-step preset gained **0.11 dB** on average and improved PSNR on **all nine scenes**. Mean final splat count fell **31.5%**, from 3.07M to 2.10M. Mean loop time went from 23.24 s to 22.61 s. [Current 4090 CSV](docs/NVIDIA_GeForce_RTX_4090_presets_current.csv) · [Previous 4090 CSV](docs/NVIDIA_GeForce_RTX_4090_presets.csv)
-
-Each row averages nine scenes equally, with one headless Vulkan run per scene at seed 42. Graphdeco scored 246 held-out views per preset at quarter resolution outdoors and half resolution indoors. Timing excludes loading, initialization, evaluation and export. VRAM is process-local GPU memory sampled at loop end. [Reproduce the benchmark](docs/benchmark-rtx4090.md)
-
-Ultrafast and Balanced keep their 3,000-step settings. Applying Quality’s 75% post-growth retention produced about 25% fewer final splats on Bicycle and Kitchen. SSIM and VGG LPIPS worsened in all four runs. [Pruning comparison](docs/benchmarks.md#pruning-in-ultrafast-and-balanced)
-
-![RTX 4090 training-loop time, PSNR, SSIM and VGG LPIPS by scene for the three current presets](assets/mipnerf360-rtx4090-presets.png)
-
-<details>
-<summary>RTX 4080 results</summary>
-
-| Preset | Steps | Training loop | PSNR ↑ | SSIM ↑ | VGG LPIPS ↓ | Final splats | VRAM at loop end |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| Ultrafast | 3,000 | 17.62 s | 27.13 dB | 0.7936 | 0.2567 | 1.43M | 5.29 GiB |
-| Balanced (default) | 3,000 | 25.97 s | 27.39 dB | 0.8143 | 0.2229 | 2.07M | 2.80 GiB |
-| **Quality** | 3,500 | 32.44 s | 27.90 dB | 0.8286 | 0.1997 | 2.11M | 4.80 GiB |
-
-The updated Quality preset improved PSNR on all nine scenes and used 32% fewer final splats than the previous Quality preset on this card. [4080 CSV](docs/NVIDIA_GeForce_RTX_4080_presets.csv) · [4080 comparisons and timings](docs/benchmarks.md#current-presets)
-
-![RTX 4080 training-loop time, PSNR, SSIM and VGG LPIPS by scene for the three current presets](assets/mipnerf360-rtx4080-presets.png)
-
-</details>
 
 ## Requirements
 
@@ -110,6 +78,40 @@ For your own COLMAP scene, skip the download and replace `"datasets/tandt/truck"
 Run `.\.venv\Scripts\python.exe -m trainer.frontend.app --help` to see every flag. If you already installed PERF-GS in an active Python environment, use `python` in place of `.\.venv\Scripts\python.exe`. [Presets and training settings](docs/usage.md#training) · [Evaluation and export flags](docs/usage.md#evaluation-and-ply-export)
 
 [Hub walkthrough](docs/usage.md#interactive-hub) · [Datasets](docs/usage.md#datasets) · [First-run help](docs/usage.md#first-run-help)
+
+## Mip-NeRF 360
+
+### RTX 4090
+
+| Preset | Steps | Training loop | PSNR ↑ | SSIM ↑ | VGG LPIPS ↓ | Final splats | VRAM at loop end |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Ultrafast | 3,000 | 10.54 s | 27.12 dB | 0.7935 | 0.2564 | 1.43M | 5.29 GiB |
+| Balanced (default) | 3,000 | 15.92 s | 27.41 dB | 0.8143 | 0.2229 | 2.07M | 2.81 GiB |
+| **Quality** | 3,500 | 22.61 s | 27.89 dB | 0.8285 | 0.1996 | 2.10M | 4.81 GiB |
+
+Compared with the previous 3,000-step Quality preset on this 4090, the 3,500-step preset gained **0.11 dB** on average and improved PSNR on **all nine scenes**. Mean final splat count fell **31.5%**, from 3.07M to 2.10M. Mean loop time went from 23.24 s to 22.61 s. [Current 4090 CSV](docs/NVIDIA_GeForce_RTX_4090_presets_current.csv) · [Previous 4090 CSV](docs/NVIDIA_GeForce_RTX_4090_presets.csv)
+
+Each row averages nine scenes equally, with one headless Vulkan run per scene at seed 42. Graphdeco scored 246 held-out views per preset at quarter resolution outdoors and half resolution indoors. Timing excludes loading, initialization, evaluation and export. VRAM is process-local GPU memory sampled at loop end. [Reproduce the benchmark](docs/benchmark-rtx4090.md)
+
+Ultrafast and Balanced keep their 3,000-step settings. Applying Quality’s 75% post-growth retention produced about 25% fewer final splats on Bicycle and Kitchen. SSIM and VGG LPIPS worsened in all four runs. [Pruning comparison](docs/benchmarks.md#pruning-in-ultrafast-and-balanced)
+
+![RTX 4090 training-loop time, PSNR, SSIM and VGG LPIPS by scene for the three current presets](assets/mipnerf360-rtx4090-presets.png)
+
+<details>
+<summary>RTX 4080 results</summary>
+
+| Preset | Steps | Training loop | PSNR ↑ | SSIM ↑ | VGG LPIPS ↓ | Final splats | VRAM at loop end |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Ultrafast | 3,000 | 17.62 s | 27.13 dB | 0.7936 | 0.2567 | 1.43M | 5.29 GiB |
+| Balanced (default) | 3,000 | 25.97 s | 27.39 dB | 0.8143 | 0.2229 | 2.07M | 2.80 GiB |
+| **Quality** | 3,500 | 32.44 s | 27.90 dB | 0.8286 | 0.1997 | 2.11M | 4.80 GiB |
+
+The updated Quality preset improved PSNR on all nine scenes and used 32% fewer final splats than the previous Quality preset on this card. [4080 CSV](docs/NVIDIA_GeForce_RTX_4080_presets.csv) · [4080 comparisons and timings](docs/benchmarks.md#current-presets)
+
+![RTX 4080 training-loop time, PSNR, SSIM and VGG LPIPS by scene for the three current presets](assets/mipnerf360-rtx4080-presets.png)
+
+</details>
+
 
 ## Reconstructions
 
