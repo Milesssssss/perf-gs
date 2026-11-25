@@ -1,5 +1,5 @@
-Trainer commit: da6b8478000cbe93f9cb092c680e06d0a3155a76
-Trainer source files SHA-256: 5a93a3185643de475040b9b6e7ca57a891c61699def0dd697b4399741fb21c17
+Trainer commit: d69f4f2f355f96d9a69472b8d62b59299f33a37b
+Trainer source files SHA-256: 1e76c2ccbdf53b2afcd6f28224a8e871a41c2ef8d58161574cd947e9d07cc41a
 System: LENOVO 30HJSAME00
 CPU: AMD Ryzen Threadripper PRO 9975WX 32-Cores      (32 cores)
 OS: Microsoft Windows 11 Enterprise 10.0.26300

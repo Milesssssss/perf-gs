@@ -14,7 +14,13 @@
 
 #include "common/execution.slang"
 // Pixel-in-tile index is row-major with row stride TILE_WIDTH (tiles may be non-square).
-static const uint NUM_WARPS   = TILE_AREA / 32u;       // buckets/WG (assumes wave=32)
+static const uint NUM_WARPS = TILE_AREA / RASTER_BUCKET_SIZE;  // 32-splat buckets per group
+
+// A native wave may hold two independent buckets. Shuffle sources are native lane indices.
+uint bucketWaveLane(uint bucket_lane)
+{
+    return (WaveGetLaneIndex() & ~(RASTER_BUCKET_SIZE - 1u)) + bucket_lane;
+}
 
 static const float ALPHA_MAX = 0.99;
 static const float ALPHA_MIN_TRACK = 1.0 / 255.0;
@@ -22,6 +28,33 @@ static const float ALPHA_MIN_TRACK = 1.0 / 255.0;
 // Equivalent gradients: 0 = fused affine-map scan (blendPrefixExclusive), 1 = separate wave scans for A/B.
 #ifndef BACKWARD_BLEND_SCAN_MODE
 #define BACKWARD_BLEND_SCAN_MODE 0
+#endif
+
+#if BACKWARD_BLEND_SCAN_MODE != 0
+// On a 64-lane wave make the lower bucket contribute the identity to the upper bucket's prefix.
+float bucketPrefixProduct(float x)
+{
+    float prefix = WavePrefixProduct(x);
+    if (WaveGetLaneCount() > RASTER_BUCKET_SIZE)
+    {
+        bool upper = WaveGetLaneIndex() >= RASTER_BUCKET_SIZE;
+        float upper_prefix = WavePrefixProduct(upper ? x : 1.0);
+        return upper ? upper_prefix : prefix;
+    }
+    return prefix;
+}
+
+float3 bucketPrefixSum(float3 x)
+{
+    float3 prefix = WavePrefixSum(x);
+    if (WaveGetLaneCount() > RASTER_BUCKET_SIZE)
+    {
+        bool upper = WaveGetLaneIndex() >= RASTER_BUCKET_SIZE;
+        float3 upper_prefix = WavePrefixSum(upper ? x : float3(0.0));
+        return upper ? upper_prefix : prefix;
+    }
+    return prefix;
+}
 #endif
 
 // Exclusive bucket scan of the affine maps T -> T * T_step, S -> S + dLdC_weight * T, where
@@ -38,7 +71,7 @@ void blendPrefixExclusive<let N : int>(vector<float, N> T_step, vector<float, N>
     for (uint d = 1u; d < RASTER_BUCKET_SIZE; d <<= 1u)
     {
         // Clamped source is unused when lane < d; all 32 lanes are active (warp-uniform region).
-        uint src = (lane >= d) ? (lane - d) : 0u;
+        uint src = bucketWaveLane((lane >= d) ? (lane - d) : 0u);
         vector<float, N> a_lo = WaveReadLaneAt(a, src);
         vector<float, N> b_lo = WaveReadLaneAt(b, src);
         if (lane >= d)
@@ -54,7 +87,7 @@ void blendPrefixExclusive<let N : int>(vector<float, N> T_step, vector<float, N>
     dLdC_C_in_front_prefix = b - T_prefix * dLdC_weight;
 #else
     // Hardened extinction can drive T_step toward 0, so shift by a lane instead of dividing.
-    uint prev = (lane >= 1u) ? (lane - 1u) : 0u;
+    uint prev = bucketWaveLane((lane >= 1u) ? (lane - 1u) : 0u);
     vector<float, N> a_prev = WaveReadLaneAt(a, prev);
     vector<float, N> b_prev = WaveReadLaneAt(b, prev);
     T_prefix        = (lane >= 1u) ? a_prev : vector<float, N>(1.0);
@@ -227,8 +260,8 @@ void backwardRasterizePerSplat(
     GroupMemoryBarrierWithGroupSync();
     uint max_processed = gs_max_processed;
 
-    uint lane = WaveGetLaneIndex();          // splat within the bucket [0,32)
-    uint warp_idx = tid / WaveGetLaneCount(); // which bucket (offset from base)
+    uint lane = WaveGetLaneIndex() % RASTER_BUCKET_SIZE;
+    uint warp_idx = tid / RASTER_BUCKET_SIZE;
     // Truncate to the buckets some pixel actually reached (vs. tile_count).
     uint num_buckets = (max_processed + RASTER_BUCKET_SIZE - 1u) / RASTER_BUCKET_SIZE;
 
@@ -358,15 +391,12 @@ void backwardRasterizePerSplat(
             // dot(dL_dC, C_in_front_excl(i)) = dot(dL_dC, C_checkpoint) + prefixsum.
             float dLdC_C_in_front = dot(dL_dC, C_checkpoint) + T_checkpoint * dLdC_C_in_front_prefix;   // exclusive
 #else
-            float T_prefix = WavePrefixProduct(T_step);        // exclusive
+            float T_prefix = bucketPrefixProduct(T_step);
             float T_i     = T_checkpoint * T_prefix;
             float alpha_T = comp.weight(alpha) * T_i;          // this splat's blend weight
             float3 contrib = c_i * alpha_T;                    // 0 when masked
             // C_in_front(i) = C_checkpoint + sum of contrib for lower lanes.
-            float3 C_in_front = C_checkpoint + float3(
-                WavePrefixSum(contrib.x),
-                WavePrefixSum(contrib.y),
-                WavePrefixSum(contrib.z));
+            float3 C_in_front = C_checkpoint + bucketPrefixSum(contrib);
 #endif
 
             if (contributes)
@@ -506,12 +536,15 @@ void backwardRasterizePerBucket(
     uniform float extinction_hardness)
 {
     uint tid = gtid.x;
-    uint lane = WaveGetLaneIndex();            // splat within the bucket [0,32)
-    uint warp_idx = tid / WaveGetLaneCount();  // which warp-bucket in the WG
+    uint lane = WaveGetLaneIndex() % RASTER_BUCKET_SIZE;
+    uint warp_idx = tid / RASTER_BUCKET_SIZE;
 
     // Tail warps (slot >= live_total) must still reach the staging barrier, so they return after it.
-    uint slot = gid.x * NUM_WARPS + warp_idx;
     uint live_total = live_bucket_total[0];
+    uint group = gid.x + gid.y * LINEAR_DISPATCH_WIDTH;
+    // Skip whole padded groups before the staging barrier; a partial group must still reach it.
+    if (live_total == 0u || group > (live_total - 1u) / NUM_WARPS) return;
+    uint slot = group * NUM_WARPS + warp_idx;
     bool bucket_valid = (slot < live_total);
 
     uint2 frame_dim_px = uint2(camera[0].image_size);
@@ -662,7 +695,8 @@ void backwardRasterizePerBucket(
             C_total[j] = output_image[pixel[j]];
             uint2 local = pixel[j] - origin;
             uint index = local.y * TILE_WIDTH + local.x;
-            float gain = WaveReadLaneAt(index < RASTER_BUCKET_SIZE ? gainPair.x : gainPair.y, index % RASTER_BUCKET_SIZE);
+            float gain = WaveReadLaneAt(index < RASTER_BUCKET_SIZE ? gainPair.x : gainPair.y,
+                                        bucketWaveLane(index % RASTER_BUCKET_SIZE));
             dLdC4[j].rgb *= gain;
             C_total[j].rgb /= gain;  // Checkpoints and splat colors are in scene space.
             dLdC_c[j] = dot(dLdC4[j].rgb, c_i);
@@ -692,7 +726,7 @@ void backwardRasterizePerBucket(
         PixelStepVector T_prefix;
         [unroll]
         for (uint j = 0u; j < PIXELS_PER_STEP; ++j)
-            T_prefix[j] = WavePrefixProduct(T_step[j]);
+            T_prefix[j] = bucketPrefixProduct(T_step[j]);
 #endif
 
         [unroll]
@@ -705,10 +739,7 @@ void backwardRasterizePerBucket(
             float dLdC_C_in_front = dLdC_C_checkpoint[j] + T_checkpoint[j] * dLdC_C_in_front_prefix[j];
 #else
             float3 contrib = c_i * alpha_T;
-            float3 C_in_front = C_checkpoint[j] + float3(
-                WavePrefixSum(contrib.x),
-                WavePrefixSum(contrib.y),
-                WavePrefixSum(contrib.z)); // WavePrefixSum is exclusive
+            float3 C_in_front = C_checkpoint[j] + bucketPrefixSum(contrib);
 #endif
 
             if (contributes[j])

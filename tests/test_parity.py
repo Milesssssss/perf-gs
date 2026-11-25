@@ -9,17 +9,16 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
-import slangpy as spy
-
-from trainer.data.dataset import simple_camera
-from trainer.backend.compute.device import create_device
 from _pipeline_testkit import TestPipeline
+
+from trainer.backend.compute.device import create_device
+from trainer.data.dataset import simple_camera
 
 
 def _render_scene(backend: str) -> np.ndarray:
     try:
         device = create_device(backend=backend)
-    except Exception as exc:
+    except RuntimeError as exc:
         pytest.skip(f"backend {backend!r} unavailable: {exc}")
 
     W, H = 128, 128
@@ -64,12 +63,11 @@ def test_vulkan_d3d12_parity() -> None:
     np.testing.assert_allclose(vk, dx, atol=1e-3, rtol=1e-3)
 
 
-def _render_dense(backend: str, warp_forward: bool) -> np.ndarray:
-    """Render a multi-bucket scene (>32 splats per tile) with either the
-    thread-per-pixel forward or the warp-per-pixel forward."""
+def _render_dense(backend: str) -> np.ndarray:
+    """Render a multi-bucket scene (>32 splats per tile)."""
     try:
         device = create_device(backend=backend)
-    except Exception as exc:
+    except RuntimeError as exc:
         pytest.skip(f"backend {backend!r} unavailable: {exc}")
 
     W, H = 128, 128
@@ -88,7 +86,6 @@ def _render_dense(backend: str, warp_forward: bool) -> np.ndarray:
     colors = rng.normal(0.0, 3.0, size=(n, 3)).astype(np.float32)
 
     pipeline = TestPipeline(device=device, width=W, height=H, max_splats=n)
-    pipeline.use_warp_per_pixel_forward = warp_forward
     pipeline.set_primitive_from_numpy(
         means=means, log_scales=log_scales, rot_quats=rot,
         opacities=opacities, color_logits=colors,
@@ -102,12 +99,8 @@ def _render_dense(backend: str, warp_forward: bool) -> np.ndarray:
     return pipeline.read_output_image()
 
 
-@pytest.mark.parametrize("backend", ["vulkan", "d3d12"])
-def test_warp_per_pixel_forward_parity(backend: str) -> None:
-    """The warp-per-pixel forward must match the thread-per-pixel forward.
-    Only difference is per-bucket vs per-splat early break, which touches
-    splats with T < T_EARLY_BREAK (1e-4) -> sub-LSB image diff."""
-    base = _render_dense(backend, warp_forward=False)
-    warp = _render_dense(backend, warp_forward=True)
-    np.testing.assert_allclose(warp, base, atol=2e-3, rtol=0.0)
-
+def test_dense_vulkan_d3d12_parity() -> None:
+    vk = _render_dense("vulkan")
+    dx = _render_dense("d3d12")
+    assert np.any(vk[..., 3] > 0.9)
+    np.testing.assert_allclose(vk, dx, atol=2e-3, rtol=0.0)

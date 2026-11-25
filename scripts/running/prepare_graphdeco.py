@@ -15,6 +15,7 @@ from trainer.data.colmap import _find_sparse_dir, _parse_images, _parse_images_b
 
 def _model_renderer(model, args, image_dir, factor, capacity, expected_count=None):
     import numpy as np
+
     from trainer.backend.render.pipeline import TrainingPipeline
     from trainer.config.config import AppearanceConfig, RasterConfig
     from trainer.data.colmap import load_colmap
@@ -37,7 +38,9 @@ def _model_renderer(model, args, image_dir, factor, capacity, expected_count=Non
     width, height = cameras[0].camera.image_size
     raster = RasterConfig(mip_enabled=True, kernel_size=state["mip_kernel_size"],
                           z_near_cull=args.z_near_cull, cluster_cull=args.cluster_cull)
-    pipe = TrainingPipeline(create_training_device(args), width, height, raster_config=raster,
+    device = create_training_device(args)
+    print(f"Replaying PLY on {device.info.adapter_name} ({device.info.api_name})")
+    pipe = TrainingPipeline(device, width, height, raster_config=raster,
                             appearance_config=AppearanceConfig(sh_degree=args.sh_degree),
                             max_splats=len(state["means"]), max_sort_pairs=capacity)
     pipe.load_snapshot(**state, reset_optimizer=False)

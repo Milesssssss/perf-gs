@@ -1,0 +1,14 @@
+Trainer commit: 676c8e9e3e26db1984ebcb8fe9031d11b57285c9
+Trainer source files SHA-256: b2683e0b71271eab054f73fc256de7228283a681eb89c529fc58c6f5a7439999
+System: LENOVO 30E1SJ3300
+CPU: AMD Ryzen Threadripper PRO 5975WX 32-Cores      (32 cores)
+OS: Microsoft Windows 11 Enterprise 10.0.26200
+Visible system RAM (KiB): 134059620
+GPU: AMD Radeon RX 7900 XT
+Windows display driver: 32.0.32029.2010
+Dedicated video memory (MiB): 20464
+Python 3.11.9 (tags/v3.11.9:de54cf5, Apr  2 2024, 10:12:12) [MSC v.1938 64 bit (AMD64)]
+slangpy 0.42.0
+torch 2.13.0+cpu
+torchvision 0.28.0+cpu
+Graphdeco scoring device: CPU

@@ -19,19 +19,12 @@ import pytest
 from _pipeline_testkit import TestPipeline
 from trainer.config.config import DensifyConfig, StructureConfig
 from trainer.data.dataset import simple_camera
-from trainer.backend.compute.device import create_device
-
-BACKENDS = ["vulkan", "d3d12"]
 
 
-def _setup(backend: str, max_splats: int = 256, sh_degree: int = 0) -> TestPipeline:
+def _setup(gpu_device, max_splats: int = 256, sh_degree: int = 0) -> TestPipeline:
     from trainer.config.config import AppearanceConfig
 
-    try:
-        device = create_device(backend=backend)
-    except Exception as exc:
-        pytest.skip(f"backend {backend!r} unavailable: {exc}")
-    return TestPipeline(device=device, width=64, height=64, max_splats=max_splats,
+    return TestPipeline(device=gpu_device, width=64, height=64, max_splats=max_splats,
                         max_sort_pairs=max(1024, max_splats * 16),
                         appearance_config=AppearanceConfig(sh_degree=sh_degree))
 
@@ -100,11 +93,10 @@ def _one_gaussian(p: TestPipeline, scale=0.1, opacity=0.9) -> None:
     )
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_anisotropic_split_child_count(backend: str) -> None:
+def test_anisotropic_split_child_count(gpu_device) -> None:
     """A gaussian that violates on x (eta_max=4) and y (eta_max=2) only should
     grid-split into ceil(sqrt(4)) * ceil(sqrt(2)) * 1 = 2 * 2 * 1 = 4 children."""
-    p = _setup(backend)
+    p = _setup(gpu_device)
     _one_gaussian(p)
     # high_ratio = 10/10 = 1.0 > tau_split, gradient high. Per-axis eta_max
     # drives the factor: x=4, y=2, z clean.
@@ -123,12 +115,11 @@ def test_anisotropic_split_child_count(backend: str) -> None:
     assert _count(p) == 4, f"expected 4 grid children, got {_count(p)}"
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_small_gaussian_clones_not_splits(backend: str) -> None:
+def test_small_gaussian_clones_not_splits(gpu_device) -> None:
     """A triggered SMALL gaussian (max scale <= dense_scale) should CLONE
     (exact duplicate, +1) rather than anisotropically split — SADGS routes the
     same eta trigger to clone-if-small / split-if-large."""
-    p = _setup(backend)
+    p = _setup(gpu_device)
     _one_gaussian(p, scale=0.1)  # world-space max scale = 0.1
     _set_eta(p, 0, n_total=10, n_high=10, n_low=0,
              eta_max=(4.0, 2.0, 0.05), grad_high=True)
@@ -150,11 +141,10 @@ def test_small_gaussian_clones_not_splits(backend: str) -> None:
     assert np.allclose(g[0], g[1]), "clone is not an exact duplicate of the parent"
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_no_split_when_ratio_below_threshold(backend: str) -> None:
+def test_no_split_when_ratio_below_threshold(gpu_device) -> None:
     """high_ratio = 3/10 = 0.3 < tau_split=0.8 -> no split, count unchanged
     (even though eta_max=9 and gradient is high)."""
-    p = _setup(backend)
+    p = _setup(gpu_device)
     _one_gaussian(p)
     _set_eta(p, 0, n_total=10, n_high=3, n_low=0, eta_max=(9.0, 0.0, 0.0), grad_high=True)
 
@@ -166,11 +156,10 @@ def test_no_split_when_ratio_below_threshold(backend: str) -> None:
     assert _count(p) == 1
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_no_split_when_gradient_low(backend: str) -> None:
+def test_no_split_when_gradient_low(gpu_device) -> None:
     """high_ratio passes (10/10) but is_grad_high is False (well-placed large
     gaussian) -> no split. This is the SADGS gradient AND-gate."""
-    p = _setup(backend)
+    p = _setup(gpu_device)
     _one_gaussian(p)
     _set_eta(p, 0, n_total=10, n_high=10, n_low=0, eta_max=(4.0, 0.0, 0.0), grad_high=False)
 
@@ -182,10 +171,9 @@ def test_no_split_when_gradient_low(backend: str) -> None:
     assert _count(p) == 1
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_prune_low_ratio(backend: str) -> None:
+def test_prune_low_ratio(gpu_device) -> None:
     """low_ratio = 10/10 = 1.0 > tau_prune -> prune (over-resolved)."""
-    p = _setup(backend)
+    p = _setup(gpu_device)
     _one_gaussian(p)
     _set_eta(p, 0, n_total=10, n_high=0, n_low=10, eta_max=(0.05, 0.05, 0.05))
 
@@ -197,10 +185,9 @@ def test_prune_low_ratio(backend: str) -> None:
     assert _count(p) == 0
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_split_factor_capped(backend: str) -> None:
+def test_split_factor_capped(gpu_device) -> None:
     """eta_max=100 with cap 3 -> n_k clamped to 3, not ceil(sqrt(100))=10."""
-    p = _setup(backend)
+    p = _setup(gpu_device)
     _one_gaussian(p)
     _set_eta(p, 0, n_total=10, n_high=10, n_low=0,
              eta_max=(100.0, 0.0, 0.0), grad_high=True)
@@ -211,13 +198,12 @@ def test_split_factor_capped(backend: str) -> None:
     assert _count(p) == 3
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
 @pytest.mark.parametrize("sh_degree", [0, 3])
-def test_full_grid_parallel_children_and_fresh_moments(backend, sh_degree) -> None:
+def test_full_grid_parallel_children_and_fresh_moments(gpu_device, sh_degree) -> None:
     """512 children span several cooperative-lane iterations; all inherit SH."""
     from trainer.common.sh import unpack_features_rest
 
-    p = _setup(backend, max_splats=600, sh_degree=sh_degree)
+    p = _setup(gpu_device, max_splats=600, sh_degree=sh_degree)
     _one_gaussian(p, scale=0.3, opacity=0.7)
     _set_eta(p, 0, n_total=10, n_high=10, eta_max=(64, 64, 64))
     if sh_degree:
@@ -244,13 +230,12 @@ def test_full_grid_parallel_children_and_fresh_moments(backend, sh_degree) -> No
         assert np.all(moments[:, :512] == 0)
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
 @pytest.mark.parametrize("sh_degree", [0, 3])
 @pytest.mark.parametrize("ranked", [False, True])
 def test_overbudget_structure_split(
-    backend, sh_degree, ranked, monkeypatch, capsys,
+    gpu_device, sh_degree, ranked, monkeypatch, capsys,
 ) -> None:
-    p = _setup(backend, max_splats=7, sh_degree=sh_degree)
+    p = _setup(gpu_device, max_splats=7, sh_degree=sh_degree)
     _one_gaussian(p, opacity=0.7)
     _set_eta(p, 0, n_total=10, n_high=10, eta_max=(64, 64, 64))
     monkeypatch.setattr(np, "percentile", lambda *a, **k: pytest.fail(
@@ -268,11 +253,10 @@ def test_overbudget_structure_split(
         assert "overflow children DROPPED" in capsys.readouterr().out
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
 @pytest.mark.parametrize("sh_degree", [0, 3])
 @pytest.mark.parametrize("mode", ["structure", "simple"])
-def test_full_budget_preserves_unsplittable_parent(backend, sh_degree, mode) -> None:
-    p = _setup(backend, max_splats=1, sh_degree=sh_degree)
+def test_full_budget_preserves_unsplittable_parent(gpu_device, sh_degree, mode) -> None:
+    p = _setup(gpu_device, max_splats=1, sh_degree=sh_degree)
     _one_gaussian(p, scale=0.3, opacity=0.7)
     _set_eta(p, 0, n_total=10, n_high=10, eta_max=(64, 64, 64))
     before = _read_gaussians(p, 1).copy()
@@ -287,9 +271,8 @@ def test_full_budget_preserves_unsplittable_parent(backend, sh_degree, mode) -> 
     np.testing.assert_array_equal(_read_gaussians(p, 1), before)
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_clones_count_toward_requested_tail_growth(backend, capsys) -> None:
-    p = _setup(backend, max_splats=1)
+def test_clones_count_toward_requested_tail_growth(gpu_device, capsys) -> None:
+    p = _setup(gpu_device, max_splats=1)
     _one_gaussian(p)
     _set_eta(p, 0, n_total=10, n_high=10, eta_max=(4, 2, 0.05))
     stats = p.structure_densifier.densify(StructureConfig(dense_scale=0.2))
@@ -298,11 +281,10 @@ def test_clones_count_toward_requested_tail_growth(backend, capsys) -> None:
     assert "requested 1 new children" in capsys.readouterr().out
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_candidate_compaction_partial_wave_and_reuse(backend) -> None:
+def test_candidate_compaction_partial_wave_and_reuse(gpu_device) -> None:
     """Repeated ticks consume a 257-parent list, including a partial final wave."""
     n = 257
-    p = _setup(backend, max_splats=600)
+    p = _setup(gpu_device, max_splats=600)
     p.set_primitive_from_numpy(
         means=np.column_stack([np.arange(n) * 0.01, np.zeros(n), np.full(n, 3)]).astype(np.float32),
         log_scales=np.log(np.full((n, 3), 0.1, np.float32)),
@@ -327,8 +309,7 @@ def test_candidate_compaction_partial_wave_and_reuse(backend) -> None:
     assert int(b.structure.children_sum.to_numpy()[0]) == 0
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_full_controller_tick_includes_mip_timing_and_queue(backend) -> None:
+def test_full_controller_tick_includes_mip_timing_and_queue(gpu_device) -> None:
     """Exercise scratch reuse -> Morton -> Mip on a real production tick."""
     from types import SimpleNamespace
 
@@ -339,7 +320,7 @@ def test_full_controller_tick_includes_mip_timing_and_queue(backend) -> None:
     from trainer.frontend.queue_limiter import QueueLimiter
     from trainer.frontend.schedule import ExtinctionHardnessSchedule
 
-    p = _setup(backend, max_splats=600, sh_degree=3)
+    p = _setup(gpu_device, max_splats=600, sh_degree=3)
     _one_gaussian(p, scale=0.3, opacity=0.7)
     _set_eta(p, 0, n_total=10, n_high=10, eta_max=(64, 64, 64))
     camera = simple_camera(width=64, height=64, eye=(0, 0, 0), target=(0, 0, 3))
@@ -382,8 +363,7 @@ def _quat_to_matrix(q: np.ndarray) -> np.ndarray:
     ], dtype=np.float64)
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_anisotropic_split_preserves_covariance(backend: str) -> None:
+def test_anisotropic_split_preserves_covariance(gpu_device) -> None:
     """SADGS split geometry invariant: for ks_scale_power == 1, the equal-weight
     mixture of the grid children must reproduce the PARENT's 3D covariance
     exactly (SADGS gaussian_model.py Eq. 8-9; the sqrt(12) child spacing is
@@ -397,7 +377,7 @@ def test_anisotropic_split_preserves_covariance(backend: str) -> None:
     Uses a non-trivial rotation, anisotropic scale, and UNEQUAL per-axis split
     factors n = (3, 2, 1) so the test exercises multi-factor grids and the
     n_k == 1 no-op axis, not just the isotropic k=2 case."""
-    p = _setup(backend)
+    p = _setup(gpu_device)
 
     # Anisotropic parent scale + a real (non-identity) rotation.
     scale = np.array([0.30, 0.20, 0.12], dtype=np.float64)
@@ -461,8 +441,7 @@ def test_anisotropic_split_preserves_covariance(backend: str) -> None:
         f"grid is not centered on the parent: mean-of-means = {mu_bar}")
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_scoring_kernel_flags_large_gaussian(backend: str) -> None:
+def test_scoring_kernel_flags_large_gaussian(gpu_device) -> None:
     """The scoring kernel itself: a LARGE gaussian against a high-frequency
     structure field (large lambda1) yields eta > 1 (splits), while a TINY
     gaussian against the same field does not."""
@@ -506,7 +485,7 @@ def test_scoring_kernel_flags_large_gaussian(backend: str) -> None:
         p.buffers.densification.grad_mean_2d_mag.copy_from_numpy(mag)
 
     # Large gaussian -> big projected extent -> eta > 1 -> should split.
-    p_big = _setup(backend)
+    p_big = _setup(gpu_device)
     _one_gaussian(p_big, scale=0.5)
     _score(p_big)
     _set_grad_high(p_big)
@@ -515,7 +494,7 @@ def test_scoring_kernel_flags_large_gaussian(backend: str) -> None:
     actions_big = _count_actions(p_big, pre_big)
 
     # Tiny gaussian -> small extent -> eta < 1 -> no split.
-    p_small = _setup(backend)
+    p_small = _setup(gpu_device)
     _one_gaussian(p_small, scale=0.001)
     _score(p_small)
     _set_grad_high(p_small)
@@ -549,8 +528,7 @@ def _read_eta(p: TestPipeline, n: int) -> dict[str, np.ndarray]:
     }
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_eta_carried_through_filler_densify(backend: str) -> None:
+def test_eta_carried_through_filler_densify(gpu_device) -> None:
     """SAD-GS eta persistence (#2): a FILLER (AbsGS) densify with carry_eta=True
     must permute the slot-indexed eta accumulators through the same
     valid_mask/scan as the gaussians, carrying the multiview window of surviving
@@ -569,7 +547,7 @@ def test_eta_carried_through_filler_densify(backend: str) -> None:
     with a UNIQUE eta signature, and after the densify match each surviving
     gaussian back to its parent by POSITION (the gaussian scatter is co-indexed
     with the eta scatter, so a correct implementation keeps them aligned)."""
-    p = _setup(backend, max_splats=64)
+    p = _setup(gpu_device, max_splats=64)
 
     # 4 parents at distinct x-positions. Scale: 3 small (0.01) so KEEP/CLONE/
     # PRUNE stay in the clone-size band; 1 large (0.30) so the SPLIT candidate
@@ -678,13 +656,12 @@ def test_eta_carried_through_filler_densify(backend: str) -> None:
         f"total carried eta_n_total should be 11+22=33, got {int(eta['n_total'].sum())}")
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_eta_carried_through_morton_sort(backend: str) -> None:
+def test_eta_carried_through_morton_sort(gpu_device) -> None:
     """mortonScatterEta: a Morton re-sort with carry_eta=True permutes the eta
     accumulators by the SAME sorted_values as the gaussians (pure permutation,
     no zeroing). After the sort, each gaussian must still be paired with its
     original eta signature — verified by matching on position."""
-    p = _setup(backend, max_splats=64)
+    p = _setup(gpu_device, max_splats=64)
 
     # Place 5 gaussians deliberately OUT of Morton order (descending x) so the
     # sort actually permutes them; tag each with a position-keyed eta.

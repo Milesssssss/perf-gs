@@ -1,0 +1,124 @@
+{
+  "trainer_commit": "77b3ceee46397631f401c640782cca4d84a86d9f",
+  "preset": "ultrafast",
+  "gpu": "NVIDIA GeForce RTX 4090",
+  "backend": "vulkan",
+  "seed": 42,
+  "training_steps": 3000,
+  "videos": [
+    {
+      "scene": "stump",
+      "video": "stump.mp4",
+      "video_sha256": "1d87712cfc1570578dc2b74dfae8a8b27600fb4dc5e17cc4119d10c41f38605a",
+      "training_run": "project_realtime_stump_77b3cee",
+      "image_downsample": 4,
+      "training_loop_seconds": 10.1537,
+      "final_splats": 1593548,
+      "exported_ply_sha256": "f6c55616345400e5de0b43ff5344e7cfbbb4bca1e2d5bcc7b70cc31c93c2bd93",
+      "camera": {
+        "path": "Stump 42-degree orbit with the original radial drift, crown tracking and 0.3 s easing",
+        "source_cameras": [
+          "_DSC9213.JPG"
+        ],
+        "frames": 174,
+        "fps": 30,
+        "duration_seconds": 5.8,
+        "orbit_degrees": 42.0,
+        "orbit_seconds": 5.8,
+        "scene_open_to_result_seconds": 13.9006
+      },
+      "playback": {
+        "training_start_seconds": 0,
+        "training_end_seconds": 10.1537,
+        "tour_start_seconds": 10.7333,
+        "duration_seconds": 16.5333,
+        "training_playback_rate": 1,
+        "poster_seconds": 4.3667
+      }
+    },
+    {
+      "scene": "bicycle",
+      "video": "bicycle-ultrafast.mp4",
+      "video_sha256": "df544e5a9b648a55c81a2619390d35f5020c08f5fb89bc68e1b7efc20b43f508",
+      "training_run": "project_realtime_bicycle_77b3cee",
+      "image_downsample": 4,
+      "training_loop_seconds": 8.9544,
+      "final_splats": 1618994,
+      "exported_ply_sha256": "38a5868e408c77c0a870001e6d8834bfe0297c3f32ac1617279e5b526d2dd348",
+      "camera": {
+        "path": "Smooth interpolation of COLMAP camera centers and orientations with captured Hub projection",
+        "source_cameras": [
+          "_DSC8679.JPG",
+          "_DSC8721.JPG"
+        ],
+        "frames": 180,
+        "fps": 30,
+        "duration_seconds": 6.0
+      },
+      "playback": {
+        "training_start_seconds": 0,
+        "training_end_seconds": 8.9544,
+        "tour_start_seconds": 9.6333,
+        "duration_seconds": 15.6333,
+        "training_playback_rate": 1,
+        "poster_seconds": 4.0667
+      }
+    },
+    {
+      "scene": "bonsai",
+      "video": "bonsai-ultrafast.mp4",
+      "video_sha256": "ddfa08cf8d399f0bc5d856043d1ec933f699540c461e5521b68d3cef83f48cb0",
+      "training_run": "project_realtime_bonsai_77b3cee",
+      "image_downsample": 2,
+      "training_loop_seconds": 13.3103,
+      "final_splats": 1321239,
+      "exported_ply_sha256": "013d83bef898e9c94b344272a7ddf56bbe8b4ef0fd747f3e887e0f4b9a202fa5",
+      "camera": {
+        "path": "Smooth interpolation of COLMAP camera centers and orientations with captured Hub projection",
+        "source_cameras": [
+          "DSCF5565.JPG",
+          "DSCF5813.JPG"
+        ],
+        "frames": 180,
+        "fps": 30,
+        "duration_seconds": 6.0
+      },
+      "playback": {
+        "training_start_seconds": 0,
+        "training_end_seconds": 13.3103,
+        "tour_start_seconds": 13.9333,
+        "duration_seconds": 19.9333,
+        "training_playback_rate": 1,
+        "poster_seconds": 5.9667
+      }
+    },
+    {
+      "scene": "garden",
+      "video": "garden-ultrafast.mp4",
+      "video_sha256": "d6da343eda13bc0ba0ccd932d82227d31692d65f23b99ee86010276128199bbc",
+      "training_run": "project_realtime_garden_77b3cee",
+      "image_downsample": 4,
+      "training_loop_seconds": 11.4915,
+      "final_splats": 1590390,
+      "exported_ply_sha256": "109c6409ebd4fc18c33dc1125b2e5be183724de926a49f6ce1d38f46a33de018",
+      "camera": {
+        "path": "Smooth interpolation of COLMAP camera centers and orientations with captured Hub projection",
+        "source_cameras": [
+          "DSC07956.JPG",
+          "DSC07992.JPG"
+        ],
+        "frames": 180,
+        "fps": 30,
+        "duration_seconds": 6.0
+      },
+      "playback": {
+        "training_start_seconds": 0,
+        "training_end_seconds": 11.4915,
+        "tour_start_seconds": 12.1667,
+        "duration_seconds": 18.1667,
+        "training_playback_rate": 1,
+        "poster_seconds": 5.1667
+      }
+    }
+  ]
+}

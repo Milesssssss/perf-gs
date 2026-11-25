@@ -3,12 +3,12 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="theme-color" content="#f9f9f5">
+  <meta name="theme-color" content="#ffffff">
   <meta name="description" content="PERF-GS trains 3D Gaussian Splatting scenes in seconds. Explore real-time training, held-out reconstructions, and measured RTX 4090 and 4080 results.">
   <meta property="og:title" content="PERF-GS · 3D Gaussian Splatting in seconds">
   <meta property="og:description" content="Run COLMAP on your photos in the PERF-GS hub or open an existing scene, then train and explore a 3D Gaussian Splatting model.">
   <meta property="og:type" content="website">
-  <title>PERF-GS · 3D Gaussian Splatting in seconds</title>
+  <title>PERF-GS · 3D Gaussian Splatting in 10 seconds</title>
   <link rel="stylesheet" href="assets/project-page/site.css">
   <script src="assets/project-page/site.js" defer></script>
 </head>
@@ -16,103 +16,230 @@
   <a class="skip" href="#main">Skip to content</a>
   <header class="site-header">
     <nav class="shell nav" aria-label="Project navigation">
-      <a class="brand" href="#main" aria-label="PERF-GS home"><span class="mark" aria-hidden="true"><i></i><i></i><i></i></span>PERF-GS</a>
-      <div class="nav-links"><a href="#reconstructions">Gallery</a><a href="#motion">Videos</a><a href="#results">Results</a><a href="#citation">Citation</a></div>
+      <a class="brand" href="#main" aria-label="PERF-GS home">PERF-GS</a>
+      <div class="nav-links"><a href="#reconstructions">Gallery</a><a href="#training">Videos</a><a href="#results">Results</a><a href="#citation">Citation</a></div>
     </nav>
   </header>
   <main id="main">
     <section class="shell introduction" aria-labelledby="title">
       <h1 id="title">PERF-GS</h1>
-      <p class="subtitle">3D Gaussian Splatting. Trained in seconds.</p>
+      <p class="subtitle">3D Gaussian Splatting in 10 seconds</p>
+      <p class="subtitle"><small>Efficient, extensible, cross-vendor, dependency-free & low VRAM differentiable training</small></p>
       <p class="byline"><a href="https://stefanoscolapasta.github.io/nozbufferallowed/about.html">Stefano Scolari</a><span aria-hidden="true">/</span><a href="https://seed.ea.com/">SEED, Electronic Arts</a></p>
       <div class="actions"><a class="button primary" href="https://github.com/electronicarts/perf-gs"><span class="code-icon" aria-hidden="true">&lt;/&gt;</span> View code</a><a class="button" href="#quickstart">Quickstart <span aria-hidden="true">↓</span></a></div>
     </section>
 
-    <section class="shell showcase" aria-label="Demo and featured reconstructions">
+    <section class="shell showcase" id="training" aria-label="Real-time Ultrafast training videos">
       <div class="media-grid">
         <figure class="demo">
-          <video id="demo" controls playsinline preload="none" poster="assets/project-page/stump-poster.webp" width="1152" height="720" aria-label="Stump training in real time, followed by a camera orbit" aria-describedby="demo-caption">
+          <video id="demo" controls muted playsinline preload="metadata" poster="assets/project-page/stump-poster.webp" width="960" height="600" aria-label="Stump training in real time, followed by a camera orbit" aria-describedby="demo-caption">
             <source src="assets/project-page/stump.mp4" type="video/mp4">
             <a href="assets/project-page/stump.mp4">Open the Stump training video</a>
           </video>
           <button class="demo-cover" id="play-demo" type="button" aria-label="Play the real-time Stump training demo" hidden>
-            <span class="demo-tag"><i aria-hidden="true"></i> Real-time demo</span>
-            <span class="demo-info"><span class="play-icon" aria-hidden="true"></span><span><strong>Stump</strong><small>Ultrafast · RTX 4090</small></span></span>
+            <span class="play-icon" aria-hidden="true"></span>
           </button>
+          <figcaption><strong>Stump</strong><span>Real-time demo · <a href="assets/project-page/ultrafast-runs.json" title="Training records for the four Ultrafast videos">Ultrafast · RTX 4090</a></span></figcaption>
         </figure>
-        <div class="scene-links">
-          <a class="scene-card" href="assets/reconstructions/kitchen-quality.webp" data-scene="kitchen" aria-label="View Kitchen reconstruction">
-            <img src="assets/reconstructions/kitchen-quality.webp" width="464" height="563" alt="">
-            <span>Kitchen</span><b aria-hidden="true">↗</b>
-          </a>
-          <a class="scene-card" href="assets/reconstructions/bicycle-quality.webp" data-scene="bicycle" aria-label="View Bicycle reconstruction">
-            <img src="assets/reconstructions/bicycle-quality.webp" width="464" height="563" alt="">
-            <span>Bicycle</span><b aria-hidden="true">↗</b>
-          </a>
-        </div>
+        <figure class="teaser-scene">
+          <video controls muted playsinline preload="metadata" width="960" height="600" poster="assets/project-page/bicycle-ultrafast.webp" aria-label="Bicycle training in real time, followed by a camera path through the result">
+            <source src="assets/project-page/bicycle-ultrafast.mp4" type="video/mp4">
+            <a href="assets/project-page/bicycle-ultrafast.mp4">Open the Bicycle video</a>
+          </video>
+          <figcaption><a href="assets/reconstructions/bicycle-ultrafast.webp" data-scene="bicycle" aria-label="View Bicycle reconstruction">Bicycle ↗</a><span>Real-time demo · Ultrafast · RTX 4090</span></figcaption>
+        </figure>
+        <figure class="teaser-scene">
+          <video controls muted playsinline preload="metadata" width="960" height="600" poster="assets/project-page/bonsai-ultrafast.webp" aria-label="Bonsai training in real time, followed by a camera path through the result">
+            <source src="assets/project-page/bonsai-ultrafast.mp4" type="video/mp4">
+            <a href="assets/project-page/bonsai-ultrafast.mp4">Open the Bonsai video</a>
+          </video>
+          <figcaption><a href="assets/reconstructions/bonsai-ultrafast.webp" data-scene="bonsai" aria-label="View Bonsai reconstruction">Bonsai ↗</a><span>Real-time demo · Ultrafast · RTX 4090</span></figcaption>
+        </figure>
+        <figure class="teaser-scene">
+          <video controls muted playsinline preload="metadata" width="960" height="600" poster="assets/project-page/garden-ultrafast.webp" aria-label="Garden training in real time, followed by a camera path through the result">
+            <source src="assets/project-page/garden-ultrafast.mp4" type="video/mp4">
+            <a href="assets/project-page/garden-ultrafast.mp4">Open the Garden video</a>
+          </video>
+          <figcaption><a href="assets/project-page/garden-ultrafast.mp4" aria-label="Open the Garden training video">Garden ↗</a><span>Real-time demo · Ultrafast · RTX 4090</span></figcaption>
+        </figure>
       </div>
-      <p class="caption" id="demo-caption">Stump trains for <strong>9.21 seconds</strong> in this recording, followed by a free-camera orbit. From opening the scene to the trained result took 13.08 seconds.</p>
+      <div class="demo-notes">
+        <p class="caption" id="demo-caption">Stump trains for <strong>10.15 seconds</strong> in this recording, followed by a free-camera orbit. From opening the scene to the trained result took 13.90 seconds.</p>
+        <div class="demo-actions"><button type="button" id="replay-training" hidden>Replay together</button><a href="#motion">Reconstructions in motion ↓</a></div>
+      </div>
       <h2 class="metric-heading" id="averages">Nine-scene Mip-NeRF 360 averages</h2>
       <dl class="metrics" aria-labelledby="averages">
-        <div><dt>Ultrafast training loop</dt><dd>10.54 <small>s</small></dd><dd class="hardware">RTX 4090 · <span>3,000 steps</span></dd></div>
-        <div><dt>Quality reconstruction</dt><dd>27.89 <small>dB</small></dd><dd class="hardware">RTX 4090 · <span>22.61 s</span></dd></div>
-        <div><dt>Quality+ reconstruction</dt><dd>28.225 <small>dB</small></dd><dd class="hardware">RTX 4080 · <span>216.40 s</span></dd></div>
+        <div><dt>Ultrafast training loop</dt><dd>10.51 <small>s</small></dd><dd class="hardware">RTX 4090 · <span>3,000 steps</span></dd></div>
+        <div><dt>Quality reconstruction</dt><dd>27.90 <small>dB</small></dd><dd class="hardware">RTX 4090 · <span>22.68 s</span></dd></div>
+        <div><dt>Quality+ reconstruction</dt><dd>28.227 <small>dB</small></dd><dd class="hardware">RTX 4090 · <span>122.66 s</span></dd></div>
       </dl>
     </section>
 
     <section class="shell section text-section" id="overview" aria-labelledby="about-heading">
       <h2 id="about-heading">Overview</h2>
-      <p>The PERF-GS hub can run COLMAP on your photos to estimate camera poses and build a sparse point cloud, or open an existing COLMAP scene. Shared Slang shaders then train the Gaussians on Vulkan or Direct3D 12. Where a Gaussian covers fine image detail, the trainer can split it into smaller primitives.</p>
-      <p>Ultrafast samples a quarter of the pixel gradients. Balanced streams training images from system memory and averaged <strong>2.81 GiB of GPU memory at loop end</strong> on the RTX 4090. Quality spends more updates refining the model. Quality+ continues until progress on training views levels off.</p>
+      <p>The goal was allowing hundreds of experiments in a day on a single consumer GPU. On our RTX 4090, Ultrafast preset runs the whole nine-scene Mip-NeRF 360 dataset in 94.6 seconds. Loading the photos, initializing the splats, scoring the held-out views and exporting the model take some minimal additional time.</p>
+      <figure class="training-figure training-kitchen">
+        <div class="training-panels">
+          <div>
+            <span class="training-label">Kitchen</span>
+            <img src="assets/project-page/kitchen-binning-view.webp" width="779" height="519" loading="lazy" alt="A metal mixing bowl, onions and an oven mitt on the Kitchen counter.">
+          </div>
+          <div>
+            <span class="training-label">Splats binned per tile</span>
+            <img src="assets/project-page/kitchen-binning-map.webp" width="392" height="264" loading="lazy" alt="Tile counts range from blue at 0 to red at 9,731. The highest counts cluster near the back of the counter.">
+            <div class="tile-scale" aria-hidden="true"><span>0</span><span>4,866</span><span>9,731</span></div>
+          </div>
+        </div>
+        <figcaption class="caption">Each square in the heatmap is one image tile. In this earlier Kitchen run, the busiest tiles had nearly 10,000 splats assigned to them. Every extra entry is another item to sort and another splat the renderer may visit when blending that tile.</figcaption>
+      </figure>
+      <details class="frontier" id="trainer-details">
+        <summary>How the trainer works</summary>
+        <nav class="resource-links" aria-label="Overview sections"><a href="#initialization">Initialization</a><a href="#forward-pass">Forward pass</a><a href="#backward-pass">Backward passes</a><a href="#densification">Densification</a><a href="#presets">Presets</a></nav>
+        <h3 id="shader-design">Trainer architecture</h3>
+        <p>We use <strong><a href="https://github.com/shader-slang/slangpy">SlangPy</a></strong> to write the training schedule in Python, the backend gpu dispatching using SlangPy and the kernels in Slang. Python picks a training camera, sets learning rates and decides when to grow the model (frontend training loop/setup), SlangPy compiles and caches each shader entry point for the session, then dispatches it through its Python RHI. There's no separate native extension to build.</p>
+        <p>Slang autodiffs the math for one splat/primitive, while we write the backward pass that accounts for how overlapping splats combine into a pixel. A <i>primitive</i> defines its projection, coverage and color. Mark its projection and coverage functions as differentiable, and Slang generates their derivatives from the same source. The <i>compositor</i> blends the contributions. The disk primitive in our tests uses the same blend loop with its own coverage function. <a class="inline-link" href="https://github.com/electronicarts/perf-gs/blob/HEAD/shaders/core/interfaces.slang">Primitive interfaces</a> · <a class="inline-link" href="https://github.com/electronicarts/perf-gs/blob/HEAD/tests/test_disk_primitive.py">Disk primitive test</a></p>
+        <p>Vulkan is the cross-platform target, and D3D12 on Windows uses the same shader sources. Training has no CUDA or PyTorch dependency, but it is totally possible to interop with PyTorch and other frameworks. We've run Vulkan training on Windows with the Nvidia RTX 4080, Nvidia RTX 4090 and AMD Radeon RX 7900 XT. Linux and macOS are unverified, yet.</p>
+        <h3 id="initialization">Initialization</h3>
+        <p>COLMAP gives us camera poses and the initial sparse point cloud. Its color initializes the constant spherical harmonic coefficient, its opacity starts at 0.1, and its initial scale comes from the root-mean-square distance to its three nearest neighbors. That lets a dense patch of points start with smaller splats than a sparse one.</p>
+        <p>We also seed geometry between those points. We take up to 28 anchor photos from the training split, rectify stereo pairs and match them in both directions. We then triangulate matches that agree left-to-right and right-to-left, then check where the 3D point lands in a third training photo. We keep it if the color agrees and this adds up to 256,000 splats in places the sparse reconstruction may barely have sampled, which helps speeding up initial convergence.</p>
+        <p>Taking inspiration from <a href="https://research.nvidia.com/labs/sil/projects/ppisp/">PPISP</a>, for a single-camera reconstruction we fit one radial falloff strength during setup and apply it when rendering. Otherwise the trainer uses a flat response. <a class="inline-link" href="https://github.com/electronicarts/perf-gs/blob/HEAD/src/trainer/data/stereo.py">Stereo initialization</a> · <a class="inline-link" href="https://github.com/electronicarts/perf-gs/blob/HEAD/src/trainer/data/lens_calibration.py">Lens fit</a></p>
+        <h3 id="forward-pass">Forward passes</h3>
+        <p>One ordinary step records the forward render, image loss, backward passes and Adam update in one GPU submission. After growth, we reorder splats along a Morton curve so nearby splats sit together in memory. At the start of a view the GPU can then cull an off-screen cluster of 128 splats with one bounding-box test.</p>
+        <p>The renderer projects each surviving Gaussian to an ellipse, counts the 8 × 8 pixel tiles it overlaps, and evaluates its view-dependent color if it touches the image. We bound the ellipse at the opacity cutoff, then walk the rows or columns of that box to find the tiles the ellipse crosses.</p>
+        <figure class="training-figure training-binning">
+          <div class="training-panels">
+            <div>
+              <span class="training-label">Tiles inside the bounding box</span>
+              <img src="assets/project-page/binning-box.webp" width="372" height="344" loading="lazy" alt="A blue rectangle encloses a slanted pink ellipse. The rectangle overlaps twelve yellow tiles.">
+            </div>
+            <div>
+              <span class="training-label">Tiles touched by the ellipse</span>
+              <img src="assets/project-page/binning-ellipse.webp" width="372" height="344" loading="lazy" alt="The same ellipse intersects eight yellow tiles. Four of the twelve tiles fall outside the ellipse.">
+            </div>
+          </div>
+          <figcaption class="caption">The box covers 12 tiles. Testing the ellipse itself keeps eight, so this splat needs four fewer entries in the tile lists. Yellow marks the tiles that each method assigns. <a href="https://speedysplat.github.io/">Hanson et al., Speedy-Splat, Fig. 1b–c</a>.</figcaption>
+        </figure>
+        <p>We use Mip-Splatting here. The training cameras set a 3D smoothing scale for each splat, and a 2D filter widens small projected footprints while compensating their opacity.</p>
+        <p>A large splat can touch many tiles. Sorting a depth key for every copy would repeat a lot of work. We sort splats by depth <strong>once per view</strong>, emit the splat–tile pairs in that order, then do a stable GPU radix sort on just the tile ID. Each tile gets a front-to-back list. The blend skips alpha below 1/255 and stops a pixel once its remaining transmittance falls below 0.0001. The loss compares the render with the training photo using pixel error and SSIM. The SSIM shader filters each 11 × 11 neighborhood first along rows, then along columns. <a class="inline-link" href="https://github.com/electronicarts/perf-gs/blob/HEAD/src/trainer/backend/render/rasterizer.py">Rasterizer</a> · <a class="inline-link" href="https://github.com/electronicarts/perf-gs/blob/HEAD/shaders/losses/ssim_loss.slang">SSIM shader</a></p>
+        <h3 id="backward-pass">Backward passes</h3>
+        <p>Many pixels can see the same splat. If each pixel writes its own update, those writes compete for the same gradient in memory. Building on <a href="https://arxiv.org/abs/2406.15643">TamingGS</a>, we give each GPU lane one splat within a tile. The lane adds up that tile's pixel contributions in registers, then writes the total for its splat.</p>
+        <figure class="training-figure">
+          <div class="training-panels">
+            <div>
+              <span class="training-label">One lane per pixel</span>
+              <img src="assets/project-page/gradient-pixel.webp" width="1056" height="552" loading="lazy" alt="Four pixels each issue an atomic addition to the same splat gradient.">
+            </div>
+            <div>
+              <span class="training-label">One lane per splat</span>
+              <img src="assets/project-page/gradient-splat.webp" width="1056" height="552" loading="lazy" alt="One lane sums the same four pixel contributions in registers and issues one atomic addition.">
+            </div>
+          </div>
+          <figcaption class="caption">Follow one gradient component for one splat in a tile. With four contributing pixels, local accumulation turns four writes to the same address into one.</figcaption>
+        </figure>
+        <p>Each splat's contribution depends on what the splats in front of it have already blended. Every 32 splats in a tile, the forward pass saves each active pixel's accumulated RGB and remaining transmittance. An indirect dispatch schedules the groups reached by at least one pixel. Within each group, lanes use the saved values and wave operations to reconstruct the blend in front of their splat.</p>
+        <details class="backward-slides">
+          <summary>From a talk I gave (slides available soon, hopefully)</summary>
+          <figure>
+            <span class="training-label">Per-pixel writes · slide 64</span>
+            <a href="assets/project-page/backward-pixel-writes.webp"><img src="assets/project-page/backward-pixel-writes.webp" width="2048" height="739" loading="lazy" alt="Nine pixel threads direct red atomic-add arrows toward the same gradient buffer."></a>
+          </figure>
+          <figure>
+            <span class="training-label">Per-splat accumulation · slide 66</span>
+            <a href="assets/project-page/backward-lane-registers.webp"><img src="assets/project-page/backward-lane-registers.webp" width="2048" height="970" loading="lazy" alt="One lane handles each splat in depth order. Green arrows collect pixel contributions in registers and red arrows write to each splat's gradient buffer."></a>
+          </figure>
+          <figure>
+            <span class="training-label">Depth groups within one tile · slide 80</span>
+            <a href="assets/project-page/backward-depth-buckets.webp"><img src="assets/project-page/backward-depth-buckets.webp" width="1000" height="726" loading="lazy" alt="Colored boxes group a tile’s depth-sorted splats. A yellow outline highlights one group of 32."></a>
+            <figcaption class="caption">Each box holds up to 32 consecutive splats in the tile's depth order. The highlighted box is one backward job. A lane handles one splat in that group.</figcaption>
+          </figure>
+        </details>
+        <p>Once those contributions have been summed across tiles, a separate pass differentiates the projection once per contributing splat. Another pass handles spherical harmonic color and its dependence on view direction. Adam updates the parameters in 32-bit float (and we use int64 atomics for better cross-platform compatibility). Its two running moments are stored in bfloat16 with stochastic rounding, which halves the storage for those moments and lets small updates accumulate. <a class="inline-link" href="https://github.com/electronicarts/perf-gs/blob/HEAD/shaders/rasterize/tile_binned/backward_persplat.slang">Blend backward</a> · <a class="inline-link" href="https://github.com/electronicarts/perf-gs/blob/HEAD/shaders/rasterize/tile_binned/projection_backward.slang">Projection backward</a> · <a class="inline-link" href="https://github.com/electronicarts/perf-gs/blob/HEAD/shaders/common/adam_precision.slang">Adam precision</a></p>
+        <h3 id="densification">Densification</h3>
+        <p>How small does a splat need to be to represent the detail in a photo? We use a modified version of <a href="https://vcai.mpi-inf.mpg.de/projects/SAD-GS/">SAD-GS</a> to answer that question for each of the splat's three axes.</p>
+        <figure class="training-figure training-growth">
+          <div class="training-panels">
+            <div>
+              <span class="training-label">Local structure in the photo</span>
+              <img src="assets/project-page/densification-structure-field.webp" width="359" height="259" loading="lazy" alt="Yellow ellipses trace the local scale and direction of detail in a photograph of a locomotive.">
+            </div>
+            <div>
+              <span class="training-label">Structure-aware splitting</span>
+              <img src="assets/project-page/densification-axis-split.webp" width="241" height="261" loading="lazy" alt="Two cameras see different projections of a Gaussian. The resulting children are narrower along the axis that needs more detail.">
+            </div>
+          </div>
+          <figcaption class="caption">On the locomotive, the yellow ellipses pick out long edges along the body and finer detail around the wheels. Different cameras see a splat from different angles. Together those views tell us which axis needs to split. Illustration by <a href="https://vcai.mpi-inf.mpg.de/projects/SAD-GS/">Lyu et al., SAD-GS</a>.</figcaption>
+        </figure>
+        <p>During growth, every tenth step samples a structure tensor built from RGB gradients in the training photo to estimate the local image frequency. We project each of the splat's axes into that view and compare its length with the scale of the image detail. If the projected axis is longer than the estimated wavelength of that detail, the view votes to split that axis. We accumulate votes across cameras.</p>
+        <p>Every 500 steps during growth, a splat can split if over 64% of its eligible observations vote for more detail and its screen-position loss gradient is large enough. Depending on which axes need subdivision, one parent can become two, four or eight children. On the intervening 100-step growth updates, we use an <a href="https://arxiv.org/abs/2404.10484">AbsGS</a>-style update driven by accumulated screen-position gradients. Small splats with a large gradient can be cloned and larger ones can split. Growth updates can also prune splats with low opacity or little accumulated blend weight. With Quality's 4M cap, proposed splits can outnumber the free slots. We rank expansions by the parent's average screen-position gradient divided by the proposed family size and give space to whole families, strongest axis first. <a class="inline-link" href="https://github.com/electronicarts/perf-gs/blob/HEAD/shaders/densify/score_structure_aware.slang">Structure scoring</a> · <a class="inline-link" href="https://github.com/electronicarts/perf-gs/blob/HEAD/shaders/densify/rank_families.slang">Split allocation</a></p>
+      </details>
+      <details class="frontier" id="preset-details">
+        <summary>Presets</summary>
+        <p id="presets">All four presets use the renderer and growth rules above, but we change how many pixels and splats get work, where the photos live, and how long we keep refining. The timings and held-out PSNR below are means over the nine Mip-NeRF 360 scenes on the RTX 4090, with equal weight per scene.</p>
+        <h4>Ultrafast</h4>
+        <p><a href="https://developer.nvidia.com/blog/rendering-in-real-time-with-spatiotemporal-blue-noise-textures-part-1/">A spatiotemporal blue-noise mask</a> picks a quarter of the pixels for the backward pass, scales their gradients by four, and advances on the next visit to that camera, while SSIM still sees the full neighborhood. Degree-2 spherical harmonics and 3,000 steps gave <strong>10.51 s at 27.13 dB</strong>.</p>
+        <p>To isolate sparse pixel sampling advantages, run Ultrafast twice on the same scene and seed. Set <code>--stbn-pixel-fraction 1</code> on the second run. You get full pixel supervision with the same growth cap, color model and GPU image cache.</p>
+        <h4>Balanced</h4>
+        <p>Balanced runs for the same 3,000 steps with the same degree-2 color model, and uses every pixel for supervision. <i>It's the default</i>. It allows up to 2.6M splats and grows through step 1,900. We stream the current photo from RAM into a mapped GPU texture and compute its structure map when needed. On Bicycle alone, caching all 169 training photos takes 656 MiB of packed pixels and their structure maps add another 1,311 MiB before texture padding. Reusing those textures is how Balanced fits more splats in less VRAM than Ultrafast. It averaged <strong>15.91 s at 27.40 dB</strong>, with <strong>2.81 GiB</strong> of GPU memory at loop end versus Ultrafast's 5.29 GiB.</p>
+        <h4>Quality</h4>
+        <p>Here we still stream the photos and use every pixel. Moving from degree-2 to degree-3 spherical harmonics gives each color channel 16 coefficients instead of nine to fit changes with viewing angle. It can grow to 4M splats through step 1,900. For the next 200 steps, we sample one pixel per 4 × 4 block and estimate how much its RGB would change if a splat disappeared. The estimate accounts for the splats in front of it and the color that would show through from behind.</p>
+        <p>At step 2,100 the CPU ranks the removal costs collected on the GPU, and the GPU compacts the surviving splats. We aim to keep 75% of the live population and always keep splats we didn't observe during scoring. The final 1,400 steps refine the survivors. That gave <strong>22.68 s at 27.90 dB</strong> and 2.10M final splats on average. We tried the same 75% trim on Bicycle and Kitchen with the two faster presets. SSIM and LPIPS got worse in all four runs, so we left it out of those presets.</p>
+        <h4>Quality+</h4>
+        <p>This runs Quality's 3,500 steps and continues with the model it just trained. The splat count stays fixed and we keep the Adam state, final learning rates and loss weights. To decide when to stop, we render up to eight fixed training views every four passes' worth of updates (at least 100 steps). A cumulative gain of 0.05 dB in mean PSNR resets the counter. Three checks without that gain end the run. The held-out views are used for reporting. On the 4090 that bought another 0.33 dB on average, reaching <strong>28.227 dB in 122.66 s</strong> including the convergence checks. The four indoor scenes gained 0.69 dB on average and the five outdoor scenes gained 0.04 dB. <a class="inline-link" href="https://github.com/electronicarts/perf-gs/blob/HEAD/docs/usage.md#training">Preset settings and stopping rule</a> · <a class="inline-link" href="#results">Benchmark results</a></p>
+      </details>
     </section>
 
     <section class="gallery-band" id="reconstructions" aria-labelledby="gallery-heading">
       <div class="shell section">
         <h2 id="gallery-heading">Reconstructions</h2>
-        <p class="lead">Compare a held-out photograph with the same camera view rendered by PERF-GS. The close-up below each view shows the marked detail.</p>
+        <p class="lead">For each scene, the same held-out photo ranked first in full-image PSNR for all three presets. The box marks the same detail in the photograph and both renders.</p>
         <form class="gallery-controls" id="gallery-controls" hidden>
-          <label>Scene <select name="scene"><option value="kitchen">Kitchen</option><option value="bicycle">Bicycle</option><option value="stump">Stump</option><option value="room">Room</option><option value="bonsai">Bonsai</option></select></label>
-          <label>Compare <select name="count"><option value="2">2 images</option><option value="3">3 images</option></select></label>
-          <label>Left <select name="left"><option value="reference">Reference</option><option value="ultrafast">Ultrafast</option><option value="balanced">Balanced</option><option value="quality">Quality</option></select></label>
-          <label><span id="preset-label">Right</span> <select name="preset"><option value="ultrafast">Ultrafast</option><option value="balanced">Balanced</option><option value="quality" selected>Quality</option></select></label>
-          <label hidden>Preset 2 <select name="preset2"><option value="ultrafast">Ultrafast</option><option value="balanced">Balanced</option><option value="quality">Quality</option></select></label>
-          <label>View <select name="layout"><option value="slider">Slider</option><option value="side-by-side">Side by side</option></select></label>
+          <label>Scene <select name="scene">
+            <option value="kitchen" data-photo="DSCF0912.JPG" data-ultrafast="34.20" data-balanced="34.46" data-quality="34.99">Kitchen</option>
+            <option value="bicycle" data-photo="_DSC8824.JPG" data-ultrafast="28.14" data-balanced="29.00" data-quality="29.74">Bicycle</option>
+            <option value="stump" data-photo="_DSC9277.JPG" data-ultrafast="30.11" data-balanced="30.37" data-quality="30.65">Stump</option>
+            <option value="room" data-photo="DSCF4763.JPG" data-ultrafast="35.78" data-balanced="36.22" data-quality="36.30">Room</option>
+            <option value="bonsai" data-photo="DSCF5725.JPG" data-ultrafast="34.39" data-balanced="34.73" data-quality="35.45">Bonsai</option>
+          </select></label>
         </form>
         <div class="compare">
           <div class="compare-images">
             <a class="photo-link" href="assets/reconstructions/kitchen-reference.webp" tabindex="-1"><img id="reference" src="assets/reconstructions/kitchen-reference.webp" alt="Held-out Kitchen photograph and detail crop" width="464" height="563" loading="lazy"></a>
-            <a class="photo-link" href="assets/reconstructions/kitchen-quality.webp" tabindex="-1"><img id="render" src="assets/reconstructions/kitchen-quality.webp" alt="Kitchen Quality reconstruction and matching detail crop" width="464" height="563" loading="lazy"></a>
-            <a class="photo-link" href="assets/reconstructions/kitchen-quality.webp" tabindex="-1" hidden><img id="render2" src="assets/reconstructions/kitchen-quality.webp" alt="" width="464" height="563" loading="lazy"></a>
+            <a class="photo-link" href="assets/reconstructions/kitchen-ultrafast.webp" tabindex="-1"><img id="render" src="assets/reconstructions/kitchen-ultrafast.webp" alt="Kitchen Ultrafast reconstruction and matching detail crop" width="464" height="563" loading="lazy"></a>
+            <a class="photo-link" href="assets/reconstructions/kitchen-quality.webp" tabindex="-1"><img id="render2" src="assets/reconstructions/kitchen-quality.webp" alt="Kitchen Quality reconstruction and matching detail crop" width="464" height="563" loading="lazy"></a>
             <div class="plate-labels">
               <span><a class="plate-label" id="ref-link" href="assets/reconstructions/kitchen-reference.webp">Reference</a></span>
-              <span><a class="plate-label" id="render-link" href="assets/reconstructions/kitchen-quality.webp">Quality</a></span>
-              <span hidden><a class="plate-label" id="render2-link"></a></span>
+              <span><a class="plate-label" id="render-link" href="assets/reconstructions/kitchen-ultrafast.webp">Ultrafast</a></span>
+              <span><a class="plate-label" id="render2-link" href="assets/reconstructions/kitchen-quality.webp">Quality</a></span>
             </div>
-            <input id="split" type="range" min="0" max="100" value="50" aria-label="Reference photograph visible" aria-describedby="split-help" hidden>
+            <input id="split" type="range" min="0" max="100" value="33" aria-label="Divider after Reference" aria-describedby="split-help" hidden>
             <span class="split-line" aria-hidden="true"></span>
             <input id="split2" type="range" min="0" max="100" value="67" aria-label="Second divider position" aria-describedby="split-help" hidden>
             <span class="split-line" aria-hidden="true"></span>
           </div>
-          <p class="caption" id="render-caption" aria-live="polite">Kitchen · Quality (3,500 steps)</p>
-          <p class="caption" id="split-help" hidden>Drag a divider or use the arrow keys. Select an image label to open the original.</p>
+          <div class="plate-controls" hidden>
+            <div><span>Left image</span><strong>Reference</strong></div>
+            <label>Middle preset <select name="preset" form="gallery-controls"><option value="ultrafast">Ultrafast</option><option value="balanced">Balanced</option><option value="quality">Quality</option></select></label>
+            <label>Right preset <select name="preset2" form="gallery-controls"><option value="ultrafast">Ultrafast</option><option value="balanced">Balanced</option><option value="quality" selected>Quality</option></select></label>
+          </div>
+          <p class="caption" id="render-caption" aria-live="polite">DSCF0912.JPG · Ultrafast 34.20 dB · Quality 34.99 dB</p>
+          <p class="caption" id="split-help" hidden>Drag a divider or use the arrow keys. Push the dividers together to compare the outer images.</p>
         </div>
-        <p class="caption">RTX 4090, seed 42. Scenes and reference photographs from Barron et al., CVPR 2022. <a href="https://jonbarron.info/mipnerf360/">Mip-NeRF 360 dataset ↗</a></p>
+        <p class="caption">RTX 4080, seed 42. Ultrafast and Balanced ran for 3,000 steps and Quality for 3,500. Scenes and photographs by Barron et al., CVPR 2022. <a href="https://jonbarron.info/mipnerf360/">Mip-NeRF 360 dataset ↗</a></p>
       </div>
     </section>
 
     <section class="shell section motion" id="motion" aria-labelledby="motion-heading">
-      <h2 id="motion-heading">Reconstructions in motion</h2>
-      <p class="lead">Follow the same camera path through two trained models. Pause or scrub the video to inspect Ultrafast on the left and Balanced on the right at exactly the same viewpoint.</p>
+      <h2 id="motion-heading">Reconstructions - animated</h2>
       <label class="motion-picker" hidden>Scene <select id="motion-scene"><option value="kitchen">Kitchen</option><option value="bicycle">Bicycle</option></select></label>
       <figure data-motion-scene="kitchen">
-        <video controls playsinline preload="none" width="1440" height="480" poster="assets/project-page/kitchen-comparison.webp" aria-label="Kitchen camera path, Ultrafast on the left and Balanced on the right">
+        <video controls muted playsinline preload="metadata" width="1440" height="480" poster="assets/project-page/kitchen-comparison.webp" aria-label="Kitchen camera path, Ultrafast on the left and Balanced on the right">
           <source src="assets/project-page/kitchen-comparison.mp4" type="video/mp4">
           <a href="assets/project-page/kitchen-comparison.mp4">Open the Kitchen video</a>
         </video>
         <figcaption><span><strong>Kitchen</strong> · RTX 4080 · 3,000 steps per model · seed 42</span><button type="button" hidden aria-label="Stop Kitchen video and return to the first frame">Stop</button></figcaption>
       </figure>
       <figure data-motion-scene="bicycle">
-        <video controls playsinline preload="none" width="1440" height="480" poster="assets/project-page/bicycle-comparison.webp" aria-label="Bicycle camera path, Ultrafast on the left and Balanced on the right">
+        <video controls muted playsinline preload="metadata" width="1440" height="480" poster="assets/project-page/bicycle-comparison.webp" aria-label="Bicycle camera path, Ultrafast on the left and Balanced on the right">
           <source src="assets/project-page/bicycle-comparison.mp4" type="video/mp4">
           <a href="assets/project-page/bicycle-comparison.mp4">Open the Bicycle video</a>
         </video>
@@ -128,9 +255,10 @@
           <thead><tr><th scope="col">GPU / preset</th><th scope="col">Steps</th><th scope="col">Train loop</th><th scope="col">PSNR ↑</th><th scope="col">SSIM ↑</th><th scope="col">VGG LPIPS ↓</th><th scope="col">End VRAM</th></tr></thead>
           <tbody>
             <tr class="group"><th scope="rowgroup" colspan="7">RTX 4090 <small>24 GB</small></th></tr>
-            <tr><th scope="row">Ultrafast</th><td>3,000</td><td>10.54 s</td><td>27.12 dB</td><td>0.7935</td><td>0.2564</td><td>5.29 GiB</td></tr>
-            <tr><th scope="row">Balanced</th><td>3,000</td><td>15.92 s</td><td>27.41 dB</td><td>0.8143</td><td>0.2229</td><td>2.81 GiB</td></tr>
-            <tr><th scope="row">Quality</th><td>3,500</td><td>22.61 s</td><td>27.89 dB</td><td>0.8285</td><td>0.1996</td><td>4.81 GiB</td></tr>
+            <tr><th scope="row">Ultrafast</th><td>3,000</td><td>10.51 s</td><td>27.13 dB</td><td>0.7935</td><td>0.2564</td><td>5.29 GiB</td></tr>
+            <tr><th scope="row">Balanced</th><td>3,000</td><td>15.91 s</td><td>27.40 dB</td><td>0.8141</td><td>0.2228</td><td>2.81 GiB</td></tr>
+            <tr><th scope="row">Quality</th><td>3,500</td><td>22.68 s</td><td>27.90 dB</td><td>0.8285</td><td>0.1996</td><td>4.81 GiB</td></tr>
+            <tr><th scope="row">Quality+</th><td>17,044 avg.</td><td>122.66 s</td><td>28.227 dB</td><td>0.8317</td><td>0.1909</td><td>4.81 GiB</td></tr>
           </tbody>
           <tbody>
             <tr class="group"><th scope="rowgroup" colspan="7">RTX 4080 <small>16 GB</small></th></tr>
@@ -139,10 +267,26 @@
             <tr><th scope="row">Quality</th><td>3,500</td><td>32.44 s</td><td>27.90 dB</td><td>0.8286</td><td>0.1997</td><td>4.80 GiB</td></tr>
             <tr><th scope="row">Quality+</th><td>17,536 avg.</td><td>216.40 s</td><td>28.225 dB</td><td>0.8316</td><td>0.1907</td><td>4.80 GiB</td></tr>
           </tbody>
+          <tbody>
+            <tr class="group"><th scope="rowgroup" colspan="7">Radeon RX 7900 XT <small>20 GB</small></th></tr>
+            <tr><th scope="row">Ultrafast</th><td>3,000</td><td>16.44 s</td><td>27.125 dB</td><td>0.7936</td><td>0.2569</td><td>5.41 GiB</td></tr>
+            <tr><th scope="row">Balanced</th><td>3,000</td><td>27.02 s</td><td>27.391 dB</td><td>0.8143</td><td>0.2229</td><td>2.85 GiB</td></tr>
+            <tr><th scope="row">Quality</th><td>3,500</td><td>39.47 s</td><td>27.898 dB</td><td>0.8286</td><td>0.1997</td><td>4.85 GiB</td></tr>
+            <tr><th scope="row">Quality+</th><td>17,189 avg.</td><td>202.04 s</td><td>28.210 dB</td><td>0.8316</td><td>0.1909</td><td>4.85 GiB</td></tr>
+          </tbody>
         </table>
       </div>
       <p class="caption">Headless Vulkan, seed 42. Training-loop timing excludes COLMAP reconstruction, loading, initialization, held-out evaluation and export. Quality+ includes its training-view convergence checks. VRAM is sampled at loop end.</p>
-      <p class="resource-links"><a href="NVIDIA_GeForce_RTX_4090_presets_current.csv" download>4090 data ↓</a><a href="NVIDIA_GeForce_RTX_4080_presets.csv" download>4080 data ↓</a><a href="NVIDIA_GeForce_RTX_4080_qualityplus.csv" download>Quality+ data ↓</a></p>
+      <p class="resource-links"><a href="NVIDIA_GeForce_RTX_4090_presets_current.csv" download>4090 fixed-budget CSV ↓</a><a href="NVIDIA_GeForce_RTX_4090_qualityplus.csv" download>4090 Quality+ CSV ↓</a><a href="NVIDIA_GeForce_RTX_4080_presets.csv" download>4080 fixed-budget CSV ↓</a><a href="NVIDIA_GeForce_RTX_4080_qualityplus.csv" download>4080 Quality+ CSV ↓</a><a href="AMD_Radeon_RX_7900_XT_presets.csv" download>7900 XT fixed-budget CSV ↓</a><a href="AMD_Radeon_RX_7900_XT_qualityplus.csv" download>7900 XT Quality+ CSV ↓</a></p>
+      <details class="frontier"><summary>Compare the same models on Radeon and GeForce</summary>
+        <img src="assets/rx7900xt-fixed-model-errors.png" loading="lazy" width="1260" height="840" alt="Nearly identical RTX 4080 and RX 7900 XT crops of Stump and Kitchen, alongside amplified pixel differences">
+        <p class="caption">Both cards rendered the same two saved models from 51 held-out cameras using Vulkan. Of 219,272,010 RGB8 channel values, 712 differed by more than one level. The largest difference was 12 levels. <a href="AMD_Radeon_RX_7900_XT_fixed_model.csv" download>Fixed-model measurements ↓</a></p>
+        <p class="caption">Training fresh models on each GPU produced larger differences. Across the four presets, 11 of 984 matched views differed by over 1 dB in PSNR. The largest gap was 4.26 dB on a Room view at Quality+. <a href="assets/rx7900xt-room-qualityplus-heldout.png">Compare that view</a> · <a href="AMD_Radeon_RX_7900_XT_vs_RTX_4080_views.csv" download>Per-view differences ↓</a></p>
+      </details>
+      <details class="frontier"><summary>Quality+ convergence on the RTX 4090</summary>
+        <img src="assets/qualityplus-convergence-4090.png" loading="lazy" width="1840" height="768" alt="Training-view PSNR gains on Bicycle and Room, and the change in held-out PSNR from Quality to Quality+ for each of the nine scenes">
+        <p class="caption">Quality+ stopped between 8,652 and 21,996 steps. Compared with Quality, held-out PSNR rose on six scenes and by 0.326 dB on average. VGG LPIPS improved on all nine.</p>
+      </details>
       <details class="frontier"><summary>Compare trainers on the same RTX 4080</summary>
         <img src="assets/mipnerf360-rtx4080-frontier.png" loading="lazy" width="1440" height="768" alt="Training-loop time versus held-out PSNR for PERF-GS, LiteGS, SAD-GS, SkipGS and FastGS-Big on the same RTX 4080">
         <p class="caption">The dashed line connects measured configurations that improve PSNR as more training time becomes available. <a href="https://github.com/electronicarts/perf-gs/blob/HEAD/docs/benchmarks.md#rtx-4080-comparison">Method settings and measurements ↗</a></p>
@@ -151,13 +295,22 @@
 
     <section class="shell section getting-started" id="quickstart" aria-labelledby="start-heading">
       <div><h2 id="start-heading">Train your own scene</h2>
-        <p>After installation, launch the hub and click <strong>Open dataset folder...</strong>. For photos, click <strong>Install reconstruction tools</strong> if prompted, then <strong>Reconstruct to COLMAP</strong>. An existing COLMAP scene opens directly.</p>
+        <p>Perf-gs was designed to be extremely simple to <a href="https://github.com/electronicarts/perf-gs#quickstart">setup and install</a>.<br>
+          <pre><code>git clone https://github.com/electronicarts/perf-gs.git
+cd perf-gs
+py -3.11 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -e .</code></pre>  
+        After installation, launch the hub and click <strong>Open dataset folder...</strong>. For photos, click <strong>Install reconstruction tools</strong> if prompted, then <strong>Reconstruct to COLMAP</strong>. An existing COLMAP scene opens directly.</p>
         <pre><code>python -m trainer.frontend.app --hub</code></pre>
         <p>Once the point cloud appears, choose a preset and click <strong>Start Training</strong>. Explore the result and save it with <strong>Export PLY...</strong>.</p>
         <a class="inline-link" href="https://github.com/electronicarts/perf-gs#quickstart">Installation and quickstart ↗</a>
-        <p class="caption">Ultrafast requires NVIDIA’s separately licensed research masks. Balanced is the default.</p>
+        <p class="caption">Ultrafast requires NVIDIA's separately licensed research masks. Balanced is the default.</p>
       </div>
-      <figure><a href="assets/perfgs-hub.webp"><img src="assets/perfgs-hub.webp" width="1280" height="720" loading="lazy" alt="PERF-GS hub showing the trained Kitchen scene beside its training and export controls"></a><figcaption class="caption">Kitchen in the hub after 3,000 Balanced steps.</figcaption></figure>
+      <figure class="quickstart-screenshots">
+        <a href="assets/train_hub.png"><img src="assets/train_hub.png" width="1980" height="1254" loading="lazy" alt="Train scene in the hub after 3,000 steps, with the Export PLY button visible"></a>
+        <a href="assets/room_hub.png"><img src="assets/room_hub.png" width="1978" height="1249" loading="lazy" alt="Room scene in the hub before training, with the Balanced preset selected"></a>
+        <figcaption class="caption">Train after 3,000 steps (left) and Room ready to train (right).</figcaption>
+      </figure>
     </section>
 
     <section class="shell section citation" id="citation" aria-labelledby="cite-heading">

@@ -7,13 +7,14 @@ function Invoke-Checked($program, [string[]]$arguments) {
     if ($LASTEXITCODE -ne 0) { throw "$program $($arguments[0]) failed (exit $LASTEXITCODE)" }
 }
 
-$gpu = (Invoke-Checked nvidia-smi @('-i', '0', '--query-gpu=name', '--format=csv,noheader')).Trim()
-if ($gpu -cne $ExpectedGpu) { throw "Expected $ExpectedGpu, found $gpu on adapter 0." }
-$gpuTag = $gpu -replace '[^A-Za-z0-9]+', '_'
 $stage = $null
 $lock = $null
 Push-Location (Join-Path $PSScriptRoot '../..')
 try {
+    $probe = 'from trainer.backend.compute.device import create_device; d = create_device(); print(d.info.adapter_name); d.close()'
+    $gpu = (Invoke-Checked python @('-c', $probe) | Select-Object -Last 1).Trim()
+    if ($gpu -cne $ExpectedGpu) { throw "Expected $ExpectedGpu, found $gpu on the training Vulkan device." }
+    $gpuTag = $gpu -replace '[^A-Za-z0-9]+', '_'
     $revision = (Invoke-Checked git @('rev-parse', 'HEAD')).Trim()
     # The next workstation may receive the trainer as an uncommitted patch.
     $fingerprint = @'
@@ -47,12 +48,26 @@ print(digest.hexdigest())
     $os = Get-CimInstance Win32_OperatingSystem
     $pythonInfo = @'
 import sys, slangpy, torch, torchvision
-if not torch.cuda.is_available():
-    raise SystemExit('Install CUDA PyTorch before benchmarking. The reference scorer requires CUDA.')
 print('Python', sys.version)
 for package in (slangpy, torch, torchvision):
     print(package.__name__, package.__version__)
+if not torch.cuda.is_available():
+    print('Graphdeco scoring device: CPU')
 '@
+    # Keep the NVIDIA system record compatible with earlier resumable runs.
+    if ($gpu -like 'NVIDIA*' -and (Get-Command nvidia-smi -ErrorAction SilentlyContinue)) {
+        $gpus = Invoke-Checked nvidia-smi @('--query-gpu=name,driver_version,memory.total', '--format=csv')
+        $gpuRecord = $gpus | Where-Object { $_ -eq $gpus[0] -or ($_ -split ',')[0] -ceq $gpu }
+    } else {
+        $adapter = Get-CimInstance Win32_VideoController | Where-Object Name -eq $gpu | Select-Object -First 1
+        if (!$adapter) { throw "Cannot find the Windows display driver for Vulkan device $gpu." }
+        $gpuRecord = @("GPU: $gpu", "Windows display driver: $($adapter.DriverVersion)")
+        # Win32_VideoController.AdapterRAM is only 32 bits, even on discrete cards over 4 GiB.
+        $driver = (Get-ItemProperty -LiteralPath "HKLM:\SYSTEM\CurrentControlSet\Enum\$($adapter.PNPDeviceID)").Driver
+        $bytes = Get-ItemPropertyValue -LiteralPath "HKLM:\SYSTEM\CurrentControlSet\Control\Class\$driver" `
+            -Name 'HardwareInformation.qwMemorySize' -ErrorAction SilentlyContinue
+        if ($bytes) { $gpuRecord += "Dedicated video memory (MiB): $([int64]($bytes / 1MB))" }
+    }
     $record = @(
         "Trainer commit: $revision"
         "Trainer source files SHA-256: $sourceHash"
@@ -60,7 +75,7 @@ for package in (slangpy, torch, torchvision):
         "CPU: $($cpu.Name) ($($cpu.NumberOfCores) cores)"
         "OS: $($os.Caption) $($os.Version)"
         "Visible system RAM (KiB): $($os.TotalVisibleMemorySize)"
-        Invoke-Checked nvidia-smi @('-i', '0', '--query-gpu=name,driver_version,memory.total', '--format=csv')
+        $gpuRecord
         Invoke-Checked python @('-c', $pythonInfo)
     ) -join "`n"
     if (Test-Path -LiteralPath $system) {
