@@ -1,6 +1,6 @@
 # PERF-GS
 
-[![Project page](https://img.shields.io/badge/Project%20page-D9D448)](https://electronicarts.github.io/perf-gs/)
+[![Project page](https://shields.io)](https://electronicarts.github.io/perf-gs/)
 [![Languages: Python and Slang](https://img.shields.io/badge/languages-Python%20%2B%20Slang-3776AB)](#architecture-from-a-high-level)
 [![Backends: Vulkan and D3D12](https://img.shields.io/badge/backends-Vulkan%20%2B%20D3D12-355B3E)](#requirements)
 
