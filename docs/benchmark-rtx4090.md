@@ -2,9 +2,9 @@
 
 The benchmark measures training-loop time, held-out image quality, final splat count and loop-end GPU memory on all nine Mip-NeRF 360 scenes. The current sweep uses each preset's default step count. The original 3,000-step sweep provides the baseline for comparing Quality recipes. [RTX 4090 comparison](benchmarks.md#rtx-4090-presets) · [Current per-scene CSV](NVIDIA_GeForce_RTX_4090_presets_current.csv) · [Original per-scene CSV](NVIDIA_GeForce_RTX_4090_presets.csv)
 
-For Quality+, add `-QualityPlusOnly` to the benchmark command below. This runs nine scenes until their training-view scores plateau. The separate `*_qualityplus.csv` records each scene’s actual step count and held-out scores. The loop clock includes the training-view checks.
+Quality+ runs each scene until training-view PSNR plateaus. Its CSV records the actual step count and held-out scores for each scene. The training-loop time includes the convergence checks. [Quality+ per-scene CSV](NVIDIA_GeForce_RTX_4090_qualityplus.csv)
 
-Run the commands from the repository root with the hub closed and the GPU idle. Both sweeps used the same RTX 4090 (24 GB) workstation with a 32-core Threadripper PRO 9975WX and Windows 11. [Current system record](NVIDIA_GeForce_RTX_4090_system_current.txt) · [Original system record](NVIDIA_GeForce_RTX_4090_system.txt)
+Run the commands from the repository root with the hub closed and the GPU idle. The published sweeps used the same RTX 4090 (24 GB) workstation with a 32-core Threadripper PRO 9975WX and Windows 11. [Current system record](NVIDIA_GeForce_RTX_4090_system_current.txt) · [Original system record](NVIDIA_GeForce_RTX_4090_system.txt)
 
 ## Set up once
 
@@ -23,18 +23,30 @@ python scripts/data/download_stbn.py
 
 ```powershell
 .\scripts\running\benchmark_presets.ps1 -ExpectedGpu 'NVIDIA GeForce RTX 4090'
+.\scripts\running\benchmark_presets.ps1 -ExpectedGpu 'NVIDIA GeForce RTX 4090' -QualityPlusOnly
 ```
 
-The sweep runs **27 fresh training processes** on a first pass. It reads the default step count from each preset. Expect **3,000** for Ultrafast and Balanced and **3,500** for Quality. Each preset uses seed 42 on all nine scenes, including flowers and treehill. It uses the stored quarter-resolution images outdoors and half-resolution images indoors. Every eighth camera is held out. Each preset must score all 246 held-out views.
+The first command runs the three fixed-budget presets in **27 fresh training processes** on a first pass. It reads each preset’s default step count. Expect **3,000** for Ultrafast and Balanced and **3,500** for Quality. The second command runs **nine Quality+ processes**. Each preset uses seed 42 on all nine scenes, including flowers and treehill. It uses the stored quarter-resolution images outdoors and half-resolution images indoors. Every eighth camera is held out. Each preset must score all 246 held-out views.
 
-Report **mean training-loop seconds per scene** and **Graphdeco RGB8 PSNR, SSIM and VGG LPIPS**. The clock excludes setup, evaluation and export. Average views within each scene, then give each of the nine scenes equal weight. The published sweep was interrupted after eight Ultrafast scenes finished. On the same workstation and trainer revision, the driver reused those eight completed runs and ran Room to finish Ultrafast. [Full protocol](mipnerf360_3k.md#reproduce-the-benchmark)
+Report **mean training-loop seconds per scene** and **Graphdeco RGB8 PSNR, SSIM and VGG LPIPS**. The clock excludes setup, held-out evaluation and export. Average views within each scene, then give each of the nine scenes equal weight. The benchmark driver can resume completed scenes on the same workstation and trainer revision. [Full protocol](mipnerf360_3k.md#reproduce-the-benchmark)
 
-The command writes two files under `outputs/benchmarks/NVIDIA_GeForce_RTX_4090/<revision>-<source hash>/`. The source hash includes local trainer and shader edits, so a patched checkout gets a separate run directory.
+The two commands write three files under `outputs/benchmarks/NVIDIA_GeForce_RTX_4090/<revision>-<source hash>/`. The source hash includes local trainer and shader edits, so a patched checkout gets a separate run directory.
 
-- `NVIDIA_GeForce_RTX_4090_presets.csv` — one measured row per scene and preset.
+- `NVIDIA_GeForce_RTX_4090_presets.csv` — one measured row per scene and fixed-budget preset.
+- `NVIDIA_GeForce_RTX_4090_qualityplus.csv` — one measured row per scene for Quality+.
 - `NVIDIA_GeForce_RTX_4090_system.txt` — workstation, driver, software versions and trainer revision.
 
 With Matplotlib installed, `python scripts/plots/plot_preset_results.py --presets docs/NVIDIA_GeForce_RTX_4090_presets_current.csv` prints the published means and regenerates the RTX 4090 chart. Pass the path to a new sweep's CSV to plot that run.
+
+The convergence plot also reads training-view PSNR from the Quality+ run directories. To regenerate it from a fresh run, substitute its sweep name and CSV paths in the published command below.
+
+```powershell
+python scripts/plots/plot_qualityplus_convergence.py `
+  --presets docs/NVIDIA_GeForce_RTX_4090_presets_current.csv `
+  --quality-plus docs/NVIDIA_GeForce_RTX_4090_qualityplus.csv `
+  --sweep 'mip360_NVIDIA_GeForce_RTX_4090_d69f4f2f355f_1e76c2ccbdf5_quality+' `
+  --output assets/qualityplus-convergence-4090.png
+```
 
 ## Interactive Stump demo
 
