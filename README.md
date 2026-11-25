@@ -1,8 +1,8 @@
 # PERF-GS
 
 [![Project Page](https://img.shields.io/badge/Project-Page-blue.svg)](https://electronicarts.github.io/perf-gs/)
-[![Languages: Python and Slang](https://img.shields.io/badge/languages-Python%20%2B%20Slang-3776AB)](#architecture-from-a-high-level)
-[![Backends: Vulkan and D3D12](https://img.shields.io/badge/backends-Vulkan%20%2B%20D3D12-355B3E)](#requirements)
+[![Languages: Python and Slang](https://img.shields.io/badge/languages-Python%20%2B%20Slang-41464D)](#architecture-from-a-high-level)
+[![Backends: Vulkan and D3D12](https://img.shields.io/badge/backends-Vulkan%20%2B%20D3D12-41464D)](#requirements)
 
 **Efficient, extensible, dependency-free & low memory differentiable training.**
 
@@ -102,7 +102,7 @@ All headline results give equal weight to the nine Mip-NeRF 360 scenes. On the R
 | Ultrafast | 3,000 | 10.51 s | 27.13 dB | 0.7935 | 0.2564 | 1.43M | 5.29 GiB |
 | Balanced (default) | 3,000 | 15.91 s | 27.40 dB | 0.8141 | 0.2228 | 2.07M | 2.81 GiB |
 | **Quality** | 3,500 | 22.68 s | 27.90 dB | 0.8285 | 0.1996 | 2.10M | 4.81 GiB |
-| **[Quality+](docs/NVIDIA_GeForce_RTX_4090_qualityplus.csv)** | [17,044 avg.](assets/qualityplus-convergence-4090.png) | 122.66 s | 28.227 dB | 0.8317 | 0.1909 | 2.10M | 4.81 GiB |
+| **[Quality+](docs/NVIDIA_GeForce_RTX_4090_qualityplus.csv)** | [17,044 avg.](docs/assets/qualityplus-convergence-4090.png) | 122.66 s | 28.227 dB | 0.8317 | 0.1909 | 2.10M | 4.81 GiB |
 
 Compared with the previous 3,000-step Quality preset on this 4090, the 3,500-step preset gained **0.11 dB** on average and improved PSNR on **all nine scenes**. Mean final splat count fell **31.6%**, from 3.07M to 2.10M. Mean loop time went from 23.24 s to 22.68 s. [Current 4090 CSV](docs/NVIDIA_GeForce_RTX_4090_presets_current.csv) · [Previous 4090 CSV](docs/NVIDIA_GeForce_RTX_4090_presets.csv)
 

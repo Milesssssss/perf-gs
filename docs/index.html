@@ -23,7 +23,7 @@
   <main id="main">
     <section class="shell introduction" aria-labelledby="title">
       <h1 id="title">PERF-GS</h1>
-      <p class="subtitle">3D Gaussian Splatting. Trained in seconds.</p>
+      <p class="subtitle">3D Gaussian Splatting in 10 seconds</p>
       <p class="byline"><a href="https://stefanoscolapasta.github.io/nozbufferallowed/about.html">Stefano Scolari</a><span aria-hidden="true">/</span><a href="https://seed.ea.com/">SEED, Electronic Arts</a></p>
       <div class="actions"><a class="button primary" href="https://github.com/electronicarts/perf-gs"><span class="code-icon" aria-hidden="true">&lt;/&gt;</span> View code</a><a class="button" href="#quickstart">Quickstart <span aria-hidden="true">↓</span></a></div>
     </section>
@@ -54,9 +54,9 @@
       <p class="caption" id="demo-caption">Stump trains for <strong>9.21 seconds</strong> in this recording, followed by a free-camera orbit. From opening the scene to the trained result took 13.08 seconds.</p>
       <h2 class="metric-heading" id="averages">Nine-scene Mip-NeRF 360 averages</h2>
       <dl class="metrics" aria-labelledby="averages">
-        <div><dt>Ultrafast training loop</dt><dd>10.54 <small>s</small></dd><dd class="hardware">RTX 4090 · <span>3,000 steps</span></dd></div>
-        <div><dt>Quality reconstruction</dt><dd>27.89 <small>dB</small></dd><dd class="hardware">RTX 4090 · <span>22.61 s</span></dd></div>
-        <div><dt>Quality+ reconstruction</dt><dd>28.225 <small>dB</small></dd><dd class="hardware">RTX 4080 · <span>216.40 s</span></dd></div>
+        <div><dt>Ultrafast training loop</dt><dd>10.51 <small>s</small></dd><dd class="hardware">RTX 4090 · <span>3,000 steps</span></dd></div>
+        <div><dt>Quality reconstruction</dt><dd>27.90 <small>dB</small></dd><dd class="hardware">RTX 4090 · <span>22.68 s</span></dd></div>
+        <div><dt>Quality+ reconstruction</dt><dd>28.227 <small>dB</small></dd><dd class="hardware">RTX 4090 · <span>122.66 s</span></dd></div>
       </dl>
     </section>
 
@@ -134,9 +134,10 @@
           <thead><tr><th scope="col">GPU / preset</th><th scope="col">Steps</th><th scope="col">Train loop</th><th scope="col">PSNR ↑</th><th scope="col">SSIM ↑</th><th scope="col">VGG LPIPS ↓</th><th scope="col">End VRAM</th></tr></thead>
           <tbody>
             <tr class="group"><th scope="rowgroup" colspan="7">RTX 4090 <small>24 GB</small></th></tr>
-            <tr><th scope="row">Ultrafast</th><td>3,000</td><td>10.54 s</td><td>27.12 dB</td><td>0.7935</td><td>0.2564</td><td>5.29 GiB</td></tr>
-            <tr><th scope="row">Balanced</th><td>3,000</td><td>15.92 s</td><td>27.41 dB</td><td>0.8143</td><td>0.2229</td><td>2.81 GiB</td></tr>
-            <tr><th scope="row">Quality</th><td>3,500</td><td>22.61 s</td><td>27.89 dB</td><td>0.8285</td><td>0.1996</td><td>4.81 GiB</td></tr>
+            <tr><th scope="row">Ultrafast</th><td>3,000</td><td>10.51 s</td><td>27.13 dB</td><td>0.7935</td><td>0.2564</td><td>5.29 GiB</td></tr>
+            <tr><th scope="row">Balanced</th><td>3,000</td><td>15.91 s</td><td>27.40 dB</td><td>0.8141</td><td>0.2228</td><td>2.81 GiB</td></tr>
+            <tr><th scope="row">Quality</th><td>3,500</td><td>22.68 s</td><td>27.90 dB</td><td>0.8285</td><td>0.1996</td><td>4.81 GiB</td></tr>
+            <tr><th scope="row">Quality+</th><td>17,044 avg.</td><td>122.66 s</td><td>28.227 dB</td><td>0.8317</td><td>0.1909</td><td>4.81 GiB</td></tr>
           </tbody>
           <tbody>
             <tr class="group"><th scope="rowgroup" colspan="7">RTX 4080 <small>16 GB</small></th></tr>
@@ -148,7 +149,11 @@
         </table>
       </div>
       <p class="caption">Headless Vulkan, seed 42. Training-loop timing excludes COLMAP reconstruction, loading, initialization, held-out evaluation and export. Quality+ includes its training-view convergence checks. VRAM is sampled at loop end.</p>
-      <p class="resource-links"><a href="NVIDIA_GeForce_RTX_4090_presets_current.csv" download>4090 data ↓</a><a href="NVIDIA_GeForce_RTX_4080_presets.csv" download>4080 data ↓</a><a href="NVIDIA_GeForce_RTX_4080_qualityplus.csv" download>Quality+ data ↓</a></p>
+      <p class="resource-links"><a href="NVIDIA_GeForce_RTX_4090_presets_current.csv" download>4090 fixed-budget CSV ↓</a><a href="NVIDIA_GeForce_RTX_4090_qualityplus.csv" download>4090 Quality+ CSV ↓</a><a href="NVIDIA_GeForce_RTX_4080_presets.csv" download>4080 fixed-budget CSV ↓</a><a href="NVIDIA_GeForce_RTX_4080_qualityplus.csv" download>4080 Quality+ CSV ↓</a></p>
+      <details class="frontier"><summary>Quality+ convergence on the RTX 4090</summary>
+        <img src="assets/qualityplus-convergence-4090.png" loading="lazy" width="1840" height="768" alt="Training-view PSNR gains on Bicycle and Room, and the change in held-out PSNR from Quality to Quality+ for each of the nine scenes">
+        <p class="caption">Quality+ stopped between 8,652 and 21,996 steps. Compared with Quality, held-out PSNR rose on six scenes and by 0.326 dB on average. VGG LPIPS improved on all nine.</p>
+      </details>
       <details class="frontier"><summary>Compare trainers on the same RTX 4080</summary>
         <img src="assets/mipnerf360-rtx4080-frontier.png" loading="lazy" width="1440" height="768" alt="Training-loop time versus held-out PSNR for PERF-GS, LiteGS, SAD-GS, SkipGS and FastGS-Big on the same RTX 4080">
         <p class="caption">The dashed line connects measured configurations that improve PSNR as more training time becomes available. <a href="https://github.com/electronicarts/perf-gs/blob/HEAD/docs/benchmarks.md#rtx-4080-comparison">Method settings and measurements ↗</a></p>

@@ -45,7 +45,7 @@ python scripts/plots/plot_qualityplus_convergence.py `
   --presets docs/NVIDIA_GeForce_RTX_4090_presets_current.csv `
   --quality-plus docs/NVIDIA_GeForce_RTX_4090_qualityplus.csv `
   --sweep 'mip360_NVIDIA_GeForce_RTX_4090_d69f4f2f355f_1e76c2ccbdf5_quality+' `
-  --output assets/qualityplus-convergence-4090.png
+  --output docs/assets/qualityplus-convergence-4090.png
 ```
 
 ## Interactive Stump demo
