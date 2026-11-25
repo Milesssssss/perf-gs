@@ -6,7 +6,10 @@ Train a 3D Gaussian Splatting model from a COLMAP scene with Slang on Vulkan or 
 On an **RTX 4090**:
 - *Quality* preset averages **27.89 dB PSNR in 22.61 seconds** across the nine Mip-NeRF 360 scenes.
 - *Ultrafast* preset averages **27.12 dB in 10.54 seconds** on the same card.<br>
+
 [RTX 4080 comparison with LiteGS, SAD-GS and FastGS](docs/benchmarks.md#rtx-4080-comparison)
+
+As of November 2026, **perf-gs** is, to the best of our knowledge, the fastest publicly available open-source 3D Gaussian Splatting trainer, outperforming competitors such as [LiteGS](https://github.com/MooreThreads/LiteGS), [SAD-GS](https://github.com/LinjieLyu/SADGS) and [FastGS](https://github.com/fastgs/FastGS) in training speed while delivering competitive or superior reconstruction quality with low VRAM usage.<br><br>
 
 For GPUs with less VRAM, Balanced streams training images from system RAM. It used **2.72-2.90 GiB of VRAM at loop end** across the two workstations. [VRAM and system RAM breakdown](docs/benchmarks.md#where-memory-goes)
 
