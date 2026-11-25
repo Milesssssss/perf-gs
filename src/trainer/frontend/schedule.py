@@ -53,11 +53,12 @@ class TrainingSchedule:
 
         do_preview = False
         if c.preview_every > 0:
-            buffered = [itr + 350 if (c.reset_every > 0 and itr % c.reset_every == 0)
-                        else itr + 50
-                        for itr in range(c.preview_every, c.iterations,
-                                         c.preview_every)]
-            do_preview = (it in buffered) or (it == c.iterations)
+            # A preview follows its scheduled tick by 350 steps after reset, otherwise 50.
+            do_preview = it == c.iterations or any(
+                tick > 0 and tick % c.preview_every == 0
+                and (not c.iterations or tick < c.iterations)
+                and it - tick == (350 if c.reset_every > 0 and tick % c.reset_every == 0 else 50)
+                for tick in (it - 50, it - 350))
 
         if c.render_all_every > 0:
             do_render_all = (it % c.render_all_every == 0) or (it == c.iterations)
@@ -73,8 +74,8 @@ class TrainingSchedule:
         do_morton = (c.morton_every > 0 and it % c.morton_every == 0
                      and not do_densify)
         mip_after_densify = c.mip_enabled and do_densify
-        mip_periodic = (c.mip_enabled and it > c.densify_to
-                        and it % 100 == 0 and it < c.iterations - 100)
+        mip_periodic = (c.mip_enabled and it > c.densify_to and it % 100 == 0
+                        and (it < c.optimization_steps - 100 or (c.until_convergence and it > c.optimization_steps)))
         blend_prune = (do_densify and c.prune_blend_weight > 0.0
                        and it >= c.blend_prune_start
                        and not self._reset_in_window(it))
@@ -129,6 +130,7 @@ class LearningRateSchedule:
 
     def short_objective(self, step: int, rates: AdamLRs, loss: LossConfig) -> tuple[AdamLRs, LossConfig]:
         """Apply the short training recipe to the scheduled rates and base loss (one-based step)."""
+        step = min(step, self._iterations)
         progress = (step - 1) / self._iterations
         phase = max(0.0, (step / self._iterations - 0.73) / (1 - 0.73))
         weight = 0.5 - 0.5 * math.cos(math.pi * phase)
@@ -139,6 +141,31 @@ class LearningRateSchedule:
                         opacity=rates.opacity * 0.7 * color_decay * appearance,
                         color=rates.color * color_decay * appearance, sh_rest=rates.sh_rest * color_decay * appearance)
         return rates, replace(loss, l2_weight=loss.l2_weight * (1 + 1.5 * weight))
+
+
+class ConvergenceMonitor:
+    """Check a fixed training-camera panel after population and SH capacity have settled."""
+
+    def __init__(self, train_indices: list[int], ready_step: int):
+        size = len(train_indices)
+        self.cameras = [train_indices[i] for i in np.linspace(0, size - 1, min(8, size), dtype=int)]
+        self.interval = max(100, 4 * size)
+        self.first = max(ready_step, 1)
+        self.reference = -math.inf
+        self.stale_checks = 0
+
+    def due(self, step: int) -> bool:
+        return step >= self.first and (step - self.first) % self.interval == 0
+
+    def observe(self, psnr: float) -> bool:
+        if not math.isfinite(psnr):
+            raise ValueError("Training-view convergence score is nonfinite.")
+        if psnr >= self.reference + 0.05:
+            self.reference = psnr
+            self.stale_checks = 0
+        else:
+            self.stale_checks += 1
+        return self.stale_checks >= 3
 
 
 def _log_lerp(start: float, end: float, step: int, steps: int) -> float:

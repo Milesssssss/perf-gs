@@ -71,9 +71,10 @@ class RunConfig:
         loss, base_lrs = _loss_and_lrs(args, mode)
         base_lrs, scale_rotation_lr_decay = _apply_recipe(
             base_lrs, LearningRateRecipe(args.lr_recipe))
+        schedule = _schedule(args, mode)
         return cls(
             densify_mode=mode,
-            schedule=_schedule(args, mode),
+            schedule=schedule,
             raster=RasterConfig(
                 z_near_cull=args.z_near_cull,
                 cluster_cull=args.cluster_cull,
@@ -85,7 +86,7 @@ class RunConfig:
             regularization=RegularizationConfig(opacity_weight=args.opacity_reg,
                                                 scale_weight=args.scale_reg),
             appearance=AppearanceConfig(sh_degree=args.sh_degree,
-                                        band_interval=_sh_band_interval(args)),
+                                        band_interval=_sh_band_interval(args, schedule.optimization_steps)),
             stbn=_stbn(args),
             densify=DensifyConfig(
                 t_opacity=args.t_opacity,
@@ -105,12 +106,11 @@ class RunConfig:
                 t_opacity=args.sad_structure_min_opacity,
                 opacity_cap=args.sad_opacity_cap,
                 dense_scale=args.grow_scale3d * scene_extent,
-                rank_split_families=args.preset == "quality",
+                rank_split_families=args.preset in ("quality", "quality+"),
                 detailed_diagnostics=bool(args.densify_diag),
             ),
             base_lrs=base_lrs,
-            # 0 follows --iters, so the mean-LR decay always lands at the end of the run.
-            position_lr_max_steps=(args.iters if args.position_lr_max_steps <= 0
+            position_lr_max_steps=(schedule.optimization_steps if args.position_lr_max_steps <= 0
                                    else args.position_lr_max_steps),
             scale_rotation_lr_decay=scale_rotation_lr_decay,
         )
@@ -144,6 +144,7 @@ def _schedule(args: argparse.Namespace, mode: DensificationMode) -> ScheduleConf
         prune_blend_weight=float(args.prune_blend_weight),
         prune_blend_from=int(args.prune_blend_from),
         render_all_on_preview=bool(args.evaluation),
+        until_convergence=args.preset == "quality+",
     )
 
 
@@ -169,7 +170,7 @@ def _apply_recipe(lrs: AdamLRs, recipe: LearningRateRecipe) -> tuple[AdamLRs, tu
     return lrs, (1.0, 1.0)
 
 
-def _sh_band_interval(args: argparse.Namespace) -> int:
+def _sh_band_interval(args: argparse.Namespace, optimization_steps: int) -> int:
     """0 = auto: the last SH band turns on by half the run.
 
     The 3DGS constant (1000) assumes 30k iterations; a 3k run would barely train degree 3.
@@ -177,8 +178,8 @@ def _sh_band_interval(args: argparse.Namespace) -> int:
     if args.sh_band_interval > 0:
         return args.sh_band_interval
     if args.sh_degree <= 0:
-        return max(1, args.iters)
-    return max(1, args.iters // (2 * args.sh_degree))
+        return max(1, optimization_steps)
+    return max(1, optimization_steps // (2 * args.sh_degree))
 
 
 def _stbn(args: argparse.Namespace) -> StbnConfig:

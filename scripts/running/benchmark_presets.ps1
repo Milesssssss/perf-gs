@@ -1,5 +1,5 @@
 # Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
-param([Parameter(Mandatory)][string]$ExpectedGpu)
+param([Parameter(Mandatory)][string]$ExpectedGpu, [switch]$QualityPlusOnly)
 
 $ErrorActionPreference = 'Stop'
 function Invoke-Checked($program, [string[]]$arguments) {
@@ -32,7 +32,8 @@ print(digest.hexdigest())
     $sourceHash = (Invoke-Checked python @('-c', $fingerprint)).Trim()
     $short = $revision.Substring(0, 12) + '-' + $sourceHash.Substring(0, 12)
     $dest = (New-Item -ItemType Directory -Force "outputs/benchmarks/$gpuTag/$short").FullName
-    $csv = Join-Path $dest "${gpuTag}_presets.csv"
+    $suite = if ($QualityPlusOnly) { 'qualityplus' } else { 'presets' }
+    $csv = Join-Path $dest "${gpuTag}_${suite}.csv"
     $system = Join-Path $dest "${gpuTag}_system.txt"
     $lock = [IO.File]::Open((Join-Path $dest 'benchmark.lock'), 'OpenOrCreate', 'ReadWrite', 'None')
     if (Test-Path -LiteralPath $csv) {
@@ -74,14 +75,16 @@ for package in (slangpy, torch, torchvision):
     }
     Invoke-Checked git @('-C', $reference, 'checkout', '--detach', '54c035f7834b564019656c3e3fcc3646292f727d')
     $scenes = 'bicycle', 'flowers', 'garden', 'stump', 'treehill', 'bonsai', 'counter', 'kitchen', 'room'
-    $models = foreach ($preset in 'ultrafast', 'balanced', 'quality') {
+    $presets = if ($QualityPlusOnly) { 'quality+' } else { 'ultrafast', 'balanced', 'quality' }
+    $models = foreach ($preset in $presets) {
         $steps = [int](Invoke-Checked python @('-c', 'import sys; from trainer.frontend.cli import parse_args; print(parse_args(sys.argv[1:]).iters)', '--preset', $preset))
         $name = "mip360_${gpuTag}_${short}_$preset" -replace '-', '_'
         Invoke-Checked python @('scripts/running/eval_sweep.py', '--axis', 'seed', '--values', '42', '--iters', "$steps",
             '--name', $name, '--no-plot', '--extra', '--preset', $preset, '--backend', 'vulkan', '--eval-every', '0',
             '--preview-every', '0', '--no-write-ground-truths', '--run-report', '--save-test-renders') | Out-Host
         $runs = Get-Content -Raw "outputs/eval_sweep/$name/results.json" | ConvertFrom-Json
-        if ($runs.Count -ne 9 -or (Compare-Object $scenes $runs.scene) -or ($runs | Where-Object { $_.iters -ne $steps })) {
+        if ($runs.Count -ne 9 -or (Compare-Object $scenes $runs.scene) -or
+            (!$QualityPlusOnly -and ($runs | Where-Object { $_.iters -ne $steps }))) {
             throw "Incomplete $preset sweep. Fix the failed scenes and rerun this command."
         }
         foreach ($scene in $scenes) {
@@ -89,15 +92,21 @@ for package in (slangpy, torch, torchvision):
             $model = "outputs/graphdeco_input/$run"
             $report = Get-Content -Raw "outputs/train/$run/run_report.json" | ConvertFrom-Json
             if ($report.device.adapter_name -cne $gpu) { throw "$run used $($report.device.adapter_name), expected $gpu" }
-            if (!(Test-Path -LiteralPath "$model/test/ours_$steps" -PathType Container)) {
+            $actual = [int]$report.iters_completed
+            if ($report.iters_requested -ne $steps -or $actual -le 0 -or
+                ($QualityPlusOnly -and $report.stop_reason -cne 'plateau') -or
+                (!$QualityPlusOnly -and $actual -ne $steps)) { throw "Incomplete $preset run: $run" }
+            if (!(Test-Path -LiteralPath "$model/test/ours_$actual" -PathType Container)) {
                 Invoke-Checked python @('scripts/running/prepare_graphdeco.py', "outputs/train/$run", $model) | Out-Host
             }
             $model
         }
     }
-    $stage = Join-Path $dest ("presets-" + [guid]::NewGuid() + '.tmp')
-    Invoke-Checked python (@('scripts/running/score_graphdeco.py', '--graphdeco', $reference,
-        '--expect-gpu', $gpu, '--preset-csv', $stage) + $models)
+    $stage = Join-Path $dest ("$suite-" + [guid]::NewGuid() + '.tmp')
+    $scoreArgs = @('scripts/running/score_graphdeco.py', '--graphdeco', $reference,
+        '--expect-gpu', $gpu, '--preset-csv', $stage)
+    if ($QualityPlusOnly) { $scoreArgs += '--quality-plus-only' }
+    Invoke-Checked python ($scoreArgs + $models)
     [IO.File]::Move($stage, $csv)
     Write-Host "Benchmark results:`n$csv`n$system"
 } finally {

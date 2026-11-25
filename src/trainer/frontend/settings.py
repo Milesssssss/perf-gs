@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from trainer.config.config import (
+    QUALITY_STEPS,
     CompositorConfig,
     ScheduleConfig,
     ShaderSpecialization,
@@ -111,22 +112,22 @@ PRESETS: dict[str, dict[str, Any]] = {
                   "densify_to": 1600, "grad_thresh": 0.00060,
                   "prune_blend_from": 650, "prune_blend_weight": 0.25},
     "balanced": {},
-    "quality": {"max_splats": 4_000_000, "sh_degree": 3, "iters": 3500,
+    "quality": {"max_splats": 4_000_000, "sh_degree": 3, "iters": QUALITY_STEPS,
                 "final_splat_fraction": 0.75},
 }
+PRESETS["quality+"] = {**PRESETS["quality"], "iters": 0}
 
 
 SETTINGS: tuple[Setting, ...] = (
     Setting(PRESET, "preset", "perf", str, default="balanced", choices=tuple(PRESETS),
-            about="Ultrafast samples fewer gradients. Balanced and quality use every pixel. "
-                  "Quality fits a larger model with more view-dependent color coefficients.",
-            help="training speed and detail: ultrafast, balanced (default), or quality. "
+            about="Ultrafast samples fewer gradients. Quality fits a larger model. "
+                  "Quality+ refines it until training-view improvement levels off.",
+            help="training speed and detail: ultrafast, balanced (default), quality, or quality+. "
                  "Explicit flags override preset settings."),
-    # The mean-LR decay horizon is deliberately not a setting: it follows --iters.
+    # The preset resolves its position LR horizon; an explicit CLI override wins.
     Setting("iters", "iterations", "schedule", int, default=3000,
-            about="Training steps. More steps reach higher quality but take longer.",
-            minimum=100, maximum=200_000, speed=25,
-            note="the LR decay horizon follows this"),
+            about="Training steps. For Quality+, 0 trains until convergence and a positive value caps the run.",
+            minimum=0, maximum=200_000, speed=25),
     Setting("lr_recipe", "learning-rate recipe", "schedule", str,
             about="The short recipe cools geometry and appearance updates toward the end of training.",
             default=LearningRateRecipe.SHORT.value,
@@ -422,6 +423,8 @@ class TrainingSetup:
         setting = SETTINGS_MAP[dest]
         coerced = setting.coerce(value)
         with self._lock:
+            if dest == "iters" and self._values[PRESET] != "quality+":
+                coerced = max(100, coerced)
             self._values[dest] = coerced
         return coerced
 

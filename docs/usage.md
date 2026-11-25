@@ -34,23 +34,30 @@ The trainer opens its viewer by default. Use `--no-viewer` for headless training
 
 During optimization the viewer presents at up to 15 frames per second so training can use the same GPU. Pausing the run or viewing the completed model restores the viewer’s normal refresh rate.
 
-All three presets use stereo matches from training views, a lens response fitted from training landmarks, and the `short` learning-rate schedule. Choose a preset with `--preset` or in the viewer. [RTX 4090 benchmarks](benchmarks.md#rtx-4090-presets) · [RTX 4080 benchmarks](benchmarks.md#current-presets)
+Choose a preset with `--preset` or in the viewer. All presets use stereo matches from training views and a lens response fitted from training landmarks. [RTX 4090 benchmarks](benchmarks.md#rtx-4090-presets) · [RTX 4080 benchmarks](benchmarks.md#current-presets)
 
 | Preset | Steps | SH degree | Pixels supervised per step | Growth capacity | Fraction kept after growth | Training images |
 | --- | ---: | ---: | ---: | ---: | ---: | --- |
 | `ultrafast` | 3,000 | 2 | 25% STBN | 1.85M | 100% | GPU-resident |
 | `balanced` (default) | 3,000 | 2 | 100% | 2.60M | 100% | Streamed |
 | `quality` | 3,500 | 3 | 100% | 4.00M | 75% target | Streamed |
+| `quality+` | Until convergence | 3 | 100% | 4.00M | 75% target | Streamed |
 
-Ultrafast renders at the full selected image dimensions and samples the pixel gradients. Download NVIDIA’s masks once with `python scripts/data/download_stbn.py`. Balanced and quality use every pixel and need no mask download. [STBN asset terms](stbn_pixel_sampling.md)
+Ultrafast renders at the full selected image dimensions and samples the pixel gradients. Download NVIDIA’s masks once with `python scripts/data/download_stbn.py`. Balanced, Quality and Quality+ use every pixel and need no mask download. [STBN asset terms](stbn_pixel_sampling.md)
 
-All three presets use structure-aware densification. It compares a Gaussian’s projected axes with local image detail across training views, then splits it along axes that cover too much detail. The CLI also supports threshold-based 3DGS splitting with `--densify-mode simple` and a fixed set of Gaussians with `--densify-mode none`. [SAD-GS](#ref-sadgs) · [Split and prune decisions](../shaders/densify/decide_actions_structure.slang)
+All presets use structure-aware densification. It compares a Gaussian’s projected axes with local image detail across training views, then splits it along axes that cover too much detail. The CLI also supports threshold-based 3DGS splitting with `--densify-mode simple` and a fixed set of Gaussians with `--densify-mode none`. [SAD-GS](#ref-sadgs) · [Split and prune decisions](../shaders/densify/decide_actions_structure.slang)
 
 When Quality’s proposed splits exceed `--max-splats`, it ranks complete expansions by the parent’s average screen-position loss gradient divided by the proposed family size. A parent can split into two, then four, then eight children if each expansion earns enough slots. The strongest image-detail axis goes first. The GPU groups similar scores into buckets. Within the last admitted bucket, an expansion receives slots only if its whole family fits. Slots freed by pruning become available at the next growth update. [Split allocator](../shaders/densify/rank_families.slang)
 
 Quality finishes growth at step 1,900. Over the next 200 steps it samples one pixel per 4×4 block and estimates how much removing each splat would change the rendered RGB, including occlusion by the splats in front. It then drops the lowest-scoring splats to retain 75% of the live population and refines the survivors for the rest of the run. Splats with no observations are kept. `--final-splat-fraction` controls the fraction, `--iters` sets the step count, and both also appear in the hub. [Removal cost](../shaders/densify/removal_cost.slang)
 
 The published Mip-NeRF 360 comparison uses the selected image resolution for training and final evaluation. Explicit settings override the preset. To control the lens response, pass `--lens-strength 1` for fixed cos⁴ falloff or `--lens-strength 0` for a flat response. [Camera model and PLY metadata](mipnerf360_3k.md#camera-response-and-ply-playback)
+
+### Quality+ convergence
+
+Quality+ starts with the same 3,500 updates as Quality. It then keeps the splats and optimizer state and continues refinement at Quality’s final learning rates and loss weights. The first convergence check is at step 3,500 with default settings. Each check renders up to eight fixed training cameras and averages their PSNR. Checks are separated by four passes through the training images (at least 100 updates). A cumulative gain of 0.05 dB restarts the count. Three checks without that gain end the run. The official test cameras are reserved for reporting.
+
+The default `--iters 0` lets the scene determine the duration. Pass a positive `--iters` to set an upper limit. The run report distinguishes reaching the plateau from hitting this limit or being interrupted. This measures the plateau of the 4M-capacity Quality model.
 
 ### Interactive hub
 

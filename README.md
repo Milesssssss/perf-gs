@@ -82,6 +82,8 @@ Run `.\.venv\Scripts\python.exe -m trainer.frontend.app --help` to see every fla
 
 [Hub walkthrough](docs/usage.md#interactive-hub) · [Datasets](docs/usage.md#datasets) · [First-run help](docs/usage.md#first-run-help)
 
+**For longer training**, select **Quality+** in the hub or add `--preset quality+` to the training command. It runs Quality for 3,500 steps, then refines the same splats until progress on training views levels off. On the RTX 4080 it averaged **28.225 dB in 3 min 36 s** across nine scenes. [How Quality+ decides when to stop](docs/usage.md#quality-convergence)
+
 ## Mip-NeRF 360
 
 ### RTX 4090
@@ -98,7 +100,7 @@ Each row averages nine scenes equally, with one headless Vulkan run per scene at
 
 Ultrafast and Balanced keep their 3,000-step settings. Applying Quality’s 75% post-growth retention produced about 25% fewer final splats on Bicycle and Kitchen. SSIM and VGG LPIPS worsened in all four runs. [Pruning comparison](docs/benchmarks.md#pruning-in-ultrafast-and-balanced)
 
-![RTX 4090 training-loop time, PSNR, SSIM and VGG LPIPS by scene for the three current presets](assets/mipnerf360-rtx4090-presets.png)
+![RTX 4090 training-loop time, PSNR, SSIM and VGG LPIPS by scene for the three fixed-budget presets](assets/mipnerf360-rtx4090-presets.png)
 
 <details>
 <summary>RTX 4080 results</summary>
@@ -108,10 +110,11 @@ Ultrafast and Balanced keep their 3,000-step settings. Applying Quality’s 75% 
 | Ultrafast | 3,000 | 17.62 s | 27.13 dB | 0.7936 | 0.2567 | 1.43M | 5.29 GiB |
 | Balanced (default) | 3,000 | 25.97 s | 27.39 dB | 0.8143 | 0.2229 | 2.07M | 2.80 GiB |
 | **Quality** | 3,500 | 32.44 s | 27.90 dB | 0.8286 | 0.1997 | 2.11M | 4.80 GiB |
+| **Quality+** | 17,536 avg. | 216.40 s | 28.225 dB | 0.8316 | 0.1907 | 2.11M | 4.80 GiB |
 
-The updated Quality preset improved PSNR on all nine scenes and used 32% fewer final splats than the previous Quality preset on this card. [4080 CSV](docs/NVIDIA_GeForce_RTX_4080_presets.csv) · [4080 comparisons and timings](docs/benchmarks.md#current-presets)
+Quality+ stopped between 8,652 and 21,996 steps. Compared with Quality, it gained 0.33 dB on average and improved VGG LPIPS on all nine scenes. Its loop time includes training-view convergence checks. [Quality+ per-scene results](docs/NVIDIA_GeForce_RTX_4080_qualityplus.csv) · [Convergence plot](assets/qualityplus-convergence-4080.png) · [Fixed-budget results](docs/NVIDIA_GeForce_RTX_4080_presets.csv)
 
-![RTX 4080 training-loop time, PSNR, SSIM and VGG LPIPS by scene for the three current presets](assets/mipnerf360-rtx4080-presets.png)
+![RTX 4080 training-loop time, PSNR, SSIM and VGG LPIPS by scene for the three fixed-budget presets](assets/mipnerf360-rtx4080-presets.png)
 
 </details>
 

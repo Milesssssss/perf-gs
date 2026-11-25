@@ -26,8 +26,8 @@ def test_explicit_heldout_overflow_counter_disambiguates_exact_capacity():
         _check_saved_sort([{"tile_pairs": 100}], {"max_sort_pairs": 100, "heldout_sort_overflows": 1})
 
 
-@pytest.mark.parametrize("steps", [3000, 3500])
-def test_training_only_model_uses_registered_split_and_original_dimensions(tmp_path, monkeypatch, steps):
+@pytest.mark.parametrize(("steps", "requested"), [(3000, 3000), (3500, 3500), (9000, 0)])
+def test_training_only_model_uses_registered_split_and_original_dimensions(tmp_path, monkeypatch, steps, requested):
     run, output = tmp_path / "run", tmp_path / "model"
     scene = write_colmap_scene(tmp_path / "bicycle", [(f"{i}.png", 32, 24, 30) for i in reversed(range(9))])
     images = scene / "images_4"
@@ -35,13 +35,19 @@ def test_training_only_model_uses_registered_split_and_original_dimensions(tmp_p
     for idx in (0, 8):
         Image.new("RGB", (8, 6), (idx, 1, 2)).save(images / f"{idx}.png")
     run.mkdir()
-    config = {"scene": str(scene), "cli_args": {"iters": steps, "eval_holdout": 1, "max_splats": 100},
+    config = {"scene": str(scene), "cli_args": {"iters": requested, "eval_holdout": 1, "max_splats": 100},
               "resolved": {"n_cams": 9, "n_train": 7, "n_test": 2, "holdout_stride": 8,
                            "downsample": 4, "width": 8, "height": 6}}
+    if requested == 0:
+        config["cli_args"]["preset"] = "quality+"
     (run / "config.json").write_text(json.dumps(config))
     def log(iters, overflows):
-        (run / "log.jsonl").write_text(json.dumps({"event": "train_complete", "iters": iters}) + "\n" +
-            json.dumps({"event": "training_memory", "sort_overflows": overflows, "max_sort_pairs": 12000}))
+        events = [{"event": "train_complete", "iters": iters},
+                  {"event": "training_memory", "sort_overflows": overflows, "max_sort_pairs": 12000}]
+        if requested == 0:
+            events.append({"event": "training_stop", "iter": iters,
+                           "stop_reason": "plateau" if iters == steps else "interrupted"})
+        (run / "log.jsonl").write_text("\n".join(map(json.dumps, events)))
     prepare = _converter["prepare"]
     model = run / "output.ply"
     selected = []
@@ -53,7 +59,7 @@ def test_training_only_model_uses_registered_split_and_original_dimensions(tmp_p
         return render
     monkeypatch.setitem(prepare.__globals__, "_model_renderer", make_renderer)
     log(steps - 1, 0)
-    with pytest.raises(ValueError, match=f"{steps:,}"):
+    with pytest.raises(ValueError, match=f"Expected {requested:,} completed"):
         prepare(run, output, ply=model)
     log(steps, 1)
     with pytest.raises(ValueError, match="overflows"):

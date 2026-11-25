@@ -73,7 +73,7 @@ def run_post_training(
     if metrics:
         print("computing final per-camera metrics...")
         progress("rendering every camera", 0.25)
-        render_all_cameras(pipeline, scene, args.iters, cams_dir,
+        render_all_cameras(pipeline, scene, completed_iters, cams_dir,
                            checkpoint=checkpoint)
 
         total = max(1, len(scene.images))
@@ -147,7 +147,7 @@ def run_post_training(
             "all_psnr_linear_db_of_mean_mse": db_of_mean_mse(total_mse_lin, n_cams),
             "per_cam": per_cam,
             "n_cams": n_cams,
-            "iters": args.iters,
+            "iters": completed_iters,
             # Training-loop wall-clock, captured with the GPU drained (excludes this pass).
             "train_wall_s": train_wall_s,
             "train_it_per_s": completed_iters / max(train_wall_s, 1e-9),

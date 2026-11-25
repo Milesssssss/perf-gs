@@ -189,6 +189,13 @@ class ResultInfo:
     run_dir: str = ""
     exported_path: str = ""
     exported_mb: float = 0.0
+    stop_reason: str | None = None
+
+    @property
+    def stopped(self) -> bool:
+        if self.stop_reason:
+            return self.stop_reason == "interrupted"
+        return self.iterations < self.target_iterations
 
     def summary(self) -> str:
         parts = [f"{self.iterations:,} iterations", format_duration(self.wall_s)]
@@ -379,7 +386,7 @@ class Snapshot:
         if self.result_state == ResultState.EXPORTED:
             return "result exported"
         if self.training_state == TrainingState.COMPLETED:
-            return ("training stopped" if self.result.iterations < self.result.target_iterations
+            return ("training stopped" if self.result.stopped
                     else "training complete")
         if self.trainable:
             return "ready to train"
@@ -405,7 +412,7 @@ class Snapshot:
         if self.training_state == TrainingState.COMPLETED:
             if self.result_state == ResultState.EXPORTED:
                 return "EXPORTED"
-            return "STOPPED" if self.result.iterations < self.result.target_iterations else "COMPLETE"
+            return "STOPPED" if self.result.stopped else "COMPLETE"
         if self.has_dataset:
             return "READY"
         return "EMPTY"

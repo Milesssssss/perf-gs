@@ -8,7 +8,7 @@ from __future__ import annotations
 import argparse
 import json
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -62,6 +62,7 @@ from trainer.frontend.sampling import CameraSampler, StbnSampler
 from trainer.frontend.scene import SceneContext, load_scene_context
 from trainer.frontend.schedule import (
     AppearanceSchedule,
+    ConvergenceMonitor,
     ExtinctionHardnessSchedule,
     IterationContext,
     LearningRateSchedule,
@@ -98,6 +99,7 @@ class TrainingResult:
     observation_total_seconds: float = 0.0
     # StageTimingRecorder when --stage-timing-every is set, else None.
     stage_timing: Any = None
+    stop_reason: str | None = None
 
 
 @dataclass
@@ -217,7 +219,7 @@ class TrainingApplication:
         self.profiler = None            # already closed by _run_training_and_post
 
 
-    def _run_training_and_post(self, *, hold_viewer: bool = True) -> None:
+    def _run_training_and_post(self, *, hold_viewer: bool = True) -> str | None:
         """Train, then write the run's post-training artifacts.
         ``hold_viewer`` blocks on the viewer window afterwards (CLI); the hub passes False
         because blocking there would freeze its panel."""
@@ -274,10 +276,11 @@ class TrainingApplication:
             viewer.state.training_completed(ResultInfo(
                 iterations=result.iterations, target_iterations=self.args.iters,
                 wall_s=result.wall_time_seconds, splats=stats.gaussians,
-                run_dir=str(self.paths.root)))
+                run_dir=str(self.paths.root), stop_reason=result.stop_reason))
             # Metrics must finish (or be stopped) before the CLI waits for the window to close.
             viewer.hold_after_training(pipeline)
         # The hub publishes the completed transition and result record once this returns.
+        return result.stop_reason
 
     def _report_memory(self) -> dict:
         """Print and return the run's sort-pair demand, owned GPU bytes and VRAM use."""
@@ -362,6 +365,7 @@ class TrainingApplication:
             gpu_lock=self.gpu_lock,
             scene=scene,
             max_splats=self._plan_memory(scene, session),
+            max_sort_pairs=self.args.max_sort_pairs,
             config=self._config,
             initial_state=scene.colmapScene.initial_points,
             slang_session=session,
@@ -386,7 +390,7 @@ class TrainingApplication:
         def cost(capacity: int) -> int:
             shape = {"max_splats": capacity, "width": scene.width,
                      "height": scene.height, "sh_degree": args.sh_degree}
-            total = estimate_pipeline_bytes(module, structure_aware=structure, **shape)
+            total = estimate_pipeline_bytes(module, structure_aware=structure, max_sort_pairs=args.max_sort_pairs, **shape)
             if not args.no_viewer:
                 total += estimate_pipeline_bytes(module, viewer_only=True, **shape)
             return total + target_bytes
@@ -495,7 +499,7 @@ class TrainingApplication:
             base=config.base_lrs,
             extent=scene.extent,
             mean_steps=config.position_lr_max_steps,
-            iterations=config.schedule.iterations,
+            iterations=config.schedule.optimization_steps,
             scale_rotation_decay=config.scale_rotation_lr_decay,
         )
 
@@ -587,6 +591,7 @@ class TrainingApplication:
                 "n_cams": sceneContext.camera_count,
                 "n_init_points": sceneContext.initial_gaussian_count,
                 "n_train": len(sceneContext.train_indices),
+                "lr_schedule_steps": resolved.schedule.optimization_steps,
                 "n_test": len(sceneContext.test_indices),
                 "holdout_stride": sceneContext.holdout_stride,
                 "eff_lambda_l2": resolved.loss.l2_weight,
@@ -681,6 +686,8 @@ class TrainingApplication:
                 process_started_at=_PROCESS_STARTED_AT,
             )
             report["memory"].update(self._memory_summary)
+            if result.stop_reason:
+                report["stop_reason"] = result.stop_reason
             if result.stage_timing is not None:
                 report["stage_timing"] = result.stage_timing.summary()
             path = run_report_module.write_run_report(report, self.paths.root)
@@ -740,6 +747,8 @@ class TrainingApplication:
 class TrainingLoop:
     """Executes optimizer steps, then scheduled mutations, then observations."""
 
+    convergence: ConvergenceMonitor | None = None
+
     def __init__(
         self,
         *,
@@ -778,12 +787,20 @@ class TrainingLoop:
         )
         self.schedule = TrainingSchedule(config.schedule)
         growth_end = config.schedule.densify_to
-        score_steps = min(200, max(0, (args.iters - growth_end) // 2))
+        schedule_steps = config.schedule.optimization_steps
+        score_steps = (200 if config.schedule.until_convergence and growth_end >= schedule_steps
+                       else min(200, max(0, (schedule_steps - growth_end) // 2)))
         self.image_prune_steps = (
             range(growth_end + 1, growth_end + score_steps + 1)
             if args.final_splat_fraction < 1 and self.densify_mode != DensificationMode.NONE
             else range(0))
         self.deferred_morton = False
+        self.stop_reason = None
+        if config.schedule.until_convergence:
+            last_growth = growth_end if self.densify_mode != DensificationMode.NONE else 0
+            self.convergence = ConvergenceMonitor(
+                scene.train_indices, max(schedule_steps, last_growth, self.image_prune_steps.stop - 1,
+                                         config.appearance.sh_degree * config.appearance.band_interval))
 
         pipeline = self.runtime.pipeline
         self.stbn_sampler = (StbnSampler(pipeline.stbn_config, pipeline.stbn_slices)
@@ -815,21 +832,30 @@ class TrainingLoop:
                 self._execute_training_step(it_context)
 
                 # Freeze training time before the final iteration's observations.
-                if it_context.step_number == self.args.iters:
+                last_step = it_context.step_number == self.args.iters
+                if last_step and self.convergence is None:
                     self._record_current_timing()
 
                 self._apply_mutations(it_context)
+                if self.convergence is not None:
+                    if self._check_convergence(it_context.step_number):
+                        self.stop_reason = "plateau"
+                        last_step = True
+                        if self.args.evaluation and self.args.eval_every is None:
+                            it_context = replace(it_context, events=replace(it_context.events, eval=True))
+                    if last_step:
+                        self._record_current_timing()
                 observed_at = time.perf_counter()
                 try:
                     should_continue = self._produce_observations(it_context)
                 finally:
                     spent = time.perf_counter() - observed_at
                     self.observation_seconds += spent
-                    if it_context.step_number != self.args.iters:
+                    if not last_step:
                         self.observation_in_wall_seconds += spent
                 self.instrumentation.end_iteration(self.runtime.pipeline)
 
-                if not should_continue:
+                if last_step or not should_continue:
                     break
         except RunStopped:
             pass
@@ -864,7 +890,7 @@ class TrainingLoop:
 
     def _should_continue(self) -> bool:
         return (
-            self.training_step < self.args.iters
+            (not self.args.iters or self.training_step < self.args.iters)
             and not self.instrumentation.should_stop()
             # The viewer's Stop ends the run early but still finalizes, keeping a usable result.
             and not self.runtime.viewer.stop_requested()
@@ -875,15 +901,32 @@ class TrainingLoop:
             return None
         return self.stbn_sampler.variables(camera_index, self.training_step)
 
+    def _check_convergence(self, step: int) -> bool:
+        monitor = self.convergence
+        if not monitor.due(step):
+            return False
+        score, _ = eval_test_psnr_srgb(self.runtime.pipeline, self.scene.colmapScene, monitor.cameras,
+                                       self.targets.srgb, checkpoint=self.runtime.viewer.checkpoint)
+        plateau = monitor.observe(score)
+        self.runtime.artifacts.log_json.write(json.dumps({
+            "event": "convergence_probe", "iter": step, "train_psnr_srgb": score,
+            "train_indices": monitor.cameras, "stale_checks": monitor.stale_checks,
+        }) + "\n")
+        print(f"[quality+] step {step:,}, train probe {score:.3f} dB, "
+              f"{monitor.stale_checks}/3 checks below the improvement threshold", flush=True)
+        return plateau
+
     def _next_iteration(self) -> IterationContext:
         self.training_step += 1
         camera_index = self.sampler.next()
         camera_entry = self.scene.colmapScene.images[camera_index]
-        learning_rates = self.learning_rates.at(self.training_step - 1)
+        score = self._should_accumulate_structure(self.training_step)
+        lr_step = min(self.training_step, self.schedule.config.optimization_steps)
+        learning_rates = self.learning_rates.at(lr_step - 1)
         if self.args.lr_recipe == LearningRateRecipe.SHORT:
             pipeline = self.runtime.pipeline
             learning_rates, pipeline.loss.config = self.learning_rates.short_objective(
-                self.training_step, learning_rates, pipeline.loss_config)
+                lr_step, learning_rates, pipeline.loss_config)
 
         return IterationContext(
             step_number=self.training_step,
@@ -896,9 +939,9 @@ class TrainingLoop:
                 hardness_value=(self.extinction_hardness_schedule.at(self.training_step) if self.extinction_hardness_schedule is not None else 1.0),
                 sh_degree=(self.appearance_schedule.at(self.training_step) if self.appearance_schedule is not None else int(self.args.sh_degree)),
                 densification_variables=DensificationProperties(
-                    structure_tensor_texture=self.structure_textures[camera_index] if self._should_accumulate_structure(self.training_step) else None,
+                    structure_tensor_texture=self.structure_textures[camera_index] if score else None,
                     # TODO: normalize the hyperparameters instead of rescaling this threshold here.
-                    structure_kwargs={"per_view_grad_thresh": (self.args.sad_freq_grad_threshold * self.scene.width * self.scene.height * 3.0) if self._should_accumulate_structure(self.training_step) else None},
+                    structure_kwargs={"per_view_grad_thresh": (self.args.sad_freq_grad_threshold * self.scene.width * self.scene.height * 3.0) if score else None},
                     track_blend_weight=self._tracks_blend_weight(self.training_step),
                     track_screen_grad=self._tracks_screen_grad(self.training_step),
                 ),
@@ -1095,6 +1138,16 @@ class TrainingLoop:
         if self.extinction_hardness_schedule is not None:
             self.runtime.pipeline.set_extinction_hardness(self.extinction_hardness_schedule.target)
         self.runtime.reporter.report_complete(self.training_step, self.post_iteration_clean_timing)
+        if self.convergence is not None:
+            self.stop_reason = self.stop_reason or (
+                "iteration_limit" if self.args.iters > 0 and self.training_step == self.args.iters else "interrupted")
+            self.runtime.artifacts.log_json.write(json.dumps({
+                "event": "training_stop", "iter": self.training_step, "stop_reason": self.stop_reason,
+            }) + "\n")
+            message = f"Quality+ finished at step {self.training_step:,} ({self.stop_reason})."
+            self.runtime.viewer.state.log(message)
+            print(message)
+            self.instrumentation.stage_timing.total_iters = self.training_step
         stage_timing = self.instrumentation.finish(self.paths.root,
                                                    self.post_iteration_clean_timing)
         return TrainingResult(
@@ -1105,6 +1158,7 @@ class TrainingLoop:
             observation_seconds=self.observation_in_wall_seconds,
             observation_total_seconds=self.observation_seconds,
             stage_timing=stage_timing,
+            stop_reason=self.stop_reason,
         )
 
 

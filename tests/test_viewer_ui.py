@@ -434,10 +434,10 @@ def test_the_store_opens_on_the_cli_defaults():
 def test_choosing_a_preset_applies_it_and_balanced_restores_the_defaults():
     setup = TrainingSetup()
     preset = SETTINGS_MAP["preset"]
-    assert preset.choices == ("ultrafast", "balanced", "quality")
+    assert preset.choices == ("ultrafast", "balanced", "quality", "quality+")
     setup.set("splat_kernel", "opaque_core")
     setup.set("lr_recipe", "default")
-    for name in ("ultrafast", "quality", "balanced"):
+    for name in ("ultrafast", "quality", "quality+", "balanced"):
         setup.set_index("preset", preset.choice_index(name))
         cli = build_parser().parse_args(["--preset", name])
         assert setup.values() == {s.setting_name: getattr(cli, s.setting_name) for s in SETTINGS}

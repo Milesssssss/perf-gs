@@ -56,7 +56,8 @@ class TrainingReporter:
             step=0, total=int(self._args.iters),
             gaussians=self._scene.initial_gaussian_count, elapsed_s=0.0,
             it_per_s=0.0, loss=None, psnr=None)
-        self._state.log(f"training started: {self._args.iters} iters at "
+        duration = f"{self._args.iters} iters" if self._args.iters else "until convergence"
+        self._state.log(f"training started: {duration} at "
                         f"{self._scene.width}x{self._scene.height}")
 
     def report_throughput(self, context: IterationContext) -> None:

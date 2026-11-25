@@ -18,7 +18,24 @@ import pytest
 
 from trainer.config.config import ScheduleConfig
 from trainer.config.config_types import DensificationMode
-from trainer.frontend.schedule import TrainingSchedule
+from trainer.frontend.schedule import ConvergenceMonitor, TrainingSchedule
+
+
+def test_quality_plus_needs_three_checks_without_cumulative_gain_on_fixed_train_views():
+    train = [i for i in range(100) if i % 8]
+    monitor = ConvergenceMonitor(train, ready_step=2100)
+    assert len(set(monitor.cameras)) == 8 and set(monitor.cameras) <= set(train)
+    assert monitor.interval == len(train) * 4
+    assert not monitor.due(2099) and monitor.due(2100 + monitor.interval)
+    assert [monitor.observe(x) for x in (28, 28.03, 28.06, 28.08, 28.09, 28.08)] == [
+        False, False, False, False, False, True]
+
+
+def test_quality_plus_small_dataset_uses_every_train_view():
+    monitor = ConvergenceMonitor([1, 3], ready_step=0)
+    assert monitor.cameras == [1, 3] and monitor.interval == 100 and monitor.first == 1
+    with pytest.raises(ValueError, match="nonfinite"):
+        monitor.observe(float("nan"))
 
 # Schedule knobs at their CLI defaults.
 DEFAULT_KNOBS = dict(

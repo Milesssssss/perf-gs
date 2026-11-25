@@ -136,6 +136,12 @@ def test_scale_and_rotation_decay_log_linearly_over_the_run() -> None:
     assert s.at(1500).opacity == 0.05
 
 
+def test_short_objective_stays_at_terminal_rates_after_its_horizon():
+    s = LearningRateSchedule(AdamLRs(), 1.0, 3500, 3500, (1.0, 1.0))
+    assert s.short_objective(3500, s.at(3500), LossConfig()) == s.short_objective(
+        10_500, s.at(10_500), LossConfig())
+
+
 def test_extinction_class_matches_reference() -> None:
     s = ExtinctionHardnessSchedule(target=4.0, warmup=500)
     assert s.target == 4.0

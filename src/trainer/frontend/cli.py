@@ -59,13 +59,8 @@ def build_parser() -> argparse.ArgumentParser:
     _shared(parser, "iters")
     _shared(parser, "lr_recipe")
     parser.add_argument("--position-lr-max-steps", type=int, default=0,
-                    help="horizon for the exponential mean-LR decay (3DGS "
-                         "position_lr_max_steps). 0 (the default) = FOLLOW --iters, "
-                         "which is what you almost always want: a horizon shorter "
-                         "than the run freezes the means early, a longer one never "
-                         "reaches the final LR. Pass a positive value to pin it "
-                         "independently of --iters (e.g. to reproduce a 30k-step "
-                         "decay in a short run).")
+                    help="horizon for exponential position LR decay. 0 follows the preset schedule "
+                         "(--iters, or 100 camera passes with a 3,500-step minimum for Quality+).")
     parser.add_argument("--downsample", type=int, default=None,
                     help="downsample factor (1=full res, 2=half, 4=quarter). "
                          "Defaults to 2 for indoor Mip-NeRF 360 scenes and 4 otherwise. "
@@ -139,6 +134,7 @@ def build_parser() -> argparse.ArgumentParser:
     _shared(parser, "lambda_ssim")
     _shared(parser, "max_splats")
     _shared(parser, "final_splat_fraction")
+    parser.add_argument("--max-sort-pairs", type=int, help="Training renderer's splat–tile pair capacity; defaults to a budget derived from --max-splats.")
     parser.add_argument("--z-near-cull", type=float, default=RasterConfig.z_near_cull,
                     help="view-space depth floor for bin cull; raise for scenes "
                          "where points can land near a camera pose (e.g. 0.2)")

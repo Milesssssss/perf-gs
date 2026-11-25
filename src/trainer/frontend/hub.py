@@ -283,7 +283,7 @@ class TrainingHub:
         self.app.viewer.push_snapshot(self.app._pipeline)  # show the initial gaussians
         state.log(f"Ready to train after {time.perf_counter() - started:.2f} s of setup")
         try:
-            self.app._run_training_and_post(hold_viewer=False)
+            stop_reason = self.app._run_training_and_post(hold_viewer=False)
         except Exception as error:                     # noqa: BLE001
             self._hub_run_failed("training", error)
             return
@@ -293,7 +293,7 @@ class TrainingHub:
         state.training_completed(ResultInfo(
             iterations=stats.step, target_iterations=stats.total,
             wall_s=stats.elapsed_s, splats=stats.gaussians,
-            run_dir=str(self.app.paths.root)))
+            run_dir=str(self.app.paths.root), stop_reason=stop_reason))
         auto_export = self.app.paths.root / "output.ply"
         if (self.app.args.save_ply or self.app.args.compute_final_metrics) and auto_export.is_file():
             state.result_exported(str(auto_export.resolve()), auto_export.stat().st_size / 1024**2)

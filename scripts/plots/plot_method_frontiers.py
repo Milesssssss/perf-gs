@@ -92,14 +92,17 @@ def scene_means(name, runs):
     return mean(times), mean(scores)
 
 
-def measurements(presets_path, baseline_paths):
-    with presets_path.open(newline="") as stream:
-        presets = list(csv.DictReader(stream))
+def measurements(presets_path, baseline_paths, additional_presets=()):
+    presets = []
+    for path in (presets_path, *additional_presets):
+        with path.open(newline="") as stream:
+            presets.extend(csv.DictReader(stream))
     groups = defaultdict(list)
     for row in presets:
         groups[f"PERF-GS {row['preset'].capitalize()}"].append(row)
-    if set(groups) != {"PERF-GS Ultrafast", "PERF-GS Balanced", "PERF-GS Quality"}:
-        raise ValueError("The preset CSV must include Ultrafast, Balanced and Quality")
+    fixed = {"PERF-GS Ultrafast", "PERF-GS Balanced", "PERF-GS Quality"}
+    if not fixed <= set(groups) <= fixed | {"PERF-GS Quality+"}:
+        raise ValueError("Provide Ultrafast, Balanced and Quality, optionally including Quality+")
     for path in baseline_paths:
         with path.open(newline="") as stream:
             rows = list(csv.DictReader(stream))
@@ -162,11 +165,12 @@ def draw(points, gpu):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--presets", type=Path, default=ROOT / "docs/NVIDIA_GeForce_RTX_4080_presets.csv")
+    parser.add_argument("--presets", type=Path, nargs="+", default=[
+        ROOT / "docs/NVIDIA_GeForce_RTX_4080_presets.csv", ROOT / "docs/NVIDIA_GeForce_RTX_4080_qualityplus.csv"])
     parser.add_argument("--baselines", "--litegs", nargs="+", type=Path,
                         default=[ROOT / "docs/mipnerf360_litegs_4080.csv", ROOT / "docs/mipnerf360_peers_4080.csv"])
     args = parser.parse_args()
-    gpu, points = measurements(args.presets, args.baselines)
+    gpu, points = measurements(args.presets[0], args.baselines, args.presets[1:])
     adapter_id = re.sub("[^a-z0-9]", "", gpu.lower())
     if not adapter_id:
         raise ValueError(f"Invalid adapter name {gpu!r}")

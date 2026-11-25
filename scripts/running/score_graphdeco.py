@@ -16,7 +16,7 @@ ROOT = Path(__file__).resolve().parents[2]
 REFERENCE_COMMIT = "54c035f7834b564019656c3e3fcc3646292f727d"
 
 
-def preset_rows(models, graphdeco, expected_gpu):
+def preset_rows(models, graphdeco, expected_gpu, *, quality_plus_only=False):
     """Match prepared renders to measured Vulkan runs under the published nine-scene protocol."""
     from trainer.frontend.settings import preset_values
 
@@ -29,6 +29,8 @@ def preset_rows(models, graphdeco, expected_gpu):
         reader = csv.DictReader(stream)
         reference = {(row["preset"], row["scene"]): row for row in reader}
         columns = reader.fieldnames
+    if quality_plus_only:
+        reference = {("quality+", scene): row for (preset, scene), row in reference.items() if preset == "quality"}
     if len(models) != len(reference):
         raise ValueError(f"Expected {len(reference)} preset/scene runs, received {len(models)}")
     rows = {}
@@ -56,7 +58,10 @@ def preset_rows(models, graphdeco, expected_gpu):
                 or scene["downsample"] != (2 if key[1] in ("bonsai", "counter", "kitchen", "room") else 4)
                 or not views or not (len(views) == scene["n_test"] == timing["n_test_cams"])):
             raise ValueError(f"Incorrect held-out split or downsample for {model}")
-        if (not (report["iters_requested"] == report["iters_completed"] == timing["iters"])
+        completed = report["iters_completed"]
+        correct_length = (report["iters_requested"] == 0 and report.get("stop_reason") == "plateau"
+                          if quality_plus_only else report["iters_requested"] == completed)
+        if (not correct_length or completed <= 0 or completed != timing["iters"]
                 or timing.get("sort_overflows") != 0 or timing.get("heldout_sort_overflows") != 0
                 or not (math.isfinite(wall) and wall > 0 and wall == timing["train_wall_s"])):
             raise ValueError(f"Invalid training length, timing or sort capacity for {model}")
@@ -88,17 +93,19 @@ def main():
                         help="checkout of graphdeco-inria/gaussian-splatting")
     parser.add_argument("--preset-csv", type=Path, help="write a new per-scene CSV for a complete preset benchmark")
     parser.add_argument("--expect-gpu", help="require this exact trainer adapter name in the preset CSV")
+    parser.add_argument("--quality-plus-only", action="store_true",
+                        help="score nine automatically converged Quality+ runs instead of the three fixed presets")
     parser.add_argument("models", type=Path, nargs="+",
                         help="directories containing one test/ours_<steps>/{renders,gt}")
     args = parser.parse_args()
     if not (args.graphdeco / "metrics.py").is_file():
         parser.error("Graphdeco checkout must contain metrics.py")
-    if args.expect_gpu and not args.preset_csv:
-        parser.error("--expect-gpu requires --preset-csv")
+    if (args.expect_gpu or args.quality_plus_only) and not args.preset_csv:
+        parser.error("--expect-gpu and --quality-plus-only require --preset-csv")
     if args.preset_csv:
         if args.preset_csv.exists():
             parser.error(f"CSV already exists: {args.preset_csv}")
-        columns, rows = preset_rows(args.models, args.graphdeco, args.expect_gpu)
+        columns, rows = preset_rows(args.models, args.graphdeco, args.expect_gpu, quality_plus_only=args.quality_plus_only)
     sys.path.insert(0, str(args.graphdeco.resolve()))
     import metrics
     import torch

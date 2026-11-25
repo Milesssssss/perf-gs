@@ -220,6 +220,11 @@ def test_pause_and_resume_are_distinct_states_not_a_toggle_guess() -> None:
     assert not snap.busy and snap.can_configure
 
 
+def test_quality_plus_plateau_completes_early_and_manual_stop_can_interrupt_an_uncapped_run():
+    assert not ResultInfo(iterations=7000, target_iterations=9000, stop_reason="plateau").stopped
+    assert ResultInfo(iterations=7000, target_iterations=0, stop_reason="interrupted").stopped
+
+
 def test_stopping_keeps_the_partial_result_rather_than_cancelling() -> None:
     session = hub()
     ready_dataset(session)

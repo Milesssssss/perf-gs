@@ -84,9 +84,10 @@ class SlangSessions:
 
 
 def create_pipeline(*, device: spy.Device, gpu_lock: Any, scene: SceneContext,
-                    max_splats: int, config: RunConfig,
+                    max_splats: int, config: RunConfig, max_sort_pairs: int | None = None,
                     initial_state: dict | None = None,
                     slang_session: spy.SlangSession | None = None) -> TrainingPipeline:
+    capacity_override = {} if max_sort_pairs is None else {"max_sort_pairs": max_sort_pairs}
     return TrainingPipeline(
         device=device,
         width=scene.width,
@@ -101,4 +102,5 @@ def create_pipeline(*, device: spy.Device, gpu_lock: Any, scene: SceneContext,
         initial_state=initial_state,
         densify_mode=config.densify_mode,
         slang_session=slang_session,
+        **capacity_override,
     )

@@ -36,7 +36,12 @@ The updated **Quality** preset averaged **27.90 dB in 32.44 s** on the RTX 4080 
 | Ultrafast | 3,000 | 17.62 s | 31.28 s | 27.13 dB | 0.7936 | 0.2567 | 5.29 GiB |
 | Balanced | 3,000 | 25.97 s | 41.30 s | 27.39 dB | 0.8143 | 0.2229 | 2.80 GiB |
 | **Quality** | **3,500** | **32.44 s** | — | **27.90 dB** | **0.8286** | **0.1997** | **4.80 GiB** |
+| Quality+ | 17,536 avg. | 216.40 s | — | 28.225 dB | 0.8316 | 0.1907 | 4.80 GiB |
 | Quality (previous) | 3,000 | 33.85 s | 49.56 s | 27.78 dB | 0.8275 | 0.2011 | 6.13 GiB |
+
+**Quality+** ran the same Quality schedule for 3,500 updates, then refined its existing splats until training-view PSNR plateaued. All nine scenes reached that stop at seed 42. Against the published 4080 Quality runs, mean held-out PSNR increased by **0.704 dB indoors** and **0.023 dB outdoors**. Six scenes gained PSNR, seven gained SSIM and all nine improved VGG LPIPS. The mean loop took 6.67× as long, including convergence checks. Bicycle and Room informed development. [Per-scene results](NVIDIA_GeForce_RTX_4080_qualityplus.csv) · [Convergence plot](../assets/qualityplus-convergence-4080.png) · [Stopping rule](usage.md#quality-convergence)
+
+**How stable is the stop?** A second Bicycle run at the same seed reached its first plateau at 23,104 updates and 25.844 dB. The published run stopped at 15,668 and 25.800 dB. Continuing the second run with the same splats and optimizer for 12 more camera passes took another 19.23 s and added 0.015 dB on the 25 held-out views. The stopping step can vary appreciably even when the resulting scores are close.
 
 VRAM is the trainer process’s local GPU memory on the RTX 4080, sampled at the end of each headless training loop and recorded in the CSV as `vram_usage_bytes`. Balanced and Quality stream photos from system RAM. Ultrafast keeps the training photos and their structure fields on the GPU for speed.
 
@@ -60,7 +65,7 @@ The transmittance multiplier improved LPIPS on seven scenes and lowered PSNR on 
 
 </details>
 
-![Training-loop time, PSNR, SSIM and VGG LPIPS for the current presets on each of the nine scenes](../assets/mipnerf360-rtx4080-presets.png)
+![Training-loop time, PSNR, SSIM and VGG LPIPS for the three fixed-budget presets on each of the nine scenes](../assets/mipnerf360-rtx4080-presets.png)
 
 | Preset | Setup + train loop | Launch to model | Launch to closed PLY | Launch to exit | Launch to synced PLY | Gaussians |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -102,7 +107,7 @@ On Bicycle, Balanced finished 3,000 steps with 2.49M Gaussians and buffers sized
 
 ![Training-loop time and held-out PSNR for Gaussian splatting trainers measured on one RTX 4080.](../assets/mipnerf360-rtx4080-frontier.png)
 
-The dashed line connects configurations that improve on the best PSNR reached at a shorter training time. Each horizontal tick doubles the training-loop budget.
+The dashed line connects configurations that improve on the best PSNR reached at a shorter training time. Each horizontal tick doubles the training-loop budget. Quality+ extends the curve to 28.225 dB at 216.40 s on the same card. [Quality+ per-scene measurements](NVIDIA_GeForce_RTX_4080_qualityplus.csv)
 
 | External trainer | Recipe | Mean train loop | Mean PSNR |
 | --- | --- | ---: | ---: |

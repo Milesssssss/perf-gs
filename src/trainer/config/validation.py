@@ -24,12 +24,16 @@ def validate_training_config(args: argparse.Namespace, *, n_cams: int, n_train: 
     """
     mode = DensificationMode(args.densify_mode)
 
-    if args.iters < 1:
+    if args.iters < 1 and not (args.preset == "quality+" and args.iters == 0):
         raise ConfigError(f"--iters must be >= 1, got {args.iters}.")
     if args.max_splats < 1:
         raise ConfigError(f"--max-splats must be >= 1, got {args.max_splats}.")
     if not 0.0 < args.final_splat_fraction <= 1.0:
         raise ConfigError("--final-splat-fraction must be in (0, 1].")
+    # The radix sort dispatches one group per 2,048 keys along a single GPU dimension.
+    max_pairs = 65_535 * 2_048
+    if args.max_sort_pairs is not None and not 1 <= args.max_sort_pairs <= max_pairs:
+        raise ConfigError(f"--max-sort-pairs must be between 1 and {max_pairs:,}.")
 
     # densify_every is a modulo divisor of the schedule, not a "disable" value.
     if args.densify_every < 1:

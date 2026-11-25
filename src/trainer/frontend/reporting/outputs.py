@@ -46,7 +46,7 @@ class RunArtifacts:
 
         # This stream also gates the loop's eval sweeps: no stream, no sweep.
         eval_every = end_of_run_cadence(args.eval_every, args.iters)
-        do_eval = ((eval_every > 0 or bool(getattr(args, "eval_iters", None)))
+        do_eval = ((args.eval_every is None or eval_every > 0 or bool(getattr(args, "eval_iters", None)))
                    and args.evaluation)
         eval_curve_json = _stream("eval_curve.jsonl") if do_eval else None
         psnr_curve_json = _stream("psnr_curve.jsonl") if args.psnr_curve else None

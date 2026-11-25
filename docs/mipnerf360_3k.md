@@ -78,7 +78,7 @@ python scripts/running/score_benchmark_renders.py --graphdeco outputs/graphdeco_
   --reference "$REFERENCE" --views "$MODEL/native_views.json" --output "$MODEL/heldout_rgb8.json"
 ```
 
-To plot another card, record its per-scene means in CSVs with the same fields as the RTX 4080 files. Pass the preset CSV with `--presets` and the external-method CSVs with `--baselines` to `python scripts/plots/plot_method_frontiers.py`. The script checks the GPU, image dimensions and held-out counts before creating a card-specific image. [PERF-GS data](NVIDIA_GeForce_RTX_4080_presets.csv) · [LiteGS data](mipnerf360_litegs_4080.csv) · [Additional trainers](mipnerf360_peers_4080.csv)
+To plot another card, pass its fixed-budget CSV and optional Quality+ CSV together under `--presets`, and its external-method CSVs under `--baselines`, to `python scripts/plots/plot_method_frontiers.py`. The script checks the GPU, image dimensions and held-out counts before creating a card-specific image. [Fixed-budget data](NVIDIA_GeForce_RTX_4080_presets.csv) · [Quality+ data](NVIDIA_GeForce_RTX_4080_qualityplus.csv) · [LiteGS data](mipnerf360_litegs_4080.csv) · [Additional trainers](mipnerf360_peers_4080.csv)
 
 ## Camera response and PLY playback
 

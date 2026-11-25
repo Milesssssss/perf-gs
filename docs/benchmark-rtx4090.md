@@ -2,6 +2,8 @@
 
 The benchmark measures training-loop time, held-out image quality, final splat count and loop-end GPU memory on all nine Mip-NeRF 360 scenes. The current sweep uses each preset's default step count. The original 3,000-step sweep provides the baseline for comparing Quality recipes. [RTX 4090 comparison](benchmarks.md#rtx-4090-presets) · [Current per-scene CSV](NVIDIA_GeForce_RTX_4090_presets_current.csv) · [Original per-scene CSV](NVIDIA_GeForce_RTX_4090_presets.csv)
 
+For Quality+, add `-QualityPlusOnly` to the benchmark command below. This runs nine scenes until their training-view scores plateau. The separate `*_qualityplus.csv` records each scene’s actual step count and held-out scores. The loop clock includes the training-view checks.
+
 Run the commands from the repository root with the hub closed and the GPU idle. Both sweeps used the same RTX 4090 (24 GB) workstation with a 32-core Threadripper PRO 9975WX and Windows 11. [Current system record](NVIDIA_GeForce_RTX_4090_system_current.txt) · [Original system record](NVIDIA_GeForce_RTX_4090_system.txt)
 
 ## Set up once

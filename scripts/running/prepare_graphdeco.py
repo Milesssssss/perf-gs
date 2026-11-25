@@ -70,6 +70,7 @@ def prepare(run: Path, output: Path, image_dir: Path | None = None, ply: Path | 
     report = json.loads(report_path.read_text(encoding="utf-8")) if report_path.is_file() else None
     memory = {}
     expected_count = None
+    plateau_step = None
     if report is None:
         if ply is None:
             raise ValueError("Supply --ply for training-only output, or train with --run-report --save-test-renders.")
@@ -82,16 +83,23 @@ def prepare(run: Path, output: Path, image_dir: Path | None = None, ply: Path | 
                 event = json.loads(line)
                 if event.get("event") == "train_complete":
                     completed = event["iters"]
+                elif (event.get("event") == "training_stop" and event.get("stop_reason") == "plateau"
+                      and getattr(args, "preset", None) == "quality+"):
+                    plateau_step = event["iter"]
                 elif event.get("event") == "training_memory":
                     memory = event
     else:
         args = argparse.Namespace(**report["cli_args"]) if ply is not None else None
         scene, scene_path = report["scene"], Path(report["scene_path"])
         requested, completed, holdout = report["iters_requested"], report["iters_completed"], scene["eval_holdout"]
+        if report.get("stop_reason") == "plateau" and report.get("cli_args", {}).get("preset") == "quality+":
+            plateau_step = completed
         if ply is not None:
             expected_count = report["model"]["n_gaussians"]
         memory = report["memory"]
-    if requested < 1 or completed != requested:
+    reached_plateau = (completed is not None and completed > 0 and plateau_step == completed
+                       and (requested == 0 or completed <= requested))
+    if not reached_plateau and (requested < 1 or completed != requested):
         raise ValueError(f"Expected {requested:,} completed training steps, found {completed}")
     if not holdout or scene["holdout_stride"] != 8:
         raise ValueError("Training must hold out every eighth registered camera")

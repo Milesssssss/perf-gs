@@ -61,10 +61,10 @@ def default_sort_pairs(max_splats: int, viewer_only: bool = False) -> int:
 
 def estimate_pipeline_bytes(module: spy.Module, *, max_splats: int, width: int,
                             height: int, sh_degree: int, structure_aware: bool = False,
-                            viewer_only: bool = False) -> int:
+                            viewer_only: bool = False, max_sort_pairs: int | None = None) -> int:
     """Base GPU bytes a pipeline of this shape allocates (no GPU work)."""
     sizes = {"max_splats": max_splats, "width": width, "height": height,
-             "max_sort_pairs": default_sort_pairs(max_splats, viewer_only),
+             "max_sort_pairs": max_sort_pairs or default_sort_pairs(max_splats, viewer_only),
              "sh_rest_floats": sh_rest_coeffs(sh_degree) * 3}
     if not viewer_only:
         sizes["structure_aware"] = structure_aware

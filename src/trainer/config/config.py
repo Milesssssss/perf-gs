@@ -10,6 +10,9 @@ from typing import Any
 from trainer.config.config_types import DensificationMode, SplatKernel
 
 
+QUALITY_STEPS = 3500
+
+
 @dataclass(frozen=True)
 class RasterConfig:
     """Projection, binning, culling, and Mip-Splatting policy."""
@@ -181,6 +184,11 @@ class ScheduleConfig:
     prune_blend_from: int = 0
     # Previews also render every camera; --no-evaluation vetoes that.
     render_all_on_preview: bool = True
+    until_convergence: bool = False
+
+    @property
+    def optimization_steps(self) -> int:
+        return QUALITY_STEPS if self.until_convergence else self.iterations
 
     @property
     def blend_prune_start(self) -> int:

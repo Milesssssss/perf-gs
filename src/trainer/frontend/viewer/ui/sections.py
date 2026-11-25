@@ -281,7 +281,7 @@ def _training_live(panel: Panel, view: View, actions: Actions) -> None:
 def _iteration_text(view: View) -> str:
     stats = view.stats
     if stats.total <= 0:
-        return "starting"
+        return f"{stats.step:,} · until convergence" if stats.step else "starting"
     return f"{stats.step:,} / {stats.total:,}      {stats.percent:.1f}%"
 
 
