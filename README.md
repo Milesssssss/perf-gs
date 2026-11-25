@@ -1,5 +1,9 @@
 # PERF-GS
 
+[![Project page](https://img.shields.io/badge/Project%20page-355B3E)](https://electronicarts.github.io/perf-gs/)
+[![Languages: Python and Slang](https://img.shields.io/badge/languages-Python%20%2B%20Slang-3776AB)](#architecture-from-a-high-level)
+[![Backends: Vulkan and D3D12](https://img.shields.io/badge/backends-Vulkan%20%2B%20D3D12-355B3E)](#requirements)
+
 **Efficient, extensible, dependency-free & low memory differentiable training.**
 
 Run COLMAP on a folder of photos directly in the PERF-GS hub, or open an existing COLMAP scene. Then train a 3D Gaussian Splatting model with Slang on Vulkan or Direct3D 12.<br>
@@ -126,7 +130,7 @@ Quality+ stopped between 8,652 and 21,996 steps. Compared with Quality, it gaine
 
 ## Reconstructions
 
-Each row pairs a held-out photo with the three renders from the RTX 4090 benchmark. Ultrafast and Balanced trained for 3,000 steps and Quality trained for 3,500, all at seed 42. The box marks the area shown at native resolution below each image.
+For each scene, the same held-out photo ranked first in full-image PSNR for all three presets on the RTX 4080. The box marks the detail shown at native resolution below each image. Ultrafast and Balanced ran for 3,000 steps and Quality for 3,500, all at seed 42. [All-view benchmark results](#mip-nerf-360)
 
 <table>
   <thead>
@@ -138,7 +142,7 @@ Each row pairs a held-out photo with the three renders from the RTX 4090 benchma
     </tr>
   </thead>
   <tbody>
-    <tr><th scope="rowgroup" colspan="4" align="left">Kitchen</th></tr>
+    <tr><th scope="rowgroup" colspan="4" align="left">Kitchen · DSCF0912.JPG · Quality 34.99 dB</th></tr>
     <tr>
       <td><a href="docs/assets/reconstructions/kitchen-reference.webp"><img src="docs/assets/reconstructions/kitchen-reference.webp" width="216" alt="Kitchen reference photograph and detail crop"></a></td>
       <td><a href="docs/assets/reconstructions/kitchen-ultrafast.webp"><img src="docs/assets/reconstructions/kitchen-ultrafast.webp" width="216" alt="Kitchen Ultrafast render and detail crop"></a></td>
@@ -147,7 +151,7 @@ Each row pairs a held-out photo with the three renders from the RTX 4090 benchma
     </tr>
   </tbody>
   <tbody>
-    <tr><th scope="rowgroup" colspan="4" align="left">Bicycle</th></tr>
+    <tr><th scope="rowgroup" colspan="4" align="left">Bicycle · _DSC8824.JPG · Quality 29.74 dB</th></tr>
     <tr>
       <td><a href="docs/assets/reconstructions/bicycle-reference.webp"><img src="docs/assets/reconstructions/bicycle-reference.webp" width="216" alt="Bicycle reference photograph and detail crop"></a></td>
       <td><a href="docs/assets/reconstructions/bicycle-ultrafast.webp"><img src="docs/assets/reconstructions/bicycle-ultrafast.webp" width="216" alt="Bicycle Ultrafast render and detail crop"></a></td>
@@ -156,7 +160,7 @@ Each row pairs a held-out photo with the three renders from the RTX 4090 benchma
     </tr>
   </tbody>
   <tbody>
-    <tr><th scope="rowgroup" colspan="4" align="left">Stump</th></tr>
+    <tr><th scope="rowgroup" colspan="4" align="left">Stump · _DSC9277.JPG · Quality 30.65 dB</th></tr>
     <tr>
       <td><a href="docs/assets/reconstructions/stump-reference.webp"><img src="docs/assets/reconstructions/stump-reference.webp" width="216" alt="Stump reference photograph and detail crop"></a></td>
       <td><a href="docs/assets/reconstructions/stump-ultrafast.webp"><img src="docs/assets/reconstructions/stump-ultrafast.webp" width="216" alt="Stump Ultrafast render and detail crop"></a></td>
@@ -165,7 +169,7 @@ Each row pairs a held-out photo with the three renders from the RTX 4090 benchma
     </tr>
   </tbody>
   <tbody>
-    <tr><th scope="rowgroup" colspan="4" align="left">Room</th></tr>
+    <tr><th scope="rowgroup" colspan="4" align="left">Room · DSCF4763.JPG · Quality 36.30 dB</th></tr>
     <tr>
       <td><a href="docs/assets/reconstructions/room-reference.webp"><img src="docs/assets/reconstructions/room-reference.webp" width="216" alt="Room reference photograph and detail crop"></a></td>
       <td><a href="docs/assets/reconstructions/room-ultrafast.webp"><img src="docs/assets/reconstructions/room-ultrafast.webp" width="216" alt="Room Ultrafast render and detail crop"></a></td>
@@ -174,7 +178,7 @@ Each row pairs a held-out photo with the three renders from the RTX 4090 benchma
     </tr>
   </tbody>
   <tbody>
-    <tr><th scope="rowgroup" colspan="4" align="left">Bonsai</th></tr>
+    <tr><th scope="rowgroup" colspan="4" align="left">Bonsai · DSCF5725.JPG · Quality 35.45 dB</th></tr>
     <tr>
       <td><a href="docs/assets/reconstructions/bonsai-reference.webp"><img src="docs/assets/reconstructions/bonsai-reference.webp" width="216" alt="Bonsai reference photograph and detail crop"></a></td>
       <td><a href="docs/assets/reconstructions/bonsai-ultrafast.webp"><img src="docs/assets/reconstructions/bonsai-ultrafast.webp" width="216" alt="Bonsai Ultrafast render and detail crop"></a></td>

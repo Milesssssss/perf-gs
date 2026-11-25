@@ -69,34 +69,40 @@
     <section class="gallery-band" id="reconstructions" aria-labelledby="gallery-heading">
       <div class="shell section">
         <h2 id="gallery-heading">Reconstructions</h2>
-        <p class="lead">Compare a held-out photograph with the same camera view rendered by PERF-GS. The close-up below each view shows the marked detail.</p>
+        <p class="lead">For each scene, the same held-out photo ranked first in full-image PSNR for all three presets. The box marks the same detail in the photograph and both renders.</p>
         <form class="gallery-controls" id="gallery-controls" hidden>
-          <label>Scene <select name="scene"><option value="kitchen">Kitchen</option><option value="bicycle">Bicycle</option><option value="stump">Stump</option><option value="room">Room</option><option value="bonsai">Bonsai</option></select></label>
-          <label>Compare <select name="count"><option value="2">2 images</option><option value="3">3 images</option></select></label>
-          <label>Left <select name="left"><option value="reference">Reference</option><option value="ultrafast">Ultrafast</option><option value="balanced">Balanced</option><option value="quality">Quality</option></select></label>
-          <label><span id="preset-label">Right</span> <select name="preset"><option value="ultrafast">Ultrafast</option><option value="balanced">Balanced</option><option value="quality" selected>Quality</option></select></label>
-          <label hidden>Preset 2 <select name="preset2"><option value="ultrafast">Ultrafast</option><option value="balanced">Balanced</option><option value="quality">Quality</option></select></label>
-          <label>View <select name="layout"><option value="slider">Slider</option><option value="side-by-side">Side by side</option></select></label>
+          <label>Scene <select name="scene">
+            <option value="kitchen" data-photo="DSCF0912.JPG" data-ultrafast="34.20" data-balanced="34.46" data-quality="34.99">Kitchen</option>
+            <option value="bicycle" data-photo="_DSC8824.JPG" data-ultrafast="28.14" data-balanced="29.00" data-quality="29.74">Bicycle</option>
+            <option value="stump" data-photo="_DSC9277.JPG" data-ultrafast="30.11" data-balanced="30.37" data-quality="30.65">Stump</option>
+            <option value="room" data-photo="DSCF4763.JPG" data-ultrafast="35.78" data-balanced="36.22" data-quality="36.30">Room</option>
+            <option value="bonsai" data-photo="DSCF5725.JPG" data-ultrafast="34.39" data-balanced="34.73" data-quality="35.45">Bonsai</option>
+          </select></label>
         </form>
         <div class="compare">
           <div class="compare-images">
             <a class="photo-link" href="assets/reconstructions/kitchen-reference.webp" tabindex="-1"><img id="reference" src="assets/reconstructions/kitchen-reference.webp" alt="Held-out Kitchen photograph and detail crop" width="464" height="563" loading="lazy"></a>
-            <a class="photo-link" href="assets/reconstructions/kitchen-quality.webp" tabindex="-1"><img id="render" src="assets/reconstructions/kitchen-quality.webp" alt="Kitchen Quality reconstruction and matching detail crop" width="464" height="563" loading="lazy"></a>
-            <a class="photo-link" href="assets/reconstructions/kitchen-quality.webp" tabindex="-1" hidden><img id="render2" src="assets/reconstructions/kitchen-quality.webp" alt="" width="464" height="563" loading="lazy"></a>
+            <a class="photo-link" href="assets/reconstructions/kitchen-ultrafast.webp" tabindex="-1"><img id="render" src="assets/reconstructions/kitchen-ultrafast.webp" alt="Kitchen Ultrafast reconstruction and matching detail crop" width="464" height="563" loading="lazy"></a>
+            <a class="photo-link" href="assets/reconstructions/kitchen-quality.webp" tabindex="-1"><img id="render2" src="assets/reconstructions/kitchen-quality.webp" alt="Kitchen Quality reconstruction and matching detail crop" width="464" height="563" loading="lazy"></a>
             <div class="plate-labels">
               <span><a class="plate-label" id="ref-link" href="assets/reconstructions/kitchen-reference.webp">Reference</a></span>
-              <span><a class="plate-label" id="render-link" href="assets/reconstructions/kitchen-quality.webp">Quality</a></span>
-              <span hidden><a class="plate-label" id="render2-link"></a></span>
+              <span><a class="plate-label" id="render-link" href="assets/reconstructions/kitchen-ultrafast.webp">Ultrafast</a></span>
+              <span><a class="plate-label" id="render2-link" href="assets/reconstructions/kitchen-quality.webp">Quality</a></span>
             </div>
-            <input id="split" type="range" min="0" max="100" value="50" aria-label="Reference photograph visible" aria-describedby="split-help" hidden>
+            <input id="split" type="range" min="0" max="100" value="33" aria-label="Divider after Reference" aria-describedby="split-help" hidden>
             <span class="split-line" aria-hidden="true"></span>
             <input id="split2" type="range" min="0" max="100" value="67" aria-label="Second divider position" aria-describedby="split-help" hidden>
             <span class="split-line" aria-hidden="true"></span>
           </div>
-          <p class="caption" id="render-caption" aria-live="polite">Kitchen · Quality (3,500 steps)</p>
-          <p class="caption" id="split-help" hidden>Drag a divider or use the arrow keys. Select an image label to open the original.</p>
+          <div class="plate-controls" hidden>
+            <div><span>Left image</span><strong>Reference</strong></div>
+            <label>Middle preset <select name="preset" form="gallery-controls"><option value="ultrafast">Ultrafast</option><option value="balanced">Balanced</option><option value="quality">Quality</option></select></label>
+            <label>Right preset <select name="preset2" form="gallery-controls"><option value="ultrafast">Ultrafast</option><option value="balanced">Balanced</option><option value="quality" selected>Quality</option></select></label>
+          </div>
+          <p class="caption" id="render-caption" aria-live="polite">DSCF0912.JPG · Ultrafast 34.20 dB · Quality 34.99 dB</p>
+          <p class="caption" id="split-help" hidden>Drag a divider or use the arrow keys. Push the dividers together to compare the outer images.</p>
         </div>
-        <p class="caption">RTX 4090, seed 42. Scenes and reference photographs from Barron et al., CVPR 2022. <a href="https://jonbarron.info/mipnerf360/">Mip-NeRF 360 dataset ↗</a></p>
+        <p class="caption">RTX 4080, seed 42. Ultrafast and Balanced ran for 3,000 steps and Quality for 3,500. Scenes and photographs by Barron et al., CVPR 2022. <a href="https://jonbarron.info/mipnerf360/">Mip-NeRF 360 dataset ↗</a></p>
       </div>
     </section>
 
