@@ -62,6 +62,7 @@ The updated Quality preset improved PSNR on all nine scenes and used 32% fewer f
 - **VRAM.** *Balanced* preset used 2.72-2.90 GiB at the end of headless Mip-NeRF 360 training. Peak and viewer usage can be higher. Minimum card capacity is unverified. [Memory measurements](docs/benchmarks.md#where-memory-goes)
 
 ## Quickstart
+Perf-gs was designed to be extremely simple to setup and install.
 
 1. Get **perf-gs.** You can:
 
