@@ -7,12 +7,29 @@
 | Ultrafast | 3,000 | 16.44 s | 27.125 dB | 0.7936 | 0.2569 | 1.43M | 5.41 GiB |
 | Balanced | 3,000 | 27.02 s | 27.391 dB | 0.8143 | 0.2229 | 2.07M | 2.85 GiB |
 | Quality | 3,500 | 39.47 s | 27.898 dB | 0.8286 | 0.1997 | 2.10M | 4.85 GiB |
+| Quality+ | 17,189 avg. | 202.04 s | 28.210 dB | 0.8316 | 0.1909 | 2.10M | 4.85 GiB |
 
 Each preset trained on all nine Mip-NeRF 360 scenes at seed 42. Times cover the headless Vulkan training loop through final synchronization. Graphdeco scored 246 held-out RGB8 images per preset on the CPU after training, using the same PSNR, SSIM and VGG LPIPS implementations as the NVIDIA sweeps. The table weights scenes equally. The three fixed-budget PSNR means were within 0.013 dB of their RTX 4090 counterparts. The largest individual scene difference was Room with Ultrafast (−0.136 dB). [AMD per-scene results](AMD_Radeon_RX_7900_XT_presets.csv) · [RTX 4090 per-scene results](NVIDIA_GeForce_RTX_4090_presets_current.csv)
 
+Quality+ reached its training-view plateau on all nine scenes in 8,652–21,996 steps. Compared with Quality, it gained 0.312 dB on average. Its loop time includes convergence checks. All 36 measured runs finished with zero training and held-out sort overflows. [AMD Quality+ per-scene results](AMD_Radeon_RX_7900_XT_qualityplus.csv)
+
 The RX 7900 XT ran on Windows 11 with a 32-core Threadripper PRO 5975WX, display driver 32.0.32029.2010 and SlangPy 0.42.0. The published RTX 4090 ran on a different workstation. On three archived Stump images, CPU scoring reproduced the original CUDA scores to within 0.000002 dB PSNR, 0.0000007 SSIM and 0.0000042 LPIPS. [AMD system and source record](AMD_Radeon_RX_7900_XT_system.txt) · [Reproduction commands](mipnerf360_3k.md#reproduce-the-benchmark)
 
+The fixed-budget sweep included the AMD shader fixes on checkout `676c8e9`. Quality+ ran after those changes were committed at `16679b2`. Both sweeps recorded the same trainer and shader source fingerprint (`b2683e0b7127`).
+
 ![Training-loop time, PSNR, SSIM and VGG LPIPS by scene for the three fixed-budget presets on the Radeon RX 7900 XT](assets/rx7900xt-presets.png)
+
+### Differences between independently trained models
+
+Across all four presets, the median absolute per-view PSNR difference between the RX 7900 XT and RTX 4080 was 0.052 dB. Eleven of the 984 comparisons differed by more than 1 dB. The largest difference was Room’s `DSCF4771.JPG` at Quality+. The AMD model scored 29.063 dB and showed a haze over the dark speaker and shelf on the left. The RTX 4080 model scored 33.323 dB. On another Room view, `DSCF4939.JPG`, the AMD model scored 1.612 dB higher. [All matched camera scores and metric differences](AMD_Radeon_RX_7900_XT_vs_RTX_4080_views.csv) · [Room comparison crop](assets/rx7900xt-room-qualityplus-heldout.png)
+
+A second AMD training run with the same seed reached the same 21,996 steps. On that Room view, the haze cleared and PSNR rose to 32.974 dB. Replaying the repeat’s exported PLY on Vulkan reproduced its training render byte-for-byte. Direct3D 12 differed by at most two RGB8 levels at the same camera. This establishes run-to-run variation in the trained result. The original timed run saved images only, so its exact model could not be replayed.
+
+Across the 738 matched fixed-budget views, the median absolute PSNR difference between the RX 7900 XT and RTX 4080 was 0.051 dB. The 95th percentile was 0.365 dB. The largest decrease was 1.774 dB on Kitchen’s `DSCF0712.JPG` at Quality (28.625 dB on AMD, 30.399 dB on NVIDIA). Both reconstructions blurred the background beyond the table. In this view the AMD reconstruction had a visible pale streak along the left table edge. The largest increase was 1.185 dB on Garden’s `DSC08108.JPG` at Balanced.
+
+![Kitchen held-out photograph, RTX 4080 and RX 7900 XT Quality renders, and a map of their squared-error difference. Enlarged crops show the left table edge where the AMD-trained model differed most.](assets/rx7900xt-kitchen-heldout.png)
+
+Two additional seed-42 Quality trainings on the Radeon scored 28.810 dB on that Kitchen view with Vulkan and 29.928 dB with Direct3D 12. Both validation runs are excluded from the benchmark means. At the same camera, replaying one saved Balanced model on the RTX 4080 and RX 7900 XT differed by at most two RGB8 levels. The measurements establish a local difference between trained models. Its cause remains unverified.
 
 ### Cross-vendor rendering checks
 
@@ -36,6 +53,8 @@ Replaying the same two models on AMD Direct3D 12 and AMD Vulkan gave 85.37 dB be
 Testing exposed a backward-pass bug on 64-lane waves. The rasterizer stores a checkpoint for every 32 splats. Its gradient kernel now treats each half of a 64-lane wave as a separate bucket and reads shuffle values from the correct half. The per-pixel reference kernel sums the number of wave partials that actually ran. Tests compare the different backward kernels and check blend weights against a forward reference on Vulkan and Direct3D 12.
 
 A second fix splits large backward dispatches across two dimensions. Direct3D 12 Balanced training on Kitchen crossed the 65,535-group X limit in all 30 sampled steps. The largest dispatch used 65,535 × 3 groups. The 3,000-step run finished with 1,517,126 splats and zero training or held-out sort overflows. Its 35 saved RGB8 views scored 30.901 dB against the photos, compared with 31.044 dB from an independent Vulkan training run on the same card. Both used seed 42. Direct3D 12 timing is excluded from the Vulkan table.
+
+The 1,202 collected tests passed across fresh test processes on this workstation. A single long-lived pytest process still had a native device-creation failure after more than 1,000 passing cases. The benchmark runs used one fresh training process per scene and preset, as in the published protocol.
 
 ## RTX 4090 presets
 

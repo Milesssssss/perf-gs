@@ -78,27 +78,98 @@
     <section class="shell section text-section" id="overview" aria-labelledby="about-heading">
       <h2 id="about-heading">Overview</h2>
       <p>The goal was allowing hundreds of experiments in a day on a single consumer GPU. On our RTX 4090, Ultrafast preset runs the whole nine-scene Mip-NeRF 360 dataset in 94.6 seconds. Loading the photos, initializing the splats, scoring the held-out views and exporting the model take some minimal additional time.</p>
+      <figure class="training-figure training-kitchen">
+        <div class="training-panels">
+          <div>
+            <span class="training-label">Kitchen</span>
+            <img src="assets/project-page/kitchen-binning-view.webp" width="779" height="519" loading="lazy" alt="A metal mixing bowl, onions and an oven mitt on the Kitchen counter.">
+          </div>
+          <div>
+            <span class="training-label">Splats binned per tile</span>
+            <img src="assets/project-page/kitchen-binning-map.webp" width="392" height="264" loading="lazy" alt="Tile counts range from blue at 0 to red at 9,731. The highest counts cluster near the back of the counter.">
+            <div class="tile-scale" aria-hidden="true"><span>0</span><span>4,866</span><span>9,731</span></div>
+          </div>
+        </div>
+        <figcaption class="caption">Each square in the heatmap is one image tile. In this earlier Kitchen run, the busiest tiles had nearly 10,000 splats assigned to them. Every extra entry is another item to sort and another splat the renderer may visit when blending that tile.</figcaption>
+      </figure>
       <details class="frontier" id="trainer-details">
         <summary>How the trainer works</summary>
         <nav class="resource-links" aria-label="Overview sections"><a href="#initialization">Initialization</a><a href="#forward-pass">Forward pass</a><a href="#backward-pass">Backward passes</a><a href="#densification">Densification</a><a href="#presets">Presets</a></nav>
         <h3 id="shader-design">Trainer architecture</h3>
-        <p>We started with <strong>SlangPy</strong> so we could write the training schedule in Python and work directly on the renderer in Slang. The goal was finding a balance between efficiency and modularity, and a Python training loop frontend, with a Slangpy-based Python backend and kernels written in Slang gave us exactly what we needed.<br>
-  Python picks a training camera, sets the learning rates and decides when to grow the model. SlangPy compiles each shader entry point from source and caches the kernel for the session, its Python RHI allows toeasily orchestrate shader dispatches. There's no separate native extension to build.</p>
-        <p>A <i>primitive</i> supplies its projection, its coverage at a pixel, and its color. The <i>compositor</i> takes care of blending it over what's behind it. With Slang.D we can mark the projection and coverage functions as differentiable. Change the math in one of those functions and Slang generates its derivatives from the same source. For performance reasons, we still need to write the outer shell's backward passes ourselves. There's a small disk primitive in the tests that uses the same forward blend loop with its own coverage function. <a class="inline-link" href="https://github.com/electronicarts/perf-gs/blob/HEAD/shaders/core/interfaces.slang">Primitive interfaces</a> · <a class="inline-link" href="https://github.com/electronicarts/perf-gs/blob/HEAD/tests/test_disk_primitive.py">Disk primitive test</a></p>
-        <p>Vulkan is the cross-platform target. D3D12 on Windows uses the same shader sources. Training has no CUDA or PyTorch dependency. One detail that mattered across vendors was wave size. We've run Vulkan training on Windows with the Nvidia RTX 4080, Nvidia RTX 4090 and AMD Radeon RX 7900 XT. Linux and macOS are unverified, yet.</p>
+        <p>We use <strong><a href="https://github.com/shader-slang/slangpy">SlangPy</a></strong> to write the training schedule in Python, the backend gpu dispatching using SlangPy and the kernels in Slang. Python picks a training camera, sets learning rates and decides when to grow the model (frontend training loop/setup), SlangPy compiles and caches each shader entry point for the session, then dispatches it through its Python RHI. There's no separate native extension to build.</p>
+        <p>Slang autodiffs the math for one splat/primitive, while we write the backward pass that accounts for how overlapping splats combine into a pixel. A <i>primitive</i> defines its projection, coverage and color. Mark its projection and coverage functions as differentiable, and Slang generates their derivatives from the same source. The <i>compositor</i> blends the contributions. The disk primitive in our tests uses the same blend loop with its own coverage function. <a class="inline-link" href="https://github.com/electronicarts/perf-gs/blob/HEAD/shaders/core/interfaces.slang">Primitive interfaces</a> · <a class="inline-link" href="https://github.com/electronicarts/perf-gs/blob/HEAD/tests/test_disk_primitive.py">Disk primitive test</a></p>
+        <p>Vulkan is the cross-platform target, and D3D12 on Windows uses the same shader sources. Training has no CUDA or PyTorch dependency, but it is totally possible to interop with PyTorch and other frameworks. We've run Vulkan training on Windows with the Nvidia RTX 4080, Nvidia RTX 4090 and AMD Radeon RX 7900 XT. Linux and macOS are unverified, yet.</p>
         <h3 id="initialization">Initialization</h3>
-        <p>COLMAP gives us camera poses and a sparse cloud of colored points. Each point becomes a round splat. Its color initializes the constant spherical harmonic coefficient, its opacity starts at 0.1, and its initial scale comes from the root-mean-square distance to its three nearest neighbors. That lets a dense patch of points start with smaller splats than a sparse one.</p>
+        <p>COLMAP gives us camera poses and the initial sparse point cloud. Its color initializes the constant spherical harmonic coefficient, its opacity starts at 0.1, and its initial scale comes from the root-mean-square distance to its three nearest neighbors. That lets a dense patch of points start with smaller splats than a sparse one.</p>
         <p>We also seed geometry between those points. We take up to 28 anchor photos from the training split, rectify stereo pairs and match them in both directions. We then triangulate matches that agree left-to-right and right-to-left, then check where the 3D point lands in a third training photo. We keep it if the color agrees and this adds up to 256,000 splats in places the sparse reconstruction may barely have sampled, which helps speeding up initial convergence.</p>
         <p>Taking inspiration from <a href="https://research.nvidia.com/labs/sil/projects/ppisp/">PPISP</a>, for a single-camera reconstruction we fit one radial falloff strength during setup and apply it when rendering. Otherwise the trainer uses a flat response. <a class="inline-link" href="https://github.com/electronicarts/perf-gs/blob/HEAD/src/trainer/data/stereo.py">Stereo initialization</a> · <a class="inline-link" href="https://github.com/electronicarts/perf-gs/blob/HEAD/src/trainer/data/lens_calibration.py">Lens fit</a></p>
         <h3 id="forward-pass">Forward passes</h3>
-        <p>One ordinary step records the forward render, image loss, backward passes and Adam update in one GPU submission. After growth, we reorder splats along a Morton curve so nearby splats sit together in memory. At the start of a view the GPU can then cull an off-screen cluster of 128 splats with one bounding-box test. The renderer projects each surviving Gaussian to an ellipse, counts the 8 × 8 pixel tiles it overlaps, and evaluates its view-dependent color if it touches the image. We use Mip-Splatting here. The training cameras set a 3D smoothing scale for each splat, and a 2D filter widens small projected footprints while compensating their opacity.</p>
+        <p>One ordinary step records the forward render, image loss, backward passes and Adam update in one GPU submission. After growth, we reorder splats along a Morton curve so nearby splats sit together in memory. At the start of a view the GPU can then cull an off-screen cluster of 128 splats with one bounding-box test.</p>
+        <p>The renderer projects each surviving Gaussian to an ellipse, counts the 8 × 8 pixel tiles it overlaps, and evaluates its view-dependent color if it touches the image. We bound the ellipse at the opacity cutoff, then walk the rows or columns of that box to find the tiles the ellipse crosses.</p>
+        <figure class="training-figure training-binning">
+          <div class="training-panels">
+            <div>
+              <span class="training-label">Tiles inside the bounding box</span>
+              <img src="assets/project-page/binning-box.webp" width="372" height="344" loading="lazy" alt="A blue rectangle encloses a slanted pink ellipse. The rectangle overlaps twelve yellow tiles.">
+            </div>
+            <div>
+              <span class="training-label">Tiles touched by the ellipse</span>
+              <img src="assets/project-page/binning-ellipse.webp" width="372" height="344" loading="lazy" alt="The same ellipse intersects eight yellow tiles. Four of the twelve tiles fall outside the ellipse.">
+            </div>
+          </div>
+          <figcaption class="caption">The box covers 12 tiles. Testing the ellipse itself keeps eight, so this splat needs four fewer entries in the tile lists. Yellow marks the tiles that each method assigns. <a href="https://speedysplat.github.io/">Hanson et al., Speedy-Splat, Fig. 1b–c</a>.</figcaption>
+        </figure>
+        <p>We use Mip-Splatting here. The training cameras set a 3D smoothing scale for each splat, and a 2D filter widens small projected footprints while compensating their opacity.</p>
         <p>A large splat can touch many tiles. Sorting a depth key for every copy would repeat a lot of work. We sort splats by depth <strong>once per view</strong>, emit the splat–tile pairs in that order, then do a stable GPU radix sort on just the tile ID. Each tile gets a front-to-back list. The blend skips alpha below 1/255 and stops a pixel once its remaining transmittance falls below 0.0001. The loss compares the render with the training photo using pixel error and SSIM. The SSIM shader filters each 11 × 11 neighborhood first along rows, then along columns. <a class="inline-link" href="https://github.com/electronicarts/perf-gs/blob/HEAD/src/trainer/backend/render/rasterizer.py">Rasterizer</a> · <a class="inline-link" href="https://github.com/electronicarts/perf-gs/blob/HEAD/shaders/losses/ssim_loss.slang">SSIM shader</a></p>
         <h3 id="backward-pass">Backward passes</h3>
-        <p>We take inspiration from recent work on per-splat backward pass parallelization (instead of per-pixel parallelization), see <a href="https://arxiv.org/abs/2406.15643">TamingGS</a>, but improve much further on its design, implementation and optimization. Every 32 splats in a tile, the forward pass saves the accumulated RGB and remaining transmittance for each active pixel, which we later use to reconstruct color and transmittance during the gradient backward pass.</p>
-        <p>Indirect dispatches are used to schedule work-lists for each 32-splat-group/wave, meaning in the gradient bwd pass, each lane takes one splat, uses wave-instrinsics to reconstruct its place/factor in the localized blending, and adds up contributions from the tile's pixels in registers, which cuts the number of threads trying to add to the same gradient in memory (reducing atomic contention).</p>
+        <p>Many pixels can see the same splat. If each pixel writes its own update, those writes compete for the same gradient in memory. Building on <a href="https://arxiv.org/abs/2406.15643">TamingGS</a>, we give each GPU lane one splat within a tile. The lane adds up that tile's pixel contributions in registers, then writes the total for its splat.</p>
+        <figure class="training-figure">
+          <div class="training-panels">
+            <div>
+              <span class="training-label">One lane per pixel</span>
+              <img src="assets/project-page/gradient-pixel.webp" width="1056" height="552" loading="lazy" alt="Four pixels each issue an atomic addition to the same splat gradient.">
+            </div>
+            <div>
+              <span class="training-label">One lane per splat</span>
+              <img src="assets/project-page/gradient-splat.webp" width="1056" height="552" loading="lazy" alt="One lane sums the same four pixel contributions in registers and issues one atomic addition.">
+            </div>
+          </div>
+          <figcaption class="caption">Follow one gradient component for one splat in a tile. With four contributing pixels, local accumulation turns four writes to the same address into one.</figcaption>
+        </figure>
+        <p>Each splat's contribution depends on what the splats in front of it have already blended. Every 32 splats in a tile, the forward pass saves each active pixel's accumulated RGB and remaining transmittance. An indirect dispatch schedules the groups reached by at least one pixel. Within each group, lanes use the saved values and wave operations to reconstruct the blend in front of their splat.</p>
+        <details class="backward-slides">
+          <summary>From a talk I gave (slides available soon, hopefully)</summary>
+          <figure>
+            <span class="training-label">Per-pixel writes · slide 64</span>
+            <a href="assets/project-page/backward-pixel-writes.webp"><img src="assets/project-page/backward-pixel-writes.webp" width="2048" height="739" loading="lazy" alt="Nine pixel threads direct red atomic-add arrows toward the same gradient buffer."></a>
+          </figure>
+          <figure>
+            <span class="training-label">Per-splat accumulation · slide 66</span>
+            <a href="assets/project-page/backward-lane-registers.webp"><img src="assets/project-page/backward-lane-registers.webp" width="2048" height="970" loading="lazy" alt="One lane handles each splat in depth order. Green arrows collect pixel contributions in registers and red arrows write to each splat's gradient buffer."></a>
+          </figure>
+          <figure>
+            <span class="training-label">Depth groups within one tile · slide 80</span>
+            <a href="assets/project-page/backward-depth-buckets.webp"><img src="assets/project-page/backward-depth-buckets.webp" width="1000" height="726" loading="lazy" alt="Colored boxes group a tile’s depth-sorted splats. A yellow outline highlights one group of 32."></a>
+            <figcaption class="caption">Each box holds up to 32 consecutive splats in the tile's depth order. The highlighted box is one backward job. A lane handles one splat in that group.</figcaption>
+          </figure>
+        </details>
         <p>Once those contributions have been summed across tiles, a separate pass differentiates the projection once per contributing splat. Another pass handles spherical harmonic color and its dependence on view direction. Adam updates the parameters in 32-bit float (and we use int64 atomics for better cross-platform compatibility). Its two running moments are stored in bfloat16 with stochastic rounding, which halves the storage for those moments and lets small updates accumulate. <a class="inline-link" href="https://github.com/electronicarts/perf-gs/blob/HEAD/shaders/rasterize/tile_binned/backward_persplat.slang">Blend backward</a> · <a class="inline-link" href="https://github.com/electronicarts/perf-gs/blob/HEAD/shaders/rasterize/tile_binned/projection_backward.slang">Projection backward</a> · <a class="inline-link" href="https://github.com/electronicarts/perf-gs/blob/HEAD/shaders/common/adam_precision.slang">Adam precision</a></p>
         <h3 id="densification">Densification</h3>
-        <p>We use a modified version of <i>structure-aware densification</i> from <a href="https://vcai.mpi-inf.mpg.de/projects/SAD-GS/">SAD-GS</a>. During growth, every tenth step samples a structure tensor built from RGB gradients in the training photo, this gives us an estimate of the <i>local image frequency</i>. The shader projects the splat's three axes into that view and scores each projected length against that frequency. Think of a long splat on a fence: seen end-on it might cover a couple of pixels, but from the side it might stretch across several slats. We accumulate those observations across cameras before deciding which axes to split.</p>
+        <p>How small does a splat need to be to represent the detail in a photo? We use a modified version of <a href="https://vcai.mpi-inf.mpg.de/projects/SAD-GS/">SAD-GS</a> to answer that question for each of the splat's three axes.</p>
+        <figure class="training-figure training-growth">
+          <div class="training-panels">
+            <div>
+              <span class="training-label">Local structure in the photo</span>
+              <img src="assets/project-page/densification-structure-field.webp" width="359" height="259" loading="lazy" alt="Yellow ellipses trace the local scale and direction of detail in a photograph of a locomotive.">
+            </div>
+            <div>
+              <span class="training-label">Structure-aware splitting</span>
+              <img src="assets/project-page/densification-axis-split.webp" width="241" height="261" loading="lazy" alt="Two cameras see different projections of a Gaussian. The resulting children are narrower along the axis that needs more detail.">
+            </div>
+          </div>
+          <figcaption class="caption">On the locomotive, the yellow ellipses pick out long edges along the body and finer detail around the wheels. Different cameras see a splat from different angles. Together those views tell us which axis needs to split. Illustration by <a href="https://vcai.mpi-inf.mpg.de/projects/SAD-GS/">Lyu et al., SAD-GS</a>.</figcaption>
+        </figure>
+        <p>During growth, every tenth step samples a structure tensor built from RGB gradients in the training photo to estimate the local image frequency. We project each of the splat's axes into that view and compare its length with the scale of the image detail. If the projected axis is longer than the estimated wavelength of that detail, the view votes to split that axis. We accumulate votes across cameras.</p>
         <p>Every 500 steps during growth, a splat can split if over 64% of its eligible observations vote for more detail and its screen-position loss gradient is large enough. Depending on which axes need subdivision, one parent can become two, four or eight children. On the intervening 100-step growth updates, we use an <a href="https://arxiv.org/abs/2404.10484">AbsGS</a>-style update driven by accumulated screen-position gradients. Small splats with a large gradient can be cloned and larger ones can split. Growth updates can also prune splats with low opacity or little accumulated blend weight. With Quality's 4M cap, proposed splits can outnumber the free slots. We rank expansions by the parent's average screen-position gradient divided by the proposed family size and give space to whole families, strongest axis first. <a class="inline-link" href="https://github.com/electronicarts/perf-gs/blob/HEAD/shaders/densify/score_structure_aware.slang">Structure scoring</a> · <a class="inline-link" href="https://github.com/electronicarts/perf-gs/blob/HEAD/shaders/densify/rank_families.slang">Split allocation</a></p>
       </details>
       <details class="frontier" id="preset-details">
@@ -201,11 +272,17 @@
             <tr><th scope="row">Ultrafast</th><td>3,000</td><td>16.44 s</td><td>27.125 dB</td><td>0.7936</td><td>0.2569</td><td>5.41 GiB</td></tr>
             <tr><th scope="row">Balanced</th><td>3,000</td><td>27.02 s</td><td>27.391 dB</td><td>0.8143</td><td>0.2229</td><td>2.85 GiB</td></tr>
             <tr><th scope="row">Quality</th><td>3,500</td><td>39.47 s</td><td>27.898 dB</td><td>0.8286</td><td>0.1997</td><td>4.85 GiB</td></tr>
+            <tr><th scope="row">Quality+</th><td>17,189 avg.</td><td>202.04 s</td><td>28.210 dB</td><td>0.8316</td><td>0.1909</td><td>4.85 GiB</td></tr>
           </tbody>
         </table>
       </div>
       <p class="caption">Headless Vulkan, seed 42. Training-loop timing excludes COLMAP reconstruction, loading, initialization, held-out evaluation and export. Quality+ includes its training-view convergence checks. VRAM is sampled at loop end.</p>
-      <p class="resource-links"><a href="NVIDIA_GeForce_RTX_4090_presets_current.csv" download>4090 fixed-budget CSV ↓</a><a href="NVIDIA_GeForce_RTX_4090_qualityplus.csv" download>4090 Quality+ CSV ↓</a><a href="NVIDIA_GeForce_RTX_4080_presets.csv" download>4080 fixed-budget CSV ↓</a><a href="NVIDIA_GeForce_RTX_4080_qualityplus.csv" download>4080 Quality+ CSV ↓</a><a href="AMD_Radeon_RX_7900_XT_presets.csv" download>7900 XT fixed-budget CSV ↓</a></p>
+      <p class="resource-links"><a href="NVIDIA_GeForce_RTX_4090_presets_current.csv" download>4090 fixed-budget CSV ↓</a><a href="NVIDIA_GeForce_RTX_4090_qualityplus.csv" download>4090 Quality+ CSV ↓</a><a href="NVIDIA_GeForce_RTX_4080_presets.csv" download>4080 fixed-budget CSV ↓</a><a href="NVIDIA_GeForce_RTX_4080_qualityplus.csv" download>4080 Quality+ CSV ↓</a><a href="AMD_Radeon_RX_7900_XT_presets.csv" download>7900 XT fixed-budget CSV ↓</a><a href="AMD_Radeon_RX_7900_XT_qualityplus.csv" download>7900 XT Quality+ CSV ↓</a></p>
+      <details class="frontier"><summary>Compare the same models on Radeon and GeForce</summary>
+        <img src="assets/rx7900xt-fixed-model-errors.png" loading="lazy" width="1260" height="840" alt="Nearly identical RTX 4080 and RX 7900 XT crops of Stump and Kitchen, alongside amplified pixel differences">
+        <p class="caption">Both cards rendered the same two saved models from 51 held-out cameras using Vulkan. Of 219,272,010 RGB8 channel values, 712 differed by more than one level. The largest difference was 12 levels. <a href="AMD_Radeon_RX_7900_XT_fixed_model.csv" download>Fixed-model measurements ↓</a></p>
+        <p class="caption">Training fresh models on each GPU produced larger differences. Across the four presets, 11 of 984 matched views differed by over 1 dB in PSNR. The largest gap was 4.26 dB on a Room view at Quality+. <a href="assets/rx7900xt-room-qualityplus-heldout.png">Compare that view</a> · <a href="AMD_Radeon_RX_7900_XT_vs_RTX_4080_views.csv" download>Per-view differences ↓</a></p>
+      </details>
       <details class="frontier"><summary>Quality+ convergence on the RTX 4090</summary>
         <img src="assets/qualityplus-convergence-4090.png" loading="lazy" width="1840" height="768" alt="Training-view PSNR gains on Bicycle and Room, and the change in held-out PSNR from Quality to Quality+ for each of the nine scenes">
         <p class="caption">Quality+ stopped between 8,652 and 21,996 steps. Compared with Quality, held-out PSNR rose on six scenes and by 0.326 dB on average. VGG LPIPS improved on all nine.</p>
@@ -229,7 +306,11 @@ py -3.11 -m venv .venv
         <a class="inline-link" href="https://github.com/electronicarts/perf-gs#quickstart">Installation and quickstart ↗</a>
         <p class="caption">Ultrafast requires NVIDIA's separately licensed research masks. Balanced is the default.</p>
       </div>
-      <figure><a href="assets/perfgs-hub.webp"><img src="assets/perfgs-hub.webp" width="1280" height="720" loading="lazy" alt="PERF-GS hub showing the trained Kitchen scene beside its training and export controls"></a><figcaption class="caption">Kitchen in the hub after 3,000 Balanced steps.</figcaption></figure>
+      <figure class="quickstart-screenshots">
+        <a href="assets/train_hub.png"><img src="assets/train_hub.png" width="1980" height="1254" loading="lazy" alt="Train scene in the hub after 3,000 steps, with the Export PLY button visible"></a>
+        <a href="assets/room_hub.png"><img src="assets/room_hub.png" width="1978" height="1249" loading="lazy" alt="Room scene in the hub before training, with the Balanced preset selected"></a>
+        <figcaption class="caption">Train after 3,000 steps (left) and Room ready to train (right).</figcaption>
+      </figure>
     </section>
 
     <section class="shell section citation" id="citation" aria-labelledby="cite-heading">

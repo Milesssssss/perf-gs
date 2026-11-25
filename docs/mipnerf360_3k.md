@@ -2,7 +2,7 @@
 
 ## Reproduce the benchmark
 
-The RTX 4080 and 4090 have nine-scene measurements for the current presets and the original 3,000-step recipes. Each per-scene row records the step count, training-loop time, Graphdeco image metrics, final splats and loop-end GPU memory. [Benchmark tables](benchmarks.md) · [Current RTX 4090 CSV](NVIDIA_GeForce_RTX_4090_presets_current.csv) · [Current RTX 4080 CSV](NVIDIA_GeForce_RTX_4080_presets.csv) · [Original RTX 4090 CSV](NVIDIA_GeForce_RTX_4090_presets.csv) · [Original RTX 4080 CSV](mipnerf360_3k_presets.csv)
+The RX 7900 XT, RTX 4080 and RTX 4090 have nine-scene measurements for the current presets. The NVIDIA cards also have results for the original 3,000-step recipes. Each per-scene row records the step count, training-loop time, Graphdeco image metrics, final splats and loop-end GPU memory. [Benchmark tables](benchmarks.md) · [RX 7900 XT CSV](AMD_Radeon_RX_7900_XT_presets.csv) · [Current RTX 4090 CSV](NVIDIA_GeForce_RTX_4090_presets_current.csv) · [Current RTX 4080 CSV](NVIDIA_GeForce_RTX_4080_presets.csv) · [Original RTX 4090 CSV](NVIDIA_GeForce_RTX_4090_presets.csv) · [Original RTX 4080 CSV](mipnerf360_3k_presets.csv)
 
 On Windows, use the benchmark driver from the repository root in the trainer’s Python environment. It verifies the Vulkan adapter, records the hardware and software, runs each preset and scores the saved renders with the pinned Graphdeco evaluator. The evaluator runs on the CPU when PyTorch has no CUDA device. [Environment and dataset setup](benchmark-rtx4090.md)
 

@@ -1,7 +1,7 @@
 # PERF-GS
 
 [![Project Page](https://img.shields.io/badge/Project-Page-blue.svg)](https://electronicarts.github.io/perf-gs/)
-[![Languages: Python and Slang](https://img.shields.io/badge/languages-Python%20%2B%20Slang-3776AB)](#architecture-from-a-high-level)
+[![Languages: Python and Slang](https://img.shields.io/badge/languages-Python%20%2B%20Slang-CF7434)](#architecture-from-a-high-level)
 [![Backends: Vulkan and D3D12](https://img.shields.io/badge/backends-Vulkan%20%2B%20D3D12-355B3E)](#requirements)
 
 **Efficient, extensible, dependency-free & low memory differentiable training.**
@@ -162,7 +162,10 @@ Perf-gs was designed to be extremely simple to setup and install.
 5. **Open your photos or scene.** Click **Open dataset folder...**. For a folder of photos, click **Install reconstruction tools** if prompted, then **Reconstruct to COLMAP**. The hub estimates the camera poses and builds a sparse point cloud. An existing COLMAP scene opens directly.
 6. **Train and save.** Once the point cloud appears, click **Start Training**. When training finishes, click **Export PLY...** to save your model.
 
-![Kitchen in the RTX 4090 hub after 3,000 Balanced steps, with controls to export the trained model or start another run](docs/assets/perfgs-hub.webp)
+<p align="center">
+  <a href="assets/train_hub.png"><img src="assets/train_hub.png" width="49%" alt="Train scene in the hub after 3,000 steps, with the Export PLY button visible"></a>
+  <a href="assets/room_hub.png"><img src="assets/room_hub.png" width="49%" alt="Room scene in the hub before training, with the Balanced preset selected"></a>
+</p>
 
 ### Train from the command line
 
@@ -209,10 +212,13 @@ Ultrafast and Balanced keep their 3,000-step settings. Applying Quality’s 75% 
 | Ultrafast | 3,000 | 16.44 s | 27.125 dB | 0.7936 | 0.2569 | 1.43M | 5.41 GiB |
 | Balanced (default) | 3,000 | 27.02 s | 27.391 dB | 0.8143 | 0.2229 | 2.07M | 2.85 GiB |
 | **Quality** | 3,500 | 39.47 s | 27.898 dB | 0.8286 | 0.1997 | 2.10M | 4.85 GiB |
+| **Quality+** | 17,189 avg. | 202.04 s | 28.210 dB | 0.8316 | 0.1909 | 2.10M | 4.85 GiB |
 
-Each row averages nine headless Vulkan runs at seed 42. Graphdeco scored all 246 held-out views per preset on the CPU. Training and held-out rendering recorded zero sort overflows. [AMD per-scene results](docs/AMD_Radeon_RX_7900_XT_presets.csv) · [Benchmark details](docs/benchmarks.md#radeon-rx-7900-xt)
+Each row averages nine headless Vulkan runs at seed 42. Graphdeco scored all 246 held-out views per preset on the CPU. Training and held-out rendering recorded zero sort overflows. [AMD fixed-budget results](docs/AMD_Radeon_RX_7900_XT_presets.csv) · [AMD Quality+ results](docs/AMD_Radeon_RX_7900_XT_qualityplus.csv) · [Benchmark details and per-view differences](docs/benchmarks.md#radeon-rx-7900-xt)
 
 Replaying the same Stump and Kitchen models on the RX 7900 XT and RTX 4080 gave **83.86 dB** and **82.53 dB** between their rendered images. Across 51 views, 712 of 219,272,010 RGB8 channel values differed by more than one level. [Cross-vendor rendering measurements](docs/benchmarks.md#cross-vendor-rendering-checks)
+
+Independently trained models showed larger local differences. The median absolute gap against the RTX 4080 was **0.052 dB** across 984 matched camera/preset comparisons. One Room view at Quality+ was **4.26 dB lower** on AMD and showed visible haze. On a second AMD run with the same seed and step count, the haze cleared and the gap fell to **0.35 dB**. [Side-by-side Room image](docs/assets/rx7900xt-room-qualityplus-heldout.png) · [All per-view differences](docs/AMD_Radeon_RX_7900_XT_vs_RTX_4080_views.csv)
 
 <details>
 <summary>RTX 4080 results</summary>
