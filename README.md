@@ -8,7 +8,7 @@ On an **RTX 4090**:
 - *Ultrafast* preset averages **27.12 dB in 10.54 seconds** on the same card.<br>
 [RTX 4080 comparison with LiteGS, SAD-GS and FastGS](docs/benchmarks.md#rtx-4080-comparison)
 
-For GPUs with less VRAM, Balanced streams training images from system RAM. It used **2.72–2.90 GiB of VRAM at loop end** across the two workstations. [VRAM and system RAM breakdown](docs/benchmarks.md#where-memory-goes)
+For GPUs with less VRAM, Balanced streams training images from system RAM. It used **2.72-2.90 GiB of VRAM at loop end** across the two workstations. [VRAM and system RAM breakdown](docs/benchmarks.md#where-memory-goes)
 
 [Quickstart](#quickstart) · [Benchmarks](#mip-nerf-360) · [Gallery](#reconstructions)
 
