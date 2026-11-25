@@ -1,6 +1,6 @@
 # PERF-GS
 
-**Efficient, extensible & low memory differentiable training.**
+**Efficient, extensible, dependency-free & low memory differentiable training.**
 
 Train a 3D Gaussian Splatting model from a COLMAP scene with Slang on Vulkan or Direct3D 12.<br>
 On an **RTX 4090**:
