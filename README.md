@@ -7,6 +7,8 @@ On an **RTX 4090**:
 - *Quality* preset averages **27.89 dB PSNR in 22.61 seconds** across the nine Mip-NeRF 360 scenes.
 - *Ultrafast* preset averages **27.12 dB in 10.54 seconds** on the same card.<br>
 
+The **Quality+** preset continues training until PSNR on training views levels off. On an **RTX 4080**, it averaged **28.225 dB held-out PSNR** across the same nine scenes, with a mean training loop of **3 min 36 s**.
+
 [RTX 4080 comparison with LiteGS, SAD-GS and FastGS](docs/benchmarks.md#rtx-4080-comparison)
 
 As of November 2026, **perf-gs** is, to the best of our knowledge, the fastest publicly available open-source 3D Gaussian Splatting trainer, outperforming competitors such as [LiteGS](https://github.com/MooreThreads/LiteGS), [SAD-GS](https://github.com/LinjieLyu/SADGS) and [FastGS](https://github.com/fastgs/FastGS) in training speed while delivering competitive or superior reconstruction quality with low VRAM usage.<br><br>
@@ -82,9 +84,11 @@ Run `.\.venv\Scripts\python.exe -m trainer.frontend.app --help` to see every fla
 
 [Hub walkthrough](docs/usage.md#interactive-hub) · [Datasets](docs/usage.md#datasets) · [First-run help](docs/usage.md#first-run-help)
 
-**For longer training**, select **Quality+** in the hub or add `--preset quality+` to the training command. It runs Quality for 3,500 steps, then refines the same splats until progress on training views levels off. On the RTX 4080 it averaged **28.225 dB in 3 min 36 s** across nine scenes. [How Quality+ decides when to stop](docs/usage.md#quality-convergence)
+Select **Quality+** in the hub or add `--preset quality+` to the training command. It starts with Quality’s 3,500 steps, then refines the same splats. [How Quality+ decides when to stop](docs/usage.md#quality-convergence)
 
 ## Mip-NeRF 360
+
+All headline results give equal weight to the nine Mip-NeRF 360 scenes. On the RTX 4080, Quality+ averaged **28.225 dB across all nine** and **29.834 dB across the seven scenes used by gsplat and LichtFeld**, which exclude *Flowers* and *Treehill*. [Per-scene results](docs/NVIDIA_GeForce_RTX_4080_qualityplus.csv) · [gsplat benchmark](https://github.com/nerfstudio-project/gsplat/blob/main/docs/source/tests/eval.rst) · [LichtFeld benchmark](https://lichtfeld.io/bounty/bounty4/)
 
 ### RTX 4090
 
