@@ -8,7 +8,7 @@ Run the commands from the repository root with the hub closed and the GPU idle. 
 
 ## Set up once
 
-Use PowerShell with Git and Python 3.11. The CUDA PyTorch package runs the independent Graphdeco evaluator. PERF-GS training uses Vulkan. Ultrafast requires NVIDIA’s separately licensed research masks. [PyTorch builds](https://pytorch.org/get-started/previous-versions/#v2100) · [Mask terms](stbn_pixel_sampling.md)
+Use PowerShell with Git and Python 3.11. PERF-GS trains and renders with Vulkan. The independent Graphdeco evaluator uses CUDA when available and otherwise scores the saved images on the CPU. Ultrafast requires NVIDIA’s separately licensed research masks. [PyTorch builds](https://pytorch.org/get-started/previous-versions/#v2100) · [Mask terms](stbn_pixel_sampling.md)
 
 ```powershell
 py -3.11 -m venv .venv
@@ -18,6 +18,8 @@ python -m pip install torch==2.10.0 torchvision==0.25.0 --index-url https://down
 python scripts/data/download_mipnerf360.py --set all
 python scripts/data/download_stbn.py
 ```
+
+On a Windows AMD workstation, use `--index-url https://download.pytorch.org/whl/cpu` in the PyTorch install command. The evaluator uses the same RGB8 images, Graphdeco equations and VGG weights on both devices.
 
 ## Run the benchmark
 

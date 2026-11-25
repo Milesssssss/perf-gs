@@ -16,6 +16,19 @@ ROOT = Path(__file__).resolve().parents[2]
 REFERENCE_COMMIT = "54c035f7834b564019656c3e3fcc3646292f727d"
 
 
+def read_cpu_images(renders_dir, gt_dir):
+    """Graphdeco's RGB tensor conversion for hosts without CUDA."""
+    from PIL import Image
+    from torchvision.transforms.functional import to_tensor
+
+    def read(path):
+        with Image.open(path) as image:
+            return to_tensor(image).unsqueeze(0)[:, :3]
+
+    names = sorted(path.name for path in renders_dir.iterdir())
+    return [read(renders_dir / name) for name in names], [read(gt_dir / name) for name in names], names
+
+
 def preset_rows(models, graphdeco, expected_gpu, *, quality_plus_only=False):
     """Match prepared renders to measured Vulkan runs under the published nine-scene protocol."""
     from trainer.frontend.settings import preset_values
@@ -111,7 +124,13 @@ def main():
     import torch
     from lpipsPyTorch.modules.lpips import LPIPS
 
-    vgg = LPIPS("vgg", "0.1").cuda().eval()
+    scoring_device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"Graphdeco scoring device: {scoring_device}", flush=True)
+    vgg = LPIPS("vgg", "0.1").to(scoring_device).eval()
+    if scoring_device == "cpu":
+        # The pinned reader calls .cuda() unconditionally. Its metrics and aggregation support CPU tensors.
+        metrics.readImages = read_cpu_images
+        vgg.to(memory_format=torch.channels_last)
 
     def cached_lpips(render, target, net_type):
         if net_type != "vgg":
@@ -141,6 +160,8 @@ def main():
                     raise ValueError(f"Incomplete {metric} scores for {model}")
             if args.preset_csv:
                 row = rows[model.name]
+                if scoring_device == "cpu":
+                    row["metric_source"] += " on CPU"
                 summary = json.loads((model / "results.json").read_text())[method]
                 if len(names) != row["heldout_views"]:
                     raise ValueError(f"Wrong number of scored views for {model}")

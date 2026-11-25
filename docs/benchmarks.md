@@ -1,5 +1,28 @@
 # Training benchmarks
 
+## Radeon RX 7900 XT
+
+### Cross-vendor rendering checks
+
+We rendered two archived RTX 4080 models on the RX 7900 XT using Vulkan. Both cards loaded the same exported PLY and used the same held-out cameras. We checked the model hashes and compared every RGB8 channel at native evaluation resolution. This isolates rendering differences from the differences introduced by training two models independently. [Model hashes and per-scene errors](AMD_Radeon_RX_7900_XT_fixed_model.csv)
+
+| Model | Views | RGB8 channels | Channels differing by more than 1 | Largest difference (out of 255) | PSNR between renders |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Stump · Ultrafast | 16 | 49,302,000 | 62 | 5 | 83.86 dB |
+| Kitchen · Balanced | 35 | 169,970,010 | 650 | 12 | 82.53 dB |
+
+The mean absolute error was 0.00026 RGB8 levels on Stump and 0.00035 on Kitchen. On a 32 × 32 grid anchored at the top left, the largest regional mean errors were 0.036 and 0.113 levels, respectively. Amplified difference images showed sparse clusters in those regions. To repeat the comparison, run the replay tool on the first card and pass its output as `--reference` when replaying the same model on the second card. [PLY replay comparison tool](../scripts/running/compare_ply_replays.py)
+
+![RTX 4080 and RX 7900 XT crops from Stump and Kitchen. The color scale shows the largest absolute RGB8 channel difference at each pixel. Cyan boxes mark the 32 × 32 regions with the greatest mean error.](assets/rx7900xt-fixed-model-errors.png)
+
+The AMD Vulkan viewer also loaded the 1.59-million-splat Stump PLY. Its 1245 × 825 scene capture at the registered camera matched the headless AMD render in all 3,081,375 RGB8 channels.
+
+### Training correctness on AMD
+
+Testing exposed a backward-pass bug on 64-lane waves. The rasterizer stores a checkpoint for every 32 splats. Its gradient kernel now treats each half of a 64-lane wave as a separate bucket and reads shuffle values from the correct half. The per-pixel reference kernel sums the number of wave partials that actually ran. Tests compare the different backward kernels and check blend weights against a forward reference on Vulkan and Direct3D 12.
+
+A second fix splits large backward dispatches across two dimensions. Direct3D 12 Balanced training on Kitchen crossed the 65,535-group X limit in all 30 sampled steps. The largest dispatch used 65,535 × 3 groups. The 3,000-step run finished with 1,517,126 splats and zero training or held-out sort overflows. Its 35 saved RGB8 views scored 30.901 dB against the photos, compared with 31.044 dB from an independent Vulkan training run on the same card. Both used seed 42. Direct3D 12 timing is excluded from the Vulkan table.
+
 ## RTX 4090 presets
 
 On the **RTX 4090 24 GB**, Quality averaged **27.90 dB in 22.68 s** with **2.10M final splats**. Compared with the original 3,000-step Quality sweep on the same card, PSNR improved on all nine scenes by an average of 0.113 dB, final splat count fell 31.6%, and loop-end GPU memory fell 21.7%. [Current per-scene measurements](NVIDIA_GeForce_RTX_4090_presets_current.csv) · [Original per-scene measurements](NVIDIA_GeForce_RTX_4090_presets.csv)

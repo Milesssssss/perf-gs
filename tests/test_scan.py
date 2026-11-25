@@ -17,23 +17,17 @@ import pytest
 import slangpy as spy
 
 from trainer.backend.compute.execution import SCAN_BLOCK_SIZE
-from trainer.backend.compute.device import SHADERS_DIR, create_device
+from trainer.backend.compute.device import SHADERS_DIR
 
 
-BACKENDS = ["vulkan", "d3d12"]
-
-
-def _make_kernels(backend: str):
-    try:
-        device = create_device(backend=backend)
-    except Exception as exc:
-        pytest.skip(f"backend {backend!r} unavailable: {exc}")
+@pytest.fixture(scope="module")
+def scan_kernels(gpu_device):
     path = str(SHADERS_DIR / "common" / "scan.slang")
     kernels = {}
     for ep in ("scanBlock", "scanBlockSums", "addBlockOffsets"):
-        program = device.load_program(path, [ep])
-        kernels[ep] = device.create_compute_kernel(program)
-    return device, kernels
+        program = gpu_device.load_program(path, [ep])
+        kernels[ep] = gpu_device.create_compute_kernel(program)
+    return gpu_device, kernels
 
 
 def _scan(device: spy.Device, kernels: dict, data: np.ndarray) -> tuple[np.ndarray, int]:
@@ -77,10 +71,9 @@ def _reference_exclusive(data: np.ndarray) -> tuple[np.ndarray, int]:
     return exc, int(data.sum())
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
 @pytest.mark.parametrize("n", [1, 7, 256, 1023, 1024, 1025, 3000, 100_000])
-def test_scan_correctness(backend: str, n: int) -> None:
-    device, kernels = _make_kernels(backend)
+def test_scan_correctness(scan_kernels, n: int) -> None:
+    device, kernels = scan_kernels
     rng = np.random.default_rng(n)
     data = rng.integers(0, 4, size=n, dtype=np.uint32)
 
@@ -91,10 +84,9 @@ def test_scan_correctness(backend: str, n: int) -> None:
     assert got_total == want_total, f"total mismatch at n={n}: got {got_total}, want {want_total}"
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_scan_all_ones(backend: str) -> None:
+def test_scan_all_ones(scan_kernels) -> None:
     """All-ones input: exclusive scan is the arange, total = n."""
-    device, kernels = _make_kernels(backend)
+    device, kernels = scan_kernels
     n = 5000
     data = np.ones(n, dtype=np.uint32)
     got, total = _scan(device, kernels, data)
@@ -102,9 +94,8 @@ def test_scan_all_ones(backend: str) -> None:
     assert total == n
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_scan_all_zeros(backend: str) -> None:
-    device, kernels = _make_kernels(backend)
+def test_scan_all_zeros(scan_kernels) -> None:
+    device, kernels = scan_kernels
     n = 5000
     data = np.zeros(n, dtype=np.uint32)
     got, total = _scan(device, kernels, data)

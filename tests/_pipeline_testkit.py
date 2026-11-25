@@ -6,13 +6,17 @@ from __future__ import annotations
 
 import numpy as np
 
+from trainer.backend.compute.execution import TILE_HEIGHT, TILE_WIDTH
 from trainer.backend.memory.buffers import GRAD_SCALAR_COMPONENTS
+from trainer.backend.render.pipeline import TrainingPipeline, default_sort_pairs
 from trainer.config.config import (
-    AdamLRs, DensificationProperties, IterationContextualVariables, StbnVariables,
+    AdamLRs,
+    DensificationProperties,
+    IterationContextualVariables,
+    StbnVariables,
 )
-from trainer.data.dataset import Camera
 from trainer.config.config_types import DensificationMode
-from trainer.backend.render.pipeline import TrainingPipeline
+from trainer.data.dataset import Camera
 
 
 class TestPipeline(TrainingPipeline):
@@ -20,10 +24,14 @@ class TestPipeline(TrainingPipeline):
 
     __test__ = False   # a pipeline, not a pytest test class
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, device, width, height, max_splats=500_000, max_sort_pairs=None, *args, **kwargs):
         # Numerical tests exercise both densifiers on the same small pipeline.
         kwargs.setdefault("densify_mode", DensificationMode.STRUCTURE_AWARE)
-        super().__init__(*args, **kwargs)
+        if max_sort_pairs is None:
+            # A splat can emit at most one pair per tile in this image.
+            tiles = ((width + TILE_WIDTH - 1) // TILE_WIDTH) * ((height + TILE_HEIGHT - 1) // TILE_HEIGHT)
+            max_sort_pairs = min(default_sort_pairs(max_splats, kwargs.get("viewer_only", False)), max_splats * tiles)
+        super().__init__(device, width, height, max_splats, max_sort_pairs, *args, **kwargs)
 
     def train_step(self, camera: Camera, lrs: AdamLRs | None = None,
                    active_sh_degree: int | None = None, hardness_value: float = 1.0,
@@ -42,7 +50,7 @@ class TestPipeline(TrainingPipeline):
         self.load_snapshot(**snapshot)
 
     def forward_and_loss(self, camera: Camera,
-                         stbn: "StbnVariables | None" = None) -> None:
+                         stbn: StbnVariables | None = None) -> None:
         """Forward + loss only (no wait); ``stbn=None`` samples every pixel."""
         with self.commands.recording("forward_and_loss"):
             self.rasterize(camera)

@@ -13,11 +13,8 @@ import numpy as np
 import pytest
 import slangpy as spy
 
-from trainer.backend.compute.device import SHADERS_DIR, create_device
+from trainer.backend.compute.device import SHADERS_DIR
 from trainer.backend.compute.execution import RADIX_DIGITS, RADIX_GLOBAL_HIST_SIZE, RADIX_PART_SIZE
-
-
-BACKENDS = ["vulkan", "d3d12"]
 
 
 PART_SIZE = RADIX_PART_SIZE
@@ -28,17 +25,14 @@ RADIX = RADIX_DIGITS
 GLOBAL_HIST_SIZE = RADIX_GLOBAL_HIST_SIZE
 
 
-def _make_device_and_kernels(backend: str):
-    try:
-        device = create_device(backend=backend)
-    except Exception as exc:
-        pytest.skip(f"backend {backend!r} unavailable: {exc}")
+@pytest.fixture(scope="module")
+def radix_kernels(gpu_device):
     path = str(SHADERS_DIR / "sort" / "device_radix_sort.slang")
     kernels = {}
     for ep in ("initGlobalHist", "upsweep", "scan", "downsweep"):
-        program = device.load_program(path, [ep])
-        kernels[ep] = device.create_compute_kernel(program)
-    return device, kernels
+        program = gpu_device.load_program(path, [ep])
+        kernels[ep] = gpu_device.create_compute_kernel(program)
+    return gpu_device, kernels
 
 
 def _radix_sort(device, kernels, keys_lo: np.ndarray, keys_hi: np.ndarray,
@@ -127,10 +121,9 @@ def _reference_sort(keys_lo: np.ndarray, keys_hi: np.ndarray, values: np.ndarray
     return keys_lo[order], keys_hi[order], values[order]
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
 @pytest.mark.parametrize("n", [1, 257, 1000, 100_000])
-def test_radix_sort(backend: str, n: int) -> None:
-    device, kernels = _make_device_and_kernels(backend)
+def test_radix_sort(radix_kernels, n: int) -> None:
+    device, kernels = radix_kernels
     rng = np.random.default_rng(n)
     keys_lo = rng.integers(0, 2**32, size=n, dtype=np.uint32)
     keys_hi = rng.integers(0, 2**32, size=n, dtype=np.uint32)
@@ -144,12 +137,11 @@ def test_radix_sort(backend: str, n: int) -> None:
     np.testing.assert_array_equal(got_v, want_v,  err_msg=f"values mismatch @ n={n}")
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_radix_sort_all_same_key(backend: str) -> None:
+def test_radix_sort_all_same_key(radix_kernels) -> None:
     """Degenerate case: all keys identical. Sort should be stable-ish
     (preserving value order isn't guaranteed under atomics, but values
     should all be preserved as a set)."""
-    device, kernels = _make_device_and_kernels(backend)
+    device, kernels = radix_kernels
     n = 1000
     keys_lo = np.full(n, 42, dtype=np.uint32)
     keys_hi = np.full(n, 7, dtype=np.uint32)
@@ -161,12 +153,11 @@ def test_radix_sort_all_same_key(backend: str) -> None:
     np.testing.assert_array_equal(np.sort(got_v), values)
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_radix_sort_tile_depth_shape(backend: str) -> None:
+def test_radix_sort_tile_depth_shape(radix_kernels) -> None:
     """Realistic use case: keys_hi is tile_id, keys_lo is sortable depth.
     After sort, keys with same tile_id should be contiguous, and within
     each tile group, keys_lo should be ascending."""
-    device, kernels = _make_device_and_kernels(backend)
+    device, kernels = radix_kernels
     n = 50_000
     rng = np.random.default_rng(7)
     # 2000 tiles, depth as arbitrary uint32.
@@ -184,13 +175,12 @@ def test_radix_sort_tile_depth_shape(backend: str) -> None:
         assert np.all(seg[1:] >= seg[:-1]), f"depth not ascending within tile {tile_id}"
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
 @pytest.mark.parametrize("passes", [5, 6])
-def test_radix_sort_skips_zero_digit_passes(backend: str, passes: int) -> None:
+def test_radix_sort_skips_zero_digit_passes(radix_kernels, passes: int) -> None:
     """The forward sorts (tile : depth) keys in only as many 8-bit passes as
     the tile index needs: a pass above the significant bits sorts all-zero
     digits, a stable identity, so the result equals the full 64-bit sort."""
-    device, kernels = _make_device_and_kernels(backend)
+    device, kernels = radix_kernels
     n = 50_000
     rng = np.random.default_rng(passes)
     tile_bits = 8 * (passes - 4)
@@ -204,12 +194,11 @@ def test_radix_sort_skips_zero_digit_passes(backend: str, passes: int) -> None:
         np.testing.assert_array_equal(g, w, err_msg=name)
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
 @pytest.mark.parametrize("passes", [2, 4])
-def test_radix_sort_single_word_keys_is_stable(backend: str, passes: int) -> None:
+def test_radix_sort_single_word_keys_is_stable(radix_kernels, passes: int) -> None:
     """32-bit keys (tile index, depth) sort on keys_lo alone; equal keys keep their input order,
     which is what turns a depth-ordered pair list into front-to-back tile lists."""
-    device, kernels = _make_device_and_kernels(backend)
+    device, kernels = radix_kernels
     n = 50_000
     rng = np.random.default_rng(passes)
     keys_lo = rng.integers(0, 2 ** (8 * passes), size=n, dtype=np.uint32)

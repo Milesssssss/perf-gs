@@ -26,7 +26,7 @@ static const uint CH_ITER_X    = 9;
 static const uint CH_ITER_Y    = 10;
 static const uint NUM_CHANNELS = 11;
 
-// One partial sum per (channel, warp); assumes 32-lane waves, as the radix sort does.
+// One partial sum per (channel, native wave). A 64-lane wave covers the whole tile.
 static const uint MAX_WARPS = TILE_AREA / 32u;
 groupshared float gs_warp[NUM_CHANNELS * MAX_WARPS];
 
@@ -215,8 +215,7 @@ void backwardRasterize(
         float total = 0.0;
         if (tid < NUM_CHANNELS)
         {
-            [ForceUnroll]
-            for (uint w = 0u; w < MAX_WARPS; ++w)
+            for (uint w = 0u; w < (TILE_AREA + WaveGetLaneCount() - 1u) / WaveGetLaneCount(); ++w)
                 total += gs_warp[tid * MAX_WARPS + w];
         }
         // Slot mapping matches the InterlockedAdd order below.

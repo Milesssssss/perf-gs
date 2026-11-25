@@ -2,15 +2,15 @@
 
 ## Reproduce the benchmark
 
-Both workstations have nine-scene measurements for the current presets and the original 3,000-step recipes. Each per-scene row records the step count, training-loop time, Graphdeco image metrics, final splats and loop-end GPU memory. [Benchmark tables](benchmarks.md) · [Current RTX 4090 CSV](NVIDIA_GeForce_RTX_4090_presets_current.csv) · [Current RTX 4080 CSV](NVIDIA_GeForce_RTX_4080_presets.csv) · [Original RTX 4090 CSV](NVIDIA_GeForce_RTX_4090_presets.csv) · [Original RTX 4080 CSV](mipnerf360_3k_presets.csv)
+The RTX 4080 and 4090 have nine-scene measurements for the current presets and the original 3,000-step recipes. Each per-scene row records the step count, training-loop time, Graphdeco image metrics, final splats and loop-end GPU memory. [Benchmark tables](benchmarks.md) · [Current RTX 4090 CSV](NVIDIA_GeForce_RTX_4090_presets_current.csv) · [Current RTX 4080 CSV](NVIDIA_GeForce_RTX_4080_presets.csv) · [Original RTX 4090 CSV](NVIDIA_GeForce_RTX_4090_presets.csv) · [Original RTX 4080 CSV](mipnerf360_3k_presets.csv)
 
-On Windows with an NVIDIA GPU, use the benchmark driver from the repository root in the trainer’s Python environment. It records the hardware and software, runs all three presets and scores the saved renders with the pinned Graphdeco evaluator. The RTX 4090 guide covers environment and dataset setup. [Reproduce the RTX 4090 benchmark](benchmark-rtx4090.md)
+On Windows, use the benchmark driver from the repository root in the trainer’s Python environment. It verifies the Vulkan adapter, records the hardware and software, runs each preset and scores the saved renders with the pinned Graphdeco evaluator. The evaluator runs on the CPU when PyTorch has no CUDA device. [Environment and dataset setup](benchmark-rtx4090.md)
 
 ```powershell
 .\scripts\running\benchmark_presets.ps1 -ExpectedGpu 'NVIDIA GeForce RTX 4090'
 ```
 
-For another NVIDIA card, pass its actual adapter name. Each completed sweep produces a CSV under `outputs/benchmarks/<GPU>/<revision>-<source hash>/`. Each preset runs its default step count in a fresh headless process per scene at seed 42, with mid-loop previews, metrics and logging off. Training and held-out rendering use the stored `images_4` outdoors and `images_2` indoors. Stereo initialization uses a 672-pixel-wide working image for up to 28 training-camera anchors and can add up to 256,000 points during setup.
+For the RX 7900 XT, pass `-ExpectedGpu 'AMD Radeon RX 7900 XT'`. Add `-QualityPlusOnly` to run the convergence preset. Each completed sweep produces a CSV under `outputs/benchmarks/<GPU>/<revision>-<source hash>/`. Each preset runs its default step count in a fresh headless process per scene at seed 42, with mid-loop previews, metrics and logging off. Training and held-out rendering use the stored `images_4` outdoors and `images_2` indoors. Stereo initialization uses a 672-pixel-wide working image for up to 28 training-camera anchors and can add up to 256,000 points during setup.
 
 The manual example below runs Balanced. For other presets, use their default step count and a distinct run name per card and preset. Prepare each run with `python scripts/running/prepare_graphdeco.py RUN MODEL`. The driver shows how to score the resulting directories together and collect all 27 rows. [Benchmark driver](../scripts/running/benchmark_presets.ps1) · [Graphdeco reference evaluation](https://github.com/graphdeco-inria/gaussian-splatting/blob/54c035f7834b564019656c3e3fcc3646292f727d/metrics.py)
 

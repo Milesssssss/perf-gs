@@ -88,7 +88,8 @@ def test_allocated_bytes_cover_the_planned_allocation(device) -> None:
     owned = budget.allocated_bytes(pipeline.buffers)
     assert owned["raster.output_image"] >= 16 * 16 * 16
     planned = estimate_pipeline_bytes(pipeline.shared_data_module, max_splats=16,
-                                      width=16, height=16, sh_degree=0)
+                                      width=16, height=16, sh_degree=0,
+                                      max_sort_pairs=pipeline.max_sort_pairs)
     assert sum(owned.values()) >= planned
 
 

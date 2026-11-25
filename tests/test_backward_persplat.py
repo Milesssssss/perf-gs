@@ -15,11 +15,11 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
-
 from _pipeline_testkit import TestPipeline
+
+from trainer.backend.compute.device import create_device, create_slang_session
 from trainer.config.config import LossConfig
 from trainer.data.dataset import simple_camera
-from trainer.backend.compute.device import create_device
 
 BACKENDS = ["vulkan", "d3d12"]
 
@@ -54,12 +54,34 @@ def _target(h: int, w: int) -> np.ndarray:
     return np.stack([xx, yy, (1.0 - xx) * yy], axis=-1).astype(np.float32)
 
 
-def _grads_with(pipeline: TestPipeline, scene, camera, use_persplat: bool,
-                use_flat: bool = False, use_warp_forward: bool = False):
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_large_live_bucket_dispatch(backend: str) -> None:
+    """Native-resolution scenes can use more than 65,535 pairs of live buckets."""
+    import slangpy as spy
+
+    from trainer.backend.compute.device import SHADERS_DIR
+
+    try:
+        device = create_device(backend=backend)
+    except RuntimeError as exc:
+        pytest.skip(f"backend {backend!r} unavailable: {exc}")
+    try:
+        program = device.load_program(str(SHADERS_DIR / "rasterize/tile_binned/live_buckets.slang"),
+                                      ["prepareBucketDispatchArgs"])
+        kernel = device.create_compute_kernel(program)
+        total = spy.NDBuffer(device=device, dtype="uint", shape=(1,))
+        args = spy.NDBuffer(device=device, dtype="uint", shape=(3,))
+        for count, expected in ((0, [1, 1, 1]), (131070, [65535, 1, 1]), (131071, [65535, 2, 1])):
+            total.copy_from_numpy(np.array([count], dtype=np.uint32))
+            kernel.dispatch(thread_count=[1, 1, 1], live_bucket_total=total.storage,
+                            dispatch_args=args.storage, max_buckets=count)
+            np.testing.assert_array_equal(args.to_numpy(), expected)
+    finally:
+        device.close()
+
+
+def _grads_with(pipeline: TestPipeline, scene, camera):
     pipeline.set_primitive_from_numpy(**scene)
-    pipeline.use_persplat_backward = use_persplat
-    pipeline.use_flat_bucket_backward = use_flat
-    pipeline.use_warp_per_pixel_forward = use_warp_forward
     pipeline.forward_and_loss(camera)
     pipeline.optimizer.zero_grad()
     pipeline.run_backward()
@@ -68,144 +90,37 @@ def _grads_with(pipeline: TestPipeline, scene, camera, use_persplat: bool,
 
 
 @pytest.mark.parametrize("backend", BACKENDS)
-def test_persplat_matches_perpixel(backend: str) -> None:
+@pytest.mark.parametrize(("per_bucket", "scan_mode"), [
+    (False, 0), (True, 0), (True, 1),
+], ids=["per-tile", "flat-buckets", "flat-separate-scan"])
+def test_bucket_gradients_match_perpixel(backend: str, per_bucket: bool, scan_mode: int) -> None:
     try:
         device = create_device(backend=backend)
-    except Exception as exc:
+    except RuntimeError as exc:
         pytest.skip(f"backend {backend!r} unavailable: {exc}")
 
-    # 64x64 so the central tiles are deep; 100 clustered splats -> multiple
-    # buckets per pixel and early-break in the densest tiles.
-    W = H = 64
-    n = 100
-    pipeline = TestPipeline(device=device, width=W, height=H, max_splats=128,
-                            loss_config=LossConfig(ssim_weight=0.0, alpha_weight=0.0))
-
-    scene = _deep_scene(n, seed=3)
-    pipeline.targets.set_image(_target(H, W))
-    camera = simple_camera(width=W, height=H, eye=(0.0, 0.0, 0.0),
+    # Both pipelines receive identical inputs. The kernel variant is selected at construction.
+    size = 64
+    scene = _deep_scene(100, seed=3)
+    camera = simple_camera(width=size, height=size, eye=(0.0, 0.0, 0.0),
                            target=(0.0, 0.0, 1.0), up=(0.0, 1.0, 0.0),
                            fovy_degrees=60.0)
+    def gradients(per_splat, per_bucket, scan_mode):
+        session = (create_slang_session(device, {"BACKWARD_BLEND_SCAN_MODE": str(scan_mode)})
+                   if scan_mode else device.slang_session)
+        pipeline = TestPipeline(device=device, width=size, height=size, max_splats=128,
+                                use_persplat_backward=per_splat, use_flat_bucket_backward=per_bucket,
+                                slang_session=session, loss_config=LossConfig(ssim_weight=0.0, alpha_weight=0.0))
+        pipeline.targets.set_image(_target(size, size))
+        return _grads_with(pipeline, scene, camera)
 
-    g_ref = _grads_with(pipeline, scene, camera, use_persplat=False)
-    g_new = _grads_with(pipeline, scene, camera, use_persplat=True)
-
-    # Compare per component. Tolerance accounts for fp16 checkpoints +
-    # atomic-order + the different summation order between the two kernels.
-    mismatches = []
+    ref = gradients(False, False, 0)
+    actual = gradients(True, per_bucket, scan_mode)
+    assert np.any(ref["color_r"] != 0.0)
     for name in GRAD_NAMES:
-        a = g_ref[name]
-        b = g_new[name]
-        assert a.shape == b.shape, f"{name}: shape {a.shape} vs {b.shape}"
-        # Relative error with an absolute floor; scale tolerance to the
-        # magnitude of the per-component gradient.
-        scale = max(1e-6, float(np.max(np.abs(a))))
-        abs_err = np.abs(a - b)
-        rel_err = abs_err / scale
-        worst = int(np.argmax(rel_err))
-        if rel_err[worst] > 0.02 and abs_err[worst] > 1e-4:
-            mismatches.append(
-                f"{name}[g{worst}]: ref={a[worst]:.6e} new={b[worst]:.6e} "
-                f"rel={rel_err[worst]:.3f}")
-
-    if mismatches:
-        pytest.fail(f"{len(mismatches)} gradient mismatches between per-pixel "
-                    f"and per-splat backward:\n" + "\n".join(mismatches))
-
-
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_flat_bucket_matches_persplat(backend: str) -> None:
-    """The flat (warp-per-bucket) backward must produce the same per-gaussian
-    gradients as the per-tile per-splat backward. Same fused blend math and
-    fixed-point atomics; only the work assignment (one warp per LIVE bucket via
-    the compacted list) and the inline per-pixel reads differ, so the two
-    should agree within fixed-point / atomic-order noise."""
-    try:
-        device = create_device(backend=backend)
-    except Exception as exc:
-        pytest.skip(f"backend {backend!r} unavailable: {exc}")
-
-    # Same deep 64x64 scene: dense central tiles span multiple buckets and
-    # early-break, exercising the live-bucket compaction + saturation skip.
-    W = H = 64
-    n = 100
-    pipeline = TestPipeline(device=device, width=W, height=H, max_splats=128,
-                            loss_config=LossConfig(ssim_weight=0.0, alpha_weight=0.0))
-
-    scene = _deep_scene(n, seed=3)
-    pipeline.targets.set_image(_target(H, W))
-    camera = simple_camera(width=W, height=H, eye=(0.0, 0.0, 0.0),
-                           target=(0.0, 0.0, 1.0), up=(0.0, 1.0, 0.0),
-                           fovy_degrees=60.0)
-
-    g_ref = _grads_with(pipeline, scene, camera, use_persplat=True, use_flat=False)
-    g_new = _grads_with(pipeline, scene, camera, use_persplat=True, use_flat=True)
-
-    mismatches = []
-    for name in GRAD_NAMES:
-        a = g_ref[name]
-        b = g_new[name]
-        assert a.shape == b.shape, f"{name}: shape {a.shape} vs {b.shape}"
-        scale = max(1e-6, float(np.max(np.abs(a))))
-        abs_err = np.abs(a - b)
-        rel_err = abs_err / scale
-        worst = int(np.argmax(rel_err))
-        if rel_err[worst] > 0.02 and abs_err[worst] > 1e-4:
-            mismatches.append(
-                f"{name}[g{worst}]: persplat={a[worst]:.6e} flat={b[worst]:.6e} "
-                f"rel={rel_err[worst]:.3f}")
-
-    if mismatches:
-        pytest.fail(f"{len(mismatches)} gradient mismatches between per-tile "
-                    f"per-splat and flat warp-per-bucket backward:\n"
-                    + "\n".join(mismatches))
-
-
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_warp_forward_backward_matches_baseline(backend: str) -> None:
-    """End-to-end gradient check: the warp-per-pixel forward writes its own
-    checkpoints + gaussian_count, which the backward then reads. Gradients
-    must match the thread-per-pixel forward feeding the same backward (only
-    the per-bucket vs per-splat early break differs -> sub-LSB)."""
-    try:
-        device = create_device(backend=backend)
-    except Exception as exc:
-        pytest.skip(f"backend {backend!r} unavailable: {exc}")
-
-    W = H = 64
-    n = 100
-    pipeline = TestPipeline(device=device, width=W, height=H, max_splats=128,
-                            loss_config=LossConfig(ssim_weight=0.0, alpha_weight=0.0))
-
-    scene = _deep_scene(n, seed=3)
-    pipeline.targets.set_image(_target(H, W))
-    camera = simple_camera(width=W, height=H, eye=(0.0, 0.0, 0.0),
-                           target=(0.0, 0.0, 1.0), up=(0.0, 1.0, 0.0),
-                           fovy_degrees=60.0)
-
-    g_ref = _grads_with(pipeline, scene, camera, use_persplat=True,
-                        use_flat=False, use_warp_forward=False)
-    g_new = _grads_with(pipeline, scene, camera, use_persplat=True,
-                        use_flat=False, use_warp_forward=True)
-
-    mismatches = []
-    for name in GRAD_NAMES:
-        a = g_ref[name]
-        b = g_new[name]
-        assert a.shape == b.shape, f"{name}: shape {a.shape} vs {b.shape}"
-        scale = max(1e-6, float(np.max(np.abs(a))))
-        abs_err = np.abs(a - b)
-        rel_err = abs_err / scale
-        worst = int(np.argmax(rel_err))
-        if rel_err[worst] > 0.02 and abs_err[worst] > 1e-4:
-            mismatches.append(
-                f"{name}[g{worst}]: threadfwd={a[worst]:.6e} "
-                f"warpfwd={b[worst]:.6e} rel={rel_err[worst]:.3f}")
-
-    if mismatches:
-        pytest.fail(f"{len(mismatches)} gradient mismatches between thread-per-"
-                    f"pixel and warp-per-pixel forward feeding the backward:\n"
-                    + "\n".join(mismatches))
+        # fp16 checkpoints, atomic order and the order of floating-point summation differ.
+        tolerance = max(1e-4, 0.02 * np.max(np.abs(ref[name])))
+        np.testing.assert_allclose(actual[name], ref[name], atol=tolerance, rtol=0.0, err_msg=name)
 
 
 @pytest.mark.parametrize("backend", BACKENDS)
@@ -214,7 +129,7 @@ def test_projection_backward_resets_the_seeds(backend: str) -> None:
     second backward without any clear yields the same geometry gradients."""
     try:
         device = create_device(backend=backend)
-    except Exception as exc:
+    except RuntimeError as exc:
         pytest.skip(f"backend {backend!r} unavailable: {exc}")
 
     W = H = 64
@@ -225,8 +140,7 @@ def test_projection_backward_resets_the_seeds(backend: str) -> None:
                            target=(0.0, 0.0, 1.0), up=(0.0, 1.0, 0.0),
                            fovy_degrees=60.0)
 
-    first = _grads_with(pipeline, _deep_scene(100, seed=3), camera,
-                        use_persplat=True, use_flat=True)
+    first = _grads_with(pipeline, _deep_scene(100, seed=3), camera)
     for name, buffer in pipeline.buffers.gradients.seeds.items():
         seeds = np.frombuffer(buffer.to_numpy().tobytes(), dtype=np.int64)
         assert not seeds.any(), f"seed {name} not reset by projection_backward"

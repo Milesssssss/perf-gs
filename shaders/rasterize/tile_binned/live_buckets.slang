@@ -82,7 +82,7 @@ void prepareBucketDispatchArgs(
     uint groups = (total + FLAT_WARPS_PER_WG - 1u) / FLAT_WARPS_PER_WG;
     // Vulkan/D3D12 require at least one group; the in-kernel slot >= total guard makes it a no-op.
     if (groups == 0u) groups = 1u;
-    dispatch_args[0] = groups;
-    dispatch_args[1] = 1u;
+    dispatch_args[0] = min(groups, LINEAR_DISPATCH_WIDTH);
+    dispatch_args[1] = (groups - 1u) / LINEAR_DISPATCH_WIDTH + 1u;
     dispatch_args[2] = 1u;
 }
