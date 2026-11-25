@@ -2,7 +2,7 @@
 
 ## Reproduce the benchmark
 
-Each measured scene has a training time, step count and Graphdeco image metrics. The original 3,000-step sweeps are available for both workstations. [Current measurements](benchmarks.md) · [Original RTX 4090 CSV](NVIDIA_GeForce_RTX_4090_presets.csv) · [Original RTX 4080 CSV](mipnerf360_3k_presets.csv)
+Both workstations have nine-scene measurements for the current presets and the original 3,000-step recipes. Each per-scene row records the step count, training-loop time, Graphdeco image metrics, final splats and loop-end GPU memory. [Benchmark tables](benchmarks.md) · [Current RTX 4090 CSV](NVIDIA_GeForce_RTX_4090_presets_current.csv) · [Current RTX 4080 CSV](NVIDIA_GeForce_RTX_4080_presets.csv) · [Original RTX 4090 CSV](NVIDIA_GeForce_RTX_4090_presets.csv) · [Original RTX 4080 CSV](mipnerf360_3k_presets.csv)
 
 On Windows with an NVIDIA GPU, use the benchmark driver from the repository root in the trainer’s Python environment. It records the hardware and software, runs all three presets and scores the saved renders with the pinned Graphdeco evaluator. The RTX 4090 guide covers environment and dataset setup. [Reproduce the RTX 4090 benchmark](benchmark-rtx4090.md)
 
@@ -18,7 +18,7 @@ The manual example below runs Balanced. For other presets, use their default ste
 python scripts/running/eval_sweep.py --axis seed --values 42 --iters 3000 --name my_gpu_balanced --no-plot --extra --preset balanced --backend vulkan --eval-every 0 --preview-every 0 --no-write-ground-truths --run-report --save-test-renders
 ```
 
-To score the model from a timed, training-only run, use `--no-evaluation --save-ply` as shown below. Then run `python scripts/running/prepare_graphdeco.py RUN MODEL --ply RUN/output.ply`, substituting the training directory for `RUN` and a fresh output directory for `MODEL`. The converter uses the training log and configuration, restores the PLY’s 3D filter, and renders the registered held-out cameras. Score it with `python scripts/running/score_graphdeco.py --graphdeco outputs/graphdeco_reference MODEL`. Replaying the quality preset’s 4,102,802-splat bicycle PLY at seed 42 reproduced all 76,261,050 RGB8 channel values across its 25 held-out views.
+To score the model from a timed, training-only run, use `--no-evaluation --save-ply` as shown below. Then run `python scripts/running/prepare_graphdeco.py RUN MODEL --ply RUN/output.ply`, substituting the training directory for `RUN` and a fresh output directory for `MODEL`. The converter uses the training log and configuration, restores the PLY’s 3D filter, and renders the registered held-out cameras. Score it with `python scripts/running/score_graphdeco.py --graphdeco outputs/graphdeco_reference MODEL`. Replaying the original Quality preset’s 4,102,802-splat bicycle PLY at seed 42 reproduced all 76,261,050 RGB8 channel values across its 25 held-out views.
 
 Held-out cameras are indices 0, 8, 16, and so on in filename order. Training and stereo initialization use the other views. The benchmark scenes informed preset selection. Each model directory contains `results.json` and `per_view.json`. Aggregate the nine scene means with equal weight for each seed. The reference evaluates saved RGB8 images and passes values in [0, 1] to its VGG LPIPS implementation. The wrapper caches the reference VGG network between images. On one indoor and one outdoor held-out view, its PSNR, SSIM and LPIPS matched the standalone upstream script exactly. [Per-scene preset measurements](NVIDIA_GeForce_RTX_4080_presets.csv)
 
@@ -31,7 +31,7 @@ Measure-Command {
 }
 ```
 
-`Measure-Command` stops at process exit. The training log records the optimizer loop under `train_complete.train_wall_s`, and the benchmark CSV distinguishes model readiness, PLY closure, process exit and a completed file sync. In the clean training-only CLI, the writer closes the PLY before exit and the timing harness syncs it immediately afterward. The quality run synced its PLY before scoring held-out views. Fresh processes may reuse filesystem and shader disk caches. Graphdeco’s `full_eval.py` times its training commands including model saves. [Per-scene timing boundaries](mipnerf360_3k_presets.csv) · [Upstream timing script](https://github.com/graphdeco-inria/gaussian-splatting/blob/54c035f7834b564019656c3e3fcc3646292f727d/full_eval.py)
+`Measure-Command` stops at process exit. The training log records the optimizer loop under `train_complete.train_wall_s`, and the benchmark CSV distinguishes model readiness, PLY closure, process exit and a completed file sync. In the clean training-only CLI, the writer closes the PLY before exit and the timing harness syncs it immediately afterward. The original RTX 4080 Quality run synced its PLY before scoring held-out views. Fresh processes may reuse filesystem and shader disk caches. Graphdeco’s `full_eval.py` times its training commands including model saves. [Per-scene timing boundaries](mipnerf360_3k_presets.csv) · [Upstream timing script](https://github.com/graphdeco-inria/gaussian-splatting/blob/54c035f7834b564019656c3e3fcc3646292f727d/full_eval.py)
 
 ### Compare LiteGS on the same GPU
 
@@ -104,11 +104,12 @@ PPISP also models the response curve, exposure and white balance. [PPISP, Sectio
 
 ## Regenerate the benchmark figures
 
-From the repository root, run the following commands with Matplotlib installed. Both read the checked-in per-scene CSVs.
+From the repository root, run the following commands with Matplotlib installed. They read the checked-in per-scene CSVs.
 
 ```sh
-python scripts/plots/plot_preset_results.py
+python scripts/plots/plot_preset_results.py --presets docs/NVIDIA_GeForce_RTX_4090_presets_current.csv
+python scripts/plots/plot_preset_results.py --presets docs/NVIDIA_GeForce_RTX_4080_presets.csv
 python scripts/plots/plot_method_frontiers.py
 ```
 
-To plot an RTX 4090 run, pass its CSV path to `python scripts/plots/plot_preset_results.py --presets PATH_TO_CSV`. It prints the measured preset means and writes `assets/mipnerf360-rtx4090-presets.png`. The method-comparison plot uses the RTX 4080 measurements until peer trainers are benchmarked on the 4090.
+The preset plots print the nine-scene means and write `assets/mipnerf360-rtx4090-presets.png` and `assets/mipnerf360-rtx4080-presets.png`. The method-comparison plot uses the RTX 4080, where all five trainers were measured on the same card.

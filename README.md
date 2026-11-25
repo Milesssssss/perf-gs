@@ -2,7 +2,7 @@
 
 **Efficient, extensible & low memory differentiable training.**
 
-Train a 3D Gaussian Splatting model from a COLMAP scene with Slang on Vulkan or Direct3D 12. On an **RTX 4090**, Ultrafast averages **27.10 dB PSNR in 11.85 seconds** across all nine Mip-NeRF 360 scenes. On a **16 GB RTX 4080**, the updated Quality preset reaches **27.90 dB in 32.44 seconds** with **2.11M final splats**. Times cover the training loop. [Same-GPU comparison with LiteGS, SAD-GS and FastGS](docs/benchmarks.md#rtx-4080-comparison)
+Train a 3D Gaussian Splatting model from a COLMAP scene with Slang on Vulkan or Direct3D 12. On an **RTX 4090**, Quality averages **27.89 dB PSNR in 22.61 seconds** across the nine Mip-NeRF 360 scenes, with **2.10M final splats**. Ultrafast averages **27.12 dB in 10.54 seconds** on the same card. Times cover the training loop. [RTX 4080 comparison with LiteGS, SAD-GS and FastGS](docs/benchmarks.md#rtx-4080-comparison)
 
 For GPUs with less VRAM, Balanced streams training images from system RAM. It used **2.72–2.90 GiB of VRAM at loop end** across the two workstations. [VRAM and system RAM breakdown](docs/benchmarks.md#where-memory-goes)
 
@@ -16,20 +16,40 @@ For GPUs with less VRAM, Balanced streams training images from system RAM. It us
 
 </div>
 
-**9.21 s for 3,000 optimization steps.** Playback starts with the training loop. Before the clip, the hub spent 0.38 s loading Stump, 0.53 s waiting for Start, and 2.95 s preparing training. The result appeared **13.08 s after scene open**. The same loop took 8.96 s in a separate unrecorded hub run and 8.95 s in the headless benchmark.
+**9.21 s for 3,000 optimization steps.** Playback starts with the training loop. Before the clip, the hub spent 0.38 s loading Stump, 0.53 s waiting for Start, and 2.95 s preparing training. The result appeared **13.08 s after scene open**. The same loop took 8.96 s in a separate unrecorded hub run and 8.95 s in the original headless benchmark.
 
 ## Mip-NeRF 360
 
-| Preset | GPU | Steps | Training loop | PSNR ↑ | SSIM ↑ | VGG LPIPS ↓ | VRAM at loop end |
-| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| Ultrafast | RTX 4090 | 3,000 | 11.85 s | 27.10 dB | 0.7930 | 0.2567 | 5.29 GiB |
-| Balanced (default) | RTX 4090 | 3,000 | 17.31 s | 27.42 dB | 0.8143 | 0.2229 | 2.81 GiB |
-| **Quality** | **RTX 4080** | **3,500** | **32.44 s** | **27.90 dB** | **0.8286** | **0.1997** | **4.80 GiB** |
-| Quality (previous) | RTX 4090 | 3,000 | 23.24 s | 27.79 dB | 0.8274 | 0.2011 | 6.14 GiB |
+### RTX 4090
 
-On the same 4080, the previous Quality preset reached 27.78 dB in 33.85 s with 3.08M splats. The updated preset improved PSNR on all nine scenes and used 32% fewer splats on average. Its 4090 rerun is pending. Each row averages nine headless Vulkan runs at seed 42. Graphdeco scored 246 held-out views at quarter resolution outdoors and half resolution indoors. Timing excludes loading, initialization, evaluation and export. [4080 CSV](docs/NVIDIA_GeForce_RTX_4080_presets.csv) · [Original 4090 CSV](docs/NVIDIA_GeForce_RTX_4090_presets.csv) · [Reproduce the benchmark](docs/benchmark-rtx4090.md)
+| Preset | Steps | Training loop | PSNR ↑ | SSIM ↑ | VGG LPIPS ↓ | Final splats | VRAM at loop end |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Ultrafast | 3,000 | 10.54 s | 27.12 dB | 0.7935 | 0.2564 | 1.43M | 5.29 GiB |
+| Balanced (default) | 3,000 | 15.92 s | 27.41 dB | 0.8143 | 0.2229 | 2.07M | 2.81 GiB |
+| **Quality** | 3,500 | 22.61 s | 27.89 dB | 0.8285 | 0.1996 | 2.10M | 4.81 GiB |
 
-![RTX 4080 training-loop time, PSNR, SSIM and VGG LPIPS by scene for Ultrafast, Balanced and the updated Quality preset](assets/mipnerf360-rtx4080-presets.png)
+Compared with the previous 3,000-step Quality preset on this 4090, the 3,500-step preset gained **0.11 dB** on average and improved PSNR on **all nine scenes**. Mean final splat count fell **31.5%**, from 3.07M to 2.10M. Mean loop time went from 23.24 s to 22.61 s. [Current 4090 CSV](docs/NVIDIA_GeForce_RTX_4090_presets_current.csv) · [Previous 4090 CSV](docs/NVIDIA_GeForce_RTX_4090_presets.csv)
+
+Each row averages nine scenes equally, with one headless Vulkan run per scene at seed 42. Graphdeco scored 246 held-out views per preset at quarter resolution outdoors and half resolution indoors. Timing excludes loading, initialization, evaluation and export. VRAM is process-local GPU memory sampled at loop end. [Reproduce the benchmark](docs/benchmark-rtx4090.md)
+
+Ultrafast and Balanced keep their 3,000-step settings. Applying Quality’s 75% post-growth retention produced about 25% fewer final splats on Bicycle and Kitchen. SSIM and VGG LPIPS worsened in all four runs. [Pruning comparison](docs/benchmarks.md#pruning-in-ultrafast-and-balanced)
+
+![RTX 4090 training-loop time, PSNR, SSIM and VGG LPIPS by scene for the three current presets](assets/mipnerf360-rtx4090-presets.png)
+
+<details>
+<summary>RTX 4080 results</summary>
+
+| Preset | Steps | Training loop | PSNR ↑ | SSIM ↑ | VGG LPIPS ↓ | Final splats | VRAM at loop end |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Ultrafast | 3,000 | 17.62 s | 27.13 dB | 0.7936 | 0.2567 | 1.43M | 5.29 GiB |
+| Balanced (default) | 3,000 | 25.97 s | 27.39 dB | 0.8143 | 0.2229 | 2.07M | 2.80 GiB |
+| **Quality** | 3,500 | 32.44 s | 27.90 dB | 0.8286 | 0.1997 | 2.11M | 4.80 GiB |
+
+The updated Quality preset improved PSNR on all nine scenes and used 32% fewer final splats than the previous Quality preset on this card. [4080 CSV](docs/NVIDIA_GeForce_RTX_4080_presets.csv) · [4080 comparisons and timings](docs/benchmarks.md#current-presets)
+
+![RTX 4080 training-loop time, PSNR, SSIM and VGG LPIPS by scene for the three current presets](assets/mipnerf360-rtx4080-presets.png)
+
+</details>
 
 ## Requirements
 
@@ -88,7 +108,7 @@ Run `.\.venv\Scripts\python.exe -m trainer.frontend.app --help` to see every fla
 
 ## Reconstructions
 
-Each row pairs a held-out photo with the three renders scored in the original RTX 4090 benchmark. All gallery models used 3,000 steps, including the previous Quality preset.
+Each row pairs a held-out photo with the three renders from the RTX 4090 benchmark. Ultrafast and Balanced trained for 3,000 steps and Quality trained for 3,500, all at seed 42. The box marks the area shown at native resolution below each image.
 
 <table>
   <thead>

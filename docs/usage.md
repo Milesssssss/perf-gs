@@ -34,13 +34,13 @@ The trainer opens its viewer by default. Use `--no-viewer` for headless training
 
 During optimization the viewer presents at up to 15 frames per second so training can use the same GPU. Pausing the run or viewing the completed model restores the viewer’s normal refresh rate.
 
-All three presets use stereo matches from training views, a lens response fitted from training landmarks, and the `short` learning-rate schedule. Choose a preset with `--preset` or in the viewer. [Measured speed and quality](benchmarks.md#current-presets)
+All three presets use stereo matches from training views, a lens response fitted from training landmarks, and the `short` learning-rate schedule. Choose a preset with `--preset` or in the viewer. [RTX 4090 benchmarks](benchmarks.md#rtx-4090-presets) · [RTX 4080 benchmarks](benchmarks.md#current-presets)
 
-| Preset | Steps | SH degree | Pixels supervised per step | Growth capacity | Training images |
-| --- | ---: | ---: | ---: | ---: | --- |
-| `ultrafast` | 3,000 | 2 | 25% STBN | 1.85M | GPU-resident |
-| `balanced` (default) | 3,000 | 2 | 100% | 2.60M | Streamed |
-| `quality` | 3,500 | 3 | 100% | 4.00M | Streamed |
+| Preset | Steps | SH degree | Pixels supervised per step | Growth capacity | Fraction kept after growth | Training images |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| `ultrafast` | 3,000 | 2 | 25% STBN | 1.85M | 100% | GPU-resident |
+| `balanced` (default) | 3,000 | 2 | 100% | 2.60M | 100% | Streamed |
+| `quality` | 3,500 | 3 | 100% | 4.00M | 75% target | Streamed |
 
 Ultrafast renders at the full selected image dimensions and samples the pixel gradients. Download NVIDIA’s masks once with `python scripts/data/download_stbn.py`. Balanced and quality use every pixel and need no mask download. [STBN asset terms](stbn_pixel_sampling.md)
 
