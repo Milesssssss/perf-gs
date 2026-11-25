@@ -174,7 +174,7 @@ if __name__ == "__main__":
     adapter_id = re.sub("[^a-z0-9]", "", gpu.lower())
     if not adapter_id:
         raise ValueError(f"Invalid adapter name {gpu!r}")
-    output = ROOT / f"assets/mipnerf360-{adapter_id}-frontier.png"
+    output = ROOT / f"docs/assets/mipnerf360-{adapter_id}-frontier.png"
     with rc_context({"font.size": 12}):
         draw(points, gpu).savefig(output)
     print(output)

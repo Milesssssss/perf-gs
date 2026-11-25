@@ -2,7 +2,7 @@
 
 **Efficient, extensible, dependency-free & low memory differentiable training.**
 
-Train a 3D Gaussian Splatting model from a COLMAP scene with Slang on Vulkan or Direct3D 12.<br>
+Run COLMAP on a folder of photos directly in the PERF-GS hub, or open an existing COLMAP scene. Then train a 3D Gaussian Splatting model with Slang on Vulkan or Direct3D 12.<br>
 On an **RTX 4090**:
 - *Quality* preset averages **27.89 dB PSNR in 22.61 seconds** across the nine Mip-NeRF 360 scenes.
 - *Ultrafast* preset averages **27.12 dB in 10.54 seconds** on the same card.<br>
@@ -65,9 +65,10 @@ Perf-gs was designed to be extremely simple to setup and install.
    .\.venv\Scripts\python.exe -m trainer.frontend.app --hub
    ```
 
-5. **Train and save.** Click **Open dataset folder...** and select your scene folder. If it contains only photos, click **Install reconstruction tools** if prompted, then **Reconstruct to COLMAP**. An existing COLMAP scene opens directly. When the point cloud appears, click **Start Training**. When training finishes, click **Export PLY...** to save your model.
+5. **Open your photos or scene.** Click **Open dataset folder...**. For a folder of photos, click **Install reconstruction tools** if prompted, then **Reconstruct to COLMAP**. The hub estimates the camera poses and builds a sparse point cloud. An existing COLMAP scene opens directly.
+6. **Train and save.** Once the point cloud appears, click **Start Training**. When training finishes, click **Export PLY...** to save your model.
 
-![Kitchen in the RTX 4090 hub after 3,000 Balanced steps, with controls to export the trained model or start another run](assets/perfgs-hub.webp)
+![Kitchen in the RTX 4090 hub after 3,000 Balanced steps, with controls to export the trained model or start another run](docs/assets/perfgs-hub.webp)
 
 ### Train from the command line
 
@@ -100,7 +101,7 @@ All headline results give equal weight to the nine Mip-NeRF 360 scenes. On the R
 
 Compared with the previous 3,000-step Quality preset on this 4090, the 3,500-step preset gained **0.11 dB** on average and improved PSNR on **all nine scenes**. Mean final splat count fell **31.5%**, from 3.07M to 2.10M. Mean loop time went from 23.24 s to 22.61 s. [Current 4090 CSV](docs/NVIDIA_GeForce_RTX_4090_presets_current.csv) · [Previous 4090 CSV](docs/NVIDIA_GeForce_RTX_4090_presets.csv)
 
-Each row averages nine scenes equally, with one headless Vulkan run per scene at seed 42. Graphdeco scored 246 held-out views per preset at quarter resolution outdoors and half resolution indoors. Timing excludes loading, initialization, evaluation and export. VRAM is process-local GPU memory sampled at loop end. [Reproduce the benchmark](docs/benchmark-rtx4090.md)
+Each row averages nine scenes equally, with one headless Vulkan run per scene at seed 42. Graphdeco scored 246 held-out views per preset at quarter resolution outdoors and half resolution indoors. Training-loop times exclude COLMAP reconstruction, loading, initialization, held-out evaluation and export. VRAM is process-local GPU memory sampled at loop end. [Reproduce the benchmark](docs/benchmark-rtx4090.md)
 
 Ultrafast and Balanced keep their 3,000-step settings. Applying Quality’s 75% post-growth retention produced about 25% fewer final splats on Bicycle and Kitchen. SSIM and VGG LPIPS worsened in all four runs. [Pruning comparison](docs/benchmarks.md#pruning-in-ultrafast-and-balanced)
 
@@ -139,46 +140,46 @@ Each row pairs a held-out photo with the three renders from the RTX 4090 benchma
   <tbody>
     <tr><th scope="rowgroup" colspan="4" align="left">Kitchen</th></tr>
     <tr>
-      <td><a href="assets/reconstructions/kitchen-reference.webp"><img src="assets/reconstructions/kitchen-reference.webp" width="216" alt="Kitchen reference photograph and detail crop"></a></td>
-      <td><a href="assets/reconstructions/kitchen-ultrafast.webp"><img src="assets/reconstructions/kitchen-ultrafast.webp" width="216" alt="Kitchen Ultrafast render and detail crop"></a></td>
-      <td><a href="assets/reconstructions/kitchen-balanced.webp"><img src="assets/reconstructions/kitchen-balanced.webp" width="216" alt="Kitchen Balanced render and detail crop"></a></td>
-      <td><a href="assets/reconstructions/kitchen-quality.webp"><img src="assets/reconstructions/kitchen-quality.webp" width="216" alt="Kitchen Quality render and detail crop"></a></td>
+      <td><a href="docs/assets/reconstructions/kitchen-reference.webp"><img src="docs/assets/reconstructions/kitchen-reference.webp" width="216" alt="Kitchen reference photograph and detail crop"></a></td>
+      <td><a href="docs/assets/reconstructions/kitchen-ultrafast.webp"><img src="docs/assets/reconstructions/kitchen-ultrafast.webp" width="216" alt="Kitchen Ultrafast render and detail crop"></a></td>
+      <td><a href="docs/assets/reconstructions/kitchen-balanced.webp"><img src="docs/assets/reconstructions/kitchen-balanced.webp" width="216" alt="Kitchen Balanced render and detail crop"></a></td>
+      <td><a href="docs/assets/reconstructions/kitchen-quality.webp"><img src="docs/assets/reconstructions/kitchen-quality.webp" width="216" alt="Kitchen Quality render and detail crop"></a></td>
     </tr>
   </tbody>
   <tbody>
     <tr><th scope="rowgroup" colspan="4" align="left">Bicycle</th></tr>
     <tr>
-      <td><a href="assets/reconstructions/bicycle-reference.webp"><img src="assets/reconstructions/bicycle-reference.webp" width="216" alt="Bicycle reference photograph and detail crop"></a></td>
-      <td><a href="assets/reconstructions/bicycle-ultrafast.webp"><img src="assets/reconstructions/bicycle-ultrafast.webp" width="216" alt="Bicycle Ultrafast render and detail crop"></a></td>
-      <td><a href="assets/reconstructions/bicycle-balanced.webp"><img src="assets/reconstructions/bicycle-balanced.webp" width="216" alt="Bicycle Balanced render and detail crop"></a></td>
-      <td><a href="assets/reconstructions/bicycle-quality.webp"><img src="assets/reconstructions/bicycle-quality.webp" width="216" alt="Bicycle Quality render and detail crop"></a></td>
+      <td><a href="docs/assets/reconstructions/bicycle-reference.webp"><img src="docs/assets/reconstructions/bicycle-reference.webp" width="216" alt="Bicycle reference photograph and detail crop"></a></td>
+      <td><a href="docs/assets/reconstructions/bicycle-ultrafast.webp"><img src="docs/assets/reconstructions/bicycle-ultrafast.webp" width="216" alt="Bicycle Ultrafast render and detail crop"></a></td>
+      <td><a href="docs/assets/reconstructions/bicycle-balanced.webp"><img src="docs/assets/reconstructions/bicycle-balanced.webp" width="216" alt="Bicycle Balanced render and detail crop"></a></td>
+      <td><a href="docs/assets/reconstructions/bicycle-quality.webp"><img src="docs/assets/reconstructions/bicycle-quality.webp" width="216" alt="Bicycle Quality render and detail crop"></a></td>
     </tr>
   </tbody>
   <tbody>
     <tr><th scope="rowgroup" colspan="4" align="left">Stump</th></tr>
     <tr>
-      <td><a href="assets/reconstructions/stump-reference.webp"><img src="assets/reconstructions/stump-reference.webp" width="216" alt="Stump reference photograph and detail crop"></a></td>
-      <td><a href="assets/reconstructions/stump-ultrafast.webp"><img src="assets/reconstructions/stump-ultrafast.webp" width="216" alt="Stump Ultrafast render and detail crop"></a></td>
-      <td><a href="assets/reconstructions/stump-balanced.webp"><img src="assets/reconstructions/stump-balanced.webp" width="216" alt="Stump Balanced render and detail crop"></a></td>
-      <td><a href="assets/reconstructions/stump-quality.webp"><img src="assets/reconstructions/stump-quality.webp" width="216" alt="Stump Quality render and detail crop"></a></td>
+      <td><a href="docs/assets/reconstructions/stump-reference.webp"><img src="docs/assets/reconstructions/stump-reference.webp" width="216" alt="Stump reference photograph and detail crop"></a></td>
+      <td><a href="docs/assets/reconstructions/stump-ultrafast.webp"><img src="docs/assets/reconstructions/stump-ultrafast.webp" width="216" alt="Stump Ultrafast render and detail crop"></a></td>
+      <td><a href="docs/assets/reconstructions/stump-balanced.webp"><img src="docs/assets/reconstructions/stump-balanced.webp" width="216" alt="Stump Balanced render and detail crop"></a></td>
+      <td><a href="docs/assets/reconstructions/stump-quality.webp"><img src="docs/assets/reconstructions/stump-quality.webp" width="216" alt="Stump Quality render and detail crop"></a></td>
     </tr>
   </tbody>
   <tbody>
     <tr><th scope="rowgroup" colspan="4" align="left">Room</th></tr>
     <tr>
-      <td><a href="assets/reconstructions/room-reference.webp"><img src="assets/reconstructions/room-reference.webp" width="216" alt="Room reference photograph and detail crop"></a></td>
-      <td><a href="assets/reconstructions/room-ultrafast.webp"><img src="assets/reconstructions/room-ultrafast.webp" width="216" alt="Room Ultrafast render and detail crop"></a></td>
-      <td><a href="assets/reconstructions/room-balanced.webp"><img src="assets/reconstructions/room-balanced.webp" width="216" alt="Room Balanced render and detail crop"></a></td>
-      <td><a href="assets/reconstructions/room-quality.webp"><img src="assets/reconstructions/room-quality.webp" width="216" alt="Room Quality render and detail crop"></a></td>
+      <td><a href="docs/assets/reconstructions/room-reference.webp"><img src="docs/assets/reconstructions/room-reference.webp" width="216" alt="Room reference photograph and detail crop"></a></td>
+      <td><a href="docs/assets/reconstructions/room-ultrafast.webp"><img src="docs/assets/reconstructions/room-ultrafast.webp" width="216" alt="Room Ultrafast render and detail crop"></a></td>
+      <td><a href="docs/assets/reconstructions/room-balanced.webp"><img src="docs/assets/reconstructions/room-balanced.webp" width="216" alt="Room Balanced render and detail crop"></a></td>
+      <td><a href="docs/assets/reconstructions/room-quality.webp"><img src="docs/assets/reconstructions/room-quality.webp" width="216" alt="Room Quality render and detail crop"></a></td>
     </tr>
   </tbody>
   <tbody>
     <tr><th scope="rowgroup" colspan="4" align="left">Bonsai</th></tr>
     <tr>
-      <td><a href="assets/reconstructions/bonsai-reference.webp"><img src="assets/reconstructions/bonsai-reference.webp" width="216" alt="Bonsai reference photograph and detail crop"></a></td>
-      <td><a href="assets/reconstructions/bonsai-ultrafast.webp"><img src="assets/reconstructions/bonsai-ultrafast.webp" width="216" alt="Bonsai Ultrafast render and detail crop"></a></td>
-      <td><a href="assets/reconstructions/bonsai-balanced.webp"><img src="assets/reconstructions/bonsai-balanced.webp" width="216" alt="Bonsai Balanced render and detail crop"></a></td>
-      <td><a href="assets/reconstructions/bonsai-quality.webp"><img src="assets/reconstructions/bonsai-quality.webp" width="216" alt="Bonsai Quality render and detail crop"></a></td>
+      <td><a href="docs/assets/reconstructions/bonsai-reference.webp"><img src="docs/assets/reconstructions/bonsai-reference.webp" width="216" alt="Bonsai reference photograph and detail crop"></a></td>
+      <td><a href="docs/assets/reconstructions/bonsai-ultrafast.webp"><img src="docs/assets/reconstructions/bonsai-ultrafast.webp" width="216" alt="Bonsai Ultrafast render and detail crop"></a></td>
+      <td><a href="docs/assets/reconstructions/bonsai-balanced.webp"><img src="docs/assets/reconstructions/bonsai-balanced.webp" width="216" alt="Bonsai Balanced render and detail crop"></a></td>
+      <td><a href="docs/assets/reconstructions/bonsai-quality.webp"><img src="docs/assets/reconstructions/bonsai-quality.webp" width="216" alt="Bonsai Quality render and detail crop"></a></td>
     </tr>
   </tbody>
 </table>

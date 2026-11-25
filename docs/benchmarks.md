@@ -105,7 +105,7 @@ On Bicycle, Balanced finished 3,000 steps with 2.49M Gaussians and buffers sized
 
 ## RTX 4080 comparison
 
-![Training-loop time and held-out PSNR for Gaussian splatting trainers measured on one RTX 4080.](../assets/mipnerf360-rtx4080-frontier.png)
+![Training-loop time and held-out PSNR for Gaussian splatting trainers measured on one RTX 4080.](assets/mipnerf360-rtx4080-frontier.png)
 
 The dashed line connects configurations that improve on the best PSNR reached at a shorter training time. Each horizontal tick doubles the training-loop budget. Quality+ extends the curve to 28.225 dB at 216.40 s on the same card. [Quality+ per-scene measurements](NVIDIA_GeForce_RTX_4080_qualityplus.csv)
 

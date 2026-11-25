@@ -115,6 +115,10 @@ At startup the trainer prints the path to `errors.log` in the initial run direct
 
 Use `python -m trainer.frontend.app --help` for the full CLI. The repository includes plotting scripts for training histories and an Nsight GPU Trace helper for NVIDIA GPUs. Pass your Nsight Graphics project with `--project PATH.ngfx-proj`. [Plotting scripts](../scripts/plots/) · [GPU trace helper](../scripts/running/capture_gpu_trace.py)
 
+## Project website
+
+Open [docs/index.html](index.html) in a browser to preview the project page locally. To publish it, select **Settings → Pages → Deploy from a branch → `master` → `/docs` → Save** on GitHub. Updates to that folder publish when they reach the branch.
+
 ## References
 
 1. <a id="ref-3dgs"></a>Kerbl et al. *3D Gaussian Splatting for Real-Time Radiance Field Rendering.* TOG, 2023. [Paper](https://arxiv.org/abs/2308.04079)

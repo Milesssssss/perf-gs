@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f9f9f5">
+  <meta name="description" content="PERF-GS trains 3D Gaussian Splatting scenes in seconds. Explore real-time training, held-out reconstructions, and measured RTX 4090 and 4080 results.">
+  <meta property="og:title" content="PERF-GS · 3D Gaussian Splatting in seconds">
+  <meta property="og:description" content="Run COLMAP on your photos in the PERF-GS hub or open an existing scene, then train and explore a 3D Gaussian Splatting model.">
+  <meta property="og:type" content="website">
+  <title>PERF-GS · 3D Gaussian Splatting in seconds</title>
+  <link rel="stylesheet" href="assets/project-page/site.css">
+  <script src="assets/project-page/site.js" defer></script>
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+  <header class="site-header">
+    <nav class="shell nav" aria-label="Project navigation">
+      <a class="brand" href="#main" aria-label="PERF-GS home"><span class="mark" aria-hidden="true"><i></i><i></i><i></i></span>PERF-GS</a>
+      <div class="nav-links"><a href="#reconstructions">Gallery</a><a href="#motion">Videos</a><a href="#results">Results</a><a href="#citation">Citation</a></div>
+    </nav>
+  </header>
+  <main id="main">
+    <section class="shell introduction" aria-labelledby="title">
+      <h1 id="title">PERF-GS</h1>
+      <p class="subtitle">3D Gaussian Splatting. Trained in seconds.</p>
+      <p class="byline"><a href="https://stefanoscolapasta.github.io/nozbufferallowed/about.html">Stefano Scolari</a><span aria-hidden="true">/</span><a href="https://seed.ea.com/">SEED, Electronic Arts</a></p>
+      <div class="actions"><a class="button primary" href="https://github.com/electronicarts/perf-gs"><span class="code-icon" aria-hidden="true">&lt;/&gt;</span> View code</a><a class="button" href="#quickstart">Quickstart <span aria-hidden="true">↓</span></a></div>
+    </section>
+
+    <section class="shell showcase" aria-label="Demo and featured reconstructions">
+      <div class="media-grid">
+        <figure class="demo">
+          <video id="demo" controls playsinline preload="none" poster="assets/project-page/stump-poster.webp" width="1152" height="720" aria-label="Stump training in real time, followed by a camera orbit" aria-describedby="demo-caption">
+            <source src="assets/project-page/stump.mp4" type="video/mp4">
+            <a href="assets/project-page/stump.mp4">Open the Stump training video</a>
+          </video>
+          <button class="demo-cover" id="play-demo" type="button" aria-label="Play the real-time Stump training demo" hidden>
+            <span class="demo-tag"><i aria-hidden="true"></i> Real-time demo</span>
+            <span class="demo-info"><span class="play-icon" aria-hidden="true"></span><span><strong>Stump</strong><small>Ultrafast · RTX 4090</small></span></span>
+          </button>
+        </figure>
+        <div class="scene-links">
+          <a class="scene-card" href="assets/reconstructions/kitchen-quality.webp" data-scene="kitchen" aria-label="View Kitchen reconstruction">
+            <img src="assets/reconstructions/kitchen-quality.webp" width="464" height="563" alt="">
+            <span>Kitchen</span><b aria-hidden="true">↗</b>
+          </a>
+          <a class="scene-card" href="assets/reconstructions/bicycle-quality.webp" data-scene="bicycle" aria-label="View Bicycle reconstruction">
+            <img src="assets/reconstructions/bicycle-quality.webp" width="464" height="563" alt="">
+            <span>Bicycle</span><b aria-hidden="true">↗</b>
+          </a>
+        </div>
+      </div>
+      <p class="caption" id="demo-caption">Stump trains for <strong>9.21 seconds</strong> in this recording, followed by a free-camera orbit. From opening the scene to the trained result took 13.08 seconds.</p>
+      <h2 class="metric-heading" id="averages">Nine-scene Mip-NeRF 360 averages</h2>
+      <dl class="metrics" aria-labelledby="averages">
+        <div><dt>Ultrafast training loop</dt><dd>10.54 <small>s</small></dd><dd class="hardware">RTX 4090 · <span>3,000 steps</span></dd></div>
+        <div><dt>Quality reconstruction</dt><dd>27.89 <small>dB</small></dd><dd class="hardware">RTX 4090 · <span>22.61 s</span></dd></div>
+        <div><dt>Quality+ reconstruction</dt><dd>28.225 <small>dB</small></dd><dd class="hardware">RTX 4080 · <span>216.40 s</span></dd></div>
+      </dl>
+    </section>
+
+    <section class="shell section text-section" id="overview" aria-labelledby="about-heading">
+      <h2 id="about-heading">Overview</h2>
+      <p>The PERF-GS hub can run COLMAP on your photos to estimate camera poses and build a sparse point cloud, or open an existing COLMAP scene. Shared Slang shaders then train the Gaussians on Vulkan or Direct3D 12. Where a Gaussian covers fine image detail, the trainer can split it into smaller primitives.</p>
+      <p>Ultrafast samples a quarter of the pixel gradients. Balanced streams training images from system memory and averaged <strong>2.81 GiB of GPU memory at loop end</strong> on the RTX 4090. Quality spends more updates refining the model. Quality+ continues until progress on training views levels off.</p>
+    </section>
+
+    <section class="gallery-band" id="reconstructions" aria-labelledby="gallery-heading">
+      <div class="shell section">
+        <h2 id="gallery-heading">Reconstructions</h2>
+        <p class="lead">Compare a held-out photograph with the same camera view rendered by PERF-GS. The close-up below each view shows the marked detail.</p>
+        <form class="gallery-controls" id="gallery-controls" hidden>
+          <label>Scene <select name="scene"><option value="kitchen">Kitchen</option><option value="bicycle">Bicycle</option><option value="stump">Stump</option><option value="room">Room</option><option value="bonsai">Bonsai</option></select></label>
+          <label>Compare <select name="count"><option value="2">2 images</option><option value="3">3 images</option></select></label>
+          <label>Left <select name="left"><option value="reference">Reference</option><option value="ultrafast">Ultrafast</option><option value="balanced">Balanced</option><option value="quality">Quality</option></select></label>
+          <label><span id="preset-label">Right</span> <select name="preset"><option value="ultrafast">Ultrafast</option><option value="balanced">Balanced</option><option value="quality" selected>Quality</option></select></label>
+          <label hidden>Preset 2 <select name="preset2"><option value="ultrafast">Ultrafast</option><option value="balanced">Balanced</option><option value="quality">Quality</option></select></label>
+          <label>View <select name="layout"><option value="slider">Slider</option><option value="side-by-side">Side by side</option></select></label>
+        </form>
+        <div class="compare">
+          <div class="compare-images">
+            <a class="photo-link" href="assets/reconstructions/kitchen-reference.webp" tabindex="-1"><img id="reference" src="assets/reconstructions/kitchen-reference.webp" alt="Held-out Kitchen photograph and detail crop" width="464" height="563" loading="lazy"></a>
+            <a class="photo-link" href="assets/reconstructions/kitchen-quality.webp" tabindex="-1"><img id="render" src="assets/reconstructions/kitchen-quality.webp" alt="Kitchen Quality reconstruction and matching detail crop" width="464" height="563" loading="lazy"></a>
+            <a class="photo-link" href="assets/reconstructions/kitchen-quality.webp" tabindex="-1" hidden><img id="render2" src="assets/reconstructions/kitchen-quality.webp" alt="" width="464" height="563" loading="lazy"></a>
+            <div class="plate-labels">
+              <span><a class="plate-label" id="ref-link" href="assets/reconstructions/kitchen-reference.webp">Reference</a></span>
+              <span><a class="plate-label" id="render-link" href="assets/reconstructions/kitchen-quality.webp">Quality</a></span>
+              <span hidden><a class="plate-label" id="render2-link"></a></span>
+            </div>
+            <input id="split" type="range" min="0" max="100" value="50" aria-label="Reference photograph visible" aria-describedby="split-help" hidden>
+            <span class="split-line" aria-hidden="true"></span>
+            <input id="split2" type="range" min="0" max="100" value="67" aria-label="Second divider position" aria-describedby="split-help" hidden>
+            <span class="split-line" aria-hidden="true"></span>
+          </div>
+          <p class="caption" id="render-caption" aria-live="polite">Kitchen · Quality (3,500 steps)</p>
+          <p class="caption" id="split-help" hidden>Drag a divider or use the arrow keys. Select an image label to open the original.</p>
+        </div>
+        <p class="caption">RTX 4090, seed 42. Scenes and reference photographs from Barron et al., CVPR 2022. <a href="https://jonbarron.info/mipnerf360/">Mip-NeRF 360 dataset ↗</a></p>
+      </div>
+    </section>
+
+    <section class="shell section motion" id="motion" aria-labelledby="motion-heading">
+      <h2 id="motion-heading">Reconstructions in motion</h2>
+      <p class="lead">Follow the same camera path through two trained models. Pause or scrub the video to inspect Ultrafast on the left and Balanced on the right at exactly the same viewpoint.</p>
+      <label class="motion-picker" hidden>Scene <select id="motion-scene"><option value="kitchen">Kitchen</option><option value="bicycle">Bicycle</option></select></label>
+      <figure data-motion-scene="kitchen">
+        <video controls playsinline preload="none" width="1440" height="480" poster="assets/project-page/kitchen-comparison.webp" aria-label="Kitchen camera path, Ultrafast on the left and Balanced on the right">
+          <source src="assets/project-page/kitchen-comparison.mp4" type="video/mp4">
+          <a href="assets/project-page/kitchen-comparison.mp4">Open the Kitchen video</a>
+        </video>
+        <figcaption><span><strong>Kitchen</strong> · RTX 4080 · 3,000 steps per model · seed 42</span><button type="button" hidden aria-label="Stop Kitchen video and return to the first frame">Stop</button></figcaption>
+      </figure>
+      <figure data-motion-scene="bicycle">
+        <video controls playsinline preload="none" width="1440" height="480" poster="assets/project-page/bicycle-comparison.webp" aria-label="Bicycle camera path, Ultrafast on the left and Balanced on the right">
+          <source src="assets/project-page/bicycle-comparison.mp4" type="video/mp4">
+          <a href="assets/project-page/bicycle-comparison.mp4">Open the Bicycle video</a>
+        </video>
+        <figcaption><span><strong>Bicycle</strong> · RTX 4080 · 3,000 steps per model · seed 42</span><button type="button" hidden aria-label="Stop Bicycle video and return to the first frame">Stop</button></figcaption>
+      </figure>
+    </section>
+
+    <section class="shell section" id="results" aria-labelledby="results-heading">
+      <h2 id="results-heading">Benchmark results</h2>
+      <p class="lead">Each of the nine Mip-NeRF 360 scenes contributes equally. Graphdeco evaluation covers 246 held-out views, at quarter resolution outdoors and half resolution indoors.</p>
+      <div class="table-wrap" role="region" tabindex="0" aria-label="Results by GPU and preset">
+        <table>
+          <thead><tr><th scope="col">GPU / preset</th><th scope="col">Steps</th><th scope="col">Train loop</th><th scope="col">PSNR ↑</th><th scope="col">SSIM ↑</th><th scope="col">VGG LPIPS ↓</th><th scope="col">End VRAM</th></tr></thead>
+          <tbody>
+            <tr class="group"><th scope="rowgroup" colspan="7">RTX 4090 <small>24 GB</small></th></tr>
+            <tr><th scope="row">Ultrafast</th><td>3,000</td><td>10.54 s</td><td>27.12 dB</td><td>0.7935</td><td>0.2564</td><td>5.29 GiB</td></tr>
+            <tr><th scope="row">Balanced</th><td>3,000</td><td>15.92 s</td><td>27.41 dB</td><td>0.8143</td><td>0.2229</td><td>2.81 GiB</td></tr>
+            <tr><th scope="row">Quality</th><td>3,500</td><td>22.61 s</td><td>27.89 dB</td><td>0.8285</td><td>0.1996</td><td>4.81 GiB</td></tr>
+          </tbody>
+          <tbody>
+            <tr class="group"><th scope="rowgroup" colspan="7">RTX 4080 <small>16 GB</small></th></tr>
+            <tr><th scope="row">Ultrafast</th><td>3,000</td><td>17.62 s</td><td>27.13 dB</td><td>0.7936</td><td>0.2567</td><td>5.29 GiB</td></tr>
+            <tr><th scope="row">Balanced</th><td>3,000</td><td>25.97 s</td><td>27.39 dB</td><td>0.8143</td><td>0.2229</td><td>2.80 GiB</td></tr>
+            <tr><th scope="row">Quality</th><td>3,500</td><td>32.44 s</td><td>27.90 dB</td><td>0.8286</td><td>0.1997</td><td>4.80 GiB</td></tr>
+            <tr><th scope="row">Quality+</th><td>17,536 avg.</td><td>216.40 s</td><td>28.225 dB</td><td>0.8316</td><td>0.1907</td><td>4.80 GiB</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="caption">Headless Vulkan, seed 42. Training-loop timing excludes COLMAP reconstruction, loading, initialization, held-out evaluation and export. Quality+ includes its training-view convergence checks. VRAM is sampled at loop end.</p>
+      <p class="resource-links"><a href="NVIDIA_GeForce_RTX_4090_presets_current.csv" download>4090 data ↓</a><a href="NVIDIA_GeForce_RTX_4080_presets.csv" download>4080 data ↓</a><a href="NVIDIA_GeForce_RTX_4080_qualityplus.csv" download>Quality+ data ↓</a></p>
+      <details class="frontier"><summary>Compare trainers on the same RTX 4080</summary>
+        <img src="assets/mipnerf360-rtx4080-frontier.png" loading="lazy" width="1440" height="768" alt="Training-loop time versus held-out PSNR for PERF-GS, LiteGS, SAD-GS, SkipGS and FastGS-Big on the same RTX 4080">
+        <p class="caption">The dashed line connects measured configurations that improve PSNR as more training time becomes available. <a href="https://github.com/electronicarts/perf-gs/blob/HEAD/docs/benchmarks.md#rtx-4080-comparison">Method settings and measurements ↗</a></p>
+      </details>
+    </section>
+
+    <section class="shell section getting-started" id="quickstart" aria-labelledby="start-heading">
+      <div><h2 id="start-heading">Train your own scene</h2>
+        <p>After installation, launch the hub and click <strong>Open dataset folder...</strong>. For photos, click <strong>Install reconstruction tools</strong> if prompted, then <strong>Reconstruct to COLMAP</strong>. An existing COLMAP scene opens directly.</p>
+        <pre><code>python -m trainer.frontend.app --hub</code></pre>
+        <p>Once the point cloud appears, choose a preset and click <strong>Start Training</strong>. Explore the result and save it with <strong>Export PLY...</strong>.</p>
+        <a class="inline-link" href="https://github.com/electronicarts/perf-gs#quickstart">Installation and quickstart ↗</a>
+        <p class="caption">Ultrafast requires NVIDIA’s separately licensed research masks. Balanced is the default.</p>
+      </div>
+      <figure><a href="assets/perfgs-hub.webp"><img src="assets/perfgs-hub.webp" width="1280" height="720" loading="lazy" alt="PERF-GS hub showing the trained Kitchen scene beside its training and export controls"></a><figcaption class="caption">Kitchen in the hub after 3,000 Balanced steps.</figcaption></figure>
+    </section>
+
+    <section class="shell section citation" id="citation" aria-labelledby="cite-heading">
+      <h2 id="cite-heading">Citation</h2>
+      <pre><code>@software{scolari2026perfgs,
+  author    = {Scolari, Stefano},
+  title     = {{PERF-GS}},
+  year      = {2026},
+  publisher = {Electronic Arts},
+  url       = {https://github.com/electronicarts/perf-gs}
+}</code></pre>
+      <a class="inline-link" href="https://github.com/electronicarts/perf-gs/blob/HEAD/CITATION.cff">Citation file ↗</a>
+    </section>
+  </main>
+  <footer><div class="shell"><span>PERF-GS · Electronic Arts</span><span><a href="https://github.com/electronicarts/perf-gs/blob/HEAD/LICENSE">Software license</a> · <a href="https://github.com/electronicarts/perf-gs/blob/HEAD/NOTICE.md">Notices</a> · Layout inspired by <a href="https://nerfies.github.io/">Nerfies</a></span></div></footer>
+</body>
+</html>
