@@ -2,28 +2,31 @@
 
 ## RTX 4090 presets
 
-On the **RTX 4090 24 GB**, Quality averaged **27.89 dB in 22.61 s** with **2.10M final splats**. Compared with the previous Quality sweep on the same card, PSNR improved on all nine scenes by an average of 0.108 dB, final splat count fell 31.5%, and loop-end GPU memory fell 21.7%. [Current per-scene measurements](NVIDIA_GeForce_RTX_4090_presets_current.csv) · [Original per-scene measurements](NVIDIA_GeForce_RTX_4090_presets.csv)
+On the **RTX 4090 24 GB**, Quality averaged **27.90 dB in 22.68 s** with **2.10M final splats**. Compared with the original 3,000-step Quality sweep on the same card, PSNR improved on all nine scenes by an average of 0.113 dB, final splat count fell 31.6%, and loop-end GPU memory fell 21.7%. [Current per-scene measurements](NVIDIA_GeForce_RTX_4090_presets_current.csv) · [Original per-scene measurements](NVIDIA_GeForce_RTX_4090_presets.csv)
 
 | Preset | Steps | Train loop | PSNR ↑ | SSIM ↑ | VGG LPIPS ↓ | Final splats | VRAM at loop end |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| Ultrafast | 3,000 | 10.54 s | 27.12 dB | 0.7935 | 0.2564 | 1.43M | 5.29 GiB |
-| Balanced | 3,000 | 15.92 s | 27.41 dB | 0.8143 | 0.2229 | 2.07M | 2.81 GiB |
-| **Quality** | **3,500** | **22.61 s** | **27.89 dB** | **0.8285** | **0.1996** | **2.10M** | **4.81 GiB** |
+| Ultrafast | 3,000 | 10.51 s | 27.13 dB | 0.7935 | 0.2564 | 1.43M | 5.29 GiB |
+| Balanced | 3,000 | 15.91 s | 27.40 dB | 0.8141 | 0.2228 | 2.07M | 2.81 GiB |
+| **Quality** | **3,500** | **22.68 s** | **27.90 dB** | **0.8285** | **0.1996** | **2.10M** | **4.81 GiB** |
+| Quality+ | 17,044 avg. | 122.66 s | 28.227 dB | 0.8317 | 0.1909 | 2.10M | 4.81 GiB |
 | Quality (previous) | 3,000 | 23.24 s | 27.79 dB | 0.8274 | 0.2011 | 3.07M | 6.14 GiB |
 
-Quality gained the most PSNR on Bonsai (+0.237 dB) and the least on Stump (+0.002 dB). SSIM improved on seven scenes, with small decreases on Stump (−0.00030) and Treehill (−0.00061). VGG LPIPS improved on eight scenes and rose by 0.00043 on Treehill. Six scenes trained faster. Counter, Kitchen and Room took 0.14, 0.23 and 0.02 s longer, respectively.
+Quality gained the most PSNR on Bonsai (+0.258 dB) and the least on Stump (+0.012 dB). SSIM improved on seven scenes, with small decreases on Stump (−0.00006) and Treehill (−0.00062). VGG LPIPS improved on seven scenes and rose slightly on Stump (+0.00001) and Treehill (+0.00021). Six scenes trained faster. Counter, Kitchen and Room took 0.31, 0.44 and 0.23 s longer, respectively.
 
-Quality's proposed splits exceeded the growth capacity at 11 of 27 structure updates. All nine runs reached their 75% retention target at step 2,100. All 27 runs across the three presets completed training and held-out rendering with zero sort overflows. Ultrafast and Balanced used their existing 3,000-step settings. They averaged 11.85 s and 17.31 s in the original sweep and 10.54 s and 15.92 s in this one, with mean PSNR changes of +0.021 and −0.010 dB, respectively.
+Quality's proposed splits exceeded the growth capacity at 11 of 27 structure updates. All nine runs reached their 75% retention target at step 2,100. All 27 fixed-budget runs completed training and held-out rendering with zero sort overflows. Ultrafast and Balanced used their existing 3,000-step settings. They averaged 11.85 s and 17.31 s in the original sweep and 10.51 s and 15.91 s in this one, with mean PSNR changes of +0.028 and −0.013 dB, respectively.
 
-Each preset trained once per scene at seed 42, using quarter resolution outdoors and half resolution indoors. The clock covers the headless Vulkan training loop and excludes loading, initialization, evaluation and export. VRAM is the trainer process’s local GPU memory sampled at loop end. Graphdeco scored 246 held-out RGB8 renders per preset. Each scene contributes equally to the means after averaging its held-out views.
+Quality+ reached its training-view plateau on all nine scenes, taking 8,652–21,996 steps. Compared with 3,500-step Quality, held-out PSNR rose by **0.326 dB** on average, with gains on six scenes. The four indoor scenes gained 0.687 dB on average and the five outdoor scenes gained 0.038 dB. SSIM improved on seven scenes and VGG LPIPS improved on all nine. The loop took 5.41× as long, including convergence checks. [Quality+ per-scene results](NVIDIA_GeForce_RTX_4090_qualityplus.csv) · [Convergence plot](../assets/qualityplus-convergence-4090.png) · [Stopping rule](usage.md#quality-convergence)
 
-Both sweeps used the same Lenovo workstation with a 32-core Threadripper PRO 9975WX, Windows 11 Enterprise, NVIDIA driver 610.88, SlangPy 0.42.0 and Python 3.11.9. Graphdeco evaluation used PyTorch 2.10.0+cu128 and torchvision 0.25.0+cu128. The current trainer revision is `da6b847`. [Current system record](NVIDIA_GeForce_RTX_4090_system_current.txt) · [Original system record](NVIDIA_GeForce_RTX_4090_system.txt) · [Reproduce the sweep](benchmark-rtx4090.md)
+Each preset trained once per scene at seed 42, using quarter resolution outdoors and half resolution indoors. The clock covers the headless Vulkan training loop and excludes loading, initialization, held-out evaluation and export. VRAM is the trainer process’s local GPU memory sampled at loop end. Graphdeco scored 246 held-out RGB8 renders per preset. Each scene contributes equally to the means after averaging its held-out views.
 
-![Training-loop time, PSNR, SSIM and VGG LPIPS by scene and preset on the RTX 4090](../assets/mipnerf360-rtx4090-presets.png)
+The sweeps used the same Lenovo workstation with a 32-core Threadripper PRO 9975WX, Windows 11 Enterprise, NVIDIA driver 610.88, SlangPy 0.42.0 and Python 3.11.9. Graphdeco evaluation used PyTorch 2.10.0+cu128 and torchvision 0.25.0+cu128. The current trainer revision is `d69f4f2`. [Current system record](NVIDIA_GeForce_RTX_4090_system_current.txt) · [Original system record](NVIDIA_GeForce_RTX_4090_system.txt) · [Reproduce the sweep](benchmark-rtx4090.md)
+
+![Training-loop time, PSNR, SSIM and VGG LPIPS by scene for the three fixed-budget presets on the RTX 4090](../assets/mipnerf360-rtx4090-presets.png)
 
 ### Pruning in Ultrafast and Balanced
 
-To test Quality’s post-growth pruning on the two 3,000-step presets, we retrained Bicycle and Kitchen at seed 42 with `--final-splat-fraction 0.75`. Each run used the corresponding default preset for all other training settings. Across those four pairs, pruning reduced final splat count by about 25% and shortened the measured loops by 0.28–0.62 s. SSIM fell and VGG LPIPS rose in every pair. PSNR fell slightly on Bicycle and rose slightly on Kitchen with both presets. Loop-end VRAM differed by at most 4 MiB. [Four pruned runs](mipnerf360_prune75_4090.csv) · [Matched default runs](NVIDIA_GeForce_RTX_4090_presets_current.csv)
+To test Quality’s post-growth pruning on the two 3,000-step presets, we retrained Bicycle and Kitchen at seed 42 with `--final-splat-fraction 0.75`. Each run used the corresponding default preset for all other training settings. Across those four pairs, pruning reduced final splat count by about 25% and shortened the measured loops by 0.28–0.62 s. SSIM fell and VGG LPIPS rose in every pair. PSNR fell slightly on Bicycle and rose slightly on Kitchen with both presets. Loop-end VRAM differed by at most 4 MiB. [Four pruned runs](mipnerf360_prune75_4090.csv) · [Matched default runs at da6b847](NVIDIA_GeForce_RTX_4090_presets_da6b847.csv)
 
 <a id="current-presets"></a>
 

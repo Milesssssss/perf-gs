@@ -4,8 +4,8 @@
 
 Run COLMAP on a folder of photos directly in the PERF-GS hub, or open an existing COLMAP scene. Then train a 3D Gaussian Splatting model with Slang on Vulkan or Direct3D 12.<br>
 On an **RTX 4090**:
-- *Quality* preset averages **27.89 dB PSNR in 22.61 seconds** across the nine Mip-NeRF 360 scenes.
-- *Ultrafast* preset averages **27.12 dB in 10.54 seconds** on the same card.<br>
+- *Quality* preset averages **27.90 dB PSNR in 22.68 seconds** across the nine Mip-NeRF 360 scenes.
+- *Ultrafast* preset averages **27.13 dB in 10.51 seconds** on the same card.<br>
 
 The **Quality+** preset continues training until PSNR on training views levels off. On an **RTX 4080**, it averaged **28.225 dB held-out PSNR** across the same nine scenes, with a mean training loop of **3 min 36 s**.
 
@@ -95,11 +95,12 @@ All headline results give equal weight to the nine Mip-NeRF 360 scenes. On the R
 
 | Preset | Steps | Training loop | PSNR ↑ | SSIM ↑ | VGG LPIPS ↓ | Final splats | VRAM at loop end |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| Ultrafast | 3,000 | 10.54 s | 27.12 dB | 0.7935 | 0.2564 | 1.43M | 5.29 GiB |
-| Balanced (default) | 3,000 | 15.92 s | 27.41 dB | 0.8143 | 0.2229 | 2.07M | 2.81 GiB |
-| **Quality** | 3,500 | 22.61 s | 27.89 dB | 0.8285 | 0.1996 | 2.10M | 4.81 GiB |
+| Ultrafast | 3,000 | 10.51 s | 27.13 dB | 0.7935 | 0.2564 | 1.43M | 5.29 GiB |
+| Balanced (default) | 3,000 | 15.91 s | 27.40 dB | 0.8141 | 0.2228 | 2.07M | 2.81 GiB |
+| **Quality** | 3,500 | 22.68 s | 27.90 dB | 0.8285 | 0.1996 | 2.10M | 4.81 GiB |
+| **[Quality+](docs/NVIDIA_GeForce_RTX_4090_qualityplus.csv)** | [17,044 avg.](assets/qualityplus-convergence-4090.png) | 122.66 s | 28.227 dB | 0.8317 | 0.1909 | 2.10M | 4.81 GiB |
 
-Compared with the previous 3,000-step Quality preset on this 4090, the 3,500-step preset gained **0.11 dB** on average and improved PSNR on **all nine scenes**. Mean final splat count fell **31.5%**, from 3.07M to 2.10M. Mean loop time went from 23.24 s to 22.61 s. [Current 4090 CSV](docs/NVIDIA_GeForce_RTX_4090_presets_current.csv) · [Previous 4090 CSV](docs/NVIDIA_GeForce_RTX_4090_presets.csv)
+Compared with the previous 3,000-step Quality preset on this 4090, the 3,500-step preset gained **0.11 dB** on average and improved PSNR on **all nine scenes**. Mean final splat count fell **31.6%**, from 3.07M to 2.10M. Mean loop time went from 23.24 s to 22.68 s. [Current 4090 CSV](docs/NVIDIA_GeForce_RTX_4090_presets_current.csv) · [Previous 4090 CSV](docs/NVIDIA_GeForce_RTX_4090_presets.csv)
 
 Each row averages nine scenes equally, with one headless Vulkan run per scene at seed 42. Graphdeco scored 246 held-out views per preset at quarter resolution outdoors and half resolution indoors. Training-loop times exclude COLMAP reconstruction, loading, initialization, held-out evaluation and export. VRAM is process-local GPU memory sampled at loop end. [Reproduce the benchmark](docs/benchmark-rtx4090.md)
 
