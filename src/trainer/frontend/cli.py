@@ -63,12 +63,13 @@ def build_parser() -> argparse.ArgumentParser:
                          "(--iters, or 100 camera passes with a 3,500-step minimum for Quality+).")
     parser.add_argument("--downsample", type=int, default=None,
                     help="downsample factor (1=full res, 2=half, 4=quarter). "
-                         "Defaults to 2 for indoor Mip-NeRF 360 scenes and 4 otherwise. "
+                         "Defaults to 1 for custom datasets; recognized Mip-NeRF 360 "
+                         "scenes use 2 indoors and 4 outdoors. "
                          "Uses images_N if available, otherwise resizes on load.")
     parser.add_argument("--width", type=int, default=None,
-                    help="force render width (overrides --downsample)")
+                    help="force target width without changing the selected image directory")
     parser.add_argument("--height", type=int, default=None,
-                    help="force render height (overrides --downsample)")
+                    help="force target height without changing the selected image directory")
     parser.add_argument("--preview-every", type=int, default=0,
                     help="sample training-view loss and PSNR every N iterations (default: off). "
                          "With evaluation enabled, previews also render every camera.")

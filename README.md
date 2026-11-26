@@ -178,6 +178,8 @@ After step 3, you can train directly from PowerShell. From the project folder, r
 
 For your own COLMAP scene, skip the download and replace `"datasets/tandt/truck"` with your folder path in quotes. The default is Balanced at 3,000 steps. With `--save-ply`, the model is saved in a timestamped folder under `outputs/train/` as `output.ply`.
 
+Custom datasets use the native COLMAP camera resolution by default. Add `--downsample 2` or `4` to reduce training time and memory use for large captures; recognized Mip-NeRF 360 scenes keep their benchmark resolutions. The startup log and hub preview show the selected dimensions. [Dataset resolution settings](docs/usage.md#datasets)
+
 Run `.\.venv\Scripts\python.exe -m trainer.frontend.app --help` to see every flag. If you already installed PERF-GS in an active Python environment, use `python` in place of `.\.venv\Scripts\python.exe`. [Presets and training settings](docs/usage.md#training) - [Evaluation and export flags](docs/usage.md#evaluation-and-ply-export)
 
 [Hub walkthrough](docs/usage.md#interactive-hub) - [Datasets](docs/usage.md#datasets) - [First-run help](docs/usage.md#first-run-help)

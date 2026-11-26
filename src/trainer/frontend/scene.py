@@ -71,6 +71,10 @@ def load_scene_context(args: argparse.Namespace, prepared: ColmapDataset | None 
     width, height = colmap_scene.images[0].camera.image_size
     print(f"loaded {camera_count} cameras, {initial_count} init points, "
           f"scene_extent={colmap_scene.scene_extent:.3f}")
+    resolution_mode = "auto" if args.downsample is None else "explicit"
+    print(f"[scene] training resolution {width}x{height}, "
+          f"downsample={colmap_scene.downsample} ({resolution_mode}), "
+          f"images={colmap_scene.image_dir}")
 
     stride = max(args.eval_holdout_stride, 1)
     test_indices, train_indices = holdout_split(camera_count, stride, bool(args.eval_holdout))

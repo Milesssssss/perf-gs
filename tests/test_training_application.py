@@ -8,6 +8,7 @@ from argparse import Namespace
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 from PIL import Image
 
 from trainer.backend.compute.device import create_device
@@ -297,6 +298,7 @@ def test_dropping_a_colmap_dataset_previews_its_point_cloud(tmp_path) -> None:
     snap = viewer.state.snapshot()
     assert snap.dataset_state is DatasetState.READY
     assert snap.dataset.images == 4
+    assert (snap.dataset.width, snap.dataset.height) == (100, 80)
     assert snap.result_state is ResultState.INITIALIZED   # points, not a result
     assert any("loaded" in n for n in viewer.notices)
 
@@ -392,6 +394,67 @@ def test_preview_cache_tracks_native_photo_size_and_directory_choice(tmp_path):
     assert hub._cached_colmap(str(scene)).images[0].camera.image_size == (16, 12)
     Image.new("RGB", (15, 11), color=(100, 200, 50)).save(first)
     assert hub._cached_colmap(str(scene)) is None
+
+
+@pytest.mark.parametrize("downsample, width, height, expected", [
+    (None, None, None, (32, 24)),
+    (2, None, None, (16, 12)),
+    (4, 19, 13, (19, 13)),
+])
+def test_hub_reports_the_selected_training_resolution(
+        tmp_path, downsample, width, height, expected):
+    scene = write_colmap_scene(tmp_path / "photos", [(f"{i}.png", 32, 24, 30) for i in range(4)])
+    viewer = _FakeHubViewer()
+    hub = _hub_app(viewer)
+    hub.app.args.downsample = downsample
+    hub.app.args.width, hub.app.args.height = width, height
+
+    hub._hub_preview_scene(str(scene))
+
+    info = viewer.state.snapshot().dataset
+    assert (info.width, info.height) == expected
+    cached = hub._cached_colmap(str(scene))
+    assert cached is not None
+    assert {entry.camera.image_size for entry in cached.images} == {expected}
+    assert any(f"{expected[0]}x{expected[1]}" in message for message in viewer.messages)
+
+
+@pytest.mark.parametrize("name, factor", [("room", 2), ("garden", 4)])
+def test_preview_cache_tracks_auto_resolution_when_pyramids_appear(tmp_path, name, factor):
+    scene = write_colmap_scene(tmp_path / "relocated" / name,
+                               [(f"{i}.png", 32, 24, 30) for i in range(4)])
+    np.save(scene / "poses_bounds.npy", np.zeros((4, 17)))
+    hub = _hub_app(_FakeHubViewer())
+    hub.app.args.downsample = None
+    hub._hub_preview_scene(str(scene))
+    assert hub._cached_colmap(str(scene)).downsample == 1
+
+    photos = scene / f"images_{factor}"
+    photos.mkdir()
+    for i in range(4):
+        Image.new("RGB", (32 // factor, 24 // factor)).save(photos / f"{i}.png")
+    assert hub._cached_colmap(str(scene)) is None
+    hub._hub_preview_scene(str(scene))
+    cached = hub._cached_colmap(str(scene))
+    assert cached.downsample == factor
+    assert cached.images[0].camera.image_size == (32 // factor, 24 // factor)
+
+    (scene / "poses_bounds.npy").unlink()
+    assert hub._cached_colmap(str(scene)) is None
+
+
+def test_preview_cache_tracks_auto_resolution_when_benchmark_siblings_appear(tmp_path):
+    scene = write_colmap_scene(tmp_path / "relocated" / "room")
+    hub = _hub_app(_FakeHubViewer())
+    hub.app.args.downsample = None
+    hub._hub_preview_scene(str(scene))
+    assert hub._cached_colmap(str(scene)).downsample == 1
+
+    for name in ("bicycle", "garden", "stump"):
+        (scene.parent / name).mkdir()
+    assert hub._cached_colmap(str(scene)) is None
+    hub._hub_preview_scene(str(scene))
+    assert hub._cached_colmap(str(scene)).downsample == 2
 
 
 # --- STBN --------------------------------------------------------------------

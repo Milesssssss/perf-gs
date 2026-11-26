@@ -14,7 +14,13 @@ The benchmark workstations ran Windows, Python 3.11.9, SlangPy 0.42.0 and Vulkan
 
 ## Datasets
 
-Pass `--scene` the directory containing the registered photos in `images/` and the COLMAP reconstruction in `sparse/0/`. The loader accepts binary or text cameras, images and points. For `--downsample 2` or `4` it uses `images_2/` or `images_4/` when available and otherwise resizes on load. Use `--downsample 1` for the original resolution. [COLMAP loader](../src/trainer/data/colmap.py)
+Pass `--scene` the directory containing the registered photos in `images/` and the COLMAP reconstruction in `sparse/0/`. The loader accepts binary or text cameras, images and points. [COLMAP loader](../src/trainer/data/colmap.py)
+
+Without `--downsample`, custom datasets use the native COLMAP camera resolution. Recognized Mip-NeRF 360 scenes keep the benchmark settings: half resolution indoors and quarter resolution outdoors. Recognition requires a benchmark scene name plus a known dataset directory, the released scene's `poses_bounds.npy` and matching `images_2/` or `images_4/`, or the sibling scenes `bicycle/`, `garden/` and `stump/`. A scene name or image pyramid alone does not opt a custom capture into benchmark downsampling. The Mip-NeRF 360 download directories below and the aliases `mipnerf360/` and `mipnerf360_v2/` are recognized.
+
+An explicit `--downsample` always overrides automatic selection. Use `--downsample 1` to force native resolution, or `2` / `4` to reduce training time and memory use for large captures. Factors above 1 use `images_N/` when available and otherwise resize `images/` on load. Stored pyramid images retain their actual dimensions, including rounding. `--width` and `--height` override the corresponding target dimension; they do not change the selected image directory. To force a custom target size from the originals, also pass `--downsample 1`.
+
+The startup log and hub preview show the selected training dimensions and image directory. Mixed-size camera models still use the most common native size as the basis for a shared target, scaling each camera's intrinsics from its own dimensions.
 
 The optional download helpers use the dataset authors’ archives. Paths below are relative to the checkout.
 

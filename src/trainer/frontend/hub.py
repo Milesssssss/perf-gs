@@ -10,7 +10,7 @@ from tempfile import TemporaryDirectory
 from typing import TYPE_CHECKING
 
 from trainer.backend.render import stbn_table
-from trainer.data.colmap import ColmapDataset, _find_sparse_dir, load_colmap
+from trainer.data.colmap import ColmapDataset, _default_downsample, _find_sparse_dir, load_colmap
 from trainer.frontend.profiling.profiler import apply_profile_session_overrides
 from trainer.frontend.reporting.error_log import report_exception
 from trainer.frontend.scene import holdout_split, split_camera_sets
@@ -46,8 +46,9 @@ class TrainingHub:
         path = Path(scene_dir).resolve()
         sparse, fmt = _find_sparse_dir(path)
         sources = {path / "images", path / f"images_{dataset.downsample}"}
-        if args.downsample is None:
-            sources.update((path / "images_2", path / "poses_bounds.npy"))
+        # Recognition can change when a pyramid, release marker or sibling
+        # scene appears. Share the loader's decision instead of duplicating it.
+        downsample = _default_downsample(path) if args.downsample is None else args.downsample
         photos = dataset.image_dir
         if photos.is_dir() and photos.name != "images" and (args.width is None or args.height is None):
             sample = min((p for p in photos.iterdir() if p.suffix.lower() in (".jpg", ".jpeg", ".png")), default=None)
@@ -61,7 +62,7 @@ class TrainingHub:
             if source.exists():
                 stat = source.stat()
                 stamps.append((source, stat.st_size, stat.st_mtime_ns))
-        return path, args.width, args.height, args.downsample, args.init_opacity, tuple(stamps)
+        return path, args.width, args.height, args.downsample, downsample, args.init_opacity, tuple(stamps)
 
     def _cached_colmap(self, scene_dir: str) -> ColmapDataset | None:
         if self._scene_cache is not None:
@@ -500,17 +501,17 @@ class TrainingHub:
         test, train = holdout_split(len(dataset.images), max(args.eval_holdout_stride, 1),
                                     bool(args.eval_holdout))
         self.app.viewer.attach_scene(split_camera_sets(dataset.images, test, train), snap=True)
-        first = dataset.images[0].camera if dataset.images else None
+        width, height = dataset.images[0].camera.image_size if dataset.images else (0, 0)
         info = state.snapshot().dataset
         state.dataset_ready(DatasetInfo(
             path=info.path or scene_dir, kind=info.kind or KIND_COLMAP,
             images=len(dataset.images),
-            width=int(getattr(first, "width", 0) or 0),
-            height=int(getattr(first, "height", 0) or 0),
+            width=width, height=height,
             points=int(shown), scene_dir=info.scene_dir or scene_dir))
         state.result_initialized(int(shown))
         state.notify(f"{info.kind_label} loaded - {len(dataset.images)} images", OK)
         state.log(f"previewing {shown:,} SfM points from {len(dataset.images)} "
-                  f"cameras — press Train to start")
+                  f"cameras — training at {width}x{height}, downsample={dataset.downsample}, "
+                  f"images={dataset.image_dir.name}/ — press Train to start")
         print(f"[hub] previewing {shown:,} initial points from {scene_dir} "
               f"({time.time() - started:.1f}s)")
