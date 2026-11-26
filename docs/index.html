@@ -26,7 +26,7 @@
       <p class="subtitle">3D Gaussian Splatting in 10 seconds</p>
       <p class="subtitle"><small>Efficient, extensible, cross-vendor, dependency-free & low VRAM differentiable training</small></p>
       <p class="byline"><a href="https://stefanoscolapasta.github.io/nozbufferallowed/about.html">Stefano Scolari</a><span aria-hidden="true">/</span><a href="https://seed.ea.com/">SEED, Electronic Arts</a></p>
-      <div class="actions"><a class="button primary" href="https://github.com/electronicarts/perf-gs"><span class="code-icon" aria-hidden="true">&lt;/&gt;</span> View code</a><a class="button" href="#quickstart">Quickstart <span aria-hidden="true">↓</span></a></div>
+      <div class="actions"><a class="button primary" href="https://github.com/electronicarts/perf-gs"><span class="code-icon" aria-hidden="true">&lt;/&gt;</span> View code</a><a class="button arrow-down" href="#quickstart">Quickstart</a></div>
     </section>
 
     <section class="shell showcase" id="training" aria-label="Real-time Ultrafast training videos">
@@ -46,26 +46,26 @@
             <source src="assets/project-page/bicycle-ultrafast.mp4" type="video/mp4">
             <a href="assets/project-page/bicycle-ultrafast.mp4">Open the Bicycle video</a>
           </video>
-          <figcaption><a href="assets/reconstructions/bicycle-ultrafast.webp" data-scene="bicycle" aria-label="View Bicycle reconstruction">Bicycle ↗</a><span>Real-time demo · Ultrafast · RTX 4090</span></figcaption>
+          <figcaption><a class="arrow-out" href="assets/reconstructions/bicycle-ultrafast.webp" data-scene="bicycle" aria-label="View Bicycle reconstruction">Bicycle</a><span>Real-time demo · Ultrafast · RTX 4090</span></figcaption>
         </figure>
         <figure class="teaser-scene">
           <video controls muted playsinline preload="metadata" width="960" height="600" poster="assets/project-page/bonsai-ultrafast.webp" aria-label="Bonsai training in real time, followed by a camera path through the result">
             <source src="assets/project-page/bonsai-ultrafast.mp4" type="video/mp4">
             <a href="assets/project-page/bonsai-ultrafast.mp4">Open the Bonsai video</a>
           </video>
-          <figcaption><a href="assets/reconstructions/bonsai-ultrafast.webp" data-scene="bonsai" aria-label="View Bonsai reconstruction">Bonsai ↗</a><span>Real-time demo · Ultrafast · RTX 4090</span></figcaption>
+          <figcaption><a class="arrow-out" href="assets/reconstructions/bonsai-ultrafast.webp" data-scene="bonsai" aria-label="View Bonsai reconstruction">Bonsai</a><span>Real-time demo · Ultrafast · RTX 4090</span></figcaption>
         </figure>
         <figure class="teaser-scene">
           <video controls muted playsinline preload="metadata" width="960" height="600" poster="assets/project-page/garden-ultrafast.webp" aria-label="Garden training in real time, followed by a camera path through the result">
             <source src="assets/project-page/garden-ultrafast.mp4" type="video/mp4">
             <a href="assets/project-page/garden-ultrafast.mp4">Open the Garden video</a>
           </video>
-          <figcaption><a href="assets/project-page/garden-ultrafast.mp4" aria-label="Open the Garden training video">Garden ↗</a><span>Real-time demo · Ultrafast · RTX 4090</span></figcaption>
+          <figcaption><a class="arrow-out" href="assets/project-page/garden-ultrafast.mp4" aria-label="Open the Garden training video">Garden</a><span>Real-time demo · Ultrafast · RTX 4090</span></figcaption>
         </figure>
       </div>
       <div class="demo-notes">
         <p class="caption" id="demo-caption">Stump trains for <strong>10.15 seconds</strong> in this recording, followed by a free-camera orbit. From opening the scene to the trained result took 13.90 seconds.</p>
-        <div class="demo-actions"><button type="button" id="replay-training" hidden>Replay together</button><a href="#motion">Reconstructions in motion ↓</a></div>
+        <div class="demo-actions"><button type="button" id="replay-training" hidden>Replay together</button><a class="arrow-down" href="#motion">Reconstructions in motion</a></div>
       </div>
       <h2 class="metric-heading" id="averages">Nine-scene Mip-NeRF 360 averages</h2>
       <dl class="metrics" aria-labelledby="averages">
@@ -224,7 +224,7 @@
           <p class="caption" id="render-caption" aria-live="polite">DSCF0912.JPG · Ultrafast 34.20 dB · Quality 34.99 dB</p>
           <p class="caption" id="split-help" hidden>Drag a divider or use the arrow keys. Push the dividers together to compare the outer images.</p>
         </div>
-        <p class="caption">RTX 4080, seed 42. Ultrafast and Balanced ran for 3,000 steps and Quality for 3,500. Scenes and photographs by Barron et al., CVPR 2022. <a href="https://jonbarron.info/mipnerf360/">Mip-NeRF 360 dataset ↗</a></p>
+        <p class="caption">RTX 4080, seed 42. Ultrafast and Balanced ran for 3,000 steps and Quality for 3,500. Scenes and photographs by Barron et al., CVPR 2022. <a class="arrow-out" href="https://jonbarron.info/mipnerf360/">Mip-NeRF 360 dataset</a></p>
       </div>
     </section>
 
@@ -252,7 +252,7 @@
       <p class="lead">Each of the nine Mip-NeRF 360 scenes contributes equally. Graphdeco evaluation covers 246 held-out views, at quarter resolution outdoors and half resolution indoors.</p>
       <div class="table-wrap" role="region" tabindex="0" aria-label="Results by GPU and preset">
         <table>
-          <thead><tr><th scope="col">GPU / preset</th><th scope="col">Steps</th><th scope="col">Train loop</th><th scope="col">PSNR ↑</th><th scope="col">SSIM ↑</th><th scope="col">VGG LPIPS ↓</th><th scope="col">End VRAM</th></tr></thead>
+          <thead><tr><th scope="col">GPU / preset</th><th scope="col">Steps</th><th scope="col">Train loop</th><th scope="col" class="arrow-up" aria-label="PSNR, higher is better">PSNR</th><th scope="col" class="arrow-up" aria-label="SSIM, higher is better">SSIM</th><th scope="col" class="arrow-down" aria-label="VGG LPIPS, lower is better">VGG LPIPS</th><th scope="col">End VRAM</th></tr></thead>
           <tbody>
             <tr class="group"><th scope="rowgroup" colspan="7">RTX 4090 <small>24 GB</small></th></tr>
             <tr><th scope="row">Ultrafast</th><td>3,000</td><td>10.51 s</td><td>27.13 dB</td><td>0.7935</td><td>0.2564</td><td>5.29 GiB</td></tr>
@@ -277,11 +277,11 @@
         </table>
       </div>
       <p class="caption">Headless Vulkan, seed 42. Training-loop timing excludes COLMAP reconstruction, loading, initialization, held-out evaluation and export. Quality+ includes its training-view convergence checks. VRAM is sampled at loop end.</p>
-      <p class="resource-links"><a href="NVIDIA_GeForce_RTX_4090_presets_current.csv" download>4090 fixed-budget CSV ↓</a><a href="NVIDIA_GeForce_RTX_4090_qualityplus.csv" download>4090 Quality+ CSV ↓</a><a href="NVIDIA_GeForce_RTX_4080_presets.csv" download>4080 fixed-budget CSV ↓</a><a href="NVIDIA_GeForce_RTX_4080_qualityplus.csv" download>4080 Quality+ CSV ↓</a><a href="AMD_Radeon_RX_7900_XT_presets.csv" download>7900 XT fixed-budget CSV ↓</a><a href="AMD_Radeon_RX_7900_XT_qualityplus.csv" download>7900 XT Quality+ CSV ↓</a></p>
+      <p class="resource-links"><a href="NVIDIA_GeForce_RTX_4090_presets_current.csv" download>4090 fixed-budget CSV</a><a href="NVIDIA_GeForce_RTX_4090_qualityplus.csv" download>4090 Quality+ CSV</a><a href="NVIDIA_GeForce_RTX_4080_presets.csv" download>4080 fixed-budget CSV</a><a href="NVIDIA_GeForce_RTX_4080_qualityplus.csv" download>4080 Quality+ CSV</a><a href="AMD_Radeon_RX_7900_XT_presets.csv" download>7900 XT fixed-budget CSV</a><a href="AMD_Radeon_RX_7900_XT_qualityplus.csv" download>7900 XT Quality+ CSV</a></p>
       <details class="frontier"><summary>Compare the same models on Radeon and GeForce</summary>
         <img src="assets/rx7900xt-fixed-model-errors.png" loading="lazy" width="1260" height="840" alt="Nearly identical RTX 4080 and RX 7900 XT crops of Stump and Kitchen, alongside amplified pixel differences">
-        <p class="caption">Both cards rendered the same two saved models from 51 held-out cameras using Vulkan. Of 219,272,010 RGB8 channel values, 712 differed by more than one level. The largest difference was 12 levels. <a href="AMD_Radeon_RX_7900_XT_fixed_model.csv" download>Fixed-model measurements ↓</a></p>
-        <p class="caption">Training fresh models on each GPU produced larger differences. Across the four presets, 11 of 984 matched views differed by over 1 dB in PSNR. The largest gap was 4.26 dB on a Room view at Quality+. <a href="assets/rx7900xt-room-qualityplus-heldout.png">Compare that view</a> · <a href="AMD_Radeon_RX_7900_XT_vs_RTX_4080_views.csv" download>Per-view differences ↓</a></p>
+        <p class="caption">Both cards rendered the same two saved models from 51 held-out cameras using Vulkan. Of 219,272,010 RGB8 channel values, 712 differed by more than one level. The largest difference was 12 levels. <a href="AMD_Radeon_RX_7900_XT_fixed_model.csv" download>Fixed-model measurements</a></p>
+        <p class="caption">Training fresh models on each GPU produced larger differences. Across the four presets, 11 of 984 matched views differed by over 1 dB in PSNR. The largest gap was 4.26 dB on a Room view at Quality+. <a href="assets/rx7900xt-room-qualityplus-heldout.png">Compare that view</a> · <a href="AMD_Radeon_RX_7900_XT_vs_RTX_4080_views.csv" download>Per-view differences</a></p>
       </details>
       <details class="frontier"><summary>Quality+ convergence on the RTX 4090</summary>
         <img src="assets/qualityplus-convergence-4090.png" loading="lazy" width="1840" height="768" alt="Training-view PSNR gains on Bicycle and Room, and the change in held-out PSNR from Quality to Quality+ for each of the nine scenes">
@@ -289,7 +289,7 @@
       </details>
       <details class="frontier"><summary>Compare trainers on the same RTX 4080</summary>
         <img src="assets/mipnerf360-rtx4080-frontier.png" loading="lazy" width="1440" height="768" alt="Training-loop time versus held-out PSNR for PERF-GS, LiteGS, SAD-GS, SkipGS and FastGS-Big on the same RTX 4080">
-        <p class="caption">The dashed line connects measured configurations that improve PSNR as more training time becomes available. <a href="https://github.com/electronicarts/perf-gs/blob/HEAD/docs/benchmarks.md#rtx-4080-comparison">Method settings and measurements ↗</a></p>
+        <p class="caption">The dashed line connects measured configurations that improve PSNR as more training time becomes available. <a class="arrow-out" href="https://github.com/electronicarts/perf-gs/blob/HEAD/docs/benchmarks.md#rtx-4080-comparison">Method settings and measurements</a></p>
       </details>
     </section>
 
@@ -303,7 +303,7 @@ py -3.11 -m venv .venv
         After installation, launch the hub and click <strong>Open dataset folder...</strong>. For photos, click <strong>Install reconstruction tools</strong> if prompted, then <strong>Reconstruct to COLMAP</strong>. An existing COLMAP scene opens directly.</p>
         <pre><code>python -m trainer.frontend.app --hub</code></pre>
         <p>Once the point cloud appears, choose a preset and click <strong>Start Training</strong>. Explore the result and save it with <strong>Export PLY...</strong>.</p>
-        <a class="inline-link" href="https://github.com/electronicarts/perf-gs#quickstart">Installation and quickstart ↗</a>
+        <a class="inline-link arrow-out" href="https://github.com/electronicarts/perf-gs#quickstart">Installation and quickstart</a>
         <p class="caption">Ultrafast requires NVIDIA's separately licensed research masks. Balanced is the default.</p>
       </div>
       <figure class="quickstart-screenshots">
@@ -322,7 +322,7 @@ py -3.11 -m venv .venv
   publisher = {Electronic Arts},
   url       = {https://github.com/electronicarts/perf-gs}
 }</code></pre>
-      <a class="inline-link" href="https://github.com/electronicarts/perf-gs/blob/HEAD/CITATION.cff">Citation file ↗</a>
+      <a class="inline-link arrow-out" href="https://github.com/electronicarts/perf-gs/blob/HEAD/CITATION.cff">Citation file</a>
     </section>
   </main>
   <footer><div class="shell"><span>PERF-GS · Electronic Arts</span><span><a href="https://github.com/electronicarts/perf-gs/blob/HEAD/LICENSE">Software license</a> · <a href="https://github.com/electronicarts/perf-gs/blob/HEAD/NOTICE.md">Notices</a> · Layout inspired by <a href="https://nerfies.github.io/">Nerfies</a></span></div></footer>
