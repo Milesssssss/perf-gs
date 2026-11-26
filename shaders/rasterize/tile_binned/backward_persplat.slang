@@ -465,26 +465,26 @@ void backwardRasterizePerSplat(
             {
                 // STBN visited visit_count of the tile's pixels; scale to all.
                 float coverage = float(TILE_AREA) / float(max(visit_count, 1u));
-                InterlockedAdd(blend_weight_accum[g_idx], toFixed(acc_weight * coverage));
+                atomicAddFixed(blend_weight_accum, g_idx, toFixed(acc_weight * coverage));
             }
 
             // projection_backward.slang applies J^T once per gaussian to these tile sums.
-            InterlockedAdd(grad_mean2d_x[g_idx], toFixed(acc_mean2d.x));
-            InterlockedAdd(grad_mean2d_y[g_idx], toFixed(acc_mean2d.y));
-            InterlockedAdd(grad_conic_a[g_idx], toFixed(acc_conic.x));
-            InterlockedAdd(grad_conic_b[g_idx], toFixed(acc_conic.y));
-            InterlockedAdd(grad_conic_c[g_idx], toFixed(acc_conic.z));
-            InterlockedAdd(grad_amplitude[g_idx], toFixed(acc_amplitude));
+            atomicAddFixed(grad_mean2d_x, g_idx, toFixed(acc_mean2d.x));
+            atomicAddFixed(grad_mean2d_y, g_idx, toFixed(acc_mean2d.y));
+            atomicAddFixed(grad_conic_a, g_idx, toFixed(acc_conic.x));
+            atomicAddFixed(grad_conic_b, g_idx, toFixed(acc_conic.y));
+            atomicAddFixed(grad_conic_c, g_idx, toFixed(acc_conic.z));
+            atomicAddFixed(grad_amplitude, g_idx, toFixed(acc_amplitude));
 #if SPLAT_KERNEL == 3
-            InterlockedAdd(grad_opacity[g_idx], toFixed(acc_opacity));
+            atomicAddFixed(grad_opacity, g_idx, toFixed(acc_opacity));
 #endif
-            InterlockedAdd(grad_color_r[g_idx], toFixed(acc_color.x));
-            InterlockedAdd(grad_color_g[g_idx], toFixed(acc_color.y));
-            InterlockedAdd(grad_color_b[g_idx], toFixed(acc_color.z));
+            atomicAddFixed(grad_color_r, g_idx, toFixed(acc_color.x));
+            atomicAddFixed(grad_color_g, g_idx, toFixed(acc_color.y));
+            atomicAddFixed(grad_color_b, g_idx, toFixed(acc_color.z));
             if (track_screen_grad != 0u)
             {
-                InterlockedAdd(grad_2d_x_iter[g_idx], toFixed(acc_absx));
-                InterlockedAdd(grad_2d_y_iter[g_idx], toFixed(acc_absy));
+                atomicAddFixed(grad_2d_x_iter, g_idx, toFixed(acc_absx));
+                atomicAddFixed(grad_2d_y_iter, g_idx, toFixed(acc_absy));
             }
         }
 
@@ -797,24 +797,24 @@ void backwardRasterizePerBucket(
         if (track_blend_weight != 0u)
         {
             float coverage = float(TILE_AREA) / float(max(visit_count, 1u));
-            InterlockedAdd(blend_weight_accum[g_idx], toFixed(acc_weight * coverage));
+            atomicAddFixed(blend_weight_accum, g_idx, toFixed(acc_weight * coverage));
         }
-        InterlockedAdd(grad_mean2d_x[g_idx], toFixed(acc_mean2d.x));
-        InterlockedAdd(grad_mean2d_y[g_idx], toFixed(acc_mean2d.y));
-        InterlockedAdd(grad_conic_a[g_idx], toFixed(acc_conic.x));
-        InterlockedAdd(grad_conic_b[g_idx], toFixed(acc_conic.y));
-        InterlockedAdd(grad_conic_c[g_idx], toFixed(acc_conic.z));
-        InterlockedAdd(grad_amplitude[g_idx], toFixed(acc_amplitude));
+        atomicAddFixed(grad_mean2d_x, g_idx, toFixed(acc_mean2d.x));
+        atomicAddFixed(grad_mean2d_y, g_idx, toFixed(acc_mean2d.y));
+        atomicAddFixed(grad_conic_a, g_idx, toFixed(acc_conic.x));
+        atomicAddFixed(grad_conic_b, g_idx, toFixed(acc_conic.y));
+        atomicAddFixed(grad_conic_c, g_idx, toFixed(acc_conic.z));
+        atomicAddFixed(grad_amplitude, g_idx, toFixed(acc_amplitude));
 #if SPLAT_KERNEL == 3
-        InterlockedAdd(grad_opacity[g_idx], toFixed(acc_opacity));
+        atomicAddFixed(grad_opacity, g_idx, toFixed(acc_opacity));
 #endif
-        InterlockedAdd(grad_color_r[g_idx], toFixed(acc_color.x));
-        InterlockedAdd(grad_color_g[g_idx], toFixed(acc_color.y));
-        InterlockedAdd(grad_color_b[g_idx], toFixed(acc_color.z));
+        atomicAddFixed(grad_color_r, g_idx, toFixed(acc_color.x));
+        atomicAddFixed(grad_color_g, g_idx, toFixed(acc_color.y));
+        atomicAddFixed(grad_color_b, g_idx, toFixed(acc_color.z));
         if (track_screen_grad != 0u)
         {
-            InterlockedAdd(grad_2d_x_iter[g_idx], toFixed(acc_absx));
-            InterlockedAdd(grad_2d_y_iter[g_idx], toFixed(acc_absy));
+            atomicAddFixed(grad_2d_x_iter, g_idx, toFixed(acc_absx));
+            atomicAddFixed(grad_2d_y_iter, g_idx, toFixed(acc_absy));
         }
     }
 }

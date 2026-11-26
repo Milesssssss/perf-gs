@@ -2,11 +2,11 @@
 
 [![Project Page](https://img.shields.io/badge/Project-Page-blue.svg)](https://electronicarts.github.io/perf-gs/)
 [![Languages: Python and Slang](https://img.shields.io/badge/languages-Python%20%2B%20Slang-CF7434)](#architecture-from-a-high-level)
-[![Backends: Vulkan and D3D12](https://img.shields.io/badge/backends-Vulkan%20%2B%20D3D12-355B3E)](#requirements)
+[![Backends: Vulkan, D3D12 and Metal](https://img.shields.io/badge/backends-Vulkan%20%2B%20D3D12%20%2B%20Metal-355B3E)](#requirements)
 
 **Efficient, extensible, dependency-free & low memory differentiable training in 10 seconds.**
 
-Run COLMAP on a folder of photos directly in the PERF-GS standalone app, or open an existing COLMAP scene. Then train a 3D Gaussian Splatting model with Slang on Vulkan or D3D12.<br>
+Run COLMAP on a folder of photos directly in the PERF-GS standalone app, or open an existing COLMAP scene. Then train a 3D Gaussian Splatting model with Slang on Vulkan, D3D12, or Metal on Apple Silicon.<br>
 On an **RTX 4090**:
 - *Quality* preset averages **27.90 dB PSNR in 22.68 seconds** across the nine Mip-NeRF 360 scenes.
 - *Ultrafast* preset averages **27.13 dB in 10.51 seconds** on the same card.<br>
@@ -53,7 +53,7 @@ Python picks a training camera, sets the learning rates and decides when to grow
 
 A *primitive* supplies its projection, its coverage at a pixel, and its color. The *compositor* takes care of blending it over what's behind it. With Slang.D we can mark the projection and coverage functions as differentiable. Change the math in one of those functions and Slang generates its derivatives from the same source. For performance reasons, we still need to write the outer shell's backward passes ourselves. There's a small disk primitive in the tests that uses the same forward blend loop with its own coverage function. [Primitive interfaces](https://github.com/electronicarts/perf-gs/blob/HEAD/shaders/core/interfaces.slang) - [Disk primitive test](https://github.com/electronicarts/perf-gs/blob/HEAD/tests/test_disk_primitive.py)
 
-Vulkan is the cross-platform target. D3D12 on Windows uses the same shader sources. Training has no CUDA or PyTorch dependency. One detail that mattered across vendors was wave size. We've run Vulkan training on Windows with the Nvidia RTX 4080, Nvidia RTX 4090 and AMD Radeon RX 7900 XT. Linux and macOS are unverified, yet.
+Vulkan is the cross-platform target. D3D12 on Windows uses the same shader sources. Apple Silicon macOS selects Metal and compiles the same Slang sources; see [Apple Silicon](docs/apple-silicon.md). Training has no CUDA or PyTorch dependency. One detail that mattered across vendors was wave size. We've run Vulkan training on Windows with the Nvidia RTX 4080, Nvidia RTX 4090 and AMD Radeon RX 7900 XT. Linux remains unverified. A Metal training run on Apple hardware has not been scored against those results.
 
 <a name="where-the-first-splats-come-from"></a>
 
@@ -124,8 +124,8 @@ This runs Quality's 3,500 steps and continues with the model it just trained. Th
 
 ## Requirements
 
-- **OS and Python.** Python 3.10+. Tested on Windows 11. Linux and macOS are unverified.
-- **GPU.** Tested on the AMD Radeon RX 7900 XT (20 GB), NVIDIA RTX 4080 (16 GB) and RTX 4090 (24 GB). The rasterizer supports 32- and 64-lane waves and uses 64-bit integer buffer atomics through Vulkan (default) or Direct3D 12 (Windows).
+- **OS and Python.** Python 3.10+. Tested on Windows 11. Linux is unverified. Apple Silicon macOS uses the Metal backend ([install and launch](docs/apple-silicon.md)); that path was not trained end to end in the published results.
+- **GPU.** Tested on the AMD Radeon RX 7900 XT (20 GB), NVIDIA RTX 4080 (16 GB) and RTX 4090 (24 GB). The rasterizer supports 32- and 64-lane waves and uses 64-bit integer buffer atomics through Vulkan (default) or Direct3D 12 (Windows). On Metal the same int64 accumulators are updated with 32-bit atomics so the integer sum is unchanged. Apple Silicon GPUs are 32-lane.
 - **VRAM.** Balanced used 2.72-2.90 GiB at loop end on the tested NVIDIA cards and 2.76-2.95 GiB on the RX 7900 XT. Peak and viewer usage can be higher. [GPU memory measurements](docs/benchmarks.md)
 
 ## Quickstart
