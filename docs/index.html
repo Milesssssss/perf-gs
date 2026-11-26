@@ -93,7 +93,7 @@
         <figcaption class="caption">Each square in the heatmap is one image tile. In this earlier Kitchen run, the busiest tiles had nearly 10,000 splats assigned to them. Every extra entry is another item to sort and another splat the renderer may visit when blending that tile.</figcaption>
       </figure>
       <details class="frontier" id="trainer-details">
-        <summary>How the trainer works</summary>
+        <summary>Trainer design</summary>
         <nav class="resource-links" aria-label="Overview sections"><a href="#initialization">Initialization</a><a href="#forward-pass">Forward pass</a><a href="#backward-pass">Backward passes</a><a href="#densification">Densification</a><a href="#presets">Presets</a></nav>
         <h3 id="shader-design">Trainer architecture</h3>
         <p>We use <strong><a href="https://github.com/shader-slang/slangpy">SlangPy</a></strong> to write the training schedule in Python, the backend gpu dispatching using SlangPy and the kernels in Slang. Python picks a training camera, sets learning rates and decides when to grow the model (frontend training loop/setup), SlangPy compiles and caches each shader entry point for the session, then dispatches it through its Python RHI. There's no separate native extension to build.</p>

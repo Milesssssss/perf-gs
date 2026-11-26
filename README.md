@@ -40,7 +40,7 @@ For GPUs with less VRAM, Balanced streams training images from system RAM. It us
 The goal was allowing hundreds of experiments in a day on a single consumer GPU. On our RTX 4090, Ultrafast preset runs the whole nine-scene Mip-NeRF 360 dataset in 94.6 seconds. Loading the photos, initializing the splats, scoring the held-out views and exporting the model take some minimal additional time.
 
 <details>
-<summary><strong>How the trainer works</strong></summary>
+<summary><strong>Trainer design</strong></summary>
 
 [Initialization](#initialization) [Forward pass](#forward-passes) [Backward passes](#backward-passes) [Densification](#densification) [Presets](#presets)
 
