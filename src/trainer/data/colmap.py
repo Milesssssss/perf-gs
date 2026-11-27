@@ -224,6 +224,26 @@ def _parse_points3d_bin(path: Path) -> tuple[np.ndarray, np.ndarray]:
     return positions, rgb
 
 
+def _default_downsample(scene_dir: Path) -> int:
+    """Keep benchmark resolutions for recognized Mip-NeRF 360 scenes, native otherwise."""
+    path = scene_dir.resolve()
+    scene = path.name.lower()
+    indoor = {"bonsai", "counter", "kitchen", "room"}
+    outdoor = {"bicycle", "flowers", "garden", "stump", "treehill"}
+    if scene not in indoor | outdoor:
+        return 1
+
+    factor = 2 if scene in indoor else 4
+    root = path.parent.name.lower()
+    known_root = root in {"360_v2", "mipnerf360", "mipnerf360_v2"}
+    known_extra = root == "360_extra_scenes" and scene in {"flowers", "treehill"}
+    # Preserve recognition of relocated releases, without treating a custom
+    # scene named "room" or an image pyramid alone as a benchmark dataset.
+    released_scene = (path / "poses_bounds.npy").is_file() and (path / f"images_{factor}").is_dir()
+    benchmark_siblings = all((path.parent / name).is_dir() for name in ("bicycle", "garden", "stump"))
+    return factor if known_root or known_extra or released_scene or benchmark_siblings else 1
+
+
 def load_colmap(
     scene_dir: Path | str,
     width: int | None = None,
@@ -233,14 +253,7 @@ def load_colmap(
 ) -> ColmapDataset:
     scene_dir = Path(scene_dir)
     if downsample is None:
-        # The Mip-NeRF 360 benchmark uses half resolution indoors and quarter outdoors.
-        downsample = 4
-        path = scene_dir.resolve()
-        if path.name.lower() in {"bonsai", "counter", "kitchen", "room"}:
-            known_root = path.parent.name.lower() in {"360_v2", "mipnerf360", "mipnerf360_v2"}
-            released_scene = (path / "poses_bounds.npy").is_file() and (path / "images_2").is_dir()
-            if known_root or released_scene or all((path.parent / s).is_dir() for s in ("bicycle", "garden", "stump")):
-                downsample = 2
+        downsample = _default_downsample(scene_dir)
     if downsample < 1:
         raise ValueError("--downsample must be at least 1")
 

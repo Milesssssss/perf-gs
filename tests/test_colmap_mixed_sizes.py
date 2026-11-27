@@ -33,7 +33,7 @@ def _write_scene(root, views=VIEWS):
     ("360_v2", "room", None, 2),
     ("360_v2", "bicycle", None, 4),
     ("360_v2", "room", 1, 1),
-    ("my_capture", "room", None, 4),
+    ("my_capture", "room", None, 1),
     ("relocated_dataset", "room", None, 2),
 ])
 def test_training_resolution_uses_benchmark_pyramid(tmp_path, root, scene, requested, expected):
