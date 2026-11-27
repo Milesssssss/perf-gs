@@ -36,7 +36,7 @@ void accumulateIter(
     float fy = fromFixed(iy) * (frame_dim.y * 0.5);
     float m = sqrt(fx * fx + fy * fy);
 
-    InterlockedAdd(grad_mean_2d_mag_accum[i], toFixed(m));
+    atomicAddFixed(grad_mean_2d_mag_accum, i, toFixed(m));
     InterlockedAdd(visibility_count_accum[i], 1u);
 
     grad_2d_x_iter[i] = int64_t(0);

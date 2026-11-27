@@ -34,15 +34,15 @@ void addRegularization(
     {
         float sig = sigmoid(g.opacity);
         float d_opa = w_opacity * sig * (1.0 - sig) * inv_n;
-        InterlockedAdd(grad_opacity[i], toFixed(d_opa));
+        atomicAddFixed(grad_opacity, i, toFixed(d_opa));
     }
 
     if (w_scale > 0.0)
     {
         float3 scale = exp(g.log_scale);
         float3 d_scale = w_scale * scale * inv_n;
-        InterlockedAdd(grad_log_scale_x[i], toFixed(d_scale.x));
-        InterlockedAdd(grad_log_scale_y[i], toFixed(d_scale.y));
-        InterlockedAdd(grad_log_scale_z[i], toFixed(d_scale.z));
+        atomicAddFixed(grad_log_scale_x, i, toFixed(d_scale.x));
+        atomicAddFixed(grad_log_scale_y, i, toFixed(d_scale.y));
+        atomicAddFixed(grad_log_scale_z, i, toFixed(d_scale.z));
     }
 }

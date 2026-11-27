@@ -44,6 +44,15 @@ void clearMipFilterTail(
     if (i < previous_count[1]) filter_3D[i] = 0.0;
 }
 
+// See RadixUpsweepUniforms. Only this kernel uses wave ops; the other two keep
+// their loose `max_splats` uniform, which Slang already emits as a constant buffer.
+struct MipFilterUniforms
+{
+    uint num_cameras;
+    float filter_coef;
+    uint max_splats;
+};
+
 groupshared float s_min_z[THREADS_PER_SPLAT];
 groupshared uint  s_any[THREADS_PER_SPLAT];   // bool as uint for the OR reduction
 
@@ -56,10 +65,11 @@ void computeMip3DFilter(
     StructuredBuffer<uint> num_gaussians_counter,
     StructuredBuffer<CameraData> cameras,
     RWStructuredBuffer<float> filter_3D,     // [max_splats], output
-    uniform uint num_cameras,
-    uniform float filter_coef,               // sqrt(0.2) / max_focal
-    uniform uint max_splats)
+    ConstantBuffer<MipFilterUniforms> uniforms)
 {
+    uint num_cameras = uniforms.num_cameras;
+    float filter_coef = uniforms.filter_coef;   // sqrt(0.2) / max_focal
+    uint max_splats = uniforms.max_splats;
     uint gid = group_id.x + group_id.y * MIP_DISPATCH_WIDTH;
     uint lane = gtid.x;               // 0 .. THREADS_PER_SPLAT-1
     if (gid >= max_splats) return;

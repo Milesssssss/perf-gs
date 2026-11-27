@@ -18,6 +18,8 @@ import numpy as np
 import pytest
 import slangpy as spy
 
+from trainer.backend.memory.ndbuffer import make_ndbuffer
+
 from trainer.backend.compute.device import SHADERS_DIR, create_device
 
 BACKENDS = ["vulkan", "d3d12"]
@@ -70,7 +72,7 @@ def _finite_difference(row, pixel, coverage_seed, color_seed, h=1e-3):
 
 
 def _buffer(device, dtype, shape, data=None):
-    buffer = spy.NDBuffer(device=device, dtype=dtype, shape=shape)
+    buffer = make_ndbuffer(device, dtype, shape)
     if data is not None:
         buffer.copy_from_numpy(np.ascontiguousarray(data))
     return buffer

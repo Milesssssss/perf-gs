@@ -13,6 +13,8 @@ import numpy as np
 import pytest
 import slangpy as spy
 
+from trainer.backend.memory.ndbuffer import make_ndbuffer
+
 from trainer.backend.compute.device import SHADERS_DIR
 from trainer.backend.compute.execution import RADIX_DIGITS, RADIX_GLOBAL_HIST_SIZE, RADIX_PART_SIZE
 
@@ -42,12 +44,12 @@ def _radix_sort(device, kernels, keys_lo: np.ndarray, keys_hi: np.ndarray,
     cap = max(PART_SIZE, ((n + PART_SIZE - 1) // PART_SIZE) * PART_SIZE)
     max_blocks = cap // PART_SIZE
 
-    kA_lo = spy.NDBuffer(device=device, dtype="uint", shape=(cap,))
-    kA_hi = spy.NDBuffer(device=device, dtype="uint", shape=(cap,))
-    vA    = spy.NDBuffer(device=device, dtype="uint", shape=(cap,))
-    kB_lo = spy.NDBuffer(device=device, dtype="uint", shape=(cap,))
-    kB_hi = spy.NDBuffer(device=device, dtype="uint", shape=(cap,))
-    vB    = spy.NDBuffer(device=device, dtype="uint", shape=(cap,))
+    kA_lo = make_ndbuffer(device, "uint", (cap))
+    kA_hi = make_ndbuffer(device, "uint", (cap))
+    vA    = make_ndbuffer(device, "uint", (cap))
+    kB_lo = make_ndbuffer(device, "uint", (cap))
+    kB_hi = make_ndbuffer(device, "uint", (cap))
+    vB    = make_ndbuffer(device, "uint", (cap))
 
     # Pad up to cap with SENTINEL (0xFFFFFFFF) so partial-partition loads
     # match what the shader would read out of a fully-allocated buffer.
@@ -59,10 +61,10 @@ def _radix_sort(device, kernels, keys_lo: np.ndarray, keys_hi: np.ndarray,
     kA_hi.copy_from_numpy(_pad(keys_hi))
     vA.copy_from_numpy(_pad(values))
 
-    pass_hist   = spy.NDBuffer(device=device, dtype="uint", shape=(RADIX * max_blocks,))
-    global_hist = spy.NDBuffer(device=device, dtype="uint", shape=(GLOBAL_HIST_SIZE,))
+    pass_hist   = make_ndbuffer(device, "uint", (RADIX * max_blocks))
+    global_hist = make_ndbuffer(device, "uint", (GLOBAL_HIST_SIZE))
 
-    n_buf = spy.NDBuffer(device=device, dtype="uint", shape=(1,))
+    n_buf = make_ndbuffer(device, "uint", (1))
     n_buf.copy_from_numpy(np.array([n], dtype=np.uint32))
 
     # Clear global_hist once at the start of the whole sort.
@@ -83,14 +85,14 @@ def _radix_sort(device, kernels, keys_lo: np.ndarray, keys_hi: np.ndarray,
             b_pass_hist=pass_hist.storage,
             b_global_hist=global_hist.storage,
             n_buf=n_buf.storage,
-            radix_shift=radix_shift, key_word=key_word,
-            pass_idx=pass_idx, max_blocks=max_blocks,
+            uniforms={"radix_shift": radix_shift, "key_word": key_word,
+                      "pass_idx": pass_idx, "max_blocks": max_blocks},
         )
         kernels["scan"].dispatch(
             thread_count=[RADIX * SCAN_DIM, 1, 1],
             b_pass_hist=pass_hist.storage,
             n_buf=n_buf.storage,
-            max_blocks=max_blocks,
+            uniforms={"max_blocks": max_blocks},
         )
         kernels["downsweep"].dispatch(
             thread_count=[max_blocks * D_DIM, 1, 1],
@@ -99,8 +101,9 @@ def _radix_sort(device, kernels, keys_lo: np.ndarray, keys_hi: np.ndarray,
             b_pass_hist=pass_hist.storage,
             b_global_hist=global_hist.storage,
             n_buf=n_buf.storage,
-            radix_shift=radix_shift, key_word=key_word, key_words=key_words,
-            pass_idx=pass_idx, max_blocks=max_blocks,
+            uniforms={"radix_shift": radix_shift, "key_word": key_word,
+                      "key_words": key_words, "pass_idx": pass_idx,
+                      "max_blocks": max_blocks},
         )
         src_lo, dst_lo = dst_lo, src_lo
         src_hi, dst_hi = dst_hi, src_hi

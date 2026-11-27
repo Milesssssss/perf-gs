@@ -266,22 +266,22 @@ void backwardRasterize(
         {
             float v = gs_atomic[tid];
             int64_t fx = toFixed(v);
-            if      (tid == 0)  InterlockedAdd(grad_opacity[g_idx],     fx);
-            else if (tid == 1)  InterlockedAdd(grad_color_r[g_idx],     fx);
-            else if (tid == 2)  InterlockedAdd(grad_color_g[g_idx],     fx);
-            else if (tid == 3)  InterlockedAdd(grad_color_b[g_idx],     fx);
-            else if (tid == 4)  InterlockedAdd(grad_2d_x_iter[g_idx],   fx);
-            else if (tid == 5)  InterlockedAdd(grad_2d_y_iter[g_idx],   fx);
-            else if (tid == 6)  InterlockedAdd(grad_mean_x[g_idx],      fx);
-            else if (tid == 7)  InterlockedAdd(grad_mean_y[g_idx],      fx);
-            else if (tid == 8)  InterlockedAdd(grad_mean_z[g_idx],      fx);
-            else if (tid == 9)  InterlockedAdd(grad_log_scale_x[g_idx], fx);
-            else if (tid == 10) InterlockedAdd(grad_log_scale_y[g_idx], fx);
-            else if (tid == 11) InterlockedAdd(grad_log_scale_z[g_idx], fx);
-            else if (tid == 12) InterlockedAdd(grad_rot_w[g_idx],       fx);
-            else if (tid == 13) InterlockedAdd(grad_rot_x[g_idx],       fx);
-            else if (tid == 14) InterlockedAdd(grad_rot_y[g_idx],       fx);
-            else if (tid == 15) InterlockedAdd(grad_rot_z[g_idx],       fx);
+            if      (tid == 0)  atomicAddFixed(grad_opacity, g_idx,     fx);
+            else if (tid == 1)  atomicAddFixed(grad_color_r, g_idx,     fx);
+            else if (tid == 2)  atomicAddFixed(grad_color_g, g_idx,     fx);
+            else if (tid == 3)  atomicAddFixed(grad_color_b, g_idx,     fx);
+            else if (tid == 4)  atomicAddFixed(grad_2d_x_iter, g_idx,   fx);
+            else if (tid == 5)  atomicAddFixed(grad_2d_y_iter, g_idx,   fx);
+            else if (tid == 6)  atomicAddFixed(grad_mean_x, g_idx,      fx);
+            else if (tid == 7)  atomicAddFixed(grad_mean_y, g_idx,      fx);
+            else if (tid == 8)  atomicAddFixed(grad_mean_z, g_idx,      fx);
+            else if (tid == 9)  atomicAddFixed(grad_log_scale_x, g_idx, fx);
+            else if (tid == 10) atomicAddFixed(grad_log_scale_y, g_idx, fx);
+            else if (tid == 11) atomicAddFixed(grad_log_scale_z, g_idx, fx);
+            else if (tid == 12) atomicAddFixed(grad_rot_w, g_idx,       fx);
+            else if (tid == 13) atomicAddFixed(grad_rot_x, g_idx,       fx);
+            else if (tid == 14) atomicAddFixed(grad_rot_y, g_idx,       fx);
+            else if (tid == 15) atomicAddFixed(grad_rot_z, g_idx,       fx);
         }
 
         GroupMemoryBarrierWithGroupSync();

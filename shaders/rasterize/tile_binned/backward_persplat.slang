@@ -138,6 +138,21 @@ static const uint STAGED_PIXELS = TILE_AREA / BACKWARD_PIXEL_STRIDE;
 
 groupshared uint2  gs_checkpoints[NUM_WARPS][STAGED_PIXELS]; // (T,RGB) as fp16
 
+// See RadixUpsweepUniforms. Both backward kernels use wave scans, so their scalar
+// uniforms (the same numbers as before) travel in one constant buffer.
+struct BackwardUniforms
+{
+    uint track_blend_weight;
+    uint track_screen_grad;
+    uint pixel_phase;
+#if STBN_ENABLED
+    uint2 stbn_dims;
+    uint stbn_slice;
+    uint stbn_tile_pixels;
+#endif
+    float extinction_hardness;
+};
+
 // Pixels the per-bucket backward advances together (independent scans that overlap their latency).
 static const int PIXELS_PER_STEP = 2;
 typealias PixelStepVector = vector<float, PIXELS_PER_STEP>;
@@ -173,21 +188,21 @@ void backwardRasterizePerSplat(
     RWStructuredBuffer<int64_t> grad_2d_y_iter,
     // Densify-window sum of each splat's blend weight alpha * T; written only when track_blend_weight != 0.
     RWStructuredBuffer<int64_t> blend_weight_accum,
-    uniform uint track_blend_weight,
-    // Screen-gradient tracking for densification (grad_2d_*_iter); off once densification ends.
-    uniform uint track_screen_grad,
-    // Visited pixel subset in [0, BACKWARD_PIXEL_STRIDE); the host rotates it per iteration.
-    uniform uint pixel_phase,
 #if STBN_ENABLED
     // stbn_slice is the image's visit count + phase (not the iteration), walking the mask's temporal axis.
     StructuredBuffer<uint> stbn_table,
-    uniform uint2 stbn_dims,
-    uniform uint stbn_slice,
-    uniform uint stbn_tile_pixels,
 #endif
-    // Compositor extinction hardness k (1 = alpha-over). See core/compositor.slang.
-    uniform float extinction_hardness)
+    ConstantBuffer<BackwardUniforms> uniforms)
 {
+    uint track_blend_weight = uniforms.track_blend_weight;
+    uint track_screen_grad = uniforms.track_screen_grad;
+    uint pixel_phase = uniforms.pixel_phase;
+#if STBN_ENABLED
+    uint2 stbn_dims = uniforms.stbn_dims;
+    uint stbn_slice = uniforms.stbn_slice;
+    uint stbn_tile_pixels = uniforms.stbn_tile_pixels;
+#endif
+    float extinction_hardness = uniforms.extinction_hardness;
     uint tid = gtid.x;
     uint2 frame_dim_px = uint2(camera[0].image_size);
     uint2 num_tiles = (frame_dim_px + uint2(TILE_WIDTH, TILE_HEIGHT) - 1u)
@@ -465,26 +480,26 @@ void backwardRasterizePerSplat(
             {
                 // STBN visited visit_count of the tile's pixels; scale to all.
                 float coverage = float(TILE_AREA) / float(max(visit_count, 1u));
-                InterlockedAdd(blend_weight_accum[g_idx], toFixed(acc_weight * coverage));
+                atomicAddFixed(blend_weight_accum, g_idx, toFixed(acc_weight * coverage));
             }
 
             // projection_backward.slang applies J^T once per gaussian to these tile sums.
-            InterlockedAdd(grad_mean2d_x[g_idx], toFixed(acc_mean2d.x));
-            InterlockedAdd(grad_mean2d_y[g_idx], toFixed(acc_mean2d.y));
-            InterlockedAdd(grad_conic_a[g_idx], toFixed(acc_conic.x));
-            InterlockedAdd(grad_conic_b[g_idx], toFixed(acc_conic.y));
-            InterlockedAdd(grad_conic_c[g_idx], toFixed(acc_conic.z));
-            InterlockedAdd(grad_amplitude[g_idx], toFixed(acc_amplitude));
+            atomicAddFixed(grad_mean2d_x, g_idx, toFixed(acc_mean2d.x));
+            atomicAddFixed(grad_mean2d_y, g_idx, toFixed(acc_mean2d.y));
+            atomicAddFixed(grad_conic_a, g_idx, toFixed(acc_conic.x));
+            atomicAddFixed(grad_conic_b, g_idx, toFixed(acc_conic.y));
+            atomicAddFixed(grad_conic_c, g_idx, toFixed(acc_conic.z));
+            atomicAddFixed(grad_amplitude, g_idx, toFixed(acc_amplitude));
 #if SPLAT_KERNEL == 3
-            InterlockedAdd(grad_opacity[g_idx], toFixed(acc_opacity));
+            atomicAddFixed(grad_opacity, g_idx, toFixed(acc_opacity));
 #endif
-            InterlockedAdd(grad_color_r[g_idx], toFixed(acc_color.x));
-            InterlockedAdd(grad_color_g[g_idx], toFixed(acc_color.y));
-            InterlockedAdd(grad_color_b[g_idx], toFixed(acc_color.z));
+            atomicAddFixed(grad_color_r, g_idx, toFixed(acc_color.x));
+            atomicAddFixed(grad_color_g, g_idx, toFixed(acc_color.y));
+            atomicAddFixed(grad_color_b, g_idx, toFixed(acc_color.z));
             if (track_screen_grad != 0u)
             {
-                InterlockedAdd(grad_2d_x_iter[g_idx], toFixed(acc_absx));
-                InterlockedAdd(grad_2d_y_iter[g_idx], toFixed(acc_absy));
+                atomicAddFixed(grad_2d_x_iter, g_idx, toFixed(acc_absx));
+                atomicAddFixed(grad_2d_y_iter, g_idx, toFixed(acc_absy));
             }
         }
 
@@ -524,17 +539,20 @@ void backwardRasterizePerBucket(
     RWStructuredBuffer<int64_t> grad_2d_x_iter,
     RWStructuredBuffer<int64_t> grad_2d_y_iter,
     RWStructuredBuffer<int64_t> blend_weight_accum,
-    uniform uint track_blend_weight,
-    uniform uint track_screen_grad,
-    uniform uint pixel_phase,
 #if STBN_ENABLED
     StructuredBuffer<uint> stbn_table,
-    uniform uint2 stbn_dims,
-    uniform uint stbn_slice,
-    uniform uint stbn_tile_pixels,
 #endif
-    uniform float extinction_hardness)
+    ConstantBuffer<BackwardUniforms> uniforms)
 {
+    uint track_blend_weight = uniforms.track_blend_weight;
+    uint track_screen_grad = uniforms.track_screen_grad;
+    uint pixel_phase = uniforms.pixel_phase;
+#if STBN_ENABLED
+    uint2 stbn_dims = uniforms.stbn_dims;
+    uint stbn_slice = uniforms.stbn_slice;
+    uint stbn_tile_pixels = uniforms.stbn_tile_pixels;
+#endif
+    float extinction_hardness = uniforms.extinction_hardness;
     uint tid = gtid.x;
     uint lane = WaveGetLaneIndex() % RASTER_BUCKET_SIZE;
     uint warp_idx = tid / RASTER_BUCKET_SIZE;
@@ -797,24 +815,24 @@ void backwardRasterizePerBucket(
         if (track_blend_weight != 0u)
         {
             float coverage = float(TILE_AREA) / float(max(visit_count, 1u));
-            InterlockedAdd(blend_weight_accum[g_idx], toFixed(acc_weight * coverage));
+            atomicAddFixed(blend_weight_accum, g_idx, toFixed(acc_weight * coverage));
         }
-        InterlockedAdd(grad_mean2d_x[g_idx], toFixed(acc_mean2d.x));
-        InterlockedAdd(grad_mean2d_y[g_idx], toFixed(acc_mean2d.y));
-        InterlockedAdd(grad_conic_a[g_idx], toFixed(acc_conic.x));
-        InterlockedAdd(grad_conic_b[g_idx], toFixed(acc_conic.y));
-        InterlockedAdd(grad_conic_c[g_idx], toFixed(acc_conic.z));
-        InterlockedAdd(grad_amplitude[g_idx], toFixed(acc_amplitude));
+        atomicAddFixed(grad_mean2d_x, g_idx, toFixed(acc_mean2d.x));
+        atomicAddFixed(grad_mean2d_y, g_idx, toFixed(acc_mean2d.y));
+        atomicAddFixed(grad_conic_a, g_idx, toFixed(acc_conic.x));
+        atomicAddFixed(grad_conic_b, g_idx, toFixed(acc_conic.y));
+        atomicAddFixed(grad_conic_c, g_idx, toFixed(acc_conic.z));
+        atomicAddFixed(grad_amplitude, g_idx, toFixed(acc_amplitude));
 #if SPLAT_KERNEL == 3
-        InterlockedAdd(grad_opacity[g_idx], toFixed(acc_opacity));
+        atomicAddFixed(grad_opacity, g_idx, toFixed(acc_opacity));
 #endif
-        InterlockedAdd(grad_color_r[g_idx], toFixed(acc_color.x));
-        InterlockedAdd(grad_color_g[g_idx], toFixed(acc_color.y));
-        InterlockedAdd(grad_color_b[g_idx], toFixed(acc_color.z));
+        atomicAddFixed(grad_color_r, g_idx, toFixed(acc_color.x));
+        atomicAddFixed(grad_color_g, g_idx, toFixed(acc_color.y));
+        atomicAddFixed(grad_color_b, g_idx, toFixed(acc_color.z));
         if (track_screen_grad != 0u)
         {
-            InterlockedAdd(grad_2d_x_iter[g_idx], toFixed(acc_absx));
-            InterlockedAdd(grad_2d_y_iter[g_idx], toFixed(acc_absy));
+            atomicAddFixed(grad_2d_x_iter, g_idx, toFixed(acc_absx));
+            atomicAddFixed(grad_2d_y_iter, g_idx, toFixed(acc_absy));
         }
     }
 }

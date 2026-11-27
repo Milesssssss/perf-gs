@@ -16,6 +16,8 @@ the flags ``cli.py`` mounts from the shared ``trainer.frontend.settings`` table.
 
 from __future__ import annotations
 
+import pytest
+
 from trainer.frontend.cli import build_parser
 
 # dest -> default, exactly as build_parser() defines today. This is the frozen
@@ -151,9 +153,18 @@ EXPECTED_DEFAULTS = {
 
 
 def test_cli_defaults_frozen() -> None:
-    """Every CLI default matches the frozen contract (values AND flag set)."""
+    """Every CLI default matches the frozen contract (values AND flag set).
+
+    ``backend`` is resolved for this host: vulkan off Apple Silicon, metal on it.
+    The frozen non-Apple value stays ``vulkan``.
+    """
+    from trainer.backend.compute.device import default_backend
+
     args = build_parser().parse_args([])
-    assert vars(args) == EXPECTED_DEFAULTS
+    expected = dict(EXPECTED_DEFAULTS)
+    expected["backend"] = default_backend()
+    assert vars(args) == expected
+    assert EXPECTED_DEFAULTS["backend"] == "vulkan"
 
 
 def test_cli_flag_set_frozen() -> None:
@@ -164,6 +175,9 @@ def test_cli_flag_set_frozen() -> None:
 
 
 def test_cli_backend_choices() -> None:
-    """Backend is restricted to the two supported RHI backends."""
+    """Backend is restricted to the supported RHI backends."""
     assert build_parser().parse_args(["--backend", "d3d12"]).backend == "d3d12"
     assert build_parser().parse_args(["--backend", "vulkan"]).backend == "vulkan"
+    assert build_parser().parse_args(["--backend", "metal"]).backend == "metal"
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["--backend", "cuda"])

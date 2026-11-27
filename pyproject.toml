@@ -11,6 +11,8 @@ description = "3D Gaussian Splatting trainer built on SlangPy + slang-rhi"
 requires-python = ">=3.10"
 license = {file = "LICENSE"}
 dependencies = [
+    # Unpinned so existing Vulkan/D3D12 environments keep resolving slangpy.
+    # Apple Silicon should install slangpy==0.42.0 (Slang 2026.5.2). See docs/apple-silicon.md.
     "slangpy",
     "numpy",
     # Dataset decode path (trainer.data.colmap.load_colmap_image). The HEADLESS

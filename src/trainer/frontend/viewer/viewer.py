@@ -889,6 +889,8 @@ class Viewer:
                             self._pipeline.rasterize(camera)
                         self._scene_dirty.clear()
                         self._last_scene_s = now
+                    # Metal may have replaced the encoder while replaying an indirect dispatch.
+                    enc = batch.encoder
                     enc.blit(surface_tex, self._pipeline.buffers.raster.output_image)
                 else:
                     enc.clear_texture_float(surface_tex, clear_value=BACKDROP)

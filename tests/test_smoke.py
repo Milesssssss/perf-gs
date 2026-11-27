@@ -2,7 +2,7 @@
 
 """Platform smoke test.
 
-For each supported backend (Vulkan primary, D3D12 cross-check), verify that:
+For each supported backend (Vulkan primary, D3D12 cross-check, Metal on Apple Silicon), verify that:
 
 1. A ``spy.Device`` can be created.
 2. A trivial ``.slang`` shader compiles against it.
@@ -23,7 +23,7 @@ import slangpy as spy
 
 from trainer.backend.compute.device import create_device
 
-BACKENDS = ["vulkan", "d3d12"]
+BACKENDS = ["vulkan", "d3d12", "metal"]
 
 
 def _try_create_device(backend: str) -> spy.Device:

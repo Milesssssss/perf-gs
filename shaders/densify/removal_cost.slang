@@ -38,7 +38,7 @@ void accumulateRemovalCost(uint3 tid : SV_DispatchThreadID,
         float3 delta = j + 1 == stop ? weight * source : (weight / t) * (source - remaining);
         int64_t energy = int64_t(dot(delta, delta) * 1073741824.0);
         // One fixed-point unit distinguishes measured zero contrast from never sampled.
-        InterlockedAdd(scores[id], max(energy, int64_t(1)));
+        atomicAddFixed(scores, id, max(energy, int64_t(1)));
         remaining -= weight * source;
         transmission *= t;
     }

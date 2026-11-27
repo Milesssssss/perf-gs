@@ -130,13 +130,13 @@ class RadixSort:
                     b_pass_hist=r.pass_hist.storage,
                     b_global_hist=r.global_hist.storage,
                     n_buf=count.storage,
-                    radix_shift=radix_shift, key_word=key_word,
-                    pass_idx=pass_idx, max_blocks=max_blocks)
+                    uniforms={"radix_shift": radix_shift, "key_word": key_word,
+                              "pass_idx": pass_idx, "max_blocks": max_blocks})
                 commands.dispatch(self._k.scan, "radix_scan",
                     thread_count=[256 * _RADIX_SCAN_DIM, 1, 1],
                     b_pass_hist=r.pass_hist.storage,
                     n_buf=count.storage,
-                    max_blocks=max_blocks)
+                    uniforms={"max_blocks": max_blocks})
                 commands.dispatch_indirect(self._k.downsweep, "radix_downsweep",
                     r.dispatch_args,
                     keys_lo_in=src[0].storage, keys_hi_in=src[1].storage,
@@ -146,7 +146,8 @@ class RadixSort:
                     b_pass_hist=r.pass_hist.storage,
                     b_global_hist=r.global_hist.storage,
                     n_buf=count.storage,
-                    radix_shift=radix_shift, key_word=key_word, key_words=key_words,
-                    pass_idx=pass_idx, max_blocks=max_blocks)
+                    uniforms={"radix_shift": radix_shift, "key_word": key_word,
+                              "key_words": key_words, "pass_idx": pass_idx,
+                              "max_blocks": max_blocks})
             src, dst = dst, src
         return src

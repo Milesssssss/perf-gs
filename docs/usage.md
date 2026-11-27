@@ -2,7 +2,7 @@
 
 ## Installation
 
-PERF-GS requires Python 3.10 or newer and a GPU with a Vulkan or D3D12 driver. Run the commands below from the checkout with your Python environment active. The README has the editable install and first training command. For a regular installation, use `python -m pip install .` or install a built wheel. The package includes the Slang shaders. [Quickstart](../README.md#quickstart)
+PERF-GS requires Python 3.10 or newer and a GPU with a Vulkan or D3D12 driver, or an Apple Silicon GPU for the Metal backend. Run the commands below from the checkout with your Python environment active. The README has the editable install and first training command. For a regular installation, use `python -m pip install .` or install a built wheel. The package includes the Slang shaders. [Quickstart](../README.md#quickstart) · [Apple Silicon](apple-silicon.md)
 
 ### First-run help
 
@@ -30,7 +30,7 @@ Sparse pixel supervision with NVIDIA’s spatiotemporal blue-noise masks require
 
 ## Training
 
-The trainer opens its viewer by default. Use `--no-viewer` for headless training, or `--wait-for-viewer` to inspect the initial Gaussians before starting. Vulkan is the default backend. On Windows, select D3D12 with `--backend d3d12`.
+The trainer opens its viewer by default. Use `--no-viewer` for headless training, or `--wait-for-viewer` to inspect the initial Gaussians before starting. Vulkan is the default backend except on Apple Silicon, where the default is Metal. On Windows, select D3D12 with `--backend d3d12`. Pass `--backend vulkan` or `--backend metal` to override the default. [Apple Silicon setup](apple-silicon.md)
 
 During optimization the viewer presents at up to 15 frames per second so training can use the same GPU. Pausing the run or viewing the completed model restores the viewer’s normal refresh rate.
 
@@ -109,7 +109,7 @@ python -m pip install -e ".[dev]"
 python -m pytest -q
 ```
 
-The suite checks CLI settings, schedules, shader math, gradients against finite differences, and Vulkan and D3D12 device creation. Backend-specific GPU tests skip when their device is unavailable.
+The suite checks CLI settings, schedules, shader math, gradients against finite differences, and Vulkan, D3D12, and Metal device creation. Backend-specific GPU tests skip when their device is unavailable. `tests/test_metal_shaders.py` compiles every compute entry to Metal and SPIR-V when `slangc` is on `PATH` (or `SLANGC` points at it) and skips otherwise. [Apple Silicon](apple-silicon.md)
 
 At startup the trainer prints the path to `errors.log` in the initial run directory. It opens the file before GPU setup and captures Python tracebacks and native stderr. In hub mode the same log covers the entire session. Check it if the viewer closes or a shader fails to compile. The viewer also shows messages in its **DIAGNOSTICS** panel.
 

@@ -9,8 +9,8 @@ from dataclasses import dataclass
 
 import numpy as np
 import slangpy as spy
-from slangpy.core.native import NativeNDBuffer, NativeNDBufferDesc, Shape
-from slangpy.reflection.lookup import resolve_element_type, resolve_program_layout
+
+from trainer.backend.memory.ndbuffer import make_labeled_ndbuffer
 
 from trainer.backend.compute.execution import (
     CLUSTER_SIZE,
@@ -53,32 +53,8 @@ _DEFAULT_BUFFER_USAGE = (
 
 
 def _make_labeled_ndbuffer(device, dtype, shape, label, usage):
-    """An NDBuffer whose storage carries a debug label (Nsight memory view).
-
-    Vulkan names a buffer only at creation, so this rebuilds NDBuffer around a labeled
-    buffer, falling back to an unlabeled NDBuffer if slangpy's internals change.
-    """
-    try:
-        program_layout = resolve_program_layout(device, dtype, None)
-        element_type = resolve_element_type(program_layout, dtype)
-        element_count = 1
-        for dim in shape:
-            element_count *= dim
-        shp = Shape(tuple(shape))
-        desc = NativeNDBufferDesc()
-        desc.usage = usage
-        desc.memory_type = spy.MemoryType.device_local
-        desc.shape = shp
-        desc.strides = shp.calc_contiguous_strides()
-        desc.dtype = element_type
-        desc.element_layout = element_type.buffer_layout.reflection
-        size = element_count * element_type.buffer_layout.reflection.stride
-        buffer = device.create_buffer(
-            size=size, usage=usage,
-            memory_type=spy.MemoryType.device_local, label=label)
-        return NativeNDBuffer(device, desc, buffer)
-    except Exception:
-        return spy.NDBuffer(device=device, dtype=dtype, shape=shape, usage=usage)
+    """A typed GPU array whose storage carries a debug label (Nsight memory view)."""
+    return make_labeled_ndbuffer(device, dtype, shape, label, usage)
 
 
 @dataclass

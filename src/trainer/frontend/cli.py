@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 from collections.abc import Sequence
 
+from trainer.backend.compute.device import default_backend
 from trainer.common.lens import parse_strength
 from trainer.config.config import (
     DensifyConfig,
@@ -41,6 +42,8 @@ class _TrainerParser(argparse.ArgumentParser):
                                      or result.eval_lpips)
             if result.eval_every is None and (requested or result.eval_iters):
                 result.eval_every = 0
+        if result.backend is None:
+            result.backend = default_backend()
         if result.scene is None and not result.hub:
             result.scene = "datasets/360_v2/bicycle"
         if result.lens_strength is not None or result.natural_vignetting:
@@ -267,7 +270,10 @@ def build_parser() -> argparse.ArgumentParser:
     _shared(parser, "splat_kernel")
     _shared(parser, "splat_profile_power")
     _shared(parser, "splat_profile_onset")
-    parser.add_argument("--backend", type=str, default="vulkan", choices=["vulkan", "d3d12"])
+    parser.add_argument("--backend", type=str, default=None, choices=["vulkan", "d3d12", "metal"],
+                    help="graphics backend. Default is metal on Apple Silicon macOS and vulkan "
+                         "elsewhere (pass --backend vulkan to keep Vulkan, including MoltenVK). "
+                         "d3d12 is the Windows cross-check. Presets and training flags are unchanged.")
     parser.add_argument("--seed", type=int, default=0)
     _shared(parser, "mip_splatting")
     parser.add_argument("--mip-kernel-size", type=float, default=0.1,
