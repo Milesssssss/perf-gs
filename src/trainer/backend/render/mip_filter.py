@@ -79,6 +79,6 @@ class MipFilter:
                 num_gaussians_counter=primitive.active_count.storage,
                 cameras=self.cameras,
                 filter_3D=primitive.filter_3d.storage,
-                num_cameras=self.num_cameras,
-                filter_coef=self.filter_coef,
-                max_splats=self._capacity)
+                uniforms={"num_cameras": self.num_cameras,
+                          "filter_coef": self.filter_coef,
+                          "max_splats": self._capacity})

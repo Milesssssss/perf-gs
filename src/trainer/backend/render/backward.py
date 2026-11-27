@@ -136,6 +136,18 @@ class RasterBackward:
         commands, k = self._commands, self._k
         r, live = self._raster, self._backward
         num_tiles = self._rasterizer.num_tiles
+        uniforms = {
+            "track_blend_weight": tracking["track_blend_weight"],
+            "track_screen_grad": tracking["track_screen_grad"],
+            "pixel_phase": self._pixel_phase,
+            "extinction_hardness": hardness,
+        }
+        stbn_resources = {}
+        if self._stbn_compacted:
+            uniforms["stbn_dims"] = backward_stbn["stbn_dims"]
+            uniforms["stbn_slice"] = backward_stbn["stbn_slice"]
+            uniforms["stbn_tile_pixels"] = backward_stbn["stbn_tile_pixels"]
+            stbn_resources["stbn_table"] = backward_stbn["stbn_table"]
         if self.per_bucket:
             with commands.marker_group("live_bucket_compaction"):
                 commands.dispatch(k.tile_max_processed, "tile_max_processed",
@@ -165,18 +177,16 @@ class RasterBackward:
                 live_buckets=live.live_buckets.storage,
                 live_bucket_total=live.live_bucket_total.storage,
                 **self._blend_kwargs(),
-                **tracking,
-                pixel_phase=self._pixel_phase,
-                **backward_stbn,
-                extinction_hardness=hardness)
+                blend_weight_accum=tracking["blend_weight_accum"],
+                **stbn_resources,
+                uniforms=uniforms)
         else:
             commands.dispatch(k.backward_persplat, "backward_persplat",
                 thread_count=[num_tiles * TILE_AREA, 1, 1],
                 **self._blend_kwargs(),
-                **tracking,
-                pixel_phase=self._pixel_phase,
-                **backward_stbn,
-                extinction_hardness=hardness)
+                blend_weight_accum=tracking["blend_weight_accum"],
+                **stbn_resources,
+                uniforms=uniforms)
         self._pixel_phase += 1
 
     def _record_projection(self) -> None:

@@ -41,6 +41,21 @@ uint per_axis_split_factor(float eta_axis, float split_power, uint max_split_fac
     return clamp(uint(raw), 1u, max_split_factor);
 }
 
+// See RadixUpsweepUniforms: wave builtins make Slang pass loose uniforms by value, which
+// Apple's metal compiler rejects. The fields are the same decision thresholds.
+struct DecideActionsUniforms
+{
+    float tau_split;
+    float tau_prune;
+    float grad_threshold_internal;
+    float split_power;
+    uint max_split_factor;
+    float t_opacity;
+    float dense_scale;
+    float min_blend_weight;
+    uint max_splats;
+};
+
 // Propose each Gaussian's action and per-axis split factors before applying the slot budget.
 [shader("compute")]
 [numthreads(256, 1, 1)]
@@ -64,13 +79,17 @@ void decideActionsStructure(
     RWStructuredBuffer<uint> densify_children_sum,  // atomic: total requested tail growth (for overbudget log)
     RWStructuredBuffer<uint> selected_parents,
     RWStructuredBuffer<uint> selected_count,
-    uniform float tau_split, uniform float tau_prune,
-    uniform float grad_threshold_internal,
-    uniform float split_power, uniform uint max_split_factor,
-    uniform float t_opacity, uniform float dense_scale,
-    uniform float min_blend_weight,
-    uniform uint max_splats)
+    ConstantBuffer<DecideActionsUniforms> uniforms)
 {
+    float tau_split = uniforms.tau_split;
+    float tau_prune = uniforms.tau_prune;
+    float grad_threshold_internal = uniforms.grad_threshold_internal;
+    float split_power = uniforms.split_power;
+    uint max_split_factor = uniforms.max_split_factor;
+    float t_opacity = uniforms.t_opacity;
+    float dense_scale = uniforms.dense_scale;
+    float min_blend_weight = uniforms.min_blend_weight;
+    uint max_splats = uniforms.max_splats;
     uint gaussian_idx = dtid.x;
     // Every lane must reach the wave ops below. Metal simdgroup instructions are undefined
     // if any lane in the simdgroup has already returned, and a 256-thread group is several

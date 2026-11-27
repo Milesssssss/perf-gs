@@ -83,14 +83,14 @@ def _radix_sort(device, kernels, keys_lo: np.ndarray, keys_hi: np.ndarray,
             b_pass_hist=pass_hist.storage,
             b_global_hist=global_hist.storage,
             n_buf=n_buf.storage,
-            radix_shift=radix_shift, key_word=key_word,
-            pass_idx=pass_idx, max_blocks=max_blocks,
+            uniforms={"radix_shift": radix_shift, "key_word": key_word,
+                      "pass_idx": pass_idx, "max_blocks": max_blocks},
         )
         kernels["scan"].dispatch(
             thread_count=[RADIX * SCAN_DIM, 1, 1],
             b_pass_hist=pass_hist.storage,
             n_buf=n_buf.storage,
-            max_blocks=max_blocks,
+            uniforms={"max_blocks": max_blocks},
         )
         kernels["downsweep"].dispatch(
             thread_count=[max_blocks * D_DIM, 1, 1],
@@ -99,8 +99,9 @@ def _radix_sort(device, kernels, keys_lo: np.ndarray, keys_hi: np.ndarray,
             b_pass_hist=pass_hist.storage,
             b_global_hist=global_hist.storage,
             n_buf=n_buf.storage,
-            radix_shift=radix_shift, key_word=key_word, key_words=key_words,
-            pass_idx=pass_idx, max_blocks=max_blocks,
+            uniforms={"radix_shift": radix_shift, "key_word": key_word,
+                      "key_words": key_words, "pass_idx": pass_idx,
+                      "max_blocks": max_blocks},
         )
         src_lo, dst_lo = dst_lo, src_lo
         src_hi, dst_hi = dst_hi, src_hi

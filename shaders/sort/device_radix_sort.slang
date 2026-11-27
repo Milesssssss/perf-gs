@@ -27,6 +27,32 @@ static const uint D_TOTAL_SMEM = 4096u;
 
 static const uint SENTINEL = 0xFFFFFFFFu;
 
+// Scalar uniforms are a ConstantBuffer, not loose entry-point uniforms. Slang 2026.5.2
+// emits a by-value struct for those uniforms on any kernel that also uses wave builtins,
+// and Apple's metal compiler rejects `uint` in that resource parameter list. A
+// ConstantBuffer is `constant T* [[buffer(N)]]`. The fields are the same integers.
+struct RadixUpsweepUniforms
+{
+    uint radix_shift;
+    uint key_word;
+    uint pass_idx;
+    uint max_blocks;
+};
+
+struct RadixScanUniforms
+{
+    uint max_blocks;
+};
+
+struct RadixDownsweepUniforms
+{
+    uint radix_shift;
+    uint key_word;
+    uint key_words;
+    uint pass_idx;
+    uint max_blocks;
+};
+
 // Upsweep's two histograms: threads 0..63 fill hist 0, 64..127 hist 1; merged before write-back.
 groupshared uint g_us[RADIX * 2];
 
@@ -118,11 +144,12 @@ void upsweep(
     RWStructuredBuffer<uint> b_pass_hist,
     RWStructuredBuffer<uint> b_global_hist,
     StructuredBuffer<uint> n_buf,
-    uniform uint radix_shift,
-    uniform uint key_word,
-    uniform uint pass_idx,
-    uniform uint max_blocks)
+    ConstantBuffer<RadixUpsweepUniforms> uniforms)
 {
+    uint radix_shift = uniforms.radix_shift;
+    uint key_word = uniforms.key_word;
+    uint pass_idx = uniforms.pass_idx;
+    uint max_blocks = uniforms.max_blocks;
     uint n = n_buf[0];
     uint active_blocks = activeBlocksOf(n);
     uint g = gid.x;
@@ -190,8 +217,9 @@ void scan(
     uint3 gtid: SV_GroupThreadID,
     RWStructuredBuffer<uint> b_pass_hist,
     StructuredBuffer<uint> n_buf,
-    uniform uint max_blocks)
+    ConstantBuffer<RadixScanUniforms> uniforms)
 {
+    uint max_blocks = uniforms.max_blocks;
     uint n = n_buf[0];
     uint active_blocks = activeBlocksOf(n);
     uint digit = gid.x;
@@ -609,12 +637,13 @@ void downsweep(
     RWStructuredBuffer<uint> b_pass_hist,
     RWStructuredBuffer<uint> b_global_hist,
     StructuredBuffer<uint> n_buf,
-    uniform uint radix_shift,
-    uniform uint key_word,
-    uniform uint key_words,
-    uniform uint pass_idx,
-    uniform uint max_blocks)
+    ConstantBuffer<RadixDownsweepUniforms> uniforms)
 {
+    uint radix_shift = uniforms.radix_shift;
+    uint key_word = uniforms.key_word;
+    uint key_words = uniforms.key_words;
+    uint pass_idx = uniforms.pass_idx;
+    uint max_blocks = uniforms.max_blocks;
     uint n = n_buf[0];
     uint active_blocks = activeBlocksOf(n);
     uint g = gid.x;

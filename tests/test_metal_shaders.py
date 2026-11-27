@@ -81,6 +81,13 @@ def test_metal_sources_have_no_64bit_atomics_or_oversize_bindings(slangc: str) -
                 assert not slots or max(slots) <= 30, (
                     f"{path.name}:{entry} uses Metal buffer({max(slots)}); the limit is 30"
                 )
+                # Slang 2026.5.2 passes loose uniforms by value on wave kernels. Apple's
+                # metal compiler rejects that (`uint` inside a resource parameter list).
+                by_value = re.findall(
+                    r"EntryPointParams_\d+\s+entryPointParams_\d+(?!\s*\*)", signature)
+                assert not by_value, (
+                    f"{path.name}:{entry} passes uniforms by value: {by_value}"
+                )
 
 
 def test_spirv_entries_still_compile(slangc: str) -> None:

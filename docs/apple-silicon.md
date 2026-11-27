@@ -57,6 +57,7 @@ The Slang sources are shared. Two lowering details exist only so those sources c
 
 - Gradient accumulators stay int64 fixed-point. Vulkan and D3D12 still use one 64-bit `InterlockedAdd`. Metal has no 64-bit atomic add on any Apple GPU, so Metal adds the same two's-complement value as two little-endian 32-bit atomics plus the carry from the low half. Integer addition does not depend on order, and no kernel reads an accumulator it is still updating.
 - `WavePrefixCountBits` is not available in Slang's Metal compute target. The structure-densify reservation uses it. Metal builds the same exclusive popcount from `WaveActiveBallot` (lane 0 is the low bit). Vulkan and D3D12 still call `WavePrefixCountBits`. That kernel also keeps every lane in the simdgroup alive until the wave ops, because Metal simdgroup instructions are undefined if a lane has already returned. Lanes past the live splat count contribute "not selected" and zero growth, which is what an inactive lane contributed before.
+- Kernels that use wave builtins cannot take loose `uniform` scalars. Slang 2026.5.2 then emits those scalars as a by-value struct on the Metal kernel, and Apple's `metal` compiler rejects it (`uint` cannot be used in a struct of resources). The radix sort (`upsweep`, `scan`, `downsweep`), per-splat backward, 3D mip filter, and structure-densify decision pass the same numbers in a `ConstantBuffer`, which Slang emits as `constant T* [[buffer(N)]]`. Vulkan and D3D12 receive that same constant buffer through slangpy. Kernels that do not use wave ops still use ordinary uniforms.
 
 Apple GPUs use 32-wide simdgroups, which matches the rasterizer's 32-splat bucket. The 64-lane backward path is unchanged and simply does not split a bucket on these GPUs.
 
@@ -74,7 +75,7 @@ python -m pytest -q tests/test_backend_select.py tests/test_fixed_atomic.py test
 
 This port was not trained on Apple hardware. Before trusting a quality number:
 
-- slangpy will ask Apple's `metal` compiler to turn the generated MSL into a metallib. That step was not run here; only Slang's Metal source emission was.
+- slangpy will ask Apple's `metal` compiler to turn the generated MSL into a metallib. The known rejection (a by-value uniform struct on wave kernels, including radix-sort `upsweep`) is fixed in the generated MSL: those uniforms are `constant T* [[buffer(N)]]`. Apple's compiler was not run in this environment, so a short training step is still the confirmation.
 - A short real scene (`--preset balanced --iters` a few hundred, `--no-viewer --save-ply`) is the first useful check that indirect dispatch, read-write textures, and the int64 emulation run.
 - Held-out PSNR against a Vulkan run of the same scene, seed, and preset is the check that the sums match in practice. Nothing here replaces that.
 - The hub window and `view_ply.py` use slangpy's Metal surface. That path is in the macOS slangpy 0.42.0 library and was not opened here.
