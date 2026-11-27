@@ -47,6 +47,21 @@ def thread_count_for_groups(kernel, groups: tuple[int, int, int]) -> list[int]:
     return [int(groups[axis]) * int(size[axis]) for axis in range(3)]
 
 
+def slangpy_metal_drops_indirect() -> bool:
+    """True for the published slangpy 0.42.0 wheel, whose Metal encoder ignores indirect dispatches.
+
+    A source build of slangpy main that bundles slang-rhi with Metal
+    ``dispatchComputeIndirect`` (PR #800) reports a later version and uses the
+    hardware path. Official 0.43.x wheels that predate that slang-rhi pin are
+    not used here; 0.42.0 still takes the CPU readback fallback.
+    """
+    try:
+        from importlib.metadata import version
+        return version("slangpy") == "0.42.0"
+    except Exception:
+        return False
+
+
 def _note_metal_indirect_once() -> None:
     global _METAL_INDIRECT_NOTE
     if _METAL_INDIRECT_NOTE:
@@ -85,9 +100,10 @@ class CommandBatch:
         if self.emulate_indirect:
             return True
         try:
-            return self._encoder.device.info.type == spy.DeviceType.metal
+            is_metal = self._encoder.device.info.type == spy.DeviceType.metal
         except AttributeError:
             return False
+        return is_metal and slangpy_metal_drops_indirect()
 
     def dispatch(self, kernel, marker: str, **kwargs) -> None:
         self._encoder.insert_debug_marker(marker, spy.math.float3(*marker_color(marker)))
@@ -98,8 +114,9 @@ class CommandBatch:
         """Record an indirect dispatch; groups_x/y/z are uint32s at ``offset`` in ``args_buf``.
 
         No barrier before the fetch: sgl's resource tracking covers the ``args_buf`` write.
-        On Metal, slangpy 0.42.0's command recorder ignores that fetch, so the same group
-        counts are read back and launched with an ordinary dispatch.
+        On slangpy 0.42.0 Metal, the command recorder ignores that fetch, so the same
+        group counts are read back and launched with an ordinary dispatch. Newer
+        slangpy builds that implement Metal indirect dispatch use the hardware path.
         """
         if self._emulate_indirect():
             self._dispatch_indirect_replayed(kernel, marker, args_buf, offset, **kwargs)

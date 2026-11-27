@@ -11,6 +11,8 @@ import numpy as np
 import pytest
 import slangpy as spy
 
+from trainer.backend.memory.ndbuffer import make_ndbuffer
+
 from _pipeline_testkit import TestPipeline
 from trainer.backend.compute.device import SHADERS_DIR, create_device
 from trainer.backend.compute.gpu import CommandRecorder, GpuRuntime
@@ -79,14 +81,14 @@ def test_filter_indirect_live_count_and_dead_tail(backend: str) -> None:
     gaussian = module.layout.find_type_by_name("Gaussian3D")
     layout = StructLayout.of(gaussian)
     primitive = PrimitiveStorage(
-        spy.NDBuffer(device=device, dtype=gaussian, shape=(capacity,)),
-        spy.NDBuffer(device=device, dtype="uint", shape=(1,)),
-        spy.NDBuffer(device=device, dtype="float", shape=(capacity,)), layout)
+        make_ndbuffer(device, gaussian, (capacity)),
+        make_ndbuffer(device, "uint", (1)),
+        make_ndbuffer(device, "float", (capacity)), layout)
     resources = MipResources(
-        dispatch_args=spy.NDBuffer(device=device, dtype="uint", shape=(6,), usage=(
+        dispatch_args=make_ndbuffer(device, "uint", (6), usage=(
             spy.BufferUsage.shader_resource | spy.BufferUsage.unordered_access
             | spy.BufferUsage.indirect_argument)),
-        previous_count=spy.NDBuffer(device=device, dtype="uint", shape=(2,)))
+        previous_count=make_ndbuffer(device, "uint", (2)))
     resources.previous_count.copy_from_numpy(np.array([capacity, capacity], np.uint32))
     data = np.zeros((capacity, layout.float_count), np.float32)
     data[:live, :3] = np.random.default_rng(42).uniform(-0.5, 0.5, (live, 3))

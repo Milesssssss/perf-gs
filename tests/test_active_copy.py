@@ -8,6 +8,8 @@ import numpy as np
 import pytest
 import slangpy as spy
 
+from trainer.backend.memory.ndbuffer import make_ndbuffer
+
 from trainer.backend.compute.device import SHADERS_DIR, create_device
 from trainer.backend.compute.gpu import CommandBatch, GpuRuntime
 
@@ -29,7 +31,7 @@ def _uint_buffer(device, values: np.ndarray, *, indirect: bool = False):
     usage = spy.BufferUsage.shader_resource | spy.BufferUsage.unordered_access
     if indirect:
         usage |= spy.BufferUsage.indirect_argument
-    buffer = spy.NDBuffer(device=device, dtype="uint", shape=values.shape, usage=usage)
+    buffer = make_ndbuffer(device, "uint", values.shape, usage=usage)
     buffer.copy_from_numpy(values)
     return buffer
 

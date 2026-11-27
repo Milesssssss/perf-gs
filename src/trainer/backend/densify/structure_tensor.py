@@ -10,6 +10,8 @@ import math
 import numpy as np
 import slangpy as spy
 
+from trainer.backend.memory.ndbuffer import make_ndbuffer
+
 from trainer.backend.compute.device import SHADERS_DIR
 from trainer.backend.compute.gpu import GpuRuntime
 
@@ -64,8 +66,8 @@ class StructureTensor:
         self._cascade = (self._texture("smooth0"), self._texture("smooth1"))
         self._accum = self._texture("accum")        # (weighted tensor.xyz, weight.w)
         self.output = self._texture("out")
-        self._max_trace = spy.NDBuffer(
-            device=device, dtype="uint", shape=(1,),
+        self._max_trace = make_ndbuffer(
+            device, "uint", (1,),
             usage=spy.BufferUsage.shader_resource | spy.BufferUsage.unordered_access)
 
     def _texture(self, label: str) -> spy.Texture:

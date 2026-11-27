@@ -18,6 +18,7 @@ import pytest
 from _pipeline_testkit import TestPipeline
 
 from trainer.backend.compute.device import create_device, create_slang_session
+from trainer.backend.memory.ndbuffer import make_ndbuffer
 from trainer.config.config import LossConfig
 from trainer.data.dataset import simple_camera
 
@@ -69,8 +70,8 @@ def test_large_live_bucket_dispatch(backend: str) -> None:
         program = device.load_program(str(SHADERS_DIR / "rasterize/tile_binned/live_buckets.slang"),
                                       ["prepareBucketDispatchArgs"])
         kernel = device.create_compute_kernel(program)
-        total = spy.NDBuffer(device=device, dtype="uint", shape=(1,))
-        args = spy.NDBuffer(device=device, dtype="uint", shape=(3,))
+        total = make_ndbuffer(device, "uint", (1))
+        args = make_ndbuffer(device, "uint", (3))
         for count, expected in ((0, [1, 1, 1]), (131070, [65535, 1, 1]), (131071, [65535, 2, 1])):
             total.copy_from_numpy(np.array([count], dtype=np.uint32))
             kernel.dispatch(thread_count=[1, 1, 1], live_bucket_total=total.storage,

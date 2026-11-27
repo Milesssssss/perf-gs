@@ -1,11 +1,12 @@
 # Copyright (c) 2026 Electronic Arts Inc. All rights reserved.
 
-"""Metal replays indirect dispatches from the same group counts.
+"""Indirect dispatch group-count helpers, and the 0.42.0 Metal readback fallback.
 
 slangpy 0.42.0 records the indirect command and then drops it on Metal. The
-replay path submits the writer, reads the three uint32 group counts, and
-launches that many groups of the same kernel. Vulkan keeps the real indirect
-command; this test forces the replay on the CPU device.
+fallback submits the writer, reads the three uint32 group counts, and launches
+that many groups of the same kernel. Newer slangpy builds that implement Metal
+``dispatchComputeIndirect`` use the hardware path by default. This test forces
+the fallback on the CPU device.
 """
 
 from __future__ import annotations
@@ -13,6 +14,8 @@ from __future__ import annotations
 import numpy as np
 import pytest
 import slangpy as spy
+
+from trainer.backend.memory.ndbuffer import make_ndbuffer
 
 from trainer.backend.compute.device import SHADERS_DIR
 from trainer.backend.compute.gpu import (
@@ -60,10 +63,10 @@ def test_replay_matches_the_indirect_group_counts() -> None:
     capacity, count, record_words = 8, 5, 4
     source = np.arange(capacity * record_words, dtype=np.uint32)
     original = np.full(source.shape, 0xDEADBEEF, np.uint32)
-    src = spy.NDBuffer(device=device, dtype="uint", shape=source.shape)
-    dst = spy.NDBuffer(device=device, dtype="uint", shape=original.shape)
-    count_buf = spy.NDBuffer(device=device, dtype="uint", shape=(1,))
-    args = spy.NDBuffer(device=device, dtype="uint", shape=(3,),
+    src = make_ndbuffer(device, "uint", source.shape)
+    dst = make_ndbuffer(device, "uint", original.shape)
+    count_buf = make_ndbuffer(device, "uint", (1))
+    args = make_ndbuffer(device, "uint", (3),
                         usage=spy.BufferUsage.shader_resource | spy.BufferUsage.unordered_access
                         | spy.BufferUsage.indirect_argument)
     src.copy_from_numpy(source)

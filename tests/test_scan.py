@@ -16,6 +16,8 @@ import numpy as np
 import pytest
 import slangpy as spy
 
+from trainer.backend.memory.ndbuffer import make_ndbuffer
+
 from trainer.backend.compute.execution import SCAN_BLOCK_SIZE
 from trainer.backend.compute.device import SHADERS_DIR
 
@@ -37,11 +39,11 @@ def _scan(device: spy.Device, kernels: dict, data: np.ndarray) -> tuple[np.ndarr
     num_blocks = (n + SCAN_BLOCK_SIZE - 1) // SCAN_BLOCK_SIZE
     assert num_blocks <= SCAN_BLOCK_SIZE, "test exceeds two-level scan capacity"
 
-    in_buf = spy.NDBuffer(device=device, dtype="uint", shape=(n,))
+    in_buf = make_ndbuffer(device, "uint", (n))
     in_buf.copy_from_numpy(data.astype(np.uint32))
-    out_buf = spy.NDBuffer(device=device, dtype="uint", shape=(n,))
-    block_sums = spy.NDBuffer(device=device, dtype="uint", shape=(max(num_blocks, 1),))
-    total_out = spy.NDBuffer(device=device, dtype="uint", shape=(1,))
+    out_buf = make_ndbuffer(device, "uint", (n))
+    block_sums = make_ndbuffer(device, "uint", (max(num_blocks, 1),))
+    total_out = make_ndbuffer(device, "uint", (1))
 
     kernels["scanBlock"].dispatch(
         thread_count=[num_blocks * SCAN_BLOCK_SIZE, 1, 1],

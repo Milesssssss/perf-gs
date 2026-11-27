@@ -45,12 +45,23 @@ def _warn_metal_slangpy_version() -> None:
         installed = version("slangpy")
     except PackageNotFoundError:
         return
-    if installed != METAL_SLANGPY_VERSION:
+    # 0.42.0 is the known-good published wheel (Metal indirect is CPU-replayed).
+    # A source-built 0.43.0 that bundles slang-rhi PR #800 uses hardware indirect.
+    # Official 0.43.1 wheels pin an older slang-rhi without that Metal implementation.
+    if installed in (METAL_SLANGPY_VERSION, "0.43.0"):
+        return
+    if installed == "0.43.1":
         print(
-            f"warning: the Metal backend was checked with slangpy {METAL_SLANGPY_VERSION} "
-            f"(Slang 2026.5.2); this environment has slangpy {installed}",
+            "warning: official slangpy 0.43.1 wheels pin a slang-rhi without Metal "
+            "dispatchComputeIndirect; use 0.42.0 or a source build of slangpy main",
             file=sys.stderr,
         )
+        return
+    print(
+        f"warning: the Metal backend was checked with slangpy {METAL_SLANGPY_VERSION} "
+        f"(Slang 2026.5.2) and a source-built 0.43.0; this environment has slangpy {installed}",
+        file=sys.stderr,
+    )
 
 
 def create_device(
