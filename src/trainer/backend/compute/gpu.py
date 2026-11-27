@@ -7,10 +7,12 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import sys
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import Callable
 
+import numpy as np
 import slangpy as spy
 
 
@@ -22,6 +24,41 @@ def marker_color(name: str) -> tuple[float, float, float]:
     return tuple(0.35 + (b / 255.0) * 0.65 for b in digest)  # type: ignore[return-value]
 
 
+_METAL_INDIRECT_NOTE = False
+
+
+def indirect_group_counts(words: np.ndarray, offset: int) -> tuple[int, int, int]:
+    """Three dispatch group counts stored as uint32s at ``offset`` bytes."""
+    if offset < 0 or offset % 4 != 0:
+        raise ValueError(f"indirect args offset {offset} is not a uint32 boundary")
+    flat = np.asarray(words, dtype=np.uint32).reshape(-1)
+    start = offset // 4
+    return int(flat[start]), int(flat[start + 1]), int(flat[start + 2])
+
+
+def thread_count_for_groups(kernel, groups: tuple[int, int, int]) -> list[int]:
+    """Thread counts that launch exactly ``groups`` of this kernel's reflected group size.
+
+    Indirect args are group counts. ``ComputeKernel.dispatch`` takes threads and divides
+    by ``[numthreads]``, so the product is the same launch Vulkan's indirect dispatch runs.
+    """
+    entry = kernel.program.layout.entry_points[0]
+    size = entry.compute_thread_group_size
+    return [int(groups[axis]) * int(size[axis]) for axis in range(3)]
+
+
+def _note_metal_indirect_once() -> None:
+    global _METAL_INDIRECT_NOTE
+    if _METAL_INDIRECT_NOTE:
+        return
+    _METAL_INDIRECT_NOTE = True
+    print(
+        "Metal: slangpy 0.42.0 drops indirect compute dispatches; "
+        "replaying them from the same group counts.",
+        file=sys.stderr,
+    )
+
+
 @dataclass(frozen=True)
 class SubmitHandle:
     """A submitted command buffer; wait on it to bound queue depth without a full device idle."""
@@ -31,13 +68,26 @@ class SubmitHandle:
 class CommandBatch:
     """One command buffer's worth of recorded GPU work (wraps a ``spy.CommandEncoder``)."""
 
-    def __init__(self, encoder: spy.CommandEncoder, label: str = "") -> None:
+    def __init__(self, encoder: spy.CommandEncoder, label: str = "",
+                 runtime: GpuRuntime | None = None) -> None:
         self._encoder = encoder
         self._label = label
+        self._runtime = runtime
+        self._debug_groups: list[str] = []
+        # Tests set this to exercise the readback path without a Metal device.
+        self.emulate_indirect = False
 
     @property
     def encoder(self) -> spy.CommandEncoder:
         return self._encoder
+
+    def _emulate_indirect(self) -> bool:
+        if self.emulate_indirect:
+            return True
+        try:
+            return self._encoder.device.info.type == spy.DeviceType.metal
+        except AttributeError:
+            return False
 
     def dispatch(self, kernel, marker: str, **kwargs) -> None:
         self._encoder.insert_debug_marker(marker, spy.math.float3(*marker_color(marker)))
@@ -48,7 +98,12 @@ class CommandBatch:
         """Record an indirect dispatch; groups_x/y/z are uint32s at ``offset`` in ``args_buf``.
 
         No barrier before the fetch: sgl's resource tracking covers the ``args_buf`` write.
+        On Metal, slangpy 0.42.0's command recorder ignores that fetch, so the same group
+        counts are read back and launched with an ordinary dispatch.
         """
+        if self._emulate_indirect():
+            self._dispatch_indirect_replayed(kernel, marker, args_buf, offset, **kwargs)
+            return
         self._encoder.insert_debug_marker(marker, spy.math.float3(*marker_color(marker)))
         pass_enc = self._encoder.begin_compute_pass()
         try:
@@ -59,12 +114,40 @@ class CommandBatch:
         finally:
             pass_enc.end()
 
+    def _dispatch_indirect_replayed(self, kernel, marker: str, args_buf: spy.NDBuffer,
+                                    offset: int, **kwargs) -> None:
+        _note_metal_indirect_once()
+        self._flush_recorded_work()
+        groups = indirect_group_counts(args_buf.to_numpy(), offset)
+        if groups[0] <= 0 or groups[1] <= 0 or groups[2] <= 0:
+            return
+        self.dispatch(kernel, marker, thread_count=thread_count_for_groups(kernel, groups), **kwargs)
+
+    def _flush_recorded_work(self) -> None:
+        """Submit the open encoder so a later read sees its writes, then keep recording."""
+        device = self._encoder.device
+        for _label in reversed(self._debug_groups):
+            self._encoder.pop_debug_group()
+        command = self._encoder.finish()
+        if self._runtime is not None:
+            with self._runtime.gpu_lock:
+                submit_id = device.submit_command_buffer(command)
+            self._runtime.wait_for_submit(submit_id)
+        else:
+            submit_id = device.submit_command_buffer(command)
+            device.wait_for_submit(submit_id)
+        self._encoder = device.create_command_encoder()
+        for label in self._debug_groups:
+            self._encoder.push_debug_group(label, spy.math.float3(*marker_color(label)))
+
     @contextlib.contextmanager
     def marker_group(self, label: str):
         self._encoder.push_debug_group(label, spy.math.float3(*marker_color(label)))
+        self._debug_groups.append(label)
         try:
             yield
         finally:
+            self._debug_groups.pop()
             self._encoder.pop_debug_group()
 
     def finish(self):
@@ -84,7 +167,7 @@ class GpuRuntime:
         self.gpu_lock = gpu_lock if gpu_lock is not None else contextlib.nullcontext()
 
     def command_batch(self, label: str) -> CommandBatch:
-        return CommandBatch(self.device.create_command_encoder(), label)
+        return CommandBatch(self.device.create_command_encoder(), label, runtime=self)
 
     def submit(self, batch: CommandBatch,
                after_submit: Callable[[], None] | None = None) -> SubmitHandle:
